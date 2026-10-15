@@ -37,56 +37,19 @@ pub fn main(init: std.process.Init) !void {
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
     if (boot.bootstrap) fail("enrollment boot cannot hand over a workload", .{});
 
-    // Raise lockdown to confidentiality before any module loads, so the
-    // kernel refuses unsigned ones, and no one, root included, reads its
-    // memory (kcore, BPF and perf reads, kprobes). Writing the current level
-    // is refused too, so read it first.
+    // The kernel forces lockdown to confidentiality from its config, so no
+    // one, root included, reads its memory (kcore, perf reads); raise it here
+    // too, so a kernel that only allows it is held the same. Writing the
+    // current level is refused, so read it first.
     mountFs("securityfs", "/sys/kernel/security", "securityfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     const lockdown = "/sys/kernel/security/lockdown";
     if (!isLocked(readAll(gpa, lockdown)) and
         !writeFile(lockdown, "confidentiality")) fail("cannot raise lockdown", .{});
 
-    // modload loads the form's modules and closes the loader for good. It
-    // reads tags on stdin, one per line. "hyperv" goes first, since the
-    // slot's disk may sit behind VMBus, which exists only on Hyper-V (Azure).
-    // Hyper-V is known by the VMBus a kernel with it built in has made, or,
-    // where VMBus is a module (newer kernels), by its firmware's vendor.
-    // "esp" adds FAT for werewolf's own EFI partition. The disk search runs
-    // while drivers load.
-    var loader: ?std.process.Child = std.process.spawn(io, .{
-        .argv = &.{"/usr/lib/werewolf/modload"},
-        .stdin = .pipe,
-    }) catch |err| blk: {
-        say("cannot run modload: {s}", .{@errorName(err)});
-        break :blk null;
-    };
-    if (loader) |l| {
-        if (linux.errno(linux.access("/sys/bus/vmbus", linux.F_OK)) == .SUCCESS or
-            std.mem.eql(
-                u8,
-                std.mem.trimEnd(u8, readAll(gpa, "/sys/class/dmi/id/sys_vendor"), "\n"),
-                "Microsoft Corporation",
-            ))
-            l.stdin.?.writeStreamingAll(io, "hyperv\n") catch {};
-        if (boot.esp != null) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
-    }
+    // The kernel has every driver built in and no module loader: find the
+    // slot's disk now.
     const found = if (boot.slots) |u| findFilesystem(gpa, u) else null;
-    if (loader) |*l| {
-        // A sentinel leaves unused tagged modules unloaded even on direct boots.
-        l.stdin.?.writeStreamingAll(io, "none\n") catch {};
-        l.stdin.?.close(io);
-        l.stdin = null;
-        const ok = if (l.wait(io)) |term| switch (term) {
-            .exited => |code| code == 0,
-            else => false,
-        } else |_| false;
-        if (!ok) say("not every module loaded; see above", .{});
-    }
-    // Nothing frees the initramfs after the switch, so delete its 14 MB of
-    // modules now that they are loaded or refused.
-    std.Io.Dir.cwd().deleteTree(io, "/usr/lib/modules") catch |err|
-        say("modules not freed: {s}", .{@errorName(err)});
-    const modules_ms = bootMs();
+    const disk_ms = bootMs();
     if (boot.native) {
         if (boot.slot != null) fail("native UKI supplied an explicit slot; not handing over", .{});
         const vars = "/sys/firmware/efi/efivars";
@@ -260,20 +223,20 @@ pub fn main(init: std.process.Init) !void {
     if (protected_rollback) try env.put("WEREWOLF_ROLLBACK", "checked");
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
         try gpa.print(
-            "kernel={d} modules={d} slot={d} root={d}",
-            .{ kernel_ms, modules_ms, slot_ms, root_ms },
+            "kernel={d} disk={d} slot={d} root={d}",
+            .{ kernel_ms, disk_ms, slot_ms, root_ms },
         )
     else
-        try gpa.print("kernel={d} modules={d} root={d}", .{ kernel_ms, modules_ms, root_ms }));
+        try gpa.print("kernel={d} disk={d} root={d}", .{ kernel_ms, disk_ms, root_ms }));
     const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
 }
 
 fn enforceIpe(io: std.Io, gpa: std.mem.Allocator, root: [32]u8) !void {
-    const required = linux.errno(linux.access("/root" ++ ipe.marker, linux.F_OK)) == .SUCCESS;
-    const present = linux.errno(linux.access(ipe.base, linux.F_OK)) == .SUCCESS;
-    if (!required and !present) return;
-    if (!present) return error.IpeMissing;
+    // Every werewolf kernel has IPE and no policy of its own: an image that
+    // does not require IPE runs unenforced; one that does must load its policy.
+    if (linux.errno(linux.access("/root" ++ ipe.marker, linux.F_OK)) != .SUCCESS) return;
+    if (linux.errno(linux.access(ipe.base, linux.F_OK)) != .SUCCESS) return error.IpeMissing;
     const signed = std.Io.Dir.cwd().readFileAlloc(
         io,
         "/ipe.p7b",

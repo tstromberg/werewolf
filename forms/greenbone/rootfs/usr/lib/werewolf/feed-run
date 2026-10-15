@@ -2,13 +2,16 @@
 # feed-run: bash, inside the feed image, as _oci-feed
 # (forms/greenbone/form.yaml). It refreshes the community feed into
 # the cache and waits a day. A failed type keeps what is already
-# there. read -t is bash, so this does not exec sleep.
+# there. Sleep after the pass: reading /dev/null returns EOF immediately.
 set -eu
+# Preserve init's shared directory modes and ACLs; new data stays group-readable.
+umask 027
 fail=0
 for type in nasl notus scap cert gvmd-data; do
-	/usr/bin/python3 /usr/local/bin/greenbone-feed-sync --type "$type" || fail=1
+	echo "feed-run: syncing $type" >&2
+	/usr/bin/python3 /usr/local/bin/greenbone-feed-sync --quiet --no-permission-change --type "$type" || fail=1
 done
 if [ "$fail" -ne 0 ]; then
 	echo "feed-run: a sync failed; keeping the cache" >&2
 fi
-read -t 86400 <>/dev/null || true
+/usr/bin/sleep 86400

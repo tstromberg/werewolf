@@ -10,12 +10,12 @@ integrity in production also needs Werewolf's kernel enforcement ([IPE](ipe.md))
 
 ## Background
 
-The [vulnerability audit](https://github.com/werewolf-linux/glibc-neutered/blob/main/docs/glibc-vuln-audit.md)
+The [vulnerability
+audit](https://github.com/werewolf-linux/glibc-build/blob/main/docs/glibc-vuln-audit.md)
 records ten years of glibc flaws reached through startup parsing (Looney Tunables),
 converter settings restored after startup (PwnKit) and NSS without loader variables
-(sudo); sanitizing the environment at launch covers only some of these paths. This is
-a proposal ([CONTRIBUTING.md](../../CONTRIBUTING.md): small, deny by default, fail
-closed); patches and application compatibility are not validated yet.
+(sudo); sanitizing the environment at launch covers only some of these paths. Adopted
+2026-10-15 by forms/minimal; each package names its Wolfi build (`wolfi-origin:`).
 
 ## Goals
 
@@ -60,7 +60,7 @@ switches, permissive builds or exceptions; claiming to repair memory corruption.
 5. **Disable nscd.** `--disable-build-nscd` and `--disable-nscd`; measure files/DNS
    lookup cost before deciding on caching elsewhere.
 
-[werewolf-linux/glibc-neutered](https://github.com/werewolf-linux/glibc-neutered)
+[werewolf-linux/glibc-build](https://github.com/werewolf-linux/glibc-build)
 holds the patches and releases: Wolfi's complete recipe and files, pinned by hash,
 with Wolfi's hardening and backports kept; a scheduled Action proposes updates, applies
 the patches without fuzz, builds matching loader and libc packages for both

@@ -21,7 +21,8 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    # The test kernel builds from source, half an hour or more.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -29,16 +30,12 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc \
+          sudo apt-get install -y build-essential gnupg xz-utils libssl-dev \
             python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools systemd-boot-efi \
             meson ninja-build gperf libcap-dev libmount-dev python3-jinja2 python3-pyelftools
           # Package installation can recreate /dev/kvm with root-only access.
           # Apply runner permissions after every runtime package is installed.
           sudo test/ci-setup
-      - name: Kernel version agreement
-        run: |
-          make build/lock/kernel.lock.json
-          python3 test/check-kernel-version
       - name: Disposable signing identity
         run: |
           mkdir -p build/ipe-check
@@ -60,7 +57,7 @@ jobs:
           PY
       - name: Stock Alpine Secure Boot release
         run: make check-secureboot
-      - name: Build kernel and test enforcement
+      - name: Build the test kernel and test enforcement
         env:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt

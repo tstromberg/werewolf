@@ -6,8 +6,6 @@ const apk = @import("apk");
 const package = @import("package");
 const compose = @import("compose");
 const form = @import("form");
-const stage0Modules = @import("image").modules;
-const ModuleParam = @import("image").Param;
 const m = @import("slot-update.zig");
 const images = @import("images.zig");
 const Io = m.Io;
@@ -148,12 +146,12 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const tree = try verity.build(u.gpa, io, erofs);
     try erofs.writePositionalAll(io, tree.tree, try erofs.length(io));
 
-    // Keep the kernel as Alpine ships it. On arm64 that is an EFI zboot
-    // image, which systemd-boot runs as is and install unwraps for GRUB.
+    // Keep the kernel as its package ships it: a bzImage, or arm64's raw
+    // Image, an EFI program itself (EFI_STUB) that systemd-boot runs as is.
     u.step = "vmlinuz";
     const k: Root = try .open(u, work_dir ++ "/kernel");
     defer k.close(u);
-    try u.write(work_dir ++ "/slot/vmlinuz", try k.read(u, "boot/vmlinuz-virt"));
+    try u.write(work_dir ++ "/slot/vmlinuz", try k.read(u, "boot/vmlinuz-werewolf"));
 
     u.step = "stage0";
     // Like the build's stage0, this one has no packages
@@ -164,42 +162,11 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, s, 0o700), "chmod stage0");
     const s0: Root = try .open(u, s);
     defer s0.close(u);
-    // writeCpio adds the device nodes here. init and the loader come from
-    // the new root, as the build takes them from its image, so a fix to
-    // either arrives with its package.
+    // writeCpio adds the device nodes here. init comes from the new root, as
+    // the build takes it from its image, so a fix arrives with its package.
+    // The kernel has no modules to add.
     (try s0.makeDir(u, "dev")).close(io);
     try s0.writeMode(u, "init", try r.read(u, "usr/lib/werewolf/stage0"), .fromMode(0o755));
-    try s0.writeMode(
-        u,
-        "usr/lib/werewolf/modload",
-        try r.read(u, "usr/lib/werewolf/modload"),
-        .fromMode(0o755),
-    );
-    const kvers = try k.list(u, "lib/modules");
-    if (kvers.len != 1) return error.NotOneKernel;
-    const src = try u.gpa.print("lib/modules/{s}", .{kvers[0]});
-    const dst = try u.gpa.print("usr/lib/modules/{s}", .{kvers[0]});
-    const dep = try k.read(u, try u.gpa.print("{s}/modules.dep", .{src}));
-    // Use the same module list and order as the build.
-    const records = "usr/share/werewolf/";
-    const words = try u.lines(try r.read(u, records ++ "modules"));
-    var params: std.ArrayList(ModuleParam) = .empty;
-    for (try u.lines(try r.read(u, records ++ "module-params"))) |line| {
-        const space = std.mem.findScalar(u8, line, ' ') orelse return error.BadModuleParams;
-        try params.append(u.gpa, .{ .module = line[0..space], .value = line[space + 1 ..] });
-    }
-    var bad: []const u8 = "";
-    const mods = stage0Modules(u.gpa, dep, words, params.items, &bad) catch |err| {
-        u.detail = bad;
-        return err;
-    };
-    // Decompress, as the build does: Alpine's kernel cannot, and modload
-    // passes each file as is.
-    for (mods.files) |path| {
-        const ko = try gunzip(u.gpa, try k.read(u, try u.gpa.print("{s}/{s}", .{ src, path })));
-        try s0.write(u, try u.gpa.print("{s}/{s}", .{ dst, withoutGz(path) }), ko);
-    }
-    try s0.write(u, try u.gpa.print("{s}/werewolf.modules", .{dst}), mods.list);
     var line: Io.Writer.Allocating = .init(u.gpa);
     try tree.params.format(&line.writer);
     try s0.write(u, "verity", line.written());
@@ -465,7 +432,7 @@ pub fn apkAdd(
         &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
         packages,
     }));
-    // wolfi-baselayout sets / to 0755; keep the staging directory 0700 until
+    // Package extraction may change /; keep the staging directory 0700 until
     // mkfs.erofs reads it.
     _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
     try prune(u, cache, root);
@@ -533,10 +500,6 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
                 u.detail = path;
                 return err;
             },
-            // Alpine 3.24 still names index signatures .SIGN.RSA and
-            // verifies them with SHA-1. Werewolf and Wolfi indexes must use
-            // .SIGN.RSA256; do not extend this exception to their keys.
-            .allow_legacy_sha1 = std.mem.eql(u8, keys, "/etc/werewolf/alpine-keys"),
         });
     }
     var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });
@@ -1317,21 +1280,6 @@ test "rollback retains signed native entries without trusting unsigned options" 
     );
 }
 
-/// gunzip inflates a gzip stream of up to max_read bytes.
-fn gunzip(gpa: Allocator, data: []const u8) ![]const u8 {
-    var in: Io.Reader = .fixed(data);
-    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &.{});
-    return gz.reader.allocRemaining(gpa, .limited(max_read)) catch |err| switch (err) {
-        error.ReadFailed => return gz.err orelse error.ReadFailed,
-        else => return err,
-    };
-}
-
-/// withoutGz strips .gz: kernel/fs/ext4/ext4.ko.gz -> kernel/fs/ext4/ext4.ko.
-fn withoutGz(path: []const u8) []const u8 {
-    return if (std.mem.endsWith(u8, path, ".gz")) path[0 .. path.len - 3] else path;
-}
-
 const Node = struct {
     name: []const u8,
     mode: u32,
@@ -1593,14 +1541,6 @@ test heldFormat {
     try testing.expectEqual(Held{ .pinned = 1, .offered = 2 }, heldFormat(&world, idx).?);
     try testing.expectEqual(null, heldFormat(&.{"werewolf-format2"}, idx));
     try testing.expectEqual(null, heldFormat(&.{"werewolf-formats"}, idx));
-}
-
-test withoutGz {
-    try testing.expectEqualStrings(
-        "kernel/fs/ext4/ext4.ko",
-        withoutGz("kernel/fs/ext4/ext4.ko.gz"),
-    );
-    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko"));
 }
 
 test cpioEntry {

@@ -105,6 +105,7 @@ def exercise(args, private):
     run('python3', 'tools/build-tpm-bootstrap', '--arch', args.arch, '--agent', args.agent,
         '--kernel', kernel, '--stub', args.stub, '--publisher', root / 'permit.pub',
         '--factory', root / 'factory.permit', '--boot-key', boot_key, '--boot-cert', boot_cert,
+        '--ipe-key', args.ipe_key, '--ipe-cert', args.ipe_cert,
         '--output', image, '--codec', codec, '--uki', uki)
     info = json.loads((image / 'manifest.json').read_text())
     shutil.copyfile(image / 'manifest.json', work / 'manifest.json')
@@ -116,6 +117,7 @@ def exercise(args, private):
         run('python3', 'tools/build-tpm-bootstrap', '--arch', args.arch, '--agent', args.agent,
             '--kernel', kernel, '--stub', args.stub, '--publisher', root / 'permit.pub',
             '--factory', root / 'factory.permit', '--boot-key', boot_key, '--boot-cert', boot_cert,
+            '--ipe-key', args.ipe_key, '--ipe-cert', args.ipe_cert,
             '--output', recovery_image, '--codec', codec, '--uki', uki, '--recovery')
         recovery_info = json.loads((recovery_image / 'manifest.json').read_text())
         if recovery_info['mode'] != 'recovery' or recovery_info['pcr11'] == info['pcr11']:
@@ -425,7 +427,8 @@ def exercise(args, private):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for arg in ['arch', 'kernel', 'stub', 'agent', 'work']:
+    # The IPE key signs the bootstrap's policy; the kernel must trust its certificate.
+    for arg in ['arch', 'kernel', 'stub', 'agent', 'work', 'ipe-key', 'ipe-cert']:
         parser.add_argument('--' + arg, required=True)
     parser.add_argument('--codec', default='build/host/tpm-bootstrap')
     parser.add_argument('--policy', default='build/host/tpm-policy')

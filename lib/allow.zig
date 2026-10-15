@@ -6,8 +6,8 @@ const std = @import("std");
 const linux = std.os.linux;
 
 pub const Allowance = enum {
-    /// kvm lets the machine run virtual machines. KVM is built in on aarch64
-    /// and loaded from the form's modules on x86_64; nesting stays off.
+    /// kvm lets the machine run virtual machines. KVM is built into the
+    /// kernel and kept from starting without it; nesting stays off.
     kvm,
     /// nested-kvm lets guests run virtual machines too. It needs kvm.
     @"nested-kvm",
@@ -17,10 +17,6 @@ pub const Allowance = enum {
     netadmin,
     /// packet keeps CAP_NET_RAW after fence. Packet sockets bypass fence's rules.
     packet,
-    /// ipv6 boots the kernel with IPv6. Otherwise ipv6.disable=1 removes the
-    /// family and the code behind it (CVE-2026-53362;
-    /// docs/cve-mitigation-survey.md).
-    ipv6,
     /// pty lets init mount devpts, for ssh logins. Without it /dev/ptmx
     /// fails even for root, and the TTY layer's pty code is out of reach
     /// (CVE-2014-0196).

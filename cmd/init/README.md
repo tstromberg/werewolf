@@ -32,10 +32,11 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
 1. **Filesystems** (`kernel.zig`): `/proc` (`hidepid=invisible`), `/sys`,
    `/dev`, RAM filesystems (`nosymfollow`), all `nosuid,noexec`; devpts only
    if the form allows `pty`; cgroup2 for leash; accounts copied to `/run`.
-2. **Kernel** (`kernel.zig`): lockdown to confidentiality, modules loaded and
-   the loader closed (`cmd/modload`), sysctls, audit of refused execs, then MDWE
-   on PID 1 unless the form allows `jit`. A refused sysctl or MDWE ends the
-   boot, except in a container, where they are the host's.
+2. **Kernel** (`kernel.zig`): lockdown to confidentiality, sysctls, audit of
+   refused execs, then MDWE on PID 1 unless the form allows `jit`. A refused
+   sysctl or MDWE ends the boot, except in a container, where they are the
+   host's. The sysctls of what the kernel leaves out (BPF, io_uring, the
+   module loader, SysRq) do not exist, and are skipped.
 3. **Config** (`config.zig`): one tar, from the first block device holding
    one; others are logged and ignored. A confined child (no capabilities,
    Landlock, seccomp) extracts it to `/run/config`. A NoCloud volume labelled

@@ -3,7 +3,7 @@
 Design, 2026-10-15. PostgreSQL's native clients, shim checks, two-boot persistence and
 CLI dispatch are implemented ([test/native/](../../test/native/),
 [cmd/howl/test.zig](../../cmd/howl/test.zig)) on the local QEMU check profile; the
-Greenbone adds GMP drivers; UI/scan qualification and publication remain proposed.
+Greenbone suite passes locally; HTTPS login, scans and publication remain proposed.
 
 ## Scope
 
@@ -81,10 +81,10 @@ output and a deadline, checking locale, UTF-8 writes and rollback, while a separ
 confined identity must fail peer login; the server's policy and exposure stay. Phase one
 writes a unique row; the next boot of the same disk, and the boot after P → C, read it
 before any setup write. The unmodified candidate boots and updates separately, proving
-measured identity, readiness, commitment and no public SQL. Greenbone, proposed, logs in
-through Caddy HTTPS with the configured password only, reads a task back after restart
-and P → C, and scans a fixture service on a restricted network; its mutable feed needs a
-versioned cache before scans are repeatable, and 8 GiB RAM.
+measured identity, readiness, commitment and no public SQL. Greenbone's clients check
+GMP/OSP, target persistence, ordinary database roles, Valkey ACLs and read-only shares.
+HTTPS login, P → C and a fixture scan remain proposed; repeatable scans need a pinned
+feed cache and 8 GiB RAM.
 
 ## Remaining lifecycle gaps
 

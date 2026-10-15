@@ -60,7 +60,8 @@ before fence sets the network policy, when no config tar was found on a disk or 
   fence's `metadata _cloud` rule. No seccomp: a filter only narrows, and its children
   need their own. Other changed entries wait in the checked tar for the next boot. GCP
   `machine.metadata-users: true` merges instance and project keys with expiry and
-  declared-user precedence; no admin or root ([manifest.md](../../docs/design/manifest.md)).
+  declared-user precedence; no admin or root
+  ([manifest.md](../../docs/design/manifest.md)).
 
 ## Drawbacks
 

@@ -1,15 +1,14 @@
-# kernel: Alpine's linux-virt, the KVM guest kernel. The build keeps
-# boot/vmlinuz-virt and the modules; the rest of what the package pulls in
-# stays behind. Alpine's keys, in alpine-keys/, are the ones the minimal
-# form carries (cmd/howl's tests keep the two the same).
+# kernel: linux-werewolf, werewolf's own kernel for virtual machines
+# (docs/design/custom-kernel.md), built by werewolf-linux/kernel-build. The
+# build keeps boot/vmlinuz-werewolf and its config; the kernel has no modules.
+# werewolf's key, beside the forms' in BUILD/keys, signs its repository.
 contents:
   repositories:
-    - https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+    - https://dist.werewolf-linux.org/apk/kernel
   keyring:
-    - alpine-keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub
-    - alpine-keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub
+    - ../keys/werewolf-packages.rsa.pub
   packages:
-    - linux-virt
+    - linux-werewolf
 
 archs:
   - aarch64

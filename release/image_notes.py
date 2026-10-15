@@ -41,8 +41,8 @@ def inventory(snapshot, form, arch, local=()):
             scope = 'test'
         elif path.name in ('kernel.lock.json', 'boot.lock.json'):
             scope = path.name.removesuffix('.lock.json')
-        elif path.name in ('kernel-builder.lock.json', 'stub-builder.lock.json'):
-            scope = 'build:' + path.name.removesuffix('-builder.lock.json')
+        elif path.name == 'stub-builder.lock.json':
+            scope = 'build:stub'
         elif path.name in recipe_locks:
             scope = 'build:' + recipe_locks[path.name]
         else:

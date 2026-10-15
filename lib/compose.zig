@@ -11,6 +11,7 @@ const form = @import("form");
 const seal = @import("seal");
 const service = @import("service");
 const package = @import("package");
+pub const baselayout = package.baselayout;
 
 const Form = form.Form;
 const Failure = form.Failure;
@@ -23,7 +24,7 @@ pub const Build = struct {
     arch: Arch,
     /// dev marks a DEV=1 build, with busybox-full and the debug shell.
     dev: bool = false,
-    /// ipe removes the stock kernel's IPE and module-signature exceptions.
+    /// ipe makes the image require IPE: stage0 activates its signed release policy.
     ipe: bool = false,
     /// posture_known is test/posture-known: the posture checks every form
     /// of a kind fails.
@@ -34,8 +35,8 @@ pub const Build = struct {
 /// composes these anew and carries every other record forward, so none of
 /// these is ever a stale copy.
 pub const records = [_][]const u8{
-    "cmdline", "dev", "etc",    "form",          "forms", "module-params", "modules",
-    "net",     "oci", "pledge", "posture-known", "prune", "weaknesses",
+    "cmdline", "dev",    "etc",           "form",  "forms",      "net",
+    "oci",     "pledge", "posture-known", "prune", "weaknesses",
 };
 
 /// release_forms are the forms CI releases as disks, for both arches
@@ -130,7 +131,18 @@ pub fn compose(
     // init seeds /run/werewolf from these; the image's /etc/passwd, group
     // and shadow link there.
     try ro.createDirPath(io, "usr/share/werewolf/etc");
-    const users = try accounts(gpa, passwd, f);
+    const normalized = try accounts(gpa, passwd, f);
+    // A shell is a login form's policy, never the base filesystem's.
+    const users = if (b.dev or hasForm(forms, "sshd"))
+        try mem.replaceOwned(
+            u8,
+            gpa,
+            normalized,
+            "root:x:0:0:root:/root:/sbin/nologin\n",
+            "root:x:0:0:root:/root:/bin/ash\n",
+        )
+    else
+        normalized;
     try unique(gpa, "group", group, f);
     try put(io, ro, "usr/share/werewolf/etc/passwd", users);
     try put(io, ro, "usr/share/werewolf/etc/group", group);
@@ -173,9 +185,6 @@ pub fn compose(
     try put(io, rec, "posture-known", b.posture_known);
     const top = forms[forms.len - 1];
     try put(io, rec, "form", try gpa.print("{s}\n", .{top.name}));
-    const mods = try modules(gpa, forms, b.arch);
-    // The updater builds stage0 with the same modules and order.
-    try put(io, rec, "modules", try lines(gpa, mods));
     try put(io, rec, "prune", try lines(gpa, try prune(gpa, forms, f)));
     const known = try weaknesses(gpa, top, b);
     try put(io, rec, "weaknesses", if (upd.off)
@@ -186,10 +195,6 @@ pub fn compose(
     const images = try oci(io, gpa, root, forms, f);
     if (images.len > 0) try put(io, rec, "oci", images);
     if (b.dev) try put(io, rec, "dev", "dev\n");
-    var params: std.ArrayList(u8) = .empty;
-    for (moduleParams(allowed, b.arch)) |p|
-        try params.print(gpa, "{s} {s}\n", .{ p.module, p.value });
-    try put(io, rec, "module-params", params.items);
     try put(io, rec, "cmdline", try gpa.print("{s}\n", .{try cmdline(gpa, allowed, b.arch)}));
     try put(io, rec, "net", try net(gpa, forms, passwd, f));
 }
@@ -466,9 +471,9 @@ pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format}
 /// image_programs are the programs from cmd/ that every image runs, stage0's
 /// init among them: a machine builds its next stage0 from its next root.
 pub const image_programs = [_][]const u8{
-    "init",         "stage0",       "modload",     "iface-up",     "fence",       "mount",
-    "mount-broker", "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",
-    "slot-keep",    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap",
+    "init",         "stage0",      "iface-up",     "fence",       "mount",      "mount-broker",
+    "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",     "slot-keep",
+    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -746,14 +751,15 @@ fn allows(allowed: []const []const u8, name: []const u8) bool {
     return false;
 }
 
-/// cmdline returns the kernel arguments for hardening that has no runtime
-/// switch: no debugfs, no forced writes through /proc/PID/mem, no 32-bit
-/// calls on x86_64, and no IPv6 unless allowed. On aarch64 the kernel starts
-/// KVM whenever the host offers EL2, so it is off unless allowed, and
-/// nested only if allowed. slab_nomerge stops a freed object being reused
-/// by an attacker's object of another type; page shuffling makes layout
-/// harder to predict. Neither costs anything. init_on_free is left off for
-/// its cost (docs/security.md).
+/// cmdline returns the kernel arguments for what has no runtime switch. The
+/// kernel (docs/design/custom-kernel.md) already leaves out debugfs, IPv6,
+/// 32-bit calls and modules; these hold the rest even if its config drifts:
+/// no forced writes through /proc/PID/mem, slab_nomerge so a freed object is
+/// not reused by an attacker's object of another type, and page shuffling so
+/// layout is harder to predict. None costs anything. init_on_free is left off
+/// for its cost (docs/security.md). KVM is built in and starts whenever the
+/// host offers virtualization, so it is off unless allowed (kvm-arm.mode on
+/// aarch64, its two initcalls on x86_64), and nested only if allowed.
 ///
 /// loglevel=5 limits the console to warnings and worse; dmesg keeps all.
 /// A cloud serial port takes about a millisecond a line: on GCP, notices
@@ -761,66 +767,20 @@ fn allows(allowed: []const []const u8, name: []const u8) bool {
 /// and the power-down line that test/boot reads are all errors or worse.
 pub fn cmdline(gpa: Allocator, allowed: []const []const u8, arch: Arch) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(
-        gpa,
-        "debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1",
-    );
-    if (!allows(allowed, "ipv6")) try out.appendSlice(gpa, " ipv6.disable=1");
-    switch (arch) {
-        .aarch64 => if (allows(allowed, "nested-kvm"))
-            try out.appendSlice(gpa, " kvm-arm.mode=nested")
-        else if (!allows(allowed, "kvm"))
-            try out.appendSlice(gpa, " kvm-arm.mode=none"),
-        .x86_64 => try out.appendSlice(gpa, " ia32_emulation=0"),
-    }
+    try out.appendSlice(gpa, "proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1");
+    const kvm = allows(allowed, "kvm");
+    const nested = allows(allowed, "nested-kvm");
+    try out.appendSlice(gpa, switch (arch) {
+        .aarch64 => if (nested) " kvm-arm.mode=nested" else if (!kvm) " kvm-arm.mode=none" else "",
+        .x86_64 => if (nested)
+            " kvm_intel.nested=1 kvm_amd.nested=1"
+        else if (kvm)
+            " kvm_intel.nested=0 kvm_amd.nested=0"
+        else
+            " initcall_blacklist=vt_init,svm_init",
+    });
     try out.appendSlice(gpa, " loglevel=5");
     return out.items;
-}
-
-pub const Param = struct { module: []const u8, value: []const u8 };
-
-/// moduleParams returns module parameters. On x86_64 with kvm allowed it
-/// sets nested virtualization, which Linux enables by default, to match
-/// the nested-kvm allowance.
-pub fn moduleParams(allowed: []const []const u8, arch: Arch) []const Param {
-    if (arch != .x86_64 or !allows(allowed, "kvm")) return &.{};
-    if (allows(allowed, "nested-kvm")) return &.{
-        .{ .module = "kvm-intel", .value = "nested=1" },
-        .{ .module = "kvm-amd", .value = "nested=1" },
-    };
-    return &.{
-        .{ .module = "kvm-intel", .value = "nested=0" },
-        .{ .module = "kvm-amd", .value = "nested=0" },
-    };
-}
-
-/// modules returns, in order, the leaf modules the chain's form.yaml names
-/// for arch. A line `ARCH MODULE...` applies to that arch only. A line
-/// `@TAG MODULE...` yields `@TAG:MODULE`, loaded only by a stage0 that finds
-/// that tag.
-pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error![]const []const u8 {
-    var all: std.ArrayList([]const u8) = .empty;
-    for (forms) |fm| for (try fm.items(gpa, "modules")) |line| {
-        var w = try words(gpa, uncommented(line));
-        if (w.len == 0) continue;
-        if (std.meta.stringToEnum(Arch, w[0])) |a| {
-            if (a != arch) continue;
-            w = w[1..];
-        }
-        const tag = if (w.len > 0 and isTag(w[0])) w[0] else "";
-        for (if (tag.len > 0) w[1..] else w) |m| {
-            const word = if (tag.len > 0) try gpa.print("{s}:{s}", .{ tag, m }) else m;
-            try all.append(gpa, word);
-        }
-    };
-    return all.items;
-}
-
-/// isTag reports whether word is @ followed by lowercase letters or digits.
-fn isTag(word: []const u8) bool {
-    if (word.len < 2 or word[0] != '@') return false;
-    for (word[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
-    return true;
 }
 
 /// uncommented returns line up to its first #.
@@ -881,8 +841,7 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
         const first = it.next() orelse continue;
         if (!mem.eql(u8, first, kind) and !mem.eql(u8, first, @tagName(b.arch))) continue;
         while (it.next()) |id| {
-            if (b.ipe and (mem.eql(u8, id, "boot-ipe-enforced") or
-                mem.eql(u8, id, "boot-sig-enforced"))) continue;
+            if (b.ipe and mem.eql(u8, id, "boot-ipe-enforced")) continue;
             try out.print(gpa, "{s} {s}\n", .{ id, unbuilt(id, excuse) });
         }
     }
@@ -895,13 +854,10 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
 fn unbuilt(id: []const u8, generic: []const u8) []const u8 {
     const bare = if (id.len > 0 and id[0] == '?') id[1..] else id;
     if (mem.eql(u8, bare, "boot-secure-boot"))
-        return "Secure Boot is phase 5 of the boot design, not built: Alpine's kernel is not " ++
+        return "Secure Boot is phase 5 of the boot design, not built: this image is not " ++
             "signed for it";
-    if (mem.eql(u8, bare, "boot-sig-enforced"))
-        return "Alpine builds this kernel without signature enforcement; phase 4 builds " ++
-            "werewolf's own";
     if (mem.eql(u8, bare, "boot-ipe-enforced"))
-        return "the stock Alpine kernel lacks IPE; build with IPE=1 for global image enforcement";
+        return "this image carries no IPE policy; build with IPE=1 for global image enforcement";
     if (mem.eql(u8, bare, "boot-rollback-protected"))
         return "no TPM counter guards the slot serial yet: phase 5 of the boot design";
     return generic;
@@ -1281,33 +1237,23 @@ fn testForm(gpa: Allocator, name: []const u8, yaml: []const u8) !Form {
     return .{ .name = name, .dir = name, .spec = try form.parse(gpa, yaml, &diag) };
 }
 
-test "cmdline and module parameters: what each allowance takes back, by arch" {
+test "cmdline: what each allowance takes back, by arch" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     const gpa = a.allocator();
-    const base = "debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1";
+    const base = "proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1";
     for ([_]struct { []const []const u8, Arch, []const u8 }{
-        .{ &.{}, .aarch64, base ++ " ipv6.disable=1 kvm-arm.mode=none loglevel=5" },
-        .{ &.{"ipv6"}, .aarch64, base ++ " kvm-arm.mode=none loglevel=5" },
-        .{ &.{"kvm"}, .aarch64, base ++ " ipv6.disable=1 loglevel=5" },
+        .{ &.{}, .aarch64, base ++ " kvm-arm.mode=none loglevel=5" },
+        .{ &.{"kvm"}, .aarch64, base ++ " loglevel=5" },
+        .{ &.{ "kvm", "nested-kvm" }, .aarch64, base ++ " kvm-arm.mode=nested loglevel=5" },
+        .{ &.{}, .x86_64, base ++ " initcall_blacklist=vt_init,svm_init loglevel=5" },
+        .{ &.{"kvm"}, .x86_64, base ++ " kvm_intel.nested=0 kvm_amd.nested=0 loglevel=5" },
         .{
             &.{ "kvm", "nested-kvm" },
-            .aarch64,
-            base ++ " ipv6.disable=1 kvm-arm.mode=nested loglevel=5",
+            .x86_64,
+            base ++ " kvm_intel.nested=1 kvm_amd.nested=1 loglevel=5",
         },
-        .{ &.{}, .x86_64, base ++ " ipv6.disable=1 ia32_emulation=0 loglevel=5" },
-        .{ &.{ "ipv6", "kvm" }, .x86_64, base ++ " ia32_emulation=0 loglevel=5" },
     }) |c| try testing.expectEqualStrings(c[2], try cmdline(gpa, c[0], c[1]));
-
-    try testing.expectEqual(0, moduleParams(&.{"kvm"}, .aarch64).len);
-    try testing.expectEqual(0, moduleParams(&.{}, .x86_64).len);
-    const off = moduleParams(&.{"kvm"}, .x86_64);
-    try testing.expectEqualStrings("kvm-intel", off[0].module);
-    try testing.expectEqualStrings("nested=0", off[1].value);
-    try testing.expectEqualStrings(
-        "nested=1",
-        moduleParams(&.{ "kvm", "nested-kvm" }, .x86_64)[0].value,
-    );
 }
 
 test "compose links each narrowed program to leash" {
@@ -1410,40 +1356,17 @@ test "allowances: along the chain, sorted, once each; nested-kvm needs kvm" {
     var f: Failure = .{};
     const got = try allowances(gpa, &.{
         try testForm(gpa, "jre", "allow: [jit, pty]\n"),
-        try testForm(gpa, "mine", "allow: [ipv6, jit]\n"),
+        try testForm(gpa, "mine", "allow: [packet, jit]\n"),
     }, &f);
     try testing.expectEqual(3, got.len);
     for ([_][]const u8{
-        "ipv6",
         "jit",
+        "packet",
         "pty",
     }, got) |want, g| try testing.expectEqualStrings(want, g);
     try testing.expectError(error.Form, allowances(gpa, &.{
         try testForm(gpa, "vm", "allow: [nested-kvm]\n"),
     }, &f));
-}
-
-test "modules: the arch's, tagged, in order, as given" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const gpa = a.allocator();
-    const forms = [_]Form{
-        try testForm(gpa, "minimal", "modules:\n  - virtio_net virtio_blk\n  - aarch64 " ++
-            "virtio_mmio\n" ++
-            "  - x86_64 ia32_only\n  - \"@xfs xfs\"\n"),
-        try testForm(gpa, "prod", "modules:\n  - ena # AWS\n  - aarch64 @hyperv hv_netvsc\n" ++
-            "  - \"@btrfs btrfs crc32c\"\n  - \"@Up not_a_tag\"\n  - aarch64 @hyperv hv_netvsc\n"),
-    };
-    const m = try modules(gpa, &forms, .aarch64);
-    const native = [_][]const u8{
-        "virtio_net",        "virtio_blk",   "virtio_mmio",   "@xfs:xfs", "ena",
-        "@hyperv:hv_netvsc", "@btrfs:btrfs", "@btrfs:crc32c", "@Up",      "not_a_tag",
-        "@hyperv:hv_netvsc",
-    };
-    try testing.expectEqual(native.len, m.len);
-    for (native, m) |want, g| try testing.expectEqualStrings(want, g);
-    const x = try modules(gpa, &forms, .x86_64);
-    try testing.expectEqualStrings("ia32_only", x[2]);
 }
 
 test "net: users as uids, ports as numbers, sorted, once each; what cannot compile fails" {
@@ -1527,17 +1450,15 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
     const gpa = a.allocator();
     const top = try testForm(gpa, "sshd", "weaknesses:\n  programs-no-shell: a shell for logins\n");
     const known = "# comment: dev and * lines\ndev programs-no-shell programs-no-interpreters\n" ++
-        "* ?files-x ?boot-secure-boot boot-rollback-protected boot-sig-enforced\n" ++
+        "* ?files-x ?boot-secure-boot boot-rollback-protected\n" ++
         "x86_64 kernel-y\naarch64 kernel-z\n";
     try testing.expectEqualStrings(
         "programs-no-shell a shell for logins\n?files-x every form on aarch64 " ++
             "(test/posture-known)\n" ++
             "?boot-secure-boot Secure Boot is phase 5 of the boot design, not built: " ++
-            "Alpine's kernel is not signed for it\n" ++
+            "this image is not signed for it\n" ++
             "boot-rollback-protected no TPM counter guards the slot serial yet: " ++
             "phase 5 of the boot design\n" ++
-            "boot-sig-enforced Alpine builds this kernel without signature enforcement; " ++
-            "phase 4 builds werewolf's own\n" ++
             "kernel-z every form on aarch64 (test/posture-known)\n",
         try weaknesses(gpa, top, .{ .arch = .aarch64, .posture_known = known }),
     );
@@ -1557,10 +1478,9 @@ test "IPE builds retain unrelated weaknesses and remove closed kernel gaps" {
     const got = try weaknesses(gpa, top, .{
         .arch = .aarch64,
         .ipe = true,
-        .posture_known = "* boot-ipe-enforced boot-sig-enforced boot-rollback-protected\n",
+        .posture_known = "* boot-ipe-enforced boot-rollback-protected\n",
     });
     try testing.expect(mem.find(u8, got, "boot-ipe-enforced") == null);
-    try testing.expect(mem.find(u8, got, "boot-sig-enforced") == null);
     try testing.expect(mem.find(u8, got, "boot-rollback-protected") != null);
     try testing.expect(mem.find(u8, got, "programs-no-shell deliberate") != null);
 }
@@ -1883,7 +1803,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     ;
     const web_form =
         \\base: minimal
-        \\allow: [ipv6]
+        \\allow: [jit]
         \\net:
         \\  - listen tcp/80
         \\  - connect web tcp/443
@@ -1924,7 +1844,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         .{ "etc/motd", "web's\n" },
         .{ "etc/sv/minimal/run", "minimal's\n" },
         .{ "etc/sv/web/service", web_service },
-        .{ "etc/werewolf/allow/ipv6", "" },
+        .{ "etc/werewolf/allow/jit", "" },
         // The chain's accounts are added as apko adds them; only root is in group 0.
         .{ "usr/share/werewolf/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n" ++
             "sync:x:5:65533:sync:/sbin:/bin/sync\n" ++ added },
@@ -1943,13 +1863,12 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         buf[0..try ro.readLink(io, try gpa.print("etc/sv/{s}/supervise", .{s}), &buf)],
     );
 
-    const cmdline_want = "debugfs=off proc_mem.force_override=never slab_nomerge " ++
+    const cmdline_want = "proc_mem.force_override=never slab_nomerge " ++
         "page_alloc.shuffle=1 kvm-arm.mode=none loglevel=5\n";
     for ([_][2][]const u8{
         .{ "form", "web\n" },
         .{ "net", "connect 80 tcp 443\nlisten tcp 80\n" },
         .{ "pledge", "stdio inet listen\n" },
-        .{ "module-params", "" },
         .{ "cmdline", cmdline_want },
         .{ "weaknesses", "files-x every form on aarch64 (test/posture-known)\n" ++
             "kernel-y every form on aarch64 (test/posture-known)\n" },

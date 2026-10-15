@@ -59,25 +59,17 @@ pub fn resolve(
     try io.randomSecure(&nonce);
     const report = try gpa.print("{s}/paths-{x}.json", .{ cache, &nonce });
     defer Dir.cwd().deleteFile(io, report) catch {};
-    var base: []const u8 = "unused";
     var env = try howl.environ.clone(gpa);
     defer env.deinit();
-    if (!external or @import("builtin").os.tag == .macos) {
+    if (@import("builtin").os.tag == .macos) {
         var build = try native.prepare(io, gpa, steps, .{
             .form = "minimal",
             .arch = arch,
-            .build = try gpa.print("{s}/alpine/{t}", .{ cache, arch }),
+            .build = try gpa.print("{s}/guest/{t}", .{ cache, arch }),
         });
-        try @import("packages.zig").kernel(&build);
-        base = try gpa.print("{s}/kernel/rootfs.tar", .{build.p.build});
-        if (@import("builtin").os.tag == .macos) {
-            try env.put("QEMU_KERNEL_IMAGE", try gpa.print("{s}/vmlinuz", .{build.p.build}));
-            try env.put("QEMU_BASE_INITRAMFS", try absolute(
-                gpa,
-                cwd,
-                try @import("melange.zig").guest(&build),
-            ));
-        }
+        const guest = try @import("melange.zig").guest(&build);
+        try env.put("QEMU_KERNEL_IMAGE", try absolute(gpa, cwd, guest.kernel));
+        try env.put("QEMU_BASE_INITRAMFS", try absolute(gpa, cwd, guest.initramfs));
     }
     try steps.enter(.{
         .name = "Checking cached security inputs",
@@ -90,8 +82,8 @@ pub fn resolve(
         else
             "all",
         source,         cache,
-        @tagName(arch), base,
-        report,         identity,
+        @tagName(arch), report,
+        identity,
     }, .env = &env }}, .{ .phases = true })).ok) return steps.fail(
         "preparing security inputs failed; see the builder dependencies in docs/testing.md",
     );

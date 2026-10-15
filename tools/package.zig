@@ -9,7 +9,7 @@ const package = @import("package");
 
 const usage = "usage: package pack DIR TREE NAME VERSION ARCH TIME DESCRIPTION " ++
     "[depend:D|provide:P]..., index DIR OLD|-, sign DIR KEYNAME SIGNATURE, " ++
-    "open INDEX KEYNAME SIGNATURE MEMBER";
+    "open INDEX KEYNAME SIGNATURE MEMBER, baselayout DIR ARCH TIME";
 const limit: Io.Limit = .limited(256 << 20);
 
 pub fn main(init: std.process.Init) !void {
@@ -27,7 +27,21 @@ pub fn main(init: std.process.Init) !void {
 
 fn run(io: Io, gpa: Allocator, args: []const []const u8) !void {
     const cwd = Dir.cwd();
-    if (args.len >= 8 and is(args[0], "pack")) {
+    if (args.len == 4 and is(args[0], "baselayout")) {
+        const time = std.fmt.parseInt(u64, args[3], 10) catch return error.Usage;
+        const version = try package.version(gpa, time);
+        const p = try package.base(gpa, args[2], time, version);
+        try cwd.createDirPath(io, args[1]);
+        const path = try gpa.print(
+            "{s}/{s}-{s}.apk",
+            .{ args[1], package.baselayout.name, version },
+        );
+        try cwd.writeFile(io, .{ .sub_path = path, .data = p.bytes });
+        try cwd.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}.stanza", .{path}), .data = p.stanza },
+        );
+    } else if (args.len >= 8 and is(args[0], "pack")) {
         var depends: std.ArrayList([]const u8) = .empty;
         var provides: std.ArrayList([]const u8) = .empty;
         for (args[8..]) |a| {

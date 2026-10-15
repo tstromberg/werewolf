@@ -630,6 +630,35 @@ pub const Posture = struct {
         });
     }
 
+    /// builtWithout adds a passing check, and returns true, when the kernel has
+    /// no /proc/sys/KEY because it was built without the feature: a switch
+    /// that does not exist cannot be turned back on. Otherwise it adds nothing.
+    pub fn builtWithout(
+        p: *Posture,
+        id: []const u8,
+        name: []const u8,
+        why: []const u8,
+        key: []const u8,
+    ) !bool {
+        const path = try p.gpa.print("/proc/sys/{s}", .{key});
+        if (exists(p.io, path)) return false;
+        try p.add(.{
+            .id = id,
+            .area = "kernel",
+            .name = name,
+            .why = why,
+            .how = try p.gpa.print(
+                "the kernel has no {s}: it was built without the feature",
+                .{dotted(p.gpa, key)},
+            ),
+            .source = path,
+            .observed = "absent",
+            .result = .pass,
+            .detail = "built without it",
+        });
+        return true;
+    }
+
     /// oneWay adds a check of a sysctl the kernel lets rise but never fall.
     /// It must read locked; as root, writing unlocked must also be refused.
     /// It writes only when the value reads locked, so it never lowers it.

@@ -33,6 +33,10 @@ def check():
                 shutil.copyfile(work / 'public' / (kind + '.crt'), trust / (kind + '.crt'))
                 env['WEREWOLF_PROTECTED_' + kind.upper() + '_KEY'] = str(work / 'private' / (kind + '.key'))
             run(['make', 'howl'], env)
+            # The published kernel's IPE trusts only the committed image certificate.
+            kernel = work / 'test-kernel.tar'
+            run(['sh', 'tools/test-kernel', 'x86_64', trust / 'image.crt', kernel], env)
+            env['WEREWOLF_PROTECTED_TEST_KERNEL'] = str(kernel)
             start = datetime.datetime.now(datetime.timezone.utc)
             bundles = []
             for offset in range(3):

@@ -68,8 +68,8 @@ package the form uses.
 
 A form is built on one other form, but a machine that runs an application
 with its database is several side by side. A form may take other forms `with`
-it, and gets their parts too: packages, accounts, services, policies, modules
-and pruning.
+it, and gets their parts too: packages, accounts, services, policies and
+pruning.
 
 ```yaml
 # forms/mastodon/form.yaml

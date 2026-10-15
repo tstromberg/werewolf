@@ -51,19 +51,26 @@ fn run(init: std.process.Init) !void {
         try write(io, lockdown, "confidentiality");
     if (std.mem.find(u8, try read(io, gpa, lockdown, 128), "[confidentiality]") == null)
         return error.UnenforcedLockdown;
+    // The kernel has no IPE policy of its own: activate the bootstrap's,
+    // signed with the image key, so only this initramfs may execute.
+    write(
+        io,
+        ipe.base ++ "/new_policy",
+        try read(io, gpa, "/enrollment/ipe-boot.p7b", ipe.max_policy),
+    ) catch
+        return error.BootstrapIpeRejected;
+    try write(io, ipe.base ++ "/policies/werewolf_boot/active", "1");
+    try write(io, ipe.base ++ "/enforce", "1");
     if (!ipe.bootstrapEnforced(
         try read(io, gpa, ipe.base ++ "/policies/werewolf_boot/policy", ipe.max_policy),
         try read(io, gpa, ipe.base ++ "/policies/werewolf_boot/active", 8),
         try read(io, gpa, ipe.base ++ "/enforce", 8),
     )) return error.UnenforcedBootstrapIpe;
-    // Bootstrap uses built-in drivers only; no process may load a module later.
-    try write(io, "/proc/sys/kernel/modules_disabled", "1");
-    if (!std.mem.eql(
-        u8,
-        std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/modules_disabled", 8), "\n"),
-        "1",
-    ))
-        return error.ModuleLoaderOpen;
+    // werewolf's kernel has no module loader at all; a kernel that has one is refused.
+    if (linux.errno(linux.access(
+        "/proc/modules",
+        linux.F_OK,
+    )) == .SUCCESS) return error.ModuleLoaderOpen;
     try ipe.lockAdmin();
     const key = try apk.parseKey(gpa, try read(io, gpa, "/enrollment/publisher.pub", 1024));
     const factory = try read(io, gpa, "/enrollment/factory.permit", 688);

@@ -2,7 +2,6 @@
 """Resolve every form, build its protected images twice, test, gate and publish them."""
 import argparse
 import datetime
-import filecmp
 import gzip
 import hashlib
 import importlib.machinery
@@ -96,11 +95,11 @@ def lock_recipe(recipe, arch, output):
 
 
 def shared_inputs(arch, output):
-    for name in ('kernel', 'boot'):
-        resolver.resolve(name + '.yaml', output / (name + '.lock.json'), 'aarch64,x86_64', 'boot')
-    for name, recipe in [('kernel-builder', 'boot/ipe-kernel.melange.yaml'),
-                         ('stub-builder', 'boot/tpm-stub.melange.yaml')]:
-        lock_recipe(recipe, arch, output / (name + '.lock.json'))
+    with tempfile.TemporaryDirectory() as temporary:
+        configs = resolver.boot_configs(Path(temporary))
+        for name in ('kernel', 'boot'):
+            resolver.resolve(name + '.yaml', output / (name + '.lock.json'), 'aarch64,x86_64', configs)
+    lock_recipe('boot/tpm-stub.melange.yaml', arch, output / 'stub-builder.lock.json')
     write(output / 'tools.json', tool_versions())
 
 
@@ -245,6 +244,31 @@ def build_one(target, snapshot, output):
             shutil.rmtree(work, ignore_errors=True)
     archive_inputs(snapshot, output / 'inputs.tar.gz')
     write(output / 'packages.json', notes.inventory(snapshot, form, arch, local_packages(snapshot, arch)))
+    keep(target, output)
+
+
+def digests(root):
+    files = {}
+    for path in sorted(root.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('form image builds must not hold links')
+        if path.is_file():
+            files[str(path.relative_to(root))] = catalog.record(path)
+    return files
+
+
+def keep(target, output):
+    """Record every file of a build by digest; the copies compare records.
+    Only the forms the lifecycle gates can be published, so the others keep
+    just what later jobs read and their gigabytes never leave the runner."""
+    write(output.parent / (target['form'] + '.files.json'), digests(output))
+    if target['form'] in GATED:
+        return
+    for name, _, _ in bundles(target):
+        descriptor = (output / name / 'boot.json').read_bytes()
+        shutil.rmtree(output / name)
+        (output / name).mkdir()
+        (output / name / 'boot.json').write_bytes(descriptor)
 
 
 def build(snapshot, output):
@@ -299,21 +323,20 @@ class redirect:
             os.close(saved)
 
 
-def same(first, second):
-    names = [sorted(str(p.relative_to(root)) for p in root.rglob('*')) for root in (first, second)]
-    if names[0] != names[1]:
-        raise ValueError('independent form image builds hold different files')
-    for name in names[0]:
-        one, two = first / name, second / name
-        if one.is_symlink() or two.is_symlink():
-            raise ValueError('form image builds must not hold links')
-        if one.is_file() and not filecmp.cmp(one, two, shallow=False):
-            raise ValueError('independent form image builds differ: ' + name)
+def same(form, first, second):
+    """The copies match when their records do, and what the first still
+    holds is what it recorded: the bytes later jobs read."""
+    one, two = (json.loads(catalog.read(root.parent / (form + '.files.json'))) for root in (first, second))
+    if one != two:
+        raise ValueError('independent form image builds differ')
+    held = digests(first)
+    if any(one.get(name) != record for name, record in held.items()) or (form in GATED and held != one):
+        raise ValueError('form image copy differs from its build record')
 
 
 def check_one(target, snapshot, first, second, output, lifecycle):
     form, arch = target['form'], target['arch']
-    same(first, second)
+    same(form, first, second)
     descriptors = {}
     for name, _, serial in bundles(target):
         manifest = json.loads(catalog.read(first / name / 'boot.json'))

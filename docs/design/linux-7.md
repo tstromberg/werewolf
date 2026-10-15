@@ -3,7 +3,10 @@
 Proposed, 2026-10-09. Declined the same day: werewolf stays on Alpine's
 `linux-virt` 6.18 LTS until its next LTS. Built anyway, for any kernel:
 lockdown `confidentiality`, `dev.tty.legacy_tiocsti=0`, and leash's UNIX
-socket rule, which waits for Landlock ABI 9.
+socket rule, which waits for Landlock ABI 9. Superseded, 2026-10-15, by
+[custom-kernel.md](custom-kernel.md): werewolf builds its own kernel from
+kernel.org's stable release, 7.2 with Landlock ABI 10, and no longer boots
+`linux-virt`.
 
 ## Summary
 

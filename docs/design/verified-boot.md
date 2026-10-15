@@ -3,12 +3,14 @@
 Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0,
 cmd/init); 2, a read-only root; 3, its dm-verity hash tree (lib/verity.zig)
 and signed releases ([docs/releases.md](../releases.md)); and phase 5's
-first slice, a signed UKI on a local disk (make check-secureboot). Phase 4,
-our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); enrolled images have
-signed slot updates ([prebuilt-images.md](prebuilt-images.md)). Phase 5's
-Secure Boot passed on AWS and GCP; Azure firmware acceptance remains unreliable.
-Posture holds gaps as `boot-` checks (docs/posture.md); IPE builds enforce
-module signatures. TPM integration is opt-in.
+first slice, a signed UKI on a local disk (make check-secureboot). Phase 4:
+every image boots our own kernel, with IPE built in
+([custom-kernel.md](custom-kernel.md)); enforcing it is opt-in ([ipe.md](ipe.md)),
+and enrolled images have signed slot updates
+([prebuilt-images.md](prebuilt-images.md)). Phase 5's Secure Boot passed on AWS
+and GCP; Azure firmware acceptance remains unreliable. Posture holds gaps as
+`boot-` checks (docs/posture.md); the kernel has no module loader. TPM
+integration is opt-in.
 
 ## Summary
 
@@ -29,8 +31,8 @@ an unsigned disk, firmware does not authenticate the kernel and stage0.
 
 ## Goals
 
-- Phase 4: the kernel refuses any exec, executable mmap or module not from
-  this release's root image, for every process.
+- Phase 4: the kernel refuses any exec or executable mmap not from this
+  release's root image, for every process.
 - Phase 5: firmware boots only our signed kernel, stage0 and command line.
 
 ## Non-Goals
@@ -45,11 +47,12 @@ mounts it read-only at `/`, with no overlay: what is written to an overlay
 can run, and IPE judges a file by its filesystem's device, so through one
 nothing would. `make check-verity` proves a changed image does not boot.
 
-**Phase 4: our kernel.** Alpine's `linux-virt` lacks IPE, so CI builds it
-from Alpine's config, at Alpine's version so CVE reports still match, with
-`SECURITY_IPE` (in `CONFIG_LSM`), `IPE_PROP_DM_VERITY`, `DM_VERITY`,
-`SYSTEM_TRUSTED_KEYS` (the image certificate), `MODULE_SIG_FORCE` and
-`LOCK_DOWN_KERNEL_FORCE_INTEGRITY`, without `KEXEC` or a developer key.
+**Phase 4: our kernel.** Alpine's `linux-virt` lacks IPE, so werewolf builds
+`linux-werewolf` ([custom-kernel.md](custom-kernel.md)) from kernel.org's stable
+release, with `SECURITY_IPE` (in `CONFIG_LSM`), `IPE_PROP_DM_VERITY`,
+`DM_VERITY`, `SYSTEM_TRUSTED_KEYS` (the image certificate) and
+`LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY`, without `MODULES`, `KEXEC` or an IPE
+policy of its own.
 
 **Phase 4: the policy.** Each release carries one, `DEFAULT action=DENY`
 and `op=EXECUTE dmverity_roothash=sha256:ROOTHASH action=ALLOW`, signed by
@@ -75,7 +78,7 @@ Trusted Launch. Stage0 requires SecureBoot on and SetupMode off.
 **Native slot identity.** The UKI seals root UUID, directory and ESP identity.
 Stage0 resolves only canonical slot UKI paths from StubImageIdentifier, then
 protects the resolved `/proc/cmdline`. Unsigned loader options cannot alter
-root, slot or IPE enforcement. Both stock Alpine and IPE kernels are supported.
+root, slot or IPE enforcement. Images with and without IPE enforcement are supported.
 The native UKI carries only stage0 and uses counted `uki` entries for A/B recovery.
 `make check-secureboot` verifies the actual release disk and manifest on both
 architectures; the continuous update test covers eight rejected boot cases.
@@ -89,12 +92,11 @@ inside a locally recomposed root cannot preserve its sealed root hash.
 
 **Open.** KMS custody, Lima arm64 integration and provider TPM provisioning.
 Opt-in [protected pair retirement](tpm-ab-retirement.md) rejects retired releases
-and preserves A/B rollback through actual QEMU x86_64 power cuts. The module
-key makes kernel builds differ, and CI requires two to match.
+and preserves A/B rollback through actual QEMU x86_64 power cuts.
 
 ## Drawbacks
 
-- Our own kernel is a build to run and keep current with Alpine's.
+- Our own kernel is a build to run and keep current with kernel.org's.
 - A release whose policy is missing or wrong runs nothing and falls back.
 
 ## Alternatives Considered

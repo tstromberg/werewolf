@@ -267,21 +267,40 @@ class Images(unittest.TestCase):
                 images.gates(dict(LIMA_RUNNER=bad))
 
     def test_nonmatching_builds_fail_before_testing_or_writing_evidence(self):
-        first, second = self.root / 'one', self.root / 'two'
-        self.bundle(first / 'qemu', self.serial, form='caddy')
-        shutil.copytree(first, second)
+        target = dict(form='caddy', arch='x86_64', serial=self.serial, inputs=digest('caddy'))
+        first, second = self.root / 'one/caddy', self.root / 'two/caddy'
+        for copy in (first, second):
+            self.bundle(copy / 'qemu', self.serial, form='caddy')
         (second / 'qemu/slot/root.erofs').write_bytes(b'different output')
-        target = dict(form='caddy', arch='x86_64', serial=self.serial, inputs='c' * 64)
+        for copy in (first, second):
+            images.keep(target, copy)
         arguments = (target, self.root / 'snapshot', first, second, self.root / 'verified', self.root / 'lifecycle')
         with patch.object(images, 'run') as run:
             with self.assertRaisesRegex(ValueError, 'builds differ'):
                 images.check_one(*arguments)
-            shutil.copyfile(first / 'qemu/slot/root.erofs', second / 'qemu/slot/root.erofs')
-            (second / 'extra').write_bytes(b'')
-            with self.assertRaisesRegex(ValueError, 'different files'):
+            shutil.copyfile(first.parent / 'caddy.files.json', second.parent / 'caddy.files.json')
+            (first / 'qemu/boot.json').write_bytes(b'{"changed": "after the build"}')
+            with self.assertRaisesRegex(ValueError, 'build record'):
                 images.check_one(*arguments)
             run.assert_not_called()
         self.assertFalse((self.root / 'verified').exists())
+
+    def test_builds_keep_only_what_later_jobs_read(self):
+        for form in ('caddy', 'playground'):
+            output = self.root / 'candidates' / form
+            target = dict(form=form, arch='x86_64', serial=self.serial)
+            for name, _, serial in images.bundles(target):
+                self.bundle(output / name, serial, form=form)
+            for name in ('inputs.tar.gz', 'packages.json'):
+                (output / name).write_bytes(name.encode())
+            whole = images.digests(output)
+            images.keep(target, output)
+            self.assertEqual(whole, json.loads((output.parent / (form + '.files.json')).read_text()))
+        self.assertEqual({'qemu/boot.json', 'inputs.tar.gz', 'packages.json'},
+                         set(images.digests(self.root / 'candidates/caddy')))
+        playground = self.root / 'candidates/playground'
+        self.assertEqual(json.loads((playground.parent / 'playground.files.json').read_text()),
+                         images.digests(playground))
 
     def test_release_notes_escape_package_and_image_text(self):
         inventory = copy.deepcopy(self.inventory)
@@ -310,14 +329,14 @@ class Images(unittest.TestCase):
         runtime = [package('caddy'), package('other-architecture', arch='aarch64')]
         images.write(snapshot / 'caddy.lock.json', dict(contents=dict(packages=runtime), werewolf=dict(images=[])))
         images.write(snapshot / 'caddy-dev.lock.json', dict(contents=dict(packages=[*runtime, package('busybox')])))
-        images.write(snapshot.parent / 'kernel.lock.json', dict(contents=dict(packages=[package('linux-virt')])))
-        images.write(snapshot.parent / 'kernel-builder.lock.json', dict(contents=dict(packages=[package('gcc')])))
+        images.write(snapshot.parent / 'kernel.lock.json', dict(contents=dict(packages=[package('linux-werewolf')])))
+        images.write(snapshot.parent / 'stub-builder.lock.json', dict(contents=dict(packages=[package('gcc')])))
         images.write(snapshot / 'melange-local.lock.json', dict(contents=dict(packages=[package('cargo')])))
         images.write(snapshot / 'melange.json', {'forms/caddy/melange/local.yaml': 'melange-local.lock.json'})
         local = [dict(name='local', version='2-r0', checksum='c' * 64)]
         first = notes.inventory(snapshot, 'caddy', 'x86_64', local)
-        self.assertEqual({'runtime': ['caddy'], 'test': ['busybox'], 'kernel': ['linux-virt'],
-                          'build:kernel': ['gcc'], 'build:forms/caddy/melange/local.yaml': ['cargo'], 'local': ['local']},
+        self.assertEqual({'runtime': ['caddy'], 'test': ['busybox'], 'kernel': ['linux-werewolf'],
+                          'build:stub': ['gcc'], 'build:forms/caddy/melange/local.yaml': ['cargo'], 'local': ['local']},
                          {scope: [p['name'] for p in first['packages'] if p['scope'] == scope]
                           for scope in {p['scope'] for p in first['packages']}})
         for path in snapshot.parent.rglob('*.lock.json'):

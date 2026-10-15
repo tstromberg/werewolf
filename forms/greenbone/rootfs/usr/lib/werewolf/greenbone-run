@@ -5,7 +5,8 @@
 # _oci-gvmd's group can open it. umask 007 keeps a create from masking
 # the group write that listen-mode asks for.
 set -eu
-pw=$(cat /tmp/admin-password)
+db=(--database=postgres --db-host=127.0.0.1 --db-port=5432 --db-user=gvmd)
+pw=$(</tmp/admin-password)
 rm -f /tmp/admin-password
 case $pw in
 *" "*|*"'"*|*'"'*|*'\'*|*$'\n'*|admin)
@@ -17,30 +18,36 @@ esac
 	echo "greenbone-run: password shorter than 12" >&2
 	exit 1
 }
+# Agent sockets belong in /run, not in the persistent key directory.
+export GNUPGHOME=/var/lib/gvm/gvmd/gnupg
+export XDG_RUNTIME_DIR=/run/user/$UID
+umask 077
+mkdir -p "$GNUPGHOME" "$XDG_RUNTIME_DIR"
+/usr/bin/gpgconf --create-socketdir
 i=0
-until /usr/local/sbin/gvmd --migrate; do
+until /usr/local/sbin/gvmd "${db[@]}" --migrate; do
 	i=$((i + 1))
 	[ "$i" -le 90 ] || {
-		echo "greenbone-run: postgres did not answer" >&2
+		echo "greenbone-run: database migration did not complete" >&2
 		exit 1
 	}
 	sleep 1
 done
-if /usr/local/sbin/gvmd --get-users --verbose | grep -q '^admin '; then
-	/usr/local/sbin/gvmd --user=admin --new-password="$pw"
+if /usr/local/sbin/gvmd "${db[@]}" --get-users --verbose | grep -q '^admin '; then
+	/usr/local/sbin/gvmd "${db[@]}" --user=admin --new-password="$pw"
 else
-	/usr/local/sbin/gvmd --create-user=admin --password="$pw"
+	/usr/local/sbin/gvmd "${db[@]}" --create-user=admin --password="$pw"
 fi
-# The scanner listens on loopback. Recording it fails open: the UI
+# The scanner's socket is mounted read-only into this image. Recording it fails open: the UI
 # comes up either way. The type is the second word.
-/usr/local/sbin/gvmd --get-scanners | while read -r uuid type _; do
+/usr/local/sbin/gvmd "${db[@]}" --get-scanners | while read -r uuid type _; do
 	case $type in
 	OpenVAS)
-		/usr/local/sbin/gvmd --modify-scanner="$uuid" \
-			--scanner-host=127.0.0.1 --scanner-port=9391 ||
+		/usr/local/sbin/gvmd "${db[@]}" --modify-scanner="$uuid" \
+			--scanner-host=/run/ospd/ospd.sock --scanner-port=0 ||
 			echo "greenbone-run: scanner not recorded" >&2
 		;;
 	esac
 done || echo "greenbone-run: scanners not listed" >&2
 umask 007
-exec /usr/local/sbin/gvmd -f --listen=/run/gvmd.sock --listen-mode=660
+exec /usr/local/sbin/gvmd "${db[@]}" -f --unix-socket=/run/gvmd.sock --listen-mode=660

@@ -35,7 +35,7 @@ per-service filter that fails other calls with ENOSYS. seal-watch and
 [docs/design/pledge.md](../docs/design/pledge.md).
 
 Measured 2026-10-06 on an Apple M4 Max (20 million `getpid` calls), a call
-took 125 ns bare and 150 sealed on werewolf's kernel (Alpine's 6.18), and
+took 125 ns bare and 150 sealed on werewolf's kernel then (Alpine's 6.18), and
 115 bare and 132 sealed on Ubuntu 26.04's Linux 7.0, where a one-instruction
 filter and 200 comparisons cost the same: verdicts are cached, so the cost
 is having a filter at all, not its length.
@@ -81,11 +81,10 @@ the updater make the same tree and builds stay reproducible. See
 ## image
 
 The steps of making a slot that howl's build (`cmd/howl/build.zig`) and,
-in time, slot-update share, as functions of bytes rather than paths: the
-modules a stage0 loads and `werewolf.modules`, from `modules.dep`, in the
-order the Makefile's build used; gunzip; the arm64 zboot unwrap and
-x86_64's `vmlinux`; the kernel config's rules, which the build checks
-Alpine's config against (`configMisses`); and
+in time, slot-update share, as functions of bytes rather than paths:
+gunzip and unzstd; the arm64 zboot unwrap and x86_64's `vmlinux`; the
+kernel config's rules, which the build checks the `linux-werewolf`
+package's `boot/config-*` against (`configMisses`); and
 mkfs.erofs's options and the version check that refuses one before 1.9,
 which writes empty files from a tar. See
 [docs/design/howl-build.md](../docs/design/howl-build.md).
@@ -139,16 +138,14 @@ scalars and inline maps by line. See
 
 ## compose
 
-Derives everything an image holds beyond its packages from its chain:
-allowances, sshd and bastion files, the accounts init seeds, supervise
-links, and the records in /usr/share/werewolf (network policy, promises,
-modules, kernel arguments) that init, fence, posture, modload and the
-updater read. The build (`build/host/form compose`) and slot-update call
-the same function, so a slot built on a machine matches the build's.
-It writes only into the two directories it is given: on a machine, a
-scratch directory the updater copies in with its own checks, never the
-new root, where a package's symlink could redirect a write. See
-[docs/design/custom-updates.md](../docs/design/custom-updates.md).
+Derives everything an image holds beyond its packages from its chain: allowances, sshd
+and bastion files, the accounts init seeds, supervise links, and the records in
+/usr/share/werewolf (network policy, promises, kernel arguments) that init, fence,
+posture and the updater read. The build (`build/host/form compose`) and slot-update call
+the same function, so a slot built on a machine matches the build's. It writes only into
+the two directories it is given: on a machine, a scratch directory the updater copies in
+with its own checks, never the new root, where a package's symlink could redirect a
+write. See [docs/design/custom-updates.md](../docs/design/custom-updates.md).
 
 Each image stages its chain (form.yaml, rootfs) and
 posture-known in /usr/share/werewolf. A form CI publishes, NAME-form, holds
@@ -193,6 +190,24 @@ of this before anything reads a byte, and a test there runs those checks on
 what this writes. `repository_pem` is release/packages.pub, which howl
 checks fetched forms with.
 
+## baselayout
+
+`werewolf-baselayout` replaces Wolfi's filesystem skeleton. `lib/baselayout.zig`
+is the complete list of directories, compatibility links and files: boot mount
+points, merged `/usr` paths, `/var/run`, `/var/empty`, locked root and nobody
+accounts and OS identity. The glibc package owns `nsswitch.conf`. The base provides
+`wolfi-baselayout` and the merged-directory aliases required by Wolfi packages.
+Certificates are an explicit dependency of the minimal form.
+
+Login forms add shell profiles, shell lists and OpenSSH's account. No base
+profile, locale environment, service/protocol database, mail or cron spool,
+legacy device groups, or general-purpose service accounts are installed.
+Forms and packages may add files they actually need.
+
+`make packages` publishes the layout with the other native packages. All builds
+and machine updates fetch it from the signed Werewolf repository named by the
+minimal form. Publish layout changes before publishing forms which need them.
+
 ## apk
 
 Verifies apk indexes and packages before any parser but its own reads
@@ -206,7 +221,7 @@ the tiers feed use the same key code.
 ## allow
 
 Lists the allowances a form may grant (`kvm`, `nested-kvm`, `netadmin`,
-`packet`, `ipv6`, `pty`, `jit`, `sh`) and the capabilities werewolf takes from
+`packet`, `pty`, `jit`, `sh`) and the capabilities werewolf takes from
 root. Allowances in form.yaml's `allow` accumulate along the chain; the
 build writes one empty file each to /etc/werewolf/allow and derives
 kernel arguments from them. Nothing reads an allowance from the command

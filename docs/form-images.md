@@ -27,7 +27,8 @@ boot, IPE, a verified root and TPM-anchored A/B updates, nothing given up.
 A provider's gateway is baked into the verified root, so each form,
 provider and architecture is its own image. Two independent native Linux
 runners build it, with no restored compiled output, and the bundles must
-match byte for byte. The form must then meet its
+match byte for byte: each runner records every file's SHA-256, and only a
+form with gates ships its bundles on to later jobs. The form must then meet its
 [form integration coverage](testing.md#form-integration-coverage) and pass
 `howl test --with FORM --arch ARCH`; `tests.json` records both, with the
 descriptor of each bundle they cover. None of these jobs holds the

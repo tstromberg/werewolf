@@ -11,9 +11,11 @@ pub const prefix = "policy_name=werewolf policy_version=1.0.0\n" ++
     "DEFAULT action=DENY\nop=EXECUTE dmverity_roothash=sha256:";
 pub const suffix = " action=ALLOW\n";
 pub const max_policy = 64 << 10;
+/// boot_policy is the TPM bootstrap image's: its initramfs alone may execute.
+/// The kernel has no policy of its own; tpm-enroll activates this one, signed
+/// with the image key, before anything else runs.
 pub const boot_policy = "policy_name=werewolf_boot policy_version=0.0.0\n" ++
-    "DEFAULT action=DENY\nop=EXECUTE boot_verified=TRUE action=ALLOW\n" ++
-    "op=KMODULE boot_verified=TRUE action=ALLOW\n";
+    "DEFAULT action=DENY\nop=EXECUTE boot_verified=TRUE action=ALLOW\n";
 
 /// Enrollment trusts only the signed initramfs and never enables a workload root.
 pub fn bootstrapEnforced(text: []const u8, is_active: []const u8, enforce: []const u8) bool {
@@ -50,16 +52,17 @@ pub fn enforced(text: []const u8, is_active: []const u8, enforce: []const u8) bo
         mem.eql(u8, mem.trim(u8, enforce, "\n"), "1");
 }
 
-/// checkConfig rejects a custom kernel that cannot hold the IPE boundary.
+/// checkConfig rejects a kernel that cannot hold the IPE boundary: IPE and
+/// forced lockdown built in, no module loader, and no policy of its own, so
+/// an image without a signed release policy boots unenforced, never refused.
 pub fn checkConfig(text: []const u8) !void {
     for ([_][]const u8{
         "SECURITY_IPE",
         "IPE_PROP_DM_VERITY",
-        "MODULE_SIG_FORCE",
         "SECURITYFS",
         "AUDIT",
         "AUDITSYSCALL",
-        "LOCK_DOWN_KERNEL_FORCE_INTEGRITY",
+        "LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY",
     }) |opt| {
         if (!mem.eql(u8, configValue(text, opt), "y")) return error.IpeKernelConfig;
     }
@@ -68,9 +71,10 @@ pub fn checkConfig(text: []const u8) !void {
     while (lsms.next()) |lsm| if (mem.eql(u8, lsm, "ipe")) {
         found = true;
     };
-    if (!found or configValue(text, "IPE_BOOT_POLICY").len <= 2 or
+    if (!found or configValue(text, "IPE_BOOT_POLICY").len > 2 or
         configValue(text, "SYSTEM_TRUSTED_KEYS").len <= 2) return error.IpeKernelConfig;
     for ([_][]const u8{
+        "MODULES",
         "KEXEC",
         "KEXEC_FILE",
         "KEXEC_CORE",
@@ -133,17 +137,23 @@ test "release policy accepts exactly one trusted root" {
     try t.expect(policyRoot(w.written()) == null);
 }
 
-test "IPE cannot silently disappear from a custom kernel" {
+test "IPE cannot silently disappear from the kernel" {
     const t = std.testing;
     const config = "CONFIG_SECURITY_IPE=y\nCONFIG_IPE_PROP_DM_VERITY=y\n" ++
-        "CONFIG_MODULE_SIG_FORCE=y\nCONFIG_SECURITYFS=y\nCONFIG_AUDIT=y\n" ++
-        "CONFIG_AUDITSYSCALL=y\nCONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y\n" ++
-        "CONFIG_LSM=\"landlock,lockdown,yama,ipe\"\nCONFIG_IPE_BOOT_POLICY=\"boot.policy\"\n" ++
-        "CONFIG_SYSTEM_TRUSTED_KEYS=\"image.crt\"\n";
+        "CONFIG_SECURITYFS=y\nCONFIG_AUDIT=y\n" ++
+        "CONFIG_AUDITSYSCALL=y\nCONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y\n" ++
+        "CONFIG_LSM=\"landlock,lockdown,yama,ipe\"\nCONFIG_IPE_BOOT_POLICY=\"\"\n" ++
+        "CONFIG_SYSTEM_TRUSTED_KEYS=\"image.crt\"\n# CONFIG_MODULES is not set\n";
     try checkConfig(config);
     try t.expectError(error.IpeKernelConfig, checkConfig(config["CONFIG_SECURITY_IPE=y\n".len..]));
     try t.expectError(error.IpeKernelConfig, checkConfig("CONFIG_LSM=\"landlock\"\n" ++ config));
     try t.expectError(error.IpeKernelConfig, checkConfig(config ++ "CONFIG_KEXEC=y\n"));
+    try t.expectError(error.IpeKernelConfig, checkConfig(config ++ "CONFIG_MODULES=y\n"));
+    // A policy of the kernel's own would refuse every image signed for no root.
+    try t.expectError(
+        error.IpeKernelConfig,
+        checkConfig("CONFIG_IPE_BOOT_POLICY=\"boot.policy\"\n" ++ config),
+    );
     try t.expectError(
         error.IpeKernelConfig,
         checkConfig(config ++ "CONFIG_IPE_POLICY_SIG_SECONDARY_KEYRING=y\n"),

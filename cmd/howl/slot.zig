@@ -172,20 +172,15 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
             }));
         }
     }
-    const kernel_pkg = if (b.spec.ipe_kernel != null)
-        mem.trim(
-            u8,
-            try b.capture(stamp, &.{ "bsdtar", "-xOf", kernel_rootfs, "boot/kernel-package" }),
-            "\n",
-        )
-    else
-        try packages.lockedKernel(
-            b.gpa,
-            try b.read("build/lock/kernel.lock.json", 64 << 20),
-            @tagName(b.spec.arch),
-        );
+    // The kernel says which package it is, linux-werewolf-VER-rN, and where
+    // the updater finds the next one.
+    const kernel_pkg = mem.trim(
+        u8,
+        try b.capture(stamp, &.{ "bsdtar", "-xOf", kernel_rootfs, "boot/kernel-package" }),
+        "\n",
+    );
     try b.put(d, "kernel", try b.path("{s}\n", .{kernel_pkg}));
-    try b.put(d, "alpine", try b.capture(stamp, &.{
+    try b.put(d, "kernel-repository", try b.capture(stamp, &.{
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
     }));
     try b.put(d, "overlay", try overlayList(b));
@@ -228,14 +223,17 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
 }
 
 /// withoutPins returns world's lines that hold no =, each ended by a
-/// newline, as grep -v = prints them.
+/// newline. The source build's base-layout pin becomes an unpinned dependency.
 fn withoutPins(gpa: Allocator, world: []const u8) ![]const u8 {
     if (world.len == 0) return "";
     const body = if (mem.endsWith(u8, world, "\n")) world[0 .. world.len - 1] else world;
     var out: std.ArrayList(u8) = .empty;
     var lines = mem.splitScalar(u8, body, '\n');
     while (lines.next()) |l| {
-        if (mem.findScalar(u8, l, '=') == null) try out.print(gpa, "{s}\n", .{l});
+        if (mem.startsWith(u8, l, @import("package").baselayout.name ++ "="))
+            try out.print(gpa, "{s}\n", .{@import("package").baselayout.name})
+        else if (mem.findScalar(u8, l, '=') == null)
+            try out.print(gpa, "{s}\n", .{l});
     }
     return out.items;
 }
@@ -291,16 +289,15 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         &.{try b.path("{s}/verity", .{out})},
     );
     try stage0Init(b, rootfs);
-    try stage0(b, "stage0", "modules", b.modules);
+    try stage0(b);
     if (goals.image or (b.spec.boot_key != null and !b.spec.boot_native)) try initramfs(b, root);
-    // The slot's kernel as Alpine ships it, not BUILD/vmlinuz: on aarch64
-    // an EFI zboot image, 10 MB to the raw Image's 36, which a UEFI
-    // machine's firmware reads on every boot.
+    // The slot's kernel as its package ships it: a bzImage, or arm64's raw
+    // Image, which is an EFI program itself (EFI_STUB) for systemd-boot.
     try copyStep(
         b,
         try b.path("{s}/slot/vmlinuz", .{out}),
         try b.path("{s}/vmlinuz", .{b.p.build}),
-        try b.path("{s}/kernel/x/boot/vmlinuz-virt", .{b.p.build}),
+        try b.path("{s}/kernel/x/boot/vmlinuz-werewolf", .{b.p.build}),
     );
     // The kernel arguments the image asks for, beside it, for
     // the disk to boot it with.
@@ -635,54 +632,42 @@ fn checkErofs(b: *B) !void {
     };
 }
 
-/// stage0Init writes OUT/stage0/init.tar: stage0's /init and the module
-/// loader, the image's own, as the updater takes them from the root it
-/// builds. Published, they come from rootfs, werewolf's packages.
+/// stage0Init writes OUT/stage0/init.tar: stage0's /init, the image's own,
+/// as the updater takes it from the root it builds. Published, it comes
+/// from rootfs, werewolf's packages.
 fn stage0Init(b: *B, rootfs: []const u8) !void {
     const target = try b.path("{s}/stage0/init.tar", .{b.p.out});
-    const inputs: []const []const u8 = if (b.spec.published)
-        &.{rootfs}
-    else
-        &.{ b.stage0_bin, b.loader_bin };
+    const inputs: []const []const u8 = if (b.spec.published) &.{rootfs} else &.{b.stage0_bin};
     const began = try b.begin(target, inputs) orelse return;
     const files = try b.path("{s}/stage0/files", .{b.p.out});
     try Dir.cwd().deleteTree(b.io, files);
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/usr/lib/werewolf", .{files}));
     const init = try b.path("{s}/init", .{files});
     if (b.spec.published) {
-        try b.run(&.{
-            "bsdtar",                  "-xf",                      rootfs, "-C", files,
-            "usr/lib/werewolf/stage0", "usr/lib/werewolf/modload",
-        }, .{});
+        try b.run(&.{ "bsdtar", "-xf", rootfs, "-C", files, "usr/lib/werewolf/stage0" }, .{});
         try b.rename(try b.path("{s}/usr/lib/werewolf/stage0", .{files}), init);
-    } else {
-        try b.copy(b.stage0_bin, init);
-        try b.copy(b.loader_bin, try b.path("{s}/usr/lib/werewolf/modload", .{files}));
-    }
+    } else try b.copy(b.stage0_bin, init);
     try layer(b, target, &.{files});
     try b.done(target, began);
 }
 
-/// stage0 writes OUT/slot/NAME.zst, a stage0: /dev's nodes, /init and the
-/// loader, the modules words name (OUT/MODULES.tar), and /verity. It has
-/// no packages.
-fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []const u8) !void {
+/// stage0 writes OUT/slot/stage0.zst: /dev's nodes, /init and /verity. It
+/// has no packages, and the kernel no modules.
+fn stage0(b: *B) !void {
     const out = b.p.out;
-    const modules = try b.path("{s}/{s}.tar", .{ out, modules_name });
-    try moduleTar(b, modules, words);
-    const target = try b.path("{s}/slot/{s}.zst", .{ out, name });
+    const target = try b.path("{s}/slot/stage0.zst", .{out});
     const init_tar = try b.path("{s}/stage0/init.tar", .{out});
     const verity_tar = try b.path("{s}/verity.tar", .{out});
     const mtree = try b.path("{s}/stage0.mtree", .{b.p.build});
     try packages.keep(b, mtree, embedded.stage0_mtree);
-    const began = try b.begin(target, &.{ modules, mtree, init_tar, verity_tar }) orelse return;
+    const began = try b.begin(target, &.{ mtree, init_tar, verity_tar }) orelse return;
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/slot", .{out}));
-    const cpio = try b.path("{s}/slot/{s}.cpio", .{ out, name });
+    const cpio = try b.path("{s}/slot/stage0.cpio", .{out});
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(b.gpa, &.{
         "bsdtar", "-cf", cpio, "--format", "newc", "--uid", "0", "--gid", "0", "--numeric-owner",
     });
-    for ([_][]const u8{ mtree, init_tar, modules, verity_tar }) |from|
+    for ([_][]const u8{ mtree, init_tar, verity_tar }) |from|
         try argv.append(b.gpa, try b.path("@{s}", .{from}));
     try b.run(argv.items, .{});
     const t = try b.tmp(target);
@@ -692,62 +677,6 @@ fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []co
     try Dir.cwd().setTimestampsNow(b.io, t, .{});
     try b.rename(t, target);
     try Dir.cwd().deleteFile(b.io, cpio);
-    try b.done(target, began);
-}
-
-/// moduleTar writes target, the modules a stage0 loads and their order
-/// (image.modules), decompressed: Alpine's kernel cannot (MODULE_DECOMPRESS
-/// is off), and the loader hands the kernel each file as it is.
-fn moduleTar(b: *B, target: []const u8, words: []const []const u8) !void {
-    const vmlinuz = try b.path("{s}/vmlinuz", .{b.p.build});
-    const inputs = try mem.concat(b.gpa, []const u8, &.{ &.{
-        vmlinuz,
-        b.self,
-        try b.path("{s}/kernel/rootfs.tar", .{b.p.build}),
-    }, b.form_files });
-    const began = try b.begin(target, inputs) orelse return;
-    const dir = target[0 .. target.len - ".tar".len];
-    try Dir.cwd().deleteTree(b.io, dir);
-    const mods = try b.path("{s}/kernel/x/lib/modules", .{b.p.build});
-    var kvers = try Dir.cwd().openDir(b.io, mods, .{ .iterate = true });
-    defer kvers.close(b.io);
-    var it = kvers.iterate();
-    const first = (try it.next(b.io)) orelse return b.fail("{s}: no kernel", .{mods});
-    const kver = try b.gpa.dupe(u8, first.name);
-    if (try it.next(b.io) != null) return b.fail("{s}: more than one kernel", .{mods});
-    const src = try b.path("{s}/{s}", .{ mods, kver });
-    var bad: []const u8 = "";
-    const m = image.modulesWithBuiltins(
-        b.gpa,
-        try b.read(try b.path("{s}/modules.dep", .{src}), 16 << 20),
-        try b.read(try b.path("{s}/modules.builtin", .{src}), 16 << 20),
-        words,
-        b.params,
-        &bad,
-    ) catch |err| return switch (err) {
-        error.NoModules => b.fail(
-            "{s}: no modules to load: the build lost its module list",
-            .{target},
-        ),
-        error.ModuleNotFound => b.fail("module {s} not in {s}/modules.dep", .{ bad, src }),
-        error.ParamsForMissingModule => b.fail(
-            "module parameters for {s}, which the form does not carry",
-            .{bad},
-        ),
-        error.OutOfMemory => error.OutOfMemory,
-    };
-    const dst = try b.path("{s}/usr/lib/modules/{s}", .{ dir, kver });
-    try Dir.cwd().createDirPath(b.io, dst);
-    try b.put(dst, "werewolf.modules", m.list);
-    for (m.files) |file| {
-        const in = try b.path("{s}/{s}", .{ src, file });
-        const raw = image.gunzip(b.gpa, try b.read(in, image.max_gunzip)) catch |err|
-            return b.fail("{s}: {t}", .{ in, err });
-        const to = try b.path("{s}/{s}", .{ dst, file[0 .. file.len - ".gz".len] });
-        try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(to).?);
-        try Dir.cwd().writeFile(b.io, .{ .sub_path = to, .data = raw });
-    }
-    try layer(b, target, &.{dir});
     try b.done(target, began);
 }
 
@@ -923,4 +852,8 @@ test withoutPins {
     );
     try testing.expectEqualStrings("a\n\nb\n", try withoutPins(a, "a\n\nb"));
     try testing.expectEqualStrings("", try withoutPins(a, "x=1\n"));
+    try testing.expectEqualStrings(
+        "werewolf-baselayout\nother@repo\n",
+        try withoutPins(a, "werewolf-baselayout=0.123-r0\nother@repo\n"),
+    );
 }

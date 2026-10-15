@@ -11,8 +11,8 @@ It runs a whole update, as a machine does one ([updater.md](updater.md)).
 slot, and boots from slot a of a disk that
 [test/check-updater](../test/check-updater) makes, whose build record claims
 the kernel release before its own: one file laid over the slot's root, so
-nothing in `build/` changes. The machine commits, finds Alpine's kernel
-newer, fetches Wolfi's and Alpine's packages and the CVE sources as
+nothing in `build/` changes. The machine commits, finds the published
+kernel newer, fetches Wolfi's and werewolf's packages and the CVE sources as
 `_update`, builds slot b, installs it and reboots.
 
 [test/update](../test/update) then reads the disk with `debugfs`: each CVE

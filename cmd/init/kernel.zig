@@ -110,10 +110,9 @@ pub fn seed(m: *Machine) void {
     for (m.list("/etc/sv")) |s| mkdir(m.fmtZ("/run/runit/supervise.{s}", .{s}), 0o755);
 }
 
-/// kernel raises lockdown to confidentiality, loads modules and closes the loader
-/// (cmd/modload), and applies the sysctls and MDWE. stage0 has done the
-/// first two already; init repeats them rather than trust the command line.
-/// Locked down, the kernel refuses modules not signed by Alpine's key.
+/// kernel raises lockdown to confidentiality, as stage0 has already, rather
+/// than trust the command line, and applies the sysctls and MDWE. The kernel
+/// has no module loader to close (docs/design/custom-kernel.md).
 /// It returns an error if a protection is refused outside a container.
 pub fn kernel(m: *Machine) !void {
     if (!m.isMounted("/sys/kernel/security")) m.mount(&.{
@@ -134,8 +133,9 @@ pub fn kernel(m: *Machine) !void {
     // A refused sysctl ends the boot, and the machine returns on the slot
     // that last worked. In a container the settings are the host's: /proc/sys
     // is read-only (EROFS) and a network namespace lacks some (ENOENT), so
-    // refusals are logged and passed. A kernel without a BPF JIT has no
-    // bpf_jit_harden, and needs none.
+    // refusals are logged and passed. A kernel built without a feature has no
+    // switch for it, and needs none (compiled_out); posture checks the
+    // kernel's config says so.
     const contained = linux.errno(linux.access("/proc/sys/kernel/panic", linux.W_OK)) == .ROFS;
     const lockdown = "/sys/kernel/security/lockdown";
     if (std.mem.indexOf(u8, m.read(lockdown), "[confidentiality]") == null)
@@ -145,14 +145,12 @@ pub fn kernel(m: *Machine) !void {
     if (!contained and init.exists(lockdown) and !std.mem.eql(u8, level, "confidentiality"))
         return error.Lockdown;
 
-    if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
-    if (!contained and !std.mem.eql(u8, trim(m.read("/proc/sys/kernel/modules_disabled")), "1"))
-        return error.ModulesNotDisabled;
-
     var all = true;
     for (sysctls) |kv| switch (writeErrno(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) {
         .SUCCESS => {},
-        .NOENT => if (contained or std.mem.eql(u8, kv[0], "net/core/bpf_jit_harden")) {
+        .NOENT => if (contained or for (compiled_out) |c| {
+            if (std.mem.eql(u8, c, kv[0])) break true;
+        } else false) {
             all = false;
         } else {
             say("sysctl {s} not set: the kernel has none", .{kv[0]});
@@ -217,6 +215,18 @@ fn writeXorExecute(contained: bool) !void {
 /// sysctls close what root could use against the kernel or another process,
 /// and what a user could use against root. Fence later denies writes to
 /// /proc/sys, including root's, so reversible settings stay set too.
+/// compiled_out are the sysctls of features werewolf's kernel leaves out:
+/// BPF, io_uring, the module loader and its helper, the uevent helper and
+/// magic SysRq. A kernel without a BPF JIT has no bpf_jit_harden.
+const compiled_out = [_][]const u8{
+    "net/core/bpf_jit_harden",
+    "kernel/unprivileged_bpf_disabled",
+    "kernel/io_uring_disabled",
+    "kernel/modprobe",
+    "kernel/hotplug",
+    "kernel/sysrq",
+};
+
 const sysctls = [_][2][]const u8{
     // Randomize addresses as far as 4K pages and 48-bit addresses allow.
     .{ "vm/mmap_rnd_bits", switch (builtin.cpu.arch) {

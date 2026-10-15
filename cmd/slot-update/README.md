@@ -3,16 +3,18 @@
 ## Summary
 
 slot-update builds or fetches the other slot and boots it once due; an unhealthy slot
-rolls back ([updater.md](../../docs/updater.md), [update-policy.md](../../docs/design/update-policy.md)).
-Signed `local-NAME` updates are due at once; `try [HASH]` selects the parked slot; a
-failed solve fails `update-held` ([manifest.md](../../docs/design/manifest.md)).
+rolls back ([updater.md](../../docs/updater.md),
+[update-policy.md](../../docs/design/update-policy.md)). Signed `local-NAME` updates are
+due at once; `try [HASH]` selects the parked slot; a failed solve fails `update-held`
+([manifest.md](../../docs/design/manifest.md)).
 
 ## Background
 
 A root is an immutable dm-verity EROFS image. A fix lands in the other slot, `a` or `b`;
 the loader falls back unless slot-keep commits it. It is composed locally from
-werewolf's repository, Wolfi and Alpine. Enrolled IPE machines fetch complete signed
-slots instead; unenrolled IPE holds updates ([prebuilt-images.md](../../docs/design/prebuilt-images.md)).
+werewolf's repositories and Wolfi. Enrolled IPE machines fetch complete signed
+slots instead; unenrolled IPE holds updates
+([prebuilt-images.md](../../docs/design/prebuilt-images.md)).
 
 | File | Holds |
 | --- | --- |
@@ -86,8 +88,8 @@ Invariants to keep:
 - **Signed inputs:** package indexes and the tiers feed use separate keys. A leaked feed
   key changes timing within bounds (serial at most a day ahead, expiry at most a week);
   package keys authorize code.
-- **Open:** apk, installing as root, follows links that signed packages lay. Alpine's
-  index signatures and every package hash are SHA-1 (forging needs a second preimage).
+- **Open:** apk, installing as root, follows links that signed packages lay. Indexes
+  name packages by SHA-1 (forging needs a second preimage); SHA-1 signatures fail.
 
 ## Reliability Considerations
 

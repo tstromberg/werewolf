@@ -25,8 +25,8 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Machine records in `build/machines/NAME`; keys and repositories in `$XDG_DATA_HOME/howl`
-  (`~/.local/share/howl`), never in `build/`.
+- Machine records in `build/machines/NAME`; keys and repositories in
+  `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`.
 
 ## Non-Goals
 
@@ -45,9 +45,9 @@ value, and the guest's code checks every value first. The tar is ustar, sorted, 
 0600, dated 1970, within init's and cloud-metadata's limits.
 
 **Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing
-prerequisites fail. Other providers, and `--dev`, need `--disable=secureboot,tpm,ipe`,
-one profile for now ([security](../../docs/security.md#protections-a-machine-can-be-made-without));
-a published download needs the provider's protected profile ([design](../../docs/design/published-secure-boot.md)).
+prerequisites fail. Other providers and `--dev` need `--disable=secureboot,tpm,ipe`
+([why](../../docs/security.md#protections-a-machine-can-be-made-without)); a download
+needs its provider's [protected profile](../../docs/design/published-secure-boot.md).
 A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
@@ -77,7 +77,8 @@ cannot attach it. Progress goes to stderr and the machine record to stdout.
 
 ## Alternatives Considered
 
-Make alone, SDKs and Terraform: [cli.md](../../docs/design/cli.md#alternatives-considered).
+Make alone, SDKs and Terraform:
+[cli.md](../../docs/design/cli.md#alternatives-considered).
 
 ## Security Considerations
 

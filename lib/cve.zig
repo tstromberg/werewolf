@@ -13,10 +13,27 @@ pub fn validCve(id: []const u8) bool {
     return true;
 }
 
-/// kernelVersion parses linux-virt-6.18.55-r0 or 6.18.55 as {6, 18, 55}.
+/// kernel_names are the kernel packages werewolf boots: its own, and Alpine's
+/// linux-virt until every machine has updated past it.
+pub const kernel_names = [_][]const u8{ "linux-werewolf", "linux-virt" };
+
+/// Kernel is a kernel package's name and apk version.
+pub const Kernel = struct { name: []const u8, version: []const u8 };
+
+/// kernelPackage splits linux-werewolf-7.2.11-r1 into its name and version,
+/// or returns null for anything that is not a kernel package.
+pub fn kernelPackage(s: []const u8) ?Kernel {
+    for (kernel_names) |name| {
+        if (s.len > name.len + 1 and std.mem.startsWith(u8, s, name) and s[name.len] == '-')
+            return .{ .name = name, .version = s[name.len + 1 ..] };
+    }
+    return null;
+}
+
+/// kernelVersion parses linux-werewolf-7.2.11-r1, linux-virt-6.18.55-r0 or
+/// 6.18.55 as {7, 2, 11}, {6, 18, 55} or {6, 18, 55}.
 pub fn kernelVersion(s: []const u8) ?[3]u32 {
-    var v = s;
-    if (std.mem.startsWith(u8, v, "linux-virt-")) v = v["linux-virt-".len..];
+    var v = if (kernelPackage(s)) |k| k.version else s;
     if (std.mem.findScalar(u8, v, '-')) |i| v = v[0..i];
     var out: [3]u32 = .{ 0, 0, 0 };
     var it = std.mem.splitScalar(u8, v, '.');
@@ -116,7 +133,19 @@ test validCve {
     }) |id| try testing.expect(!validCve(id));
 }
 
+test kernelPackage {
+    const ours = kernelPackage("linux-werewolf-7.2.11-r1").?;
+    try testing.expectEqualStrings("linux-werewolf", ours.name);
+    try testing.expectEqualStrings("7.2.11-r1", ours.version);
+    try testing.expectEqualStrings("linux-virt", kernelPackage("linux-virt-6.18.55-r0").?.name);
+    try testing.expectEqual(null, kernelPackage("linux-werewolf"));
+    try testing.expectEqual(null, kernelPackage("linux-werewolf-"));
+    try testing.expectEqual(null, kernelPackage("linux-lts-6.18.55-r0"));
+    try testing.expectEqual(null, kernelPackage("linux-virtual-6.18.55-r0"));
+}
+
 test kernelVersion {
+    try testing.expectEqual([3]u32{ 7, 2, 11 }, kernelVersion("linux-werewolf-7.2.11-r1").?);
     try testing.expectEqual([3]u32{ 6, 18, 55 }, kernelVersion("linux-virt-6.18.55-r0").?);
     try testing.expectEqual([3]u32{ 6, 18, 42 }, kernelVersion("6.18.42").?);
     try testing.expectEqual(null, kernelVersion("6.18"));

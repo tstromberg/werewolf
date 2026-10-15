@@ -43,7 +43,7 @@ pub const Phase = struct {
             eql(u8, p.short, "reuse") or has(u8, p.short, "collect") != null) return "🌕";
         if (has(u8, p.short, "pack") != null or has(u8, p.short, "install") != null or
             has(u8, p.short, "configure") != null or eql(u8, p.short, "config") or
-            eql(u8, p.short, "files") or eql(u8, p.short, "modules") or
+            eql(u8, p.short, "files") or
             eql(u8, p.short, "metadata") or eql(u8, p.short, "boot image")) return "🌔";
         if (eql(u8, p.short, "start") or eql(u8, p.short, "prepare")) return "🌑";
         return "🌒";
@@ -538,7 +538,6 @@ pub fn phaseOf(target: []const u8) ?Phase {
     if (ends(t, "/rootfs.tar")) return P("Installing packages", "packages");
     if (has(t, "/programs/")) return P("Compiling werewolf's programs", "programs");
     if (has(t, "melange")) return P("Building packages with melange", "melange");
-    if (ends(t, "modules.tar")) return P("Choosing kernel modules", "modules");
     if (ends(t, "/meta.stamp")) return P("Recording what the image holds", "metadata");
     if (ends(t, "/overlay.tar") or
         has(t, "/application")) return P("Adding the form's files", "files");

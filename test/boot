@@ -86,7 +86,7 @@ proc diagnosis {} {
 	set text [string map [list "\r" ""] [read $f]]
 	close $f
 	set d ""
-	set progress [regexp -all -inline {(?:stage0|werewolf|modload|fence|slot-keep|leash|pg-init|dhcp-client|cloud-metadata): [^\[\n]*} $text]
+	set progress [regexp -all -inline {(?:stage0|werewolf|fence|slot-keep|leash|pg-init|dhcp-client|cloud-metadata): [^\[\n]*} $text]
 	if {[llength $progress]} { append d "last progress: [string trim [lindex $progress end]]\n" }
 	foreach re {
 		{Kernel panic[^\n]*}

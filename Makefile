@@ -32,7 +32,7 @@ HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
 FORM_TOOL = build/host/form
-FORM_TOOL_SOURCES = tools/form.zig lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
+FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
 compose_modules = --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
@@ -94,7 +94,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
-	check-lease check-dns check-static check-unsigned check-verity check-deadman check-metadata check-persist \
+	check-lease check-dns check-static check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
 
 all: image
@@ -242,7 +242,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
-	lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -265,7 +265,7 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/form-coverage: ; python3 test/form-coverage
@@ -275,14 +275,11 @@ _test/azure-security: ; python3 test/azure-security --test
 _test/provider-ab:
 	python3 test/ab_checks.py
 	python3 test/ab-provider-tests
-_test/kernel-version: ; python3 test/kernel-version
 _test/local-prerequisites: $(HOWL)
 	python3 test/local-prerequisites
 	python3 test/lima-state $(HOWL)
-	python3 test/sign-kernel
 	python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
-_test/kernel-inputs: ; python3 test/kernel-inputs
 _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/local-publisher $(HOWL)
 	python3 test/boot-images $(HOWL)
@@ -317,6 +314,7 @@ check-tpm-bootstrap-guest: build/host/tpm-bootstrap build/host/tpm-policy build/
 	@[ "$(IPE)" = 1 ] || { echo 'check-tpm-bootstrap-guest: set IPE=1 and a measured UKI_STUB' >&2; exit 1; }
 	python3 test/check-tpm-bootstrap-guest --arch $(ARCH) --kernel $(IPE_KERNEL) --stub $(UKI_STUB) \
 		--agent $(call program_bin,tpm-enroll) --work $(BUILD)/check/tpm-bootstrap \
+		--ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT) \
 		--unmeasured-stub out/tools/stubs/$(ARCH)/linux.efi.stub --recovery-cuts
 
 check-tpm-guest: $(HOWL) build/host/tpm-policy build/host/uki
@@ -366,7 +364,7 @@ PACKAGES = $(BUILD)/packages
 PACKAGE_TIME ?= $(shell git log -1 --format=%ct 2>/dev/null)
 # Each program depends on the format its files are in (lib/compose.zig).
 PACKAGE_FORMAT = $(shell $(FORM_ASK) format)
-$(PACKAGE_TOOL): tools/package.zig lib/package.zig
+$(PACKAGE_TOOL): tools/package.zig lib/package.zig lib/baselayout.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe --dep package -Mroot=$< -Mpackage=lib/package.zig -femit-bin=$@
 # Each form CI publishes is NAME-form: the form as an image stages it, with its
@@ -385,6 +383,7 @@ packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format (lib/compose.zig)" provide:werewolf-format=$(PACKAGE_FORMAT)
 	cp release/advisories $(PACKAGES)/advisories/usr/share/werewolf/ && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) \
 		$(PACKAGES)/advisories werewolf-advisories - $(ARCH) $(PACKAGE_TIME) "werewolf's own advisories (release/advisories)"
+	$(PACKAGE_TOOL) baselayout $(PACKAGES)/$(ARCH) $(ARCH) $(PACKAGE_TIME)
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
 	# A signed UKI, when the boot key built one (docs/design/verified-boot.md):
@@ -412,7 +411,7 @@ $(CVE_TIERS_BIN): tools/cve-tiers.zig lib/cve.zig lib/update-policy.zig
 	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
 cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 	mkdir -p build/tiers && FORM_TOOL=$(FORM_TOOL) release/origins build/tiers/origins
-	@kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
+	@kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-werewolf-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
 	NVD_API_KEY=$${NVD_API_KEY:-$$(cat $(NVD_API_KEY_FILE))} \
 	$(CVE_TIERS_BIN) "$$kernel" build/tiers/origins build/tiers/nvd build/tiers/in build/tiers/cve-tiers.json
 
@@ -483,7 +482,7 @@ CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # The posture failures test/boot expects: test/posture-known's and the form's weaknesses.
 POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
-export POSTURE_KNOWN := $(if $(IPE),$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN_KIND)),$(POSTURE_KNOWN_KIND)) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
+export POSTURE_KNOWN := $(if $(IPE),$(filter-out boot-ipe-enforced,$(POSTURE_KNOWN_KIND)),$(POSTURE_KNOWN_KIND)) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
 # A check script's environment (docs/testing.md). Homebrew keeps debugfs off PATH.
 SLOTS_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
@@ -514,16 +513,17 @@ check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 # check-secureboot runs where firmware boots fast enough: an arm64 host
 # with its own accelerator. Emulated arm64 skips it, as it skips the UEFI
 # boots below.
-check-integrity: check-slot check-unsigned check-verity check-deadman check-posture \
+check-integrity: check-slot check-verity check-deadman check-posture \
 	$(if $(filter aarch64-hvf aarch64-kvm,$(ARCH)-$(ACCEL)),check-secureboot)
 
 # IPE is opt-in; enrolled images update through signed prebuilt bundles.
 .PHONY: ipe-kernel check-ipe _check-ipe
-ipe-kernel: $(HOWL)
-	@[ -n "$(WEREWOLF_IPE_KEY)" ] && [ -n "$(WEREWOLF_IPE_CRT)" ] || \
-		{ echo "ipe-kernel: WEREWOLF_IPE_KEY and WEREWOLF_IPE_CRT must name signing files" >&2; exit 1; }
-	$(MAKE) --no-print-directory IPE= FORM=minimal ARCH=$(ARCH) slot
-	boot/build-kernel build/$(ARCH)/kernel/rootfs.tar $(WEREWOLF_IPE_CRT) $(WEREWOLF_IPE_KEY) $(dir $(IPE_KERNEL))
+# A test kernel, IPE trusting WEREWOLF_IPE_CRT (tools/test-kernel). On macOS,
+# QEMU_KERNEL_IMAGE and QEMU_BASE_INITRAMFS name melange's guest.
+ipe-kernel:
+	@[ -n "$(WEREWOLF_IPE_CRT)" ] || \
+		{ echo "ipe-kernel: WEREWOLF_IPE_CRT must name the test IPE certificate" >&2; exit 1; }
+	tools/test-kernel $(ARCH) $(WEREWOLF_IPE_CRT) $(IPE_KERNEL)
 
 IPE_PROBE = $(BUILD)/test/ipe-probe-root/usr/lib/werewolf/ipe-probe
 $(IPE_PROBE): test/ipe-init.zig lib/ipe.zig lib/dm.zig lib/verity.zig
@@ -566,7 +566,7 @@ _check-native:
 	@test/cage $(FORM) $(OUT)/slot/root.erofs $(CHECK)/$(FORM)-native.log
 seal-learn: | _check-shared
 	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(addprefix check-,$(FORMS)) check-slot check-persist \
-		check-nodata check-lease check-static check-unsigned check-metadata
+		check-nodata check-lease check-static check-metadata
 	@test/seal-learn $(BUILD)/check-learn
 
 REPEAT ?= 10
@@ -667,8 +667,6 @@ check-slot: | _check-shared check-minimal
 check-deadman: | _check-shared check-minimal check-slot
 	@$(call built,deadman,$(CHECK_MAKE) FORM=minimal slot)
 	@$(CHECK_MAKE) FORM=minimal _check-deadman
-check-unsigned: | _check-shared check-minimal check-slot
-	@$(CHECK_MAKE) FORM=minimal _check-unsigned
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -695,7 +693,7 @@ check-firecracker: | _check-shared
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl --dep verity -Mroot=tools/verity.zig -Mverity=lib/verity.zig -femit-bin=build/x86_64/tools/verity
 	@$(CHECK_ENV) FIRECRACKER_HOST=$(FIRECRACKER_HOST) FORM_DIR=$(FC_FORM) \
 		POSTURE_KNOWN='$(POSTURE_KNOWN_X64)' test/check-firecracker
-_check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman _check-unsigned: $(HOWL)
+_check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman: $(HOWL)
 	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
 _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
@@ -732,7 +730,7 @@ endif
 _check-dist:
 	@$(UEFI_ENV) DIST=$(DIST) HOWL=$(HOWL) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) \
 		CONSOLE=$(wildcard $(FORM_DIR)/test/console) \
-		POSTURE_KNOWN="$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN))" \
+		POSTURE_KNOWN="$(filter-out boot-ipe-enforced,$(POSTURE_KNOWN))" \
 		test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
 		-nographic -smp 2 -m $(or $(call form_check,memory),2048) -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
@@ -795,7 +793,7 @@ _check-cloud: $(HOWL)
 		trap 'rm -f "$$runner"' EXIT && cp test/cloud "$$runner" && chmod 700 "$$runner" && \
 		HOWL=$(HOWL) "$$runner" $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot
-	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) LOCK=$(FORM_LOCK) VENDOR=$(BUILD)/vendor \
+	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) \
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
 
 # EROFS_OPTS must match the options lib/image.zig gives mkfs.erofs.

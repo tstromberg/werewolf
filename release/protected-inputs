@@ -3,9 +3,10 @@
 import hashlib
 import json
 from pathlib import Path
-import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 FORMS = ('playground', 'prod', 'prod-ssh')
@@ -25,6 +26,18 @@ def resolve(config, output, arch, workdir):
             if attempt == 3:
                 raise
             time.sleep(15 * (attempt + 1))
+
+
+def boot_configs(directory):
+    """boot/'s apko configs laid out in directory as a build lays them out,
+    werewolf's repository key in ../keys; returns their directory."""
+    configs, keys = directory / 'apko', directory / 'keys'
+    configs.mkdir()
+    keys.mkdir()
+    for name in ('kernel.yaml', 'boot.yaml'):
+        shutil.copyfile(Path('boot') / name, configs / name)
+    shutil.copyfile('release/packages.pub', keys / 'werewolf-packages.rsa.pub')
+    return configs
 
 
 def identity(source, arch, locks):
@@ -66,31 +79,28 @@ def prepare(howl, arch, output):
         lock = lockdir / (form + '.lock.json')
         lock.unlink(missing_ok=True)
         run([howl, '_build', '--with', form, '--arch', arch, 'lock'])
-    for name in ('kernel', 'boot'):
-        resolve(name + '.yaml', lockdir / (name + '.lock.json'), 'aarch64,x86_64', 'boot')
+    with tempfile.TemporaryDirectory() as temporary:
+        configs = boot_configs(Path(temporary))
+        for name in ('kernel', 'boot'):
+            resolve(name + '.yaml', lockdir / (name + '.lock.json'), 'aarch64,x86_64', configs)
     # Ask Melange for its own parsed environment; these are apko inputs too.
-    for kind, recipe in [('kernel-builder', 'boot/ipe-kernel.melange.yaml'),
-                         ('stub-builder', 'boot/tpm-stub.melange.yaml')]:
-        contents = {}
-        for field in ('Repositories', 'Keyring', 'Packages'):
-            query = '{{ range .Environment.Contents.' + field + ' }}{{ println . }}{{ end }}'
-            lines = subprocess.check_output(['melange', 'query', recipe, query], text=True).splitlines()
-            if not lines or any(not line.strip() for line in lines):
-                raise ValueError('incomplete Melange environment')
-            contents[field.lower()] = lines
-        config = output / (kind + '.json')
-        config.write_text(json.dumps(dict(contents=contents, archs=[arch])) + '\n')
-        resolve(config.name, output / (kind + '.lock.json'), arch, output)
+    contents = {}
+    for field in ('Repositories', 'Keyring', 'Packages'):
+        query = '{{ range .Environment.Contents.' + field + ' }}{{ println . }}{{ end }}'
+        lines = subprocess.check_output(['melange', 'query', 'boot/tpm-stub.melange.yaml', query],
+                                        text=True).splitlines()
+        if not lines or any(not line.strip() for line in lines):
+            raise ValueError('incomplete Melange environment')
+        contents[field.lower()] = lines
+    config = output / 'stub-builder.json'
+    config.write_text(json.dumps(dict(contents=contents, archs=[arch])) + '\n')
+    resolve(config.name, output / 'stub-builder.lock.json', arch, output)
     locks = {}
     for path in [*(lockdir / (name + '.lock.json') for name in (*FORMS, 'kernel', 'boot')),
                  *output.glob('*-builder.lock.json')]:
         locks[path.name] = json.loads(path.read_text())
         if path.parent != output:
             (output / path.name).write_bytes(path.read_bytes())
-    version = re.search(r'^alpine_version=(.+)$', Path('boot/kernel-source').read_text(), re.M).group(1)
-    kernel = locks['kernel.lock.json']['contents']['packages']
-    if not any(p['name'] == 'linux-virt' and p['architecture'] == arch and p['version'] == version for p in kernel):
-        raise ValueError('Alpine kernel changed; update boot/kernel-source before publishing')
     tree = subprocess.check_output(['git', 'ls-tree', '-rz', 'HEAD', '--', 'Makefile', 'files.zig',
         'boot', 'cmd', 'forms', 'lib', 'tools', 'release', 'test', '.github'])
     source = source_identity(tree)

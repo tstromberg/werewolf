@@ -29,7 +29,7 @@ run` downloads the signed profile by default; `--build` keeps caller-owned signi
 ### Dedicated production trust
 
 `release/protected/boot.crt` authorizes protected loaders and UKIs alone;
-`release/protected/image.crt` IPE policies, modules and signed image and boot heads.
+`release/protected/image.crt` IPE policies and signed image and boot heads.
 Neither may reuse a legacy release key. `release/protected/trust.json` fixes the HTTPS
 mirror and the declared host permit port. `release/create-protected-trust PRIVATE
 PUBLIC` refuses partial state or replacing committed trust; custody is the Git-ignored
@@ -80,8 +80,8 @@ owner and TPM state and accepts a candidate through its issuer.
 `.github/workflows/form-images.yml` runs the unit, admission, download, custody and
 export tests, then builds every form for each provider of each architecture, in two
 independent copies with dedicated environment secrets. A shard resolves one package
-snapshot (forms, kernel base, bootloader, both Melange builders) for both copies; jobs
-share prerequisites between forms, never compiled kernels between copies, and the
+snapshot (forms, kernel, bootloader, the stub's Melange builder) for both copies; jobs
+share prerequisites between forms, never compiled output between copies, and the
 comparison covers complete signed disks and slots. A target is skipped only when its
 digest of source, package bytes, tools and trust matches a passed signed catalog row,
 unless `force`d. Public candidates omit `boot.json.sig`. Each gate job authorizes three

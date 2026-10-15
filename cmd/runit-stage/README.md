@@ -11,7 +11,7 @@ services, and stage 3 stops them and unmounts `/data` before the power goes.
 runit is PID 1 after werewolf's `/init`. It runs `/etc/runit/1` once, then
 `2` until told to stop, then `3`, then kills what is left, syncs, and powers
 off or reboots. A distro's stages are shell scripts; werewolf has no shell.
-Stage 1's work (mounts, modules, fence, the seal) is done by `/init` before
+Stage 1's work (mounts, sysctls, fence, the seal) is done by `/init` before
 runit starts. Without stage 3, a stop is a power cut, and ext4 loses its last
 few seconds of writes.
 

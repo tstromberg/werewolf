@@ -1,5 +1,5 @@
 //! form answers the build's questions about a form: its chain of bases,
-//! form.yaml keys, kernel arguments, modules and composed files.
+//! form.yaml keys, kernel arguments and composed files.
 //! See README.md and forms/README.md.
 
 const std = @import("std");
@@ -10,7 +10,7 @@ const form = @import("form");
 const compose = @import("compose");
 
 const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
-    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH, " ++
+    "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
     "stage FORM DIR, depends FORM, archs FORM";
@@ -55,6 +55,18 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
             }
             try w.writeAll("\n");
         }
+        return;
+    }
+    if (is(verb, "base-accounts") and args.len == 2) {
+        var dir = try root.createDirPathOpen(io, args[1], .{});
+        defer dir.close(io);
+        const base = compose.baselayout;
+        for ([_][2][]const u8{
+            .{ "passwd", base.passwd },
+            .{ "group", base.group },
+            .{ "shadow", base.shadow },
+        }) |entry|
+            try dir.writeFile(io, .{ .sub_path = entry[0], .data = entry[1] });
         return;
     }
     if (is(verb, "format") and args.len == 1) {
@@ -137,13 +149,6 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     } else if (is(verb, "cmdline") and args.len == 3) {
         const allowed = try compose.allowances(gpa, forms, f);
         try w.print("{s}\n", .{try compose.cmdline(gpa, allowed, try arch(args[2]))});
-    } else if (is(verb, "module-params") and args.len == 3) {
-        const allowed = try compose.allowances(gpa, forms, f);
-        for (compose.moduleParams(allowed, try arch(args[2]))) |p|
-            try w.print("{s}:{s}\n", .{ p.module, p.value });
-    } else if (is(verb, "modules") and args.len == 3) {
-        const m = try compose.modules(gpa, forms, try arch(args[2]));
-        for (m) |name| try w.print("{s}\n", .{name});
     } else if (is(verb, "compose") and (args.len == 7 or (args.len == 8 and is(args[7], "dev")))) {
         const b: compose.Build = .{
             .arch = try arch(args[2]),

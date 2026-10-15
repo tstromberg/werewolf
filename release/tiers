@@ -1,6 +1,6 @@
 #!/bin/sh
 # tiers builds the CVE tiers feed (tools/cve-tiers.zig) for what werewolf
-# installs (release/origins) and for the kernel Alpine ships now. It signs
+# installs (release/origins) and for the kernel werewolf ships now. It signs
 # the feed (release/sign-tiers), commits it as cve-tiers.json and
 # cve-tiers.json.sig to FEED, a checkout of the feed's repository
 # (werewolf-linux/cve-feed), and pushes. Machines fetch the feed from there
@@ -33,13 +33,17 @@ release=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Cover what werewolf installs and the kernel Alpine ships now.
+# Cover what werewolf installs and the kernel werewolf ships now.
 "$release/origins" "$work/origins"
 # Lock into this run's directory; the tree's locks belong to its builds.
-(cd boot && apko lock --arch x86_64 --output "$work/kernel.lock.json" kernel.yaml >/dev/null)
+# kernel.yaml finds werewolf's key in ../keys, as it does in a build.
+mkdir "$work/apko" "$work/keys"
+cp boot/kernel.yaml "$work/apko/"
+cp release/packages.pub "$work/keys/werewolf-packages.rsa.pub"
+(cd "$work/apko" && apko lock --arch x86_64 --output "$work/kernel.lock.json" kernel.yaml >/dev/null)
 make --no-print-directory build/host/cve-tiers
-kernel=$(sed -n 's|.*"url": "[^"]*/x86_64/\(linux-virt-[^/]*\)\.apk".*|\1|p' "$work/kernel.lock.json")
-[ -n "$kernel" ] || { echo "tiers: the kernel lock names no linux-virt" >&2; exit 1; }
+kernel=$(sed -n 's|.*"url": "[^"]*/x86_64/\(linux-werewolf-[^/]*\)\.apk".*|\1|p' "$work/kernel.lock.json")
+[ -n "$kernel" ] || { echo "tiers: the kernel lock names no linux-werewolf" >&2; exit 1; }
 build/host/cve-tiers "$kernel" "$work/origins" "$cache" "$work/in" "$work/cve-tiers.json"
 
 # If only the stamp changed and the feed is less than a day old, publish nothing.

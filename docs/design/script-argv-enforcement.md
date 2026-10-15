@@ -24,9 +24,9 @@ it.
 
 ## A second argv
 
-The phase-4 kernel ([verified-boot.md](verified-boot.md)) gets one BPF LSM hook,
-`bprm_check_security`, in the same build as IPE. Alpine's `linux-virt` does not
-put the BPF LSM in `CONFIG_LSM` ([lockdown.md](lockdown.md)). Lockdown stays at
+werewolf's kernel ([custom-kernel.md](custom-kernel.md)) would get one BPF LSM
+hook, `bprm_check_security`. It builds neither the `bpf` system call nor the BPF
+LSM today, so this needs a kernel revision. Lockdown stays at
 confidentiality, which refuses kprobes and tracepoints; this hook is neither.
 It runs after `copy_strings`, so it reads the kernel's copy of argv and env,
 not the caller's memory.
@@ -54,8 +54,8 @@ as it activates IPE before `CAP_MAC_ADMIN` leaves. An enforcing root
   general policy language.
 - A re-exec the check boot never made is refused in production. The recording
   comes from that form's check.
-- Alpine's kernel does not enforce it. There, a command line
-  stays frozen only where the pledge has no `exec`.
+- Until the kernel builds the hook, a command line stays frozen only where
+  the pledge has no `exec`.
 
 ## Alternatives considered
 

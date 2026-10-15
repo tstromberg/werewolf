@@ -12,8 +12,7 @@ packages:
 
 # The service's user, declared only so its login shell is sh-shim, which a
 # program that asks for its shell then runs; its ids come from its name's
-# hash (forms/README.md). Not `cron`: wolfi-baselayout has
-# that account already (uid 16).
+# hash (forms/README.md). The service name does not reserve an account.
 accounts:
   users:
     - username: supercronic

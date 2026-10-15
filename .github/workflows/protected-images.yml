@@ -9,6 +9,7 @@ on:
       - 'forms/**'
       - 'lib/**'
       - 'tools/local-prerequisites'
+      - 'tools/test-kernel'
       - 'test/local-prerequisites'
       - 'test/ci-setup'
       - 'cmd/howl/**'
@@ -61,7 +62,8 @@ jobs:
   qemu-validation:
     needs: admission
     runs-on: ubuntu-26.04
-    timeout-minutes: 150
+    # The test kernel builds from source, half an hour or more.
+    timeout-minutes: 210
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       WEREWOLF_PROTECTED_INPUTS: ${{ github.workspace }}/build/protected-inputs

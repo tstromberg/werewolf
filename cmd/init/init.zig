@@ -483,7 +483,7 @@ pub fn say(comptime f: []const u8, args: anytype) void {
 
 /// Phases records when each boot phase ended, in milliseconds of the boot
 /// clock. stage0 passes its phases in WEREWOLF_BOOT as
-/// `kernel=225 modules=611 slot=838 root=851`; init appends its own.
+/// `kernel=225 disk=611 slot=838 root=851`; init appends its own.
 const Phases = struct {
     names: [max][]const u8 = undefined,
     ends: [max]u64 = undefined,
@@ -547,7 +547,7 @@ test lastField {
 }
 
 test Phases {
-    var p = Phases.parse("kernel=225 modules=611 slot=838 root=851");
+    var p = Phases.parse("kernel=225 disk=611 slot=838 root=851");
     p.add("mounts", 900);
     try testing.expectEqual(225, p.endOf("kernel"));
     try testing.expectEqual(0, p.endOf("absent"));
@@ -561,7 +561,7 @@ test Phases {
     try testing.expectEqual(49, took[4].ms);
 
     // A bad word ends the list; what came before it stays.
-    try testing.expectEqual(1, Phases.parse("kernel=225 modules=100").len);
+    try testing.expectEqual(1, Phases.parse("kernel=225 disk=100").len);
     try testing.expectEqual(1, Phases.parse("kernel=225 Bad=900 root=950").len);
     try testing.expectEqual(1, Phases.parse("kernel=225 root=x").len);
     try testing.expectEqual(1, Phases.parse("kernel=225 \"x\"=900").len);

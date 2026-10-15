@@ -1,0 +1,16 @@
+# melange-guest: Alpine's linux-virt, the kernel melange's QEMU runner boots
+# where there is no bubblewrap, as on macOS (cmd/howl/melange.zig). melange's
+# initramfs loads its drivers as modules, and werewolf's kernel has none. It
+# only builds packages; no image boots it. Alpine's keys are in alpine-keys/.
+contents:
+  repositories:
+    - https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+  keyring:
+    - alpine-keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub
+    - alpine-keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub
+  packages:
+    - linux-virt
+
+archs:
+  - aarch64
+  - x86_64
