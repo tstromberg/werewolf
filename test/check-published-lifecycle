@@ -34,8 +34,10 @@ if any(m['form'] != 'playground' or m['image']['arch'] != arch or
 releases = [(bundle / 'slot/release.id').read_bytes().hex() for bundle in bundles]
 if len(set(releases)) != 3 or sorted(m['image']['serial'] for m in manifests) != [m['image']['serial'] for m in manifests]:
     sys.exit('lifecycle requires distinct, ordered signed releases')
-consumer = work / 'consumer'
-consumer.mkdir()
+# QEMU's console and monitor are Unix sockets (108-byte Linux path limit).
+# Keep a fresh consumer independent of the checkout's possibly deep CI path.
+consumer_work = tempfile.TemporaryDirectory(prefix='ww-consumer-', dir='/tmp')
+consumer = Path(consumer_work.name)
 mirror = work / 'mirror'
 base = mirror / 'playground' / provider / arch
 latest = base / 'latest'
@@ -48,7 +50,7 @@ for bundle in bundles:
         os.link(bundle / 'slot' / name, objects / name)
     os.link(bundle / 'disk.img.zst', objects / 'disk.img.zst')
     for name in ('latest.json', 'latest.json.sig'):
-        os.link(bundle / 'prebuilt/aarch64' / name, objects / name)
+        os.link(bundle / 'prebuilt' / arch / name, objects / name)
 
 
 def promote(bundle):
@@ -399,3 +401,4 @@ finally:
     identity.unlink(missing_ok=True)
     key.unlink(missing_ok=True)
     proxy_work.cleanup()
+    consumer_work.cleanup()

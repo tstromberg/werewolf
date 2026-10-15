@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify the released signed disk, its enrollment, and firmware rejection."""
 import hashlib
+import errno
 import json
 import os
 import pathlib
@@ -12,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from ab_checks import require_native_initrd
+from ab_checks import console_posture_failures, require_native_initrd
 
 env = os.environ
 arch = env['ARCH']
@@ -74,7 +75,17 @@ def boot(label, refused=False):
             deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
                 if select.select([master], [], [], 0.5)[0]:
-                    seen += os.read(master, 65536)
+                    try:
+                        part = os.read(master, 65536)
+                    except OSError as error:
+                        # Linux reports terminal EOF as EIO when QEMU exits.
+                        # Keep the firmware/startup error in boot.log visible.
+                        if error.errno != errno.EIO:
+                            raise
+                        part = b''
+                    if not part:
+                        break
+                    seen += part
                     log.seek(0)
                     log.write(seen)
                     log.flush()
@@ -84,13 +95,10 @@ def boot(label, refused=False):
                     if b'access denied' in seen.lower():
                         return
                 else:
-                    line = re.search(rb'posture: fail=([^ ]*) pass=', seen)
-                    if line:
-                        failures = set(line[1].decode().split(',')) - {''}
-                        expected = ({x.lstrip('?') for x in env['POSTURE_KNOWN'].split()} -
-                                    {'boot-ipe-enforced', 'boot-sig-enforced'})
-                        required = ({x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')} -
-                                    {'boot-ipe-enforced', 'boot-sig-enforced'})
+                    failures = console_posture_failures(seen)
+                    if failures is not None:
+                        expected = {x.lstrip('?') for x in env['POSTURE_KNOWN'].split()}
+                        required = {x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')}
                         assert failures <= expected and required <= failures, failures
                         assert b'Secure Boot enforced outside setup mode' in seen
                         assert b'native UKI selected slot a' in seen
@@ -98,7 +106,8 @@ def boot(label, refused=False):
                         return
                 if process.poll() is not None:
                     break
-            raise RuntimeError('no expected firmware outcome: ' + label)
+            raise RuntimeError('no expected firmware outcome: ' + label +
+                               '; QEMU exit=' + str(process.poll()) + '; see ' + str(work / (label + '.log')))
     finally:
         if process.poll() is None:
             process.terminate()

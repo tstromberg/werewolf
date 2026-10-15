@@ -35,6 +35,14 @@ def fingerprint(arch, files):
     return value.hexdigest()
 
 
+def package_pins(path, arch):
+    packages = json.loads(Path(path).read_text())['contents']['packages']
+    selected = [p for p in packages if p['architecture'] == arch]
+    if not selected or len({p['name'] for p in selected}) != len(selected):
+        raise ValueError('missing or duplicate packages in protected input lock')
+    return [p['name'] + '=' + p['version'] for p in selected]
+
+
 def sign_kernel(tree, source, key, cert, output):
     phase('kernel-sign', 'Signing IPE kernel modules on the host')
     run(['python3', tree / 'tools/sign-kernel', source, key, cert, output])
@@ -68,11 +76,16 @@ def melange(tree, cache, arch, output, kind, base=None, cert=None):
         scratch = work / 'scratch'
         scratch.mkdir()
         env.update(TMPDIR=str(scratch), QEMU_DISKS_PATH=str(scratch), SOURCE_DATE_EPOCH='0')
+        pins = []
+        if snapshot := os.environ.get('WEREWOLF_PROTECTED_INPUTS'):
+            lock = Path(snapshot) / (('kernel' if kind == 'kernel' else 'stub') + '-builder.lock.json')
+            for pin in package_pins(lock, arch):
+                pins.extend(['--package-append', pin])
         run(['melange', 'build', source / recipe, '--runner', runner, '--arch', arch,
              '--source-dir', source, '--out-dir', work / 'packages', '--cache-dir', cache / 'melange-cache',
              '--cpu', os.environ.get('MELANGE_CPU', str(max(1, (os.cpu_count() or 2) // 2))),
              '--memory', os.environ.get('MELANGE_MEMORY', '8Gi'), '--disk', '24Gi',
-             '--generate-index=false'], env=env)
+             '--generate-index=false', *pins], env=env)
         apk = work / 'packages' / arch / (package + '-0.1.0-r0.apk')
         destination = output.with_name(output.name + '.new')
         phase(kind + '-collect', 'Collecting the ' + ('Linux kernel' if kind == 'kernel' else 'measured EFI stub') + ' build output')
@@ -145,14 +158,17 @@ def build(tree, cache, arch, base, key, cert):
         'tools/sign-kernel',
     ]}
     files.update(base=base, certificate=cert)
+    if snapshot := os.environ.get('WEREWOLF_PROTECTED_INPUTS'):
+        files.update({kind + '-packages': Path(snapshot) / (kind + '-builder.lock.json')
+                      for kind in ('kernel', 'stub')})
     expected = fingerprint(arch, files)
     target = cache / arch / expected
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
     kernel_files = {name: path for name, path in files.items()
                     if name in ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
-                                'boot/ipe-kernel.melange.yaml', 'base', 'certificate']}
+                                'boot/ipe-kernel.melange.yaml', 'base', 'certificate', 'kernel-packages']}
     stub_files = {name: path for name, path in files.items()
-                  if name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml']}
+                  if name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml', 'stub-packages']}
     compiled_pin = fingerprint(arch, kernel_files)
     kernel_pin = fingerprint(arch, dict(kernel_files, **{'tools/sign-kernel': files['tools/sign-kernel']}))
     stub_pin = fingerprint(arch, stub_files)

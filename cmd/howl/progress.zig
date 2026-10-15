@@ -842,8 +842,8 @@ test "only opted-in commands change phase and all output stays in the log" {
     const cmd: Steps.Cmd = .{ .argv = &.{
         "/bin/sh",
         "-c",
-        "printf 'howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)\\n" ++
-            "CC security/bpf/hooks.o' >&2",
+        "printf 'howl: phase kernel-compile: Compiling Linux 6.18.56 " ++
+            "(make Image modules)\\nCC security/bpf/hooks.o' >&2",
     } };
     try testing.expect((try steps.exec(&.{cmd}, .{})).ok);
     try testing.expectEqualStrings(first.name, steps.said.phase.name);

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Failures create one issue, retries update it, and recovery closes it."""
+import importlib.machinery
+import json
+import os
+import unittest
+from unittest.mock import patch
+
+health = importlib.machinery.SourceFileLoader('publishing_health', 'release/report-publishing-health').load_module()
+
+
+class Health(unittest.TestCase):
+    def setUp(self):
+        self.run = dict(name='protected-images', workflow_id=42, run_number=7,
+                        conclusion='failure', html_url='https://github.com/org/repo/actions/runs/7', head_sha='a' * 40)
+
+    def commands(self, issues=(), latest=7):
+        calls = []
+
+        def gh(*args):
+            calls.append(args)
+            if args[:2] == ('issue', 'list'):
+                return json.dumps(issues)
+            if args[0] == 'api':
+                return json.dumps(dict(workflow_runs=[dict(run_number=latest, event='push',
+                                                          head_repository=dict(full_name='org/repo'))]))
+            return ''
+
+        with patch.dict(os.environ, GH_REPO='org/repo'), patch.object(health, 'gh', gh):
+            health.report(self.run)
+        return calls
+
+    def test_first_failure_opens_one_issue_and_retry_updates_the_same_issue(self):
+        self.assertEqual(('issue', 'create'), self.commands()[-1][:2])
+        issues = [dict(number=12, title='Publishing blocked: protected-images')]
+        self.assertEqual(('issue', 'edit', '12'), self.commands(issues)[-1][:3])
+
+    def test_recovery_closes_existing_issue_without_creating_one_for_healthy_runs(self):
+        self.run['conclusion'] = 'success'
+        self.assertFalse(any(c[:2] == ('issue', 'create') for c in self.commands()))
+        issues = [dict(number=12, title='Publishing blocked: protected-images')]
+        self.assertEqual(('issue', 'close', '12'), self.commands(issues)[-1][:3])
+
+    def test_delayed_failure_does_not_reopen_recovered_issue(self):
+        calls = self.commands(latest=8)
+        self.assertFalse(any(c[:2] in [('issue', 'create'), ('issue', 'edit')] for c in calls))
+
+    def test_unrelated_title_is_never_edited(self):
+        calls = self.commands([dict(number=12, title='protected-images user question')])
+        self.assertEqual(('issue', 'create'), calls[-1][:2])
+
+
+if __name__ == '__main__':
+    unittest.main()

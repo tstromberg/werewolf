@@ -1,0 +1,36 @@
+# Keep one actionable issue per failing main-branch publishing dependency.
+name: publishing-health
+
+on:
+  workflow_run:
+    workflows: [check, packages, release, protected-images]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+concurrency:
+  group: publishing-health-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: >-
+      github.repository == 'werewolf-linux/werewolf' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      contains(fromJSON('["success", "failure", "timed_out"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or recover the publishing failure issue
+        run: python3 release/report-publishing-health

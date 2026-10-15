@@ -282,6 +282,8 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/protected-release
 	python3 test/protected-publication
 	python3 test/protected-export
+	python3 test/protected-inputs
+	python3 test/publishing-health
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
@@ -438,7 +440,7 @@ MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
 CONSOLE = $(if $(filter aarch64,$(ARCH)),ttyAMA0,ttyS0)
 # Without KVM, HVF or NVMM (some CI runners, FreeBSD), QEMU emulates.
 ifeq ($(ARCH),$(HOST_ARCH))
-ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(if $(wildcard /dev/kvm),kvm,$(if $(wildcard /dev/nvmm),nvmm,tcg)))
+ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(or $(shell test -r /dev/kvm && test -w /dev/kvm && echo kvm),$(if $(wildcard /dev/nvmm),nvmm,tcg)))
 CPU = $(if $(filter tcg,$(ACCEL)),max,host)
 else
 ACCEL = tcg
@@ -486,7 +488,8 @@ endif
 endif
 shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 	awk -F/ -v s=$(SHARD) 'BEGIN { split(s, a, "/") } (NR - 1) % a[2] == a[1] - 1'),$(1))
-APP_CHECK_FORMS := $(shell awk '!/^\#/ && NF { print $$1 }' test/app-fixtures)
+# Octal keeps Make's comment parser and awk's escape handling portable.
+APP_CHECK_FORMS := $(shell awk '!/^\043/ && NF { print $$1 }' test/app-fixtures)
 .PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
 check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
 $(foreach f,$(APP_CHECK_FORMS),$(eval check-$(f): check-app-$(f)))
