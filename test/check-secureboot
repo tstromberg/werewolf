@@ -87,8 +87,10 @@ def boot(label, refused=False):
                     line = re.search(rb'posture: fail=([^ ]*) pass=', seen)
                     if line:
                         failures = set(line[1].decode().split(',')) - {''}
-                        expected = {x.lstrip('?') for x in env['POSTURE_KNOWN'].split()}
-                        required = {x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')}
+                        expected = ({x.lstrip('?') for x in env['POSTURE_KNOWN'].split()} -
+                                    {'boot-ipe-enforced', 'boot-sig-enforced'})
+                        required = ({x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')} -
+                                    {'boot-ipe-enforced', 'boot-sig-enforced'})
                         assert failures <= expected and required <= failures, failures
                         assert b'Secure Boot enforced outside setup mode' in seen
                         assert b'native UKI selected slot a' in seen

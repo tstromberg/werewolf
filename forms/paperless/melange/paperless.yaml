@@ -11,7 +11,7 @@
 package:
   name: paperless
   version: 3.3.0
-  epoch: 0
+  epoch: 1
   description: Document management with OCR, tags and full-text search
   copyright:
     - license: GPL-3.0-only
@@ -38,6 +38,7 @@ environment:
       - tesseract
       - tesseract-eng
       - python-3.13-dev
+      - postgresql-17-dev
       - uv
   environment:
     UV_PYTHON_DOWNLOADS: never
@@ -61,7 +62,7 @@ pipeline:
       if [ -f paperless/pyproject.toml ]; then cd paperless
       elif [ -f paperless/paperless-ngx/pyproject.toml ]; then cd paperless/paperless-ngx
       else find paperless -maxdepth 2 -type d -print; exit 1; fi
-      uv export --frozen --python /usr/bin/python3.13 --no-dev --extra webserver \
+      uv export --frozen --python /usr/bin/python3.13 --no-dev --extra webserver --extra postgres \
         --no-emit-project \
         --no-emit-package torch \
         --no-emit-package sentence-transformers \

@@ -265,14 +265,19 @@ fn servicesLeashed(p: *Posture) !void {
         // so a capability it cannot name still fails.
         const text = p.read(try p.gpa.print("/etc/sv/{s}/service", .{name}));
         var bad_file: service.Bad = .{};
-        const named: u64 = if (service.parse(p.gpa, text, &bad_file)) |parsed|
+        const named: u32 = if (service.parse(p.gpa, text, &bad_file)) |parsed|
             parsed.caps
         else |_|
             0;
-        const allowed: u64 = (1 << linux.CAP.NET_BIND_SERVICE) | named;
+        const login = named & service.cap.login != 0 and std.mem.eql(u8, name, "sshd");
+        const allowed: u64 = if (login)
+            service.cap.login_set
+        else
+            (1 << linux.CAP.NET_BIND_SERVICE) | @as(u64, named & ~service.cap.login);
         if (whyNotLeashed(
             status,
             allowed,
+            login,
         )) |why| try listAdd(p.gpa, &bad, "{s} {s}", .{ name, why });
     }
     try p.add(.{
@@ -431,14 +436,16 @@ fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usi
 
 /// whyNotLeashed says why a /proc/PID/status does not look leashed, or null.
 /// allowed is CAP_NET_BIND_SERVICE and the capabilities that service file names.
-fn whyNotLeashed(status: []const u8, allowed: u64) ?[]const u8 {
+fn whyNotLeashed(status: []const u8, allowed: u64, login: bool) ?[]const u8 {
     const uids = statusField(status, "Uid") orelse return "shows no uid";
     var ids = std.mem.tokenizeAny(u8, uids, " \t");
-    while (ids.next()) |id| if (std.mem.eql(u8, id, "0")) return "runs as root";
+    if (!login) while (ids.next()) |id| if (std.mem.eql(u8, id, "0")) return "runs as root";
     for ([_][]const u8{ "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb" }) |key| {
         const v = std.fmt.parseInt(u64, statusField(status, key) orelse "", 16) catch
             return "shows no capabilities";
-        if (v & ~allowed != 0) return "has capabilities";
+        const mask = if (login and (std.mem.eql(u8, key, "CapInh") or
+            std.mem.eql(u8, key, "CapAmb"))) 0 else allowed;
+        if (v & ~mask != 0) return "has capabilities";
     }
     if (!std.mem.eql(u8, statusField(status, "NoNewPrivs") orelse "", "1"))
         return "may gain privileges";
@@ -465,28 +472,38 @@ test whyNotLeashed {
         "000000000400\n" ++
         "CapEff:\t0000000000000400\nCapBnd:\t0000000000000400\nCapAmb:\t0000000000000400\nNoNewP" ++
         "rivs:\t1\n";
-    try testing.expectEqual(null, whyNotLeashed(ok, bind));
+    try testing.expectEqual(null, whyNotLeashed(ok, bind, false));
     try testing.expectEqualStrings(
         "runs as root",
-        whyNotLeashed("Uid:\t200\t0\t200\t200\n", bind).?,
+        whyNotLeashed("Uid:\t200\t0\t200\t200\n", bind, false).?,
     );
     const caps = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t000001fffff" ++
         "fffff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
-    try testing.expectEqualStrings("has capabilities", whyNotLeashed(caps, bind).?);
+    try testing.expectEqualStrings("has capabilities", whyNotLeashed(caps, bind, false).?);
     const packet: u64 = service.cap.net_raw | service.cap.net_admin;
     const scan = "Uid:\t70\t70\t70\t70\nCapInh:\t3000\nCapPrm:\t3000\nCapEff:\t3000\nCapBnd:\t30" ++
         "00\n" ++
         "CapAmb:\t3000\nNoNewPrivs:\t1\n";
-    try testing.expectEqual(null, whyNotLeashed(scan, bind | packet));
-    try testing.expectEqualStrings("has capabilities", whyNotLeashed(scan, bind).?);
+    try testing.expectEqual(null, whyNotLeashed(scan, bind | packet, false));
+    try testing.expectEqualStrings("has capabilities", whyNotLeashed(scan, bind, false).?);
     const nnp = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t0\nCapAmb:\t" ++
         "0\nNoNewPrivs:\t0\n";
-    try testing.expectEqualStrings("may gain privileges", whyNotLeashed(nnp, bind).?);
-    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0022\n", bind));
-    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0077\n", bind));
+    try testing.expectEqualStrings("may gain privileges", whyNotLeashed(nnp, bind, false).?);
+    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0022\n", bind, false));
+    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0077\n", bind, false));
     try testing.expectEqualStrings(
         "makes files others may write",
-        whyNotLeashed(ok ++ "Umask:\t0002\n", bind).?,
+        whyNotLeashed(ok ++ "Umask:\t0002\n", bind, false).?,
     );
-    try testing.expectEqualStrings("shows no umask", whyNotLeashed(ok ++ "Umask:\tx\n", bind).?);
+    try testing.expectEqualStrings(
+        "shows no umask",
+        whyNotLeashed(ok ++ "Umask:\tx\n", bind, false).?,
+    );
+    const sshd = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t4254404ff\nCapEff:\t4254404ff\n" ++
+        "CapBnd:\t4254404ff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    try testing.expectEqual(null, whyNotLeashed(sshd, service.cap.login_set, true));
+    try testing.expectEqualStrings(
+        "runs as root",
+        whyNotLeashed(sshd, service.cap.login_set, false).?,
+    );
 }

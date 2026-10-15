@@ -33,6 +33,9 @@ through firmware boot, signed UKI delivery, verified slot b and commit.
 make test           # every program's and library's unit tests
 make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
+make check-apps     # application-carrier forms with supplied code
+make check-posture  # concurrent scans, stale probes and fresh audit evidence
+python3 test/form-coverage --list # form-specific coverage and exceptions
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-dns      # Linux: local DNS/TLS/DHCP fixtures in private namespaces
 make check-updater  # a whole update, over the network
@@ -48,7 +51,8 @@ Besides the build's tools, `make check` needs QEMU, `expect` and `mke2fs`
 ships with macOS.
 
 The tutorial forms also need Go, rustup and the .NET 10 SDK on the build
-host. Install Rust's Linux musl target for the architecture you test, for
+host. The supplied-code Java fixture needs a JDK with `javac` and `jar`
+(Java 8 or newer). Install Rust's Linux musl target for the architecture you test, for
 example
 `rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl`.
 Use `x86_64-unknown-linux-musl` for `ARCH=x86_64`. CI and `make ci` install
@@ -61,6 +65,43 @@ with a native EFI partition. On each machine it runs
 [test/checks](../test/checks) as root on the serial console, then powers
 the machine off. A machine passes when it boots, every check comes out as
 expected, and it shuts down cleanly.
+
+`make check-posture` boots minimal with overlapping posture scans, leftovers
+from an interrupted probe, and a deliberately invalid service directory.
+It requires fresh audit evidence after the kernel's printk burst has reset.
+The unit suite also checks audit delivery at the timeout boundary, missing
+or spoofed records, interrupted reads and continuous unrelated records.
+
+## Form integration coverage
+
+Service and application forms must have at least five distinct integration
+cases. Test useful behavior through the running service: write and read data,
+authenticate, reject a wrong password, refuse an unsupported operation, serve
+the configured content or retain state after reboot. Process credentials,
+private files and restricted listeners also matter where they protect that
+service. Give each case a name that identifies the behavior; several assertions
+about one operation are still one case.
+
+`python3 test/form-coverage` checks this minimum in `make test` and
+`make check-forms`. Shared boot and posture checks do not count toward it.
+`--list` shows counts contributed by the form's own guest checks,
+supplied-code deployments and host-side SSH tests. Quantity is a guard against
+missing coverage; review must still judge whether the cases are relevant.
+
+The [exceptions](../test/form-coverage-exceptions) explain why the machine
+foundations and runtime-only forms use the shared or dedicated suites instead
+of five artificial cases. A new service form needs five cases by default.
+
+`make check-apps` builds `node-app`, `python-app`, `ruby-app`, `jre-app` and
+`php` with real application fixtures in the verified image, then exercises
+their public HTTP behavior. These boots supplement the ordinary boots without
+supplied code, including the application-carrier forms' missing-code refusal.
+The [fixture list](../test/app-fixtures) names the overlays and guest suites;
+`make check-app-python-app` runs just one. These deployments use separate
+disks, configuration and logs, and run as part of `make check-FORM` and
+`make check-forms` for each application-carrier form.
+
+## Boot checks
 
 On aarch64, each machine gets EL2 wherever the host can lend it: always
 under TCG, under HVF on Apple M3 and later, and under KVM where the host
@@ -102,11 +143,13 @@ default route that the command line gave. One check runs first, before any
 attack: it confirms that nothing was refused during boot, which catches a
 protection that breaks a service.
 
-Every form then boots a second time, on the disks its first boot left
+The forms named by `AGAIN_FORMS` in the Makefile then boot a second time,
+on the disks their first boot left. Set `AGAIN_FORMS=all` to test every form
 ([test/checks-again](../test/checks-again)). `/data` may hold real data, so
 a disk that init formatted once must come back as it was. It must be
 opened, checked and mounted, and still hold the mark the first boot wrote.
-No line on the console may say that init formatted anything.
+No line on the console may say that init formatted anything. MongoDB and
+RabbitMQ also read back application data retained from their first boots.
 
 `prod` boots once more on the LUKS2 disk its own boots left, with no key
 ([test/checks-nodata](../test/checks-nodata)). It must refuse the disk

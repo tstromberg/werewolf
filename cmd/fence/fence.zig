@@ -55,6 +55,7 @@ const pref = struct {
     const metadata_allow: u32 = 100;
     const metadata_refuse: u32 = 101;
     const out_allow: u32 = 200;
+    const in_private: u32 = 290;
     const out_refuse: u32 = 299;
     const in_allow: u32 = 300;
     const in_drop: u32 = 399;
@@ -375,8 +376,8 @@ const RT_TABLE_LOCAL = 255;
 const Rule = net_rule.Rule;
 
 /// max_rules bounds plan's output. Per entry index, listen, UDP listen,
-/// connect and metadata make at most 3 + 3 + 3 + 2 rules, and a public
-/// connect one more per non-public prefix; the rest are fixed.
+/// connect, metadata and private ports make at most 3 + 3 + 3 + 2 + 1
+/// rules, and a public connect one more per non-public prefix; the rest are fixed.
 const max_rules = 16 + wire_server_ports.len + dropped.len + (15 + non_public4.len) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
@@ -391,6 +392,7 @@ const max_rules = 16 + wire_server_ports.len + dropped.len + (15 + non_public4.l
 ///   200   sent as declared (user, protocol, port), from a served port (a
 ///         UDP one by its user alone), or ICMPv6 (which neighbour discovery
 ///         needs): main
+///   290   arriving at a loopback-only TCP port: dropped
 ///   299   anything else sent: refused (EACCES)
 ///   300   arriving at a served port, from a connected port or the metadata
 ///         server, or ICMP: local
@@ -543,6 +545,14 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .table = RT_TABLE_MAIN,
         .from_here = true,
         .proto = .icmp,
+    });
+    // A forged reply source port must not expose a private listener that
+    // binds all interfaces. Local traffic has already matched local_out.
+    for (p.loopback[0..p.nloopback]) |port_number| rules.add(.{
+        .priority = pref.in_private,
+        .action = FR_ACT_BLACKHOLE,
+        .proto = .tcp,
+        .dport = port_number,
     });
     rules.add(.{ .priority = pref.out_refuse, .action = FR_ACT_PROHIBIT, .from_here = true });
 
@@ -703,7 +713,7 @@ fn restrict(p: Policy) !void {
         try ruleset.port(sandbox.bind_tcp, l);
         try ruleset.port(sandbox.connect_tcp, l);
     }
-    // No routing rule names a loopback port, so the network cannot reach it.
+    // Private-port drops precede reply allowances; local traffic passes first.
     for (p.loopback[0..p.nloopback]) |l| {
         try ruleset.port(sandbox.bind_tcp, l);
         try ruleset.port(sandbox.connect_tcp, l);
@@ -885,12 +895,16 @@ const files = [_]struct { path: [*:0]const u8, access: u64 }{
 
 /// Binds iterates the writable places under each image root, from the
 /// build's list (/usr/share/werewolf/oci): the root's /tmp and /run, which
-/// may hold sockets, its /data, and each `write` path. Malformed lines are
-/// skipped, as init skipped them, so nothing is mounted there.
+/// may hold sockets, its /data, each `write` path, and writable shared
+/// `data` paths on both sides of the bind. Shared directories may hold
+/// local IPC sockets. Read-only shares get no write grant. Malformed lines
+/// are skipped, as init skipped them, so nothing is mounted there.
 const Binds = struct {
     text: []const u8,
     at: usize = 0,
     dir: []const u8 = "",
+    name: []const u8 = "",
+    source: ?[]const u8 = null,
     /// pending counts the current root's /tmp, /run and /data still to return.
     pending: u8 = 0,
     buf: [1024]u8 = undefined,
@@ -899,6 +913,10 @@ const Binds = struct {
 
     fn next(b: *Binds) ?Bind {
         while (true) {
+            if (b.source) |path| {
+                b.source = null;
+                return b.makeAt("", path, true) orelse continue;
+            }
             if (b.pending > 0) {
                 b.pending -= 1;
                 return b.make(switch (b.pending) {
@@ -914,7 +932,7 @@ const Binds = struct {
             var words = std.mem.tokenizeScalar(u8, line, ' ');
             const key = words.next() orelse continue;
             if (std.mem.eql(u8, key, "root")) {
-                _ = words.next() orelse continue;
+                b.name = words.next() orelse continue;
                 b.dir = words.next() orelse continue;
                 if (b.dir.len == 0 or b.dir[0] != '/') {
                     b.dir = "";
@@ -926,17 +944,49 @@ const Binds = struct {
                 const path = words.next() orelse continue;
                 if (path.len == 0 or path[0] != '/') continue;
                 return b.make(path, false) orelse continue;
+            } else if (std.mem.eql(u8, key, "data") and b.dir.len > 0) {
+                const name = words.next() orelse continue;
+                const host = words.next() orelse continue;
+                const image = words.next() orelse continue;
+                const access = words.next() orelse continue;
+                if (!std.mem.eql(u8, name, b.name) or words.next() != null or
+                    !std.mem.eql(u8, access, "write") or !sharedSource(host) or
+                    !cleanPath(image)) continue;
+                const target = b.make(image, true) orelse continue;
+                b.source = host;
+                return target;
             }
         }
     }
 
     fn make(b: *Binds, path: []const u8, sockets: bool) ?Bind {
-        const s = std.mem.print(b.buf[0 .. b.buf.len - 1], "{s}{s}", .{ b.dir, path }) catch
+        return b.makeAt(b.dir, path, sockets);
+    }
+
+    fn makeAt(b: *Binds, prefix: []const u8, path: []const u8, sockets: bool) ?Bind {
+        const s = std.mem.print(b.buf[0 .. b.buf.len - 1], "{s}{s}", .{ prefix, path }) catch
             return null;
         b.buf[s.len] = 0;
         return .{ .path = b.buf[0..s.len :0].ptr, .sockets = sockets };
     }
 };
+
+fn cleanPath(path: []const u8) bool {
+    if (path.len < 2 or path[0] != '/' or std.mem.findScalar(u8, path, 0) != null)
+        return false;
+    var parts = std.mem.splitScalar(u8, path[1..], '/');
+    while (parts.next()) |part| if (part.len == 0 or std.mem.eql(u8, part, ".") or
+        std.mem.eql(u8, part, "..")) return false;
+    return true;
+}
+
+fn sharedSource(path: []const u8) bool {
+    const prefix = "/data/share/";
+    if (!cleanPath(path) or !std.mem.startsWith(u8, path, prefix)) return false;
+    const rest = path[prefix.len..];
+    const slash = std.mem.findScalar(u8, rest, '/') orelse return false;
+    return slash > 0 and slash + 1 < rest.len;
+}
 
 // --- files, errors, logging ----------------------------------------------------
 
@@ -1092,7 +1142,7 @@ test "the plan, in the order the kernel tries it" {
     // port, first matches the local rule, so the machine still answers.
     var drops: usize = 0;
     for (r) |x| {
-        if (x.action == FR_ACT_BLACKHOLE and (x.proto == .tcp or x.proto == .udp)) drops += 1;
+        if (x.priority == pref.in_drop and (x.proto == .tcp or x.proto == .udp)) drops += 1;
     }
     try std.testing.expectEqual(2, drops);
     const first = for (r) |x| {
@@ -1106,7 +1156,7 @@ test "the plan, in the order the kernel tries it" {
     var refused_out = false;
     var dns_replies: usize = 0;
     for (r) |x| {
-        if (x.priority < pref.in_allow)
+        if (x.priority < pref.in_allow and x.priority != pref.in_private)
             try std.testing.expect(x.from_here)
         else
             try std.testing.expect(!x.from_here);
@@ -1165,16 +1215,67 @@ test "the binds beneath image roots" {
     try std.testing.expectEqual(null, none.next());
 }
 
-test "a loopback port is in no rule" {
+test "shared writable binds allow IPC at both paths and read-only binds grant nothing" {
+    var b: Binds = .{
+        .text = "root app /oci/app _oci-app\n" ++
+            "data app /data/share/unifi/bus /werewolf/bus write\n" ++
+            "data app /data/share/unifi/files /files read\n" ++
+            "data other /data/share/unifi/other /other write\n" ++
+            "data app /etc/shadow /secret write\n" ++
+            "data app /data/share/unifi/../private /escape write\n" ++
+            "data app /data/share/unifi/files /../escape write\n" ++
+            "data app /data/share/unifi/files /files write extra\n",
+    };
+    // The root's three private binds precede its declared shared bind.
+    for (0..3) |_| _ = b.next().?;
+    var item = b.next().?;
+    try std.testing.expectEqualStrings("/oci/app/werewolf/bus", std.mem.span(item.path));
+    try std.testing.expect(item.sockets);
+    item = b.next().?;
+    try std.testing.expectEqualStrings("/data/share/unifi/bus", std.mem.span(item.path));
+    try std.testing.expect(item.sockets);
+    try std.testing.expectEqual(null, b.next());
+}
+
+test "private ports drop arrivals before forged replies can admit them" {
     var rules: [max_rules]Rule = undefined;
-    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
-        var served = false;
-        for (plan(try parsePolicy(example), fam, &rules)) |x| {
-            try std.testing.expect(x.dport != 5432 and x.sport != 5432);
-            if (x.dport == 22 and x.priority == pref.in_allow) served = true;
+    const p = try parsePolicy(
+        example ++ "listen tcp 54000 loopback\nconnect 70 tcp 5432\nconnect 71 tcp any\n",
+    );
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        const planned = plan(p, family, &rules);
+        for ([_]u16{ 443, 5432, 40000 }) |source| {
+            for ([_]u16{ 5432, 54000 }) |destination|
+                try std.testing.expectEqual(
+                    FR_ACT_BLACKHOLE,
+                    arrivingAction(planned, destination, source),
+                );
+            try std.testing.expectEqual(FR_ACT_TO_TBL, arrivingAction(planned, 22, source));
         }
-        try std.testing.expect(served);
+        var private = false;
+        for (planned) |r| {
+            if (r.priority == pref.in_private and r.dport == 5432) {
+                private = true;
+                try std.testing.expect(!r.from_here and r.proto == .tcp);
+                try std.testing.expect(r.priority > pref.local_out and r.priority < pref.in_allow);
+            }
+        }
+        try std.testing.expect(private);
     }
+}
+
+/// First matching action for TCP arriving from an ordinary external address.
+fn arrivingAction(rules: []const Rule, destination: u16, source: u16) u8 {
+    for (rules) |r| {
+        if (r.from_here or r.src != null or r.dst != null) continue;
+        if (r.proto != null and r.proto != .tcp) continue;
+        if (r.sport != null and r.sport != source) continue;
+        if (r.dport) |first| {
+            if (destination < first or destination > (r.dport_last orelse first)) continue;
+        }
+        return r.action;
+    }
+    return 0;
 }
 
 test "tunnels and IPsec arriving are dropped, like the transports" {
@@ -1320,7 +1421,9 @@ test "a full policy fits its rules" {
             .public = true,
         };
         p.metadata[i] = @intCast(i);
+        p.loopback[i] = @intCast(3000 + i);
     }
+    p.nloopback = max_entries;
     p.nlisten = max_entries;
     p.nconnect = max_entries;
     p.nmetadata = max_entries;

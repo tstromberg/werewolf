@@ -7,3 +7,7 @@ ok  samba-other  ! smbclient //127.0.0.1/alice -m SMB3 --client-protection=encry
 ok  samba-network  smbclient //10.0.2.15/bob -m SMB3 --client-protection=encrypt -U 'bob%werewolf-other-password' -c 'ls'
 ok  samba-wrong    ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'alice%incorrect-password' -c 'ls' >/tmp/samba-wrong 2>&1
 ok  samba-smb2     ! smbclient //10.0.2.15/alice -m SMB2 -U 'alice%werewolf-check-password' -c 'ls' >/tmp/samba-smb2 2>&1
+
+# Real account IDs, not the old synthetic preload database.
+ok  samba-unix-users a=$(id -u alice); b=$(id -u bob); [ "$a" -ge 536870912 ] && [ "$a" != "$b" ] && chpst -u samba grep -q "^alice:$a:" /run/svc/samba/private/smbpasswd && chpst -u samba grep -q "^bob:$b:" /run/svc/samba/private/smbpasswd
+ok  samba-no-preload ! grep -q 'LD_PRELOAD' /etc/sv/samba/service && [ ! -e /usr/lib/werewolf/samba-passwd.so ] && [ ! -e /run/svc/samba/passwd ]

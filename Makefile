@@ -87,7 +87,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 # A target named _NAME is a step of another target.
 .PHONY: all install uninstall install-deps install-precommit precommit hooks image slot disk list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
-	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
+	check-shellfree check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-dns check-static check-unsigned check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
@@ -154,9 +154,6 @@ CMDS := $(filter-out howl,$(patsubst cmd/%/,%,$(wildcard cmd/*/)))
 # program_bin NAME is where cmd/NAME is built; form_bin DIR, where forms/F/cmd/P is.
 program_bin = $(PROGRAMS)/$(1)/$(or $(PROGRAM_AT_$(1)),usr/lib/werewolf/$(1))
 PROGRAM_AT_init = init
-PROGRAM_AT_samba-passwd = usr/lib/werewolf/samba-passwd.so
-PROGRAM_AT_paperless-group = usr/lib/werewolf/paperless-group.so
-PROGRAM_AT_crash-log = usr/lib/werewolf/crash-log.so
 form_bin = $(PROGRAMS)/forms/$(notdir $(patsubst %/cmd/$(notdir $(1)),%,$(1)))/usr/lib/werewolf/$(notdir $(1))
 FORM_CMDS := $(sort $(patsubst %/,%,$(wildcard forms/*/cmd/*/) $(foreach d,$(FORM_DIRS),$(wildcard $(d)/cmd/*/))))
 POSTURE_BIN = $(call program_bin,posture)
@@ -188,20 +185,8 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(filter-out samba-passwd paperless-group crash-log,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(CMDS),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
-# samba preloads samba-passwd.so into smbd, for the same reason: glibc.
-$(call program_bin,samba-passwd): cmd/samba-passwd/samba-passwd.zig
-	$(zig_check)
-	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
-# Paperless preloads paperless-group.so into CPython, so it links glibc too.
-$(call program_bin,paperless-group): cmd/paperless-group/paperless-group.zig
-	$(zig_check)
-	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
-# Suricata preloads crash-log.so, so it links glibc as Suricata does.
-$(call program_bin,crash-log): cmd/crash-log/crash-log.zig
-	$(zig_check)
-	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 
 # howl makes programs before it builds an image.
 programs: $(foreach p,$(CMDS),$(call program_bin,$(p))) $(foreach c,$(FORM_CMDS),$(call form_bin,$(c)))
@@ -272,9 +257,10 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image _test/release-signing
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
+_test/form-coverage: ; python3 test/form-coverage
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing: ; python3 test/release-signing; python3 test/native-firmware
 _test/azure-security: ; python3 test/azure-security --test
@@ -343,9 +329,6 @@ _test/tools/form.zig: ; zig test $(FORM_TOOL_MODULES)
 _test/lib/compose.zig: ; zig test $(COMPOSE_MODULES)
 _test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mroot=$* -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
-_test/cmd/samba-passwd/samba-passwd.zig: ; zig test cmd/samba-passwd/samba-passwd.zig -lc
-_test/cmd/paperless-group/paperless-group.zig: ; zig test cmd/paperless-group/paperless-group.zig -lc
-_test/cmd/crash-log/crash-log.zig: ; zig test cmd/crash-log/crash-log.zig -lc
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
@@ -506,12 +489,13 @@ shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 APP_CHECK_FORMS := $(shell awk '!/^\#/ && NF { print $$1 }' test/app-fixtures)
 .PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
 check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
-check-forms:     $(addprefix check-,$(call shard,$(FORMS))) check-apps
+$(foreach f,$(APP_CHECK_FORMS),$(eval check-$(f): check-app-$(f)))
+check-forms:     $(addprefix check-,$(call shard,$(FORMS))) _test/form-coverage
 check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 # check-secureboot runs where firmware boots fast enough: an arm64 host
 # with its own accelerator. Emulated arm64 skips it, as it skips the UEFI
 # boots below.
-check-integrity: check-slot check-unsigned check-verity check-deadman \
+check-integrity: check-slot check-unsigned check-verity check-deadman check-posture \
 	$(if $(filter aarch64-hvf aarch64-kvm,$(ARCH)-$(ACCEL)),check-secureboot)
 
 # IPE is opt-in; enrolled images update through signed prebuilt bundles.
@@ -571,6 +555,10 @@ check-one: | _check-shared
 	@$(call built,$(FORM),$(CHECK_MAKE) FORM=$(FORM) image)
 	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(CHECK_MAKE) FORM=$(FORM) _check-form
 
+# Repeated and overlapping posture scans, stale fixtures and log evidence.
+check-posture: | _check-shared
+	@$(CHECK_MAKE) FORM=minimal CHECK_NAME=posture FORM_CHECKS=test/checks-posture _check-form
+
 check-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
 	@$(CHECK_MAKE) FORM=$* _check-form
@@ -592,7 +580,7 @@ CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
 CHECK_SKIP ?= $(call form_check,skip)
 CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
 # The forms booted again on the disks they left (docs/testing.md).
-AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba mongodb rabbitmq
+AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba paperless mongodb rabbitmq
 ifeq ($(AGAIN_FORMS),all)
 override AGAIN_FORMS := $(FORMS)
 endif
@@ -707,7 +695,8 @@ else
 		$(MAKE) --no-print-directory FORM=$$f _check-dist || failed=1; done; exit $$failed
 endif
 _check-dist:
-	@$(UEFI_ENV) DIST=$(DIST) test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
+	@$(UEFI_ENV) DIST=$(DIST) POSTURE_KNOWN="$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN))" \
+		test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
 		-nographic -smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 

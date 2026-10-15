@@ -859,9 +859,16 @@ pub const Update = struct {
     /// error.TooBig if it exceeds max.
     pub fn downloadMax(u: *Update, url: []const u8, path: [:0]const u8, max: usize) ![]const u8 {
         const got = try u.downloadLimit(url, path, max);
-        _ = linux.close(got.fd);
+        defer _ = linux.close(got.fd);
         if (got.size > max) return error.TooBig;
-        return u.read(path);
+        const f: Io.File = .{ .handle = got.fd, .flags = .{ .nonblocking = false } };
+        const buf = try u.gpa.alloc(u8, @intCast(got.size));
+        if (try f.readPositionalAll(u.io, buf, 0) != buf.len) return error.UnexpectedEof;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(buf, &digest, .{});
+        if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), &got.sha256))
+            return error.ArtifactMismatch;
+        return buf;
     }
 
     /// sha256Of returns the hex sha256 of the file at path.

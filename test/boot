@@ -398,7 +398,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	}
 	if {$in} { say ok ssh-login } else { say FAIL ssh-login "root's key did not log in:\n$out"; incr failed }
 	# Exercise command output and exit status over authenticated sessions.
-	lassign [host [list {*}$ssh {*}$login root@127.0.0.1 {printf '%s\n' werewolf-ssh-command}]] status out
+	lassign [host [list {*}$ssh {*}$login root@127.0.0.1 {echo werewolf-ssh-command}]] status out
 	if {$status == 0 && [lindex [split [string trim $out] \n] end] eq "werewolf-ssh-command"} {
 		say ok ssh-command-output
 	} else { say FAIL ssh-command-output $out; incr failed }

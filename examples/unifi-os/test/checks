@@ -1,3 +1,25 @@
 # Deliberately require application readiness: running processes alone do
 # not establish a working UniFi OS integration.
-ok  unifi-network-ready i=0; until curl -sf http://127.0.0.1:8081/status; do i=$((i + 1)); [ $i -le 120 ] || exit 1; sleep 1; done
+ok  unifi-mongodb i=0; until python3 /usr/share/werewolf-mongodb/probe.py; do i=$((i + 1)); [ $i -le 60 ] || exit 1; sleep 1; done
+ok  unifi-rabbitmq i=0; until python3 /usr/share/werewolf-rabbitmq/probe.py; do i=$((i + 1)); [ $i -le 90 ] || exit 1; sleep 1; done
+ok  unifi-rabbitmq-no-guest python3 /usr/share/werewolf-rabbitmq/probe.py --guest
+ok  unifi-service-state python3 /run/config/dbus-probe.py
+ok  unifi-no-service-control python3 /run/config/dbus-probe.py --control
+ok  unifi-no-other-units python3 /run/config/dbus-probe.py --unknown-unit
+ok  unifi-dbus-identity python3 /run/config/dbus-probe.py --bad-auth
+ok  unifi-dbus-peer python3 /run/config/dbus-probe.py --wrong-peer
+ok  unifi-dbus-private [ -S /data/share/unifi/bus/system_bus_socket ] && [ "$(stat -c %a /data/share/unifi/bus/system_bus_socket)" = 660 ] && ! netstat -ltn | grep -q ':11090[[:space:]]'
+ok  unifi-bus-parent-private [ "$(stat -c %a /data/share/unifi)" = 2750 ] && [ "$(stat -c %a /data/svc/unifi-core)" = 700 ]
+ok  unifi-dbus-user p=$(pidof unifi-systemd); [ -n "$p" ] && ! grep -q '^Uid:[[:space:]]*0[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  unifi-core-ready i=0; until curl --max-time 2 -sf -o /dev/null http://127.0.0.1:11081/api/system; do i=$((i + 1)); [ $i -le 120 ] || exit 1; sleep 1; done; for i in 1 2 3 4 5; do sleep 1; curl --max-time 2 -sf -o /dev/null http://127.0.0.1:11081/api/system || exit 1; done
+ok  unifi-network-ready i=0; until python3 /run/config/network-probe.py; do i=$((i + 1)); [ $i -le 120 ] || exit 1; sleep 1; done
+ok  unifi-internal-listeners python3 /run/config/network-probe.py --private
+ok  unifi-console curl --max-time 5 -ksf https://127.0.0.1/ | grep -q 'window.UNIFI_OS_MANIFEST.*UOSSERVER'
+ok  unifi-persistence-record python3 /run/config/persistence-probe.py
+ok  unifi-http curl --max-time 5 -sf http://127.0.0.1/ | grep -q 'window.UNIFI_OS_MANIFEST.*UOSSERVER'
+ok  unifi-nginx-reload python3 /run/config/nginx-probe.py reload
+ok  unifi-nginx-invalid-config python3 /run/config/nginx-probe.py invalid-config
+ok  unifi-nginx-commands-denied python3 /run/config/nginx-probe.py denied
+ok  unifi-nginx-peer python3 /run/config/nginx-probe.py peer
+ok  unifi-nginx-private python3 /run/config/nginx-probe.py private
+ok  unifi-nginx-user p=$(pidof unifi-nginx); u=$(id -u nginx); [ -f /etc/sv/nginx/service ] && [ ! -e /etc/sv/unifi-nginx ] && [ -n "$p" ] && grep -Eq "^Uid:[[:space:]]+$u[[:space:]]+$u[[:space:]]+$u[[:space:]]+$u$" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status

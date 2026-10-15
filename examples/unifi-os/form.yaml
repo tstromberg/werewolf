@@ -1,21 +1,47 @@
 # Experimental UniFi OS 5.1.42 integration; outside the released catalog
 # until its console, service-control compatibility and adoption are tested.
 base: prod
-with: [postgresql, mongodb, rabbitmq]
+with: [postgresql, mongodb, rabbitmq, nginx]
 archs: [aarch64]
 updates: off
 allow: [jit]
 
 weaknesses:
   kernel-write-xor-execute: UniFi's Java and Node runtimes, PostgreSQL and Erlang use JIT compilation
+  updates-enabled: Automatic updates are disabled for this unreleased integration experiment
 
 dev: [curl]
 
 check:
   memory: 8192
-  skip: [http-answering]
+  # Guest and console-group listeners activate only after setup. Explicit
+  # protocol checks in test/checks establish application readiness.
+  skip: [answering, http-answering]
 
 services:
+  nginx:
+    exec: /usr/lib/werewolf/unifi-nginx
+    user: nginx
+    group: _oci-unifi-core
+    pledge: stdio rpath wpath proc unix inet listen connect exec aio sendfile
+    listen: [tcp/80 tcp/443 tcp/8444, tcp/11083 tcp/11084 loopback]
+    connect: [tcp/8081 tcp/8843 tcp/11011, /data/share/unifi/config/http/uos-http.sock /data/share/unifi/config/http/uos-auth.sock]
+    run: /usr/bin/nginx
+    read: /etc/nginx /data/share/unifi/config /oci/unifi-core/usr/share/unifi-core /oci/unifi-core/usr/share/unifi-assets
+    write: /data/share/unifi/reload
+    memory: 128
+    nofile: 4096
+
+  unifi-systemd:
+    exec: /usr/lib/werewolf/unifi-systemd
+    user: unifi-systemd
+    pledge: stdio rpath wpath unix listen proc
+    group: _oci-unifi-core
+    write: /data/share/unifi/bus
+    read: /run/runit/supervise.unifi-network /run/runit/supervise.unifi-core
+    memory: 16
+    nofile: 32
+
   postgres:
     exec: /usr/bin/postgres -D /data/svc/postgres/data -c config_file=/usr/share/werewolf-unifi/postgresql.conf
     before: /usr/lib/werewolf/pg-init
@@ -28,21 +54,27 @@ services:
 
   unifi-core:
     image: ghcr.io/lemker/uosserver@sha256:7b66869dacf35184d856a12dee146437abf725608b5cfad20e543e3f7742059b
-    exec: /usr/bin/node24 --expose-gc /usr/share/unifi-core/app/service.js
+    exec: /usr/bin/node24 --import /werewolf/core-runtime.mjs --expose-gc /usr/share/unifi-core/app/service.js
     before: /usr/bin/node24 /werewolf/core-setup.mjs
     dir: /usr/share/unifi-core/app
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec sendfile
-    listen: [tcp/11051 tcp/11081 tcp/11082 tcp/11083 tcp/11084 loopback]
+    listen: [tcp/11051 tcp/11081 loopback]
     connect: [tcp/5432 tcp/5672 tcp/8081 tcp/11010 tcp/11011]
+    data:
+      - /data/share/unifi/bus /werewolf/bus write
+      - /data/share/unifi/config /werewolf/config write
+      - /data/share/unifi/reload /werewolf/reload write
     run: [/usr/lib/werewolf/unifi-host-info, /bin/cat]
     memory: 1024
     nofile: 65536
     env:
+      - PATH=/usr/bin:/bin
       - NODE_ENV=production
       - '"NODE_OPTIONS=--max-old-space-size=300 --openssl-legacy-provider --no-network-family-autoselection --dns-result-order=ipv4first"'
       - UV_THREADPOOL_SIZE=16
       - NODE_CONFIG_DIR=/usr/share/unifi-core/app/config:/data/unifi-core/config/overrides
       - HOME=/data/unifi-core
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/werewolf/bus/system_bus_socket
 
   unifi-network:
     image: ghcr.io/lemker/uosserver@sha256:7b66869dacf35184d856a12dee146437abf725608b5cfad20e543e3f7742059b
@@ -52,7 +84,7 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
     listen:
       - tcp/8080 udp/3478 udp/10001
-      - tcp/8081 tcp/8443 tcp/8843 tcp/8880 tcp/6789 loopback
+      - tcp/8081 tcp/8443 tcp/8843 tcp/8880 tcp/6789 tcp/28082 loopback
     connect: [tcp/27017 tcp/5432 tcp/5672 tcp/11081]
     write: /var/lib/unifi
     run: /usr/bin/node24

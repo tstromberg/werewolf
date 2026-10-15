@@ -112,8 +112,24 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "no group {s} in /etc/group", .{group_name});
         if (gid.* < 1 << 16) l.fail(.park, "group {s} is a system's", .{group_name});
     }
-    if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
-    if (user.uid <= 70 or user.gid <= 70) l.fail(.park, "{s} is a system's", .{s.user});
+    const login = s.caps & service.cap.login != 0;
+    if (login) {
+        if (user.uid != 0 or user.gid != 0 or !std.mem.eql(u8, name, "sshd") or
+            !allowances.has(.pty))
+            l.fail(.park, "caps login is for sshd when this machine allows pty", .{});
+        // Disable Speculative Store Bypass for ssh-keygen, sshd and every
+        // session (docs/security.md).
+        _ = linux.prctl(
+            @backingInt(linux.PR.SET_SPECULATION_CTRL),
+            linux.PR.SPEC_STORE_BYPASS,
+            linux.PR.SPEC_FORCE_DISABLE,
+            0,
+            0,
+        );
+    } else {
+        if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
+        if (user.uid <= 70 or user.gid <= 70) l.fail(.park, "{s} is a system's", .{s.user});
+    }
     // The build could not tell this service's directories from another's.
     // Each narrowed program's link ships in the image, as ./run does.
     for (s.narrow) |n| {
@@ -169,6 +185,8 @@ pub fn main(init: std.process.Init) !void {
     const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
     _ = linux.mkdir("/run/svc", 0o755);
     own(l, run_dir, user, s.share);
+    if (s.root != null)
+        own(l, try gpa.printSentinel("/run/svc/{s}/run", .{name}, 0), user, s.share);
     if (!nodata) {
         _ = linux.mkdir("/data/svc", 0o755);
         own(l, data_dir, user, s.share);
@@ -235,78 +253,89 @@ pub fn main(init: std.process.Init) !void {
         _ = linux.fchown(fd, user.uid, user.gid);
     };
 
-    const rules = sandbox.Ruleset.init(.{ .sockets = true }) catch |err| l.fail(
+    const rules = sandbox.Ruleset.init(
+        if (login) .{ .only_bind = true } else .{ .sockets = true },
+    ) catch |err| l.fail(
         .park,
         "Landlock: {s}; this kernel cannot leash a service",
         .{sandbox.whyNot(gpa, err)},
     );
     if ((s.listen.len > 0 or s.connect.len > 0 or s.connect_any or s.dns) and rules.abi < 4)
         l.fail(.park, "Landlock ABI {d} has no TCP rules", .{rules.abi});
-    const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
-    for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
-    for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd|
-        allow(rules, fd, sandbox.write_file, .optional) catch {};
-    allow(rules, own_run, write_tree, .own) catch |err|
-        l.fail(.park, "{s}: {s}", .{ own_run, sandbox.whyNot(gpa, err) });
-    if (!nodata) allow(rules, own_data, write_tree, .own) catch |err|
-        l.fail(.park, "{s}: {s}", .{ own_data, sandbox.whyNot(gpa, err) });
-    // An image keeps pid files and sockets in /run, which init binds from
-    // /run/svc/NAME/run (cmd/init/oci.zig).
-    if (s.root != null) allow(rules, "/run", write_tree, .own) catch |err|
-        l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
-    for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
-    for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
-    // A shared directory is a different inode from the image path it is
-    // bound over, so the rule names the image path. Write on a parent
-    // does not cover it. A reader stays read-only here even if the
-    // directory's mode is wider.
-    for (s.data) |d| allowPath(
-        l,
-        rules,
-        gpa,
-        d.image,
-        if (d.write) write_tree else read_tree,
-        nodata,
-    );
-    for (s.run) |p| if (p[p.len - 1] == '/') {
-        // Every program beneath an image's directory, as Grafana runs one
-        // for each data source: the image is read-only, in the verified root.
-        const z = try gpa.dupeSentinel(u8, p[0 .. p.len - 1], 0);
-        allow(rules, z, run_file, .follow) catch |err|
-            l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
-    } else allowProgram(l, rules, gpa, p);
-    // The image's sh shim, which a service in an image of its own lacks.
-    if (allowances.has(.sh) and s.root == null and (s.pledge.contains(.exec) or s.before.len > 0))
-        allowProgram(l, rules, gpa, sh_shim);
-    allowProgram(l, rules, gpa, s.exec[0]);
-    for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
-    if (s.render) |r| {
-        allowProgram(l, rules, gpa, service_config);
-        if (r.from) |from| allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
+    if (login) {
+        if (rules.abi >= 4) rules.port(sandbox.bind_tcp, 0) catch |err|
+            l.fail(.park, "listen tcp/0: {s}", .{sandbox.whyNot(gpa, err)});
+        for (s.listen) |port| rules.port(sandbox.bind_tcp, port) catch |err|
+            l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+    } else {
+        const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
+        for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
+        for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd|
+            allow(rules, fd, sandbox.write_file, .optional) catch {};
+        allow(rules, own_run, write_tree, .own) catch |err|
+            l.fail(.park, "{s}: {s}", .{ own_run, sandbox.whyNot(gpa, err) });
+        if (!nodata) allow(rules, own_data, write_tree, .own) catch |err|
+            l.fail(.park, "{s}: {s}", .{ own_data, sandbox.whyNot(gpa, err) });
+        // An image keeps pid files and sockets in /run, which init binds from
+        // /run/svc/NAME/run (cmd/init/oci.zig).
+        if (s.root != null) allow(rules, "/run", write_tree, .own) catch |err|
+            l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
+        for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
+        for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
+        // A shared directory is a different inode from the image path it is
+        // bound over, so the rule names the image path. Write on a parent
+        // does not cover it. A reader stays read-only here even if the
+        // directory's mode is wider.
+        for (s.data) |d| allowPath(
+            l,
+            rules,
+            gpa,
+            d.image,
+            if (d.write) write_tree else read_tree,
+            nodata,
+        );
+        for (s.run) |p| if (p[p.len - 1] == '/') {
+            // Every program beneath an image's directory, as Grafana runs one
+            // for each data source: the image is read-only, in the verified root.
+            const z = try gpa.dupeSentinel(u8, p[0 .. p.len - 1], 0);
+            allow(rules, z, run_file, .follow) catch |err|
+                l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
+        } else allowProgram(l, rules, gpa, p);
+        // The image's sh shim, which a service in an image of its own lacks.
+        if (allowances.has(
+            .sh,
+        ) and s.root == null and (s.pledge.contains(.exec) or s.before.len > 0))
+            allowProgram(l, rules, gpa, sh_shim);
+        allowProgram(l, rules, gpa, s.exec[0]);
+        for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
+        if (s.render) |r| {
+            allowProgram(l, rules, gpa, service_config);
+            if (r.from) |from| allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
+        }
+        // A narrowed program's leash is leash, reading this file.
+        if (s.narrow.len > 0) {
+            allowProgram(l, rules, gpa, leash_bin);
+            const file = try gpa.printSentinel("/etc/sv/{s}/service", .{name}, 0);
+            allowPath(l, rules, gpa, file, sandbox.read_file, nodata);
+        }
+        for (s.listen) |port| rules.port(sandbox.bind_tcp, port) catch |err|
+            l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+        for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
+            l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+        if (s.dns) rules.port(sandbox.connect_tcp, 53) catch |err|
+            l.fail(.park, "connect dns: {s}", .{sandbox.whyNot(gpa, err)});
+        // Every TCP port, for the one service that declared it. Other
+        // services keep the ports on their connect lines and no others.
+        if (s.connect_any) {
+            var p: u32 = 1;
+            while (p <= 65535) : (p += 1) rules.port(sandbox.connect_tcp, @intCast(p)) catch |err|
+                l.fail(.park, "connect tcp/{d}: {s}", .{ p, sandbox.whyNot(gpa, err) });
+        }
+        // A socket's directory, not the socket, which its server makes anew
+        // each time it starts; nothing there but reaching sockets.
+        if (rules.fs & sandbox.resolve_unix != 0) for (s.sockets) |p|
+            allowPath(l, rules, gpa, std.fs.path.dirname(p).?, sandbox.resolve_unix, nodata);
     }
-    // A narrowed program's leash is leash, reading this file.
-    if (s.narrow.len > 0) {
-        allowProgram(l, rules, gpa, leash_bin);
-        const file = try gpa.printSentinel("/etc/sv/{s}/service", .{name}, 0);
-        allowPath(l, rules, gpa, file, sandbox.read_file, nodata);
-    }
-    for (s.listen) |port| rules.port(sandbox.bind_tcp, port) catch |err|
-        l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
-    for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
-        l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
-    if (s.dns) rules.port(sandbox.connect_tcp, 53) catch |err|
-        l.fail(.park, "connect dns: {s}", .{sandbox.whyNot(gpa, err)});
-    // Every TCP port, for the one service that declared it. Other
-    // services keep the ports on their connect lines and no others.
-    if (s.connect_any) {
-        var p: u32 = 1;
-        while (p <= 65535) : (p += 1) rules.port(sandbox.connect_tcp, @intCast(p)) catch |err|
-            l.fail(.park, "connect tcp/{d}: {s}", .{ p, sandbox.whyNot(gpa, err) });
-    }
-    // A socket's directory, not the socket, which its server makes anew
-    // each time it starts; nothing there but reaching sockets.
-    if (rules.fs & sandbox.resolve_unix != 0) for (s.sockets) |p|
-        allowPath(l, rules, gpa, std.fs.path.dirname(p).?, sandbox.resolve_unix, nodata);
 
     const cwd: [:0]const u8 = if (s.dir) |d|
         try gpa.dupeSentinel(u8, d, 0)
@@ -330,13 +359,13 @@ pub fn main(init: std.process.Init) !void {
     // A packet capability is kept only when this machine allowed it.
     // A file that names one the machine did not allow parks, so editing
     // the file cannot widen the bounding set.
-    var keep: u32 = s.caps;
+    var keep: u64 = if (login) service.cap.login_set else s.caps;
     if (low_port) keep |= 1 << linux.CAP.NET_BIND_SERVICE;
     if (s.caps & service.cap.net_raw != 0 and !allow_packet)
         l.fail(.park, "caps net_raw: this machine does not allow packet", .{});
     if (s.caps & service.cap.net_admin != 0 and !allow_netadmin)
         l.fail(.park, "caps net_admin: this machine does not allow netadmin", .{});
-    dropTo(user, groups, keep) catch |err|
+    dropTo(user, groups, keep, login) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
 
     // --- leashed --------------------------------------------------------------
@@ -611,13 +640,18 @@ fn learning() bool {
 /// not a directory or cannot be changed.
 fn own(l: Leash, dir: [:0]const u8, user: User, share: service.Share) void {
     const mode = share.mode();
-    _ = linux.mkdir(dir, @intCast(mode));
+    const made = linux.mkdir(dir, @intCast(mode));
+    switch (linux.errno(made)) {
+        .SUCCESS, .EXIST => {},
+        else => |err| l.fail(.park, "mkdir {s}: {t}", .{ dir, err }),
+    }
     const rc = linux.open(
         dir,
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
         0,
     );
-    if (linux.errno(rc) != .SUCCESS) l.fail(.park, "{s} is not a directory", .{dir});
+    if (linux.errno(rc) != .SUCCESS)
+        l.fail(.park, "open directory {s}: {t}", .{ dir, linux.errno(rc) });
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
     var st: linux.Statx = undefined;
@@ -840,38 +874,46 @@ comptime {
 }
 
 /// dropTo switches to user for good. It keeps no supplementary groups and
-/// no capability but the bits in keep (a low port's, and the packet
-/// capabilities the service file named), which survive exec. It fails
-/// with StillRoot if root can be regained.
-fn dropTo(user: User, groups: []const linux.gid_t, keep: u32) !void {
+/// no capability but the bits in keep (a low port's, the packet
+/// capabilities the service file named, or sshd's login_set), which
+/// survive exec. It fails with StillRoot if root can be regained.
+fn dropTo(user: User, groups: []const linux.gid_t, keep: u64, login: bool) !void {
     // EINVAL means the kernel does not know the capability, so it cannot
     // grant it either. Any other failure is an error.
     var n: usize = 0;
     while (n < 64) : (n += 1) {
-        if (n < 32 and keep & (@as(u32, 1) << @intCast(n)) != 0) continue;
+        if (keep & (@as(u64, 1) << @intCast(n)) != 0) continue;
         const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), n, 0, 0, 0);
         if (linux.errno(rc) != .INVAL) try check(rc);
     }
-    if (keep != 0) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
+    if (!login and keep != 0)
+        try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
     try check(linux.setgroups(groups.len, groups.ptr));
     try check(linux.setresgid(user.gid, user.gid, user.gid));
     try check(linux.setresuid(user.uid, user.uid, user.uid));
     var hdr: CapHeader = .{};
-    const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep, .inheritable = keep }, .{} };
+    const low: u32 = @truncate(keep);
+    const high: u32 = @truncate(keep >> 32);
+    const inh: u32 = if (login) 0 else low;
+    const caps = [2]CapSets{
+        .{ .effective = low, .permitted = low, .inheritable = inh },
+        .{ .effective = high, .permitted = high, .inheritable = 0 },
+    };
     try check(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)));
     // Ambient, so each one survives exec into a program without file
     // capabilities. Other services pass keep 0, or only the low port.
     // bit stays a usize: a u5 cannot count to 32, and the last increment
     // would overflow.
-    for (0..32) |bit| if (keep & (@as(u32, 1) << @intCast(bit)) != 0) try check(linux.prctl(
-        @backingInt(linux.PR.CAP_AMBIENT),
-        linux.PR.CAP_AMBIENT_RAISE,
-        bit,
-        0,
-        0,
-    ));
+    if (!login) for (0..32) |bit| if (low & (@as(u32, 1) << @intCast(bit)) != 0)
+        try check(linux.prctl(
+            @backingInt(linux.PR.CAP_AMBIENT),
+            linux.PR.CAP_AMBIENT_RAISE,
+            bit,
+            0,
+            0,
+        ));
     try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
-    if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
+    if (!login and linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
 }
 
 fn check(rc: usize) !void {

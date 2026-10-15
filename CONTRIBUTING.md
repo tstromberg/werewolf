@@ -38,6 +38,10 @@ The image has no shell, so everything that runs on a machine is a small Zig prog
 2. Before you push, run `make test`, `make lint` (`make fix` repairs most of it) and `make check`. CI runs `make check` on x86_64 and arm64; [docs/testing.md](docs/testing.md) explains each check.
 3. A new program gets a README on the [design doc template](docs/design/TEMPLATE.md) (100 lines at most), and unit tests beside its code (`test "..." {}`).
 4. A larger change starts as a design doc in `docs/design/`, on the same template.
+5. Service and application forms need at least five distinct integration cases
+   covering useful behavior and refusals. Run `python3 test/form-coverage --list`
+   to inspect coverage; [the testing guide](docs/testing.md#form-integration-coverage)
+   explains the foundation and runtime exceptions.
 
 ## Style
 

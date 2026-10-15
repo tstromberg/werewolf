@@ -3,4 +3,5 @@
 set -eu
 mkdir -p "$1/samba"
 umask 077
+printf '%s\n' alice bob >"$1/users"
 printf '%s\n' 'alice:werewolf-check-password' 'bob:werewolf-other-password' >"$1/samba/users"

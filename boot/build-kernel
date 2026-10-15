@@ -39,6 +39,12 @@ printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
 phase kernel-unpack "Unpacking Linux $version sources"
 src=$out/linux-$version
 [ -d "$src" ] || tar -xJf "$archive" -C "$out"
+# Anonymous W^X is governed by PID 1's PR_SET_MDWE (omitted only when a form
+# declares allow: [jit]); IPE governs file-backed execution.
+sed -i 's/if (prot & PROT_EXEC) {/if (f \&\& (prot \& PROT_EXEC)) {/' "$src/security/ipe/hooks.c"
+sed -i '/ipe_file_mprotect/,/^}/s/if (f && (prot & PROT_EXEC)) {/if (vma->vm_file \&\& (prot \& PROT_EXEC)) {/' "$src/security/ipe/hooks.c"
+grep -q 'if (f && (prot & PROT_EXEC))' "$src/security/ipe/hooks.c"
+grep -q 'if (vma->vm_file && (prot & PROT_EXEC))' "$src/security/ipe/hooks.c"
 obj=$out/obj
 stage=$out/root.$$
 alpine_base=$(mktemp -d "$out/base.XXXXXXXX")

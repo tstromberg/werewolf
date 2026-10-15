@@ -1,7 +1,7 @@
 //! samba-init writes Samba's configuration and its password file before
 //! each start. Users come from /run/svc/samba/users, one `name:password`
 //! line. Each gets a directory under /data/svc/samba/homes. Registration
-//! of a UNIX account is not required: the share forces the samba user.
+//! requires an existing UNIX account; the share forces the samba service user.
 //!
 //! The password file is the classic smbpasswd format, under /run, rewritten
 //! each start. Its NT hash is MD4 of the password in UTF-16LE. LANMAN is
@@ -10,7 +10,6 @@
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
-const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 const data_dir = "/data/svc/samba";
@@ -20,10 +19,6 @@ const private_dir = run_dir ++ "/private";
 const users_file = run_dir ++ "/users";
 const conf_name = "smb.conf";
 const passwd_name = "smbpasswd";
-const accounts_name = "passwd";
-// Share accounts are not UNIX users. Their ids sit above the range people
-// use and below the hashes of service accounts, and never match a real one.
-const uid_base: u32 = 70000;
 
 const User = struct { name: []const u8, password: []const u8 };
 
@@ -46,6 +41,14 @@ fn run(io: Io, gpa: Allocator) !void {
         say(io, "name at least one user, as name:password", .{});
         return error.NoUsers;
     }
+    const accounts = try Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20));
+    const uids = try gpa.alloc(u32, users.len);
+    for (users, uids) |user, *uid| {
+        uid.* = accountUid(accounts, user.name) catch |err| {
+            say(io, "{s}: a real non-root UNIX account is required", .{user.name});
+            return err;
+        };
+    }
     // The password file and smbd's sockets live under /run: /data is noexec,
     // and the password file is rewritten from the config on every start.
     // The shares themselves stay on /data.
@@ -64,14 +67,11 @@ fn run(io: Io, gpa: Allocator) !void {
         };
     }
     var passwd: std.ArrayList(u8) = .empty;
-    var accounts: std.ArrayList(u8) = .empty;
-    const gid = linux.getgid();
-    for (users, 0..) |user, i| {
+    for (users, uids) |user, uid| {
         Dir.cwd().createDirPath(io, try gpa.print("{s}/{s}", .{ homes, user.name })) catch |err| {
             say(io, "{s}/{s}: {s}", .{ homes, user.name, @errorName(err) });
             return err;
         };
-        const uid = uid_base + @as(u32, @intCast(i));
         const hash = ntHash(user.password);
         // smbd is not root, so it cannot become this uid. The share forces
         // the samba user, who owns the files.
@@ -80,17 +80,29 @@ fn run(io: Io, gpa: Allocator) !void {
             "{s}:{d}:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:{s}:[U          ]:LCT-00000001\n",
             .{ user.name, uid, hash },
         );
-        try accounts.print(
-            gpa,
-            "{s}:x:{d}:{d}::/var/empty:/sbin/nologin\n",
-            .{ user.name, uid, gid },
-        );
     }
     try writePrivate(io, passwd.items);
-    try writeRun(io, accounts_name, accounts.items);
     const conf = try configText(gpa, users);
     try writeRun(io, conf_name, conf);
     say(io, "{d} user{s}", .{ users.len, if (users.len == 1) "" else "s" });
+}
+
+fn accountUid(passwd: []const u8, name: []const u8) !u32 {
+    var found: ?u32 = null;
+    var lines = std.mem.splitScalar(u8, passwd, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, ':');
+        if (!std.mem.eql(u8, fields.next() orelse "", name)) continue;
+        _ = fields.next() orelse return error.BadAccount;
+        const uid = std.fmt.parseInt(
+            u32,
+            fields.next() orelse "",
+            10,
+        ) catch return error.BadAccount;
+        if (uid == 0 or found != null) return error.BadAccount;
+        found = uid;
+    }
+    return found orelse error.NoAccount;
 }
 
 fn parseUsers(gpa: Allocator, raw: []const u8) ![]User {
@@ -328,6 +340,27 @@ test "the NT hash of password is the one Samba publishes" {
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, conf, "valid users = alice\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, conf, "guest ok = no\n") != null);
+}
+
+test "SMB identities come from existing UNIX users, independent of password order" {
+    const passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1001:1001::/data/home/alice:/sbin/nologin" ++
+        "\nbob:x:1002:1002::/data/home/bob:/sbin/nologin\n";
+    try std.testing.expectEqual(@as(u32, 1002), try accountUid(passwd, "bob"));
+    try std.testing.expectEqual(@as(u32, 1001), try accountUid(passwd, "alice"));
+    try std.testing.expectError(error.NoAccount, accountUid(passwd, "carol"));
+    try std.testing.expectError(error.BadAccount, accountUid(passwd, "root"));
+    try std.testing.expectError(
+        error.BadAccount,
+        accountUid("alice:x:0:1001::/:/bin/sh\n", "alice"),
+    );
+    try std.testing.expectError(
+        error.BadAccount,
+        accountUid("alice:x:bad:1001::/:/bin/sh\n", "alice"),
+    );
+    try std.testing.expectError(
+        error.BadAccount,
+        accountUid(passwd ++ "alice:x:2001:2001::/:/bin/sh\n", "alice"),
+    );
 }
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {

@@ -32,7 +32,7 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 
 pub const usage =
-    \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+    \\usage: howl build --with FORM,... [--build] [--insecure] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
     \\       howl run [--with FORM,...] [--on TARGET] [--secure|--insecure] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   secure by default; replaces werewolf-run; default form playground
@@ -1120,7 +1120,10 @@ pub const Tell = struct {
             .command = t.command,
             .log = try gpa.print("{s}/create.log", .{dir}),
             .first = if (t.milestones) |m|
-                m.phase orelse .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" }
+                m.phase orelse .{
+                    .name = "Preparing VM boot image and enrollment",
+                    .short = "prepare",
+                }
             else
                 .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" },
             .milestones = t.milestones,
@@ -1690,10 +1693,19 @@ pub fn releaseDiskAt(
             try gpa.print("build/boot/{t}", .{arch}),
             false,
         );
-    const kernel = if (target != null) environ.get("WEREWOLF_IPE_KERNEL") else null;
+    const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (o.secure and target != null and
+        environ.get("WEREWOLF_IPE_KERNEL") == null)
+        try @import("prerequisites.zig").resolve(io, gpa, &steps, arch, why)
+    else
+        null;
+    const kernel = if (target != null)
+        environ.get("WEREWOLF_IPE_KERNEL") orelse if (ipe_inputs) |inp| inp.kernel else null
+    else
+        null;
     const p = try buildHere(io, gpa, &steps, .{
         .form = o.form,
         .arch = arch,
+        .insecure = !o.secure and kernel == null,
         .app = ab.root,
         .published = !o.local,
         .boot_key = if (boot_signer) |k| k.key else null,
@@ -1701,8 +1713,14 @@ pub fn releaseDiskAt(
         .boot_native = target != null,
         .qcow2_path = target,
         .ipe_kernel = kernel,
-        .ipe_key = if (kernel != null) environ.get("WEREWOLF_IPE_KEY") else null,
-        .ipe_cert = if (kernel != null) environ.get("WEREWOLF_IPE_CRT") else null,
+        .ipe_key = if (kernel != null)
+            environ.get("WEREWOLF_IPE_KEY") orelse if (ipe_inputs) |inp| inp.key else null
+        else
+            null,
+        .ipe_cert = if (kernel != null)
+            environ.get("WEREWOLF_IPE_CRT") orelse if (ipe_inputs) |inp| inp.cert else null
+        else
+            null,
         .ipe_updates = if (kernel != null) environ.get("IPE_UPDATES") else null,
         .image_serial = if (kernel != null) environ.get("IMAGE_SERIAL") else null,
     }, .{ .qcow2 = true });

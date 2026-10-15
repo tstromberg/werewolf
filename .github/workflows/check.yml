@@ -121,6 +121,7 @@ jobs:
         if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
         run: |
           command -v go || sudo apt-get install -y golang-go
+          command -v javac || sudo apt-get install -y default-jdk-headless
           command -v rustup || sudo apt-get install -y rustup
           rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
           dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0

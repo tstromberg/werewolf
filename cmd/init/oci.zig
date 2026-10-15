@@ -181,10 +181,9 @@ fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
             say("oci: {s}: {s} is not a root", .{ s.host, owner });
             continue;
         };
-        shareMode(m, s.host, ids);
-        var extra: [4]u32 = undefined;
-        const n = extraWriters(shares, roots, s.host, owner, &extra);
-        if (n > 0) shareAcl(m.z(s.host), extra[0..n]);
+        // mount keeps only CAP_SYS_ADMIN. Admit traversal while it opens
+        // these paths, as root() does for the private service directories.
+        shareMode(m, s.host, ids, 0o2751);
     }
     for (shares) |s| {
         const at = for (roots) |r| {
@@ -194,6 +193,17 @@ fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
             continue;
         };
         m.mount(&.{ "--bind", m.z(s.host), m.fmt("{s}{s}", .{ at.dir, s.image }) });
+    }
+    // No service has started yet. Close traversal before handover, then
+    // set writer ACLs: chmod after an ACL would narrow its writer mask.
+    for (shares) |s| {
+        const owner = ownerOf(shares, s.host) orelse continue;
+        if (!std.mem.eql(u8, s.name, owner)) continue;
+        const ids = idsOf(roots, owner) orelse continue;
+        shareMode(m, s.host, ids, 0o2750);
+        var extra: [4]u32 = undefined;
+        const n = extraWriters(shares, roots, s.host, owner, &extra);
+        if (n > 0) shareAcl(m.z(s.host), extra[0..n]);
     }
 }
 
@@ -209,21 +219,21 @@ fn idsOf(roots: []const Root, name: []const u8) ?phase_config.Ids {
 }
 
 /// shareMode creates host and gives every directory under /data/share
-/// to ids, mode 02750. /data/share itself stays 0711.
-fn shareMode(m: *Machine, host: []const u8, ids: phase_config.Ids) void {
+/// to ids with mode. /data/share itself stays 0711.
+fn shareMode(m: *Machine, host: []const u8, ids: phase_config.Ids, mode: u32) void {
     m.mkdirAll(m.z(host));
     const prefix = "/data/share";
     var at: usize = prefix.len;
     while (std.mem.findScalarPos(u8, host, at + 1, '/')) |slash| {
         if (slash > prefix.len) {
             const z = m.z(host[0..slash]);
-            _ = linux.fchmodat(linux.AT.FDCWD, z, 0o2750);
+            _ = linux.fchmodat(linux.AT.FDCWD, z, mode);
             own(z, ids);
         }
         at = slash;
     }
     const z = m.z(host);
-    _ = linux.fchmodat(linux.AT.FDCWD, z, 0o2750);
+    _ = linux.fchmodat(linux.AT.FDCWD, z, mode);
     own(z, ids);
 }
 

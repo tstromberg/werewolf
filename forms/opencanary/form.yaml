@@ -7,7 +7,10 @@ base: prod
 
 # make check's (forms/README.md).
 check:
-  memory: 1024
+  # Hold both the large OCI initramfs and its unpacked root during boot.
+  memory: 2048
+  # Most bait listeners are not HTTP; the form checks their protocols.
+  skip: [http-answering]
 
 services:
   # OpenCanary, as _oci-opencanary, inside its image. It may bind the bait
@@ -15,7 +18,7 @@ services:
   # A login here is a log line. It is not an account on this machine.
   opencanary:
     image: docker.io/thinkst/opencanary:latest
-    exec: /usr/local/bin/python3.10 /opencanary/.venv/bin/twistd -n -o -y /opencanary/.venv/bin/opencanary.tac
+    exec: /usr/local/bin/python3.10 /opencanary/.venv/bin/twistd -n --pidfile= -o -y /opencanary/.venv/bin/opencanary.tac
     before: /usr/lib/werewolf/opencanary-setup
     pledge: stdio rpath wpath inet unix netlink listen proc exec
     listen: [tcp/21 tcp/22 tcp/23 tcp/80 tcp/3389 tcp/5900]
@@ -23,5 +26,7 @@ services:
     memory: 256
     env:
       - HOME=/data
-      - PYTHONPATH=/opencanary/.venv/lib/python3.10/site-packages
+      # The upstream application is an editable install. The global Python
+      # reads its dependencies here, but does not process the venv's .pth.
+      - PYTHONPATH=/opencanary:/opencanary/.venv/lib/python3.10/site-packages
       - PYTHONDONTWRITEBYTECODE=1

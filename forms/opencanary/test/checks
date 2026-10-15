@@ -1,7 +1,7 @@
 # FTP answers with its banner. SMB is not listening. The process is not
 # root; binding the low ports leaves it CAP_NET_BIND_SERVICE and nothing
 # else.
-ok  oc-ftp    i=0; until wget -T 3 -O /dev/null ftp://127.0.0.1/ 2>&1 | grep -q '220'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no FTP banner in 60 s"; exit 1; }; sleep 1; done
+ok  oc-ftp    i=0; until (sleep 1; printf 'QUIT\r\n') | timeout 5 nc 127.0.0.1 21 | grep -q '^220 FTP server ready'; do i=$((i + 1)); [ $i -le 30 ] || { echo 'no FTP banner in 30 attempts'; exit 1; }; sleep 1; done
 ok  oc-user   p=$(head -n 1 /run/cgroup/svc/opencanary/cgroup.procs); u=$(grep '^_oci-opencanary:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  oc-smb    ! grep -qi ':01BD ' /proc/net/tcp
 ok  oc-https  ! grep -qi ':01BB ' /proc/net/tcp
@@ -9,4 +9,6 @@ ok  oc-https  ! grep -qi ':01BB ' /proc/net/tcp
 # The SSH bait speaks SSH, and a failed FTP login is recorded as an
 # event, without creating a real operating-system account.
 ok  oc-ssh (printf '\r\n'; sleep 1) | timeout 5 nc 127.0.0.1 22 | grep -q '^SSH-2.0-'
-ok  oc-login-logged (printf 'USER integration-bait\r\n'; sleep 1; printf 'PASS wrong-password\r\n'; sleep 1; printf 'QUIT\r\n') | timeout 5 nc 127.0.0.1 21 >/tmp/oc-login; grep -q '530' /tmp/oc-login && i=0 && until grep -q integration-bait /data/svc/opencanary/opencanary.log; do i=$((i + 1)); [ $i -le 15 ] || exit 1; sleep 1; done; ! grep -q '^integration-bait:' /etc/passwd
+ok  oc-http wget -q -T 5 -S -O /dev/null http://127.0.0.1/ 2>&1 | grep -q 'HTTP/1.[01] 200'
+ok  oc-host-key [ -s /data/svc/opencanary/id_rsa ] && [ -s /data/svc/opencanary/id_rsa.pub ] && ! chpst -u nobody test -r /data/svc/opencanary/id_rsa
+ok  oc-login-logged (printf 'USER integration-bait\r\n'; sleep 1; printf 'PASS wrong-password\r\n'; sleep 1; printf 'QUIT\r\n') | timeout 5 nc 127.0.0.1 21 >/tmp/oc-login; grep -q '^530' /tmp/oc-login && { i=0; until grep -q integration-bait /data/svc/opencanary/opencanary.log; do i=$((i + 1)); [ $i -le 15 ] || exit 1; sleep 1; done; } && ! grep -q '^integration-bait:' /etc/passwd

@@ -1364,40 +1364,91 @@ fn refusedExecLogged(p: *Posture, detail: *[]const u8) !?bool {
         ),
         try p.gpa.print(" pid={d} ", .{child}),
     };
-    const deadline = Io.Timestamp.now(p.io, .awake).nanoseconds + 100 * std.time.ns_per_ms;
-    var record: [8192]u8 = undefined;
+    var source: ExecLogSource = .{
+        .io = p.io,
+        .fd = fd,
+        .deadline = Io.Timestamp.now(p.io, .awake).nanoseconds + 100 * std.time.ns_per_ms,
+    };
     var records: usize = 0;
-    while (true) {
-        const left = deadline - Io.Timestamp.now(p.io, .awake).nanoseconds;
-        if (left <= 0) return execLogTimeout(p, detail, child, records);
-        const n = linux.read(fd, &record, record.len);
+    return switch (followExecLog(&source, &needles, &records)) {
+        .logged => blk: {
+            detail.* = try p.gpa.print(
+                "child={d}: execve(/)=EACCES(13); matching AUDIT_SYSCALL record",
+                .{child},
+            );
+            break :blk true;
+        },
+        .timeout => execLogTimeout(p, detail, child, records),
+        .flood => blk: {
+            detail.* = try p.gpa.print(
+                "child={d}: execve(/)=EACCES(13); records={d}; audit search reached its " ++
+                    "4096-read limit",
+                .{ child, records },
+            );
+            break :blk false;
+        },
+        .read_error => execLogFailure(p, detail, "read(/dev/kmsg)", source.rc, child),
+        .poll_error => execLogFailure(p, detail, "poll(/dev/kmsg)", source.rc, child),
+        .eof => execLogFailure(p, detail, "read(/dev/kmsg): EOF", 0, child),
+    };
+}
+
+const ExecLogSource = struct {
+    io: Io,
+    fd: i32,
+    deadline: i96,
+    rc: usize = 0,
+
+    fn read(s: *ExecLogSource, record: []u8) usize {
+        s.rc = linux.read(s.fd, record.ptr, record.len);
+        return s.rc;
+    }
+
+    fn wait(s: *ExecLogSource) ?usize {
+        const left = s.deadline - Io.Timestamp.now(s.io, .awake).nanoseconds;
+        if (left <= 0) return null;
+        var fds = [1]linux.pollfd{.{ .fd = s.fd, .events = linux.POLL.IN, .revents = 0 }};
+        s.rc = linux.poll(
+            &fds,
+            1,
+            @intCast(@divFloor(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)),
+        );
+        return s.rc;
+    }
+};
+
+const ExecLogEvidence = enum { logged, timeout, flood, read_error, poll_error, eof };
+
+/// Follow a nonblocking log cursor. The source supplies the deadline and
+/// poll; a controlled source also tests delivery at the timeout boundary.
+fn followExecLog(source: anytype, needles: []const []const u8, records: *usize) ExecLogEvidence {
+    var record: [8192]u8 = undefined;
+    // Bound draining too, so a continuous unrelated flood cannot keep this
+    // scan alive forever after the wait deadline.
+    for (0..4096) |_| {
+        // Drain queued evidence even if this task was descheduled past its
+        // deadline. The deadline limits waiting for more records, not reading
+        // a record the kernel has already delivered.
+        const n = source.read(&record);
         switch (linux.errno(n)) {
             .SUCCESS => {
-                if (n == 0) return execLogFailure(p, detail, "read(/dev/kmsg): EOF", n, child);
-                records += 1;
-                if (execAuditRecord(record[0..n], &needles)) {
-                    detail.* = try p.gpa.print(
-                        "child={d}: execve(/)=EACCES(13); matching AUDIT_SYSCALL record",
-                        .{child},
-                    );
-                    return true;
-                }
+                if (n == 0) return .eof;
+                records.* += 1;
+                if (execAuditRecord(record[0..n], needles)) return .logged;
             },
             .PIPE, .INTR => continue,
             .AGAIN => {
-                var fds = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
-                const ready = linux.poll(
-                    &fds,
-                    1,
-                    @intCast(@divFloor(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)),
-                );
+                const ready = source.wait() orelse return .timeout;
                 if (linux.errno(ready) == .INTR) continue;
-                if (ready == 0) return execLogTimeout(p, detail, child, records);
-                if (ready != 1) return execLogFailure(p, detail, "poll(/dev/kmsg)", ready, child);
+                // A record can arrive as poll times out, or before this task
+                // gets CPU again. Make one final read before calling it absent.
+                if (ready == 0) continue;
+                if (ready != 1) return .poll_error;
             },
-            else => return execLogFailure(p, detail, "read(/dev/kmsg)", n, child),
+            else => return .read_error,
         }
     }
+    return .flood;
 }
 
 fn execAuditRecord(record: []const u8, needles: []const []const u8) bool {
@@ -1409,6 +1460,102 @@ fn execAuditRecord(record: []const u8, needles: []const []const u8) bool {
     const end = std.mem.indexOf(u8, body, " comm=") orelse return false;
     return posture.logHas(body[0 .. end + 1], needles);
 }
+
+test "audit reader drains queued evidence after descheduling and poll timeout" {
+    const matching = "5,1,2,-;audit: type=1300 success=no pid=123 comm=probe\n";
+    const unrelated = "5,2,3,-;audit: type=1300 success=no pid=456 comm=probe\n";
+    const spoof = "13,3,4,-;audit: type=1300 success=no pid=123 comm=probe\n";
+    const again = ScriptedExecLog.errnoRc(.AGAIN);
+    const intr = ScriptedExecLog.errnoRc(.INTR);
+    const pipe = ScriptedExecLog.errnoRc(.PIPE);
+    const io_error = ScriptedExecLog.errnoRc(.IO);
+    const Case = struct { steps: []const ScriptedExecLog.Step, want: ExecLogEvidence };
+    for ([_]Case{
+        // Already queued: no call to wait, even with no waiting budget left.
+        .{ .steps = &.{ .{ .record = unrelated }, .{ .record = matching } }, .want = .logged },
+        // Delivery races poll's timeout. Read once more before giving up.
+        .{
+            .steps = &.{ .{ .read_rc = again }, .{ .wait_rc = 0 }, .{ .record = matching } },
+            .want = .logged,
+        },
+        // Genuine absence still fails, without a retry of the refused exec.
+        .{
+            .steps = &.{
+                .{ .read_rc = again },
+                .{ .wait_rc = 0 },
+                .{ .read_rc = again },
+                .{ .wait_rc = null },
+            },
+            .want = .timeout,
+        },
+        .{
+            .steps = &.{
+                .{ .record = unrelated },
+                .{ .record = spoof },
+                .{ .read_rc = again },
+                .{ .wait_rc = null },
+            },
+            .want = .timeout,
+        },
+        .{
+            .steps = &.{
+                .{ .read_rc = pipe },
+                .{ .read_rc = intr },
+                .{ .read_rc = again },
+                .{ .wait_rc = intr },
+                .{ .record = matching },
+            },
+            .want = .logged,
+        },
+        .{ .steps = &.{.{ .read_rc = io_error }}, .want = .read_error },
+        .{ .steps = &.{ .{ .read_rc = again }, .{ .wait_rc = io_error } }, .want = .poll_error },
+        .{ .steps = &.{.{ .read_rc = 0 }}, .want = .eof },
+    }) |case| {
+        var source: ScriptedExecLog = .{ .steps = case.steps };
+        var records: usize = 0;
+        try testing.expectEqual(
+            case.want,
+            followExecLog(&source, &.{ "success=no", " pid=123 " }, &records),
+        );
+        try testing.expectEqual(case.steps.len, source.pos);
+    }
+
+    // A flood must not turn the final drain into an unbounded wait.
+    var source: ScriptedExecLog = .{ .steps = &.{}, .flood = unrelated };
+    var records: usize = 0;
+    try testing.expectEqual(.flood, followExecLog(&source, &.{" pid=123 "}, &records));
+    try testing.expectEqual(@as(usize, 4096), records);
+}
+
+const ScriptedExecLog = struct {
+    const Step = union(enum) { record: []const u8, read_rc: usize, wait_rc: ?usize };
+    steps: []const Step,
+    pos: usize = 0,
+    flood: ?[]const u8 = null,
+
+    fn errnoRc(err: linux.E) usize {
+        return 0 -% @as(usize, @intCast(@backingInt(err)));
+    }
+
+    fn read(s: *ScriptedExecLog, record: []u8) usize {
+        const step = if (s.flood) |text| Step{ .record = text } else s.steps[s.pos];
+        s.pos += 1;
+        return switch (step) {
+            .record => |text| blk: {
+                @memcpy(record[0..text.len], text);
+                break :blk text.len;
+            },
+            .read_rc => |rc| rc,
+            .wait_rc => unreachable,
+        };
+    }
+
+    fn wait(s: *ScriptedExecLog) ?usize {
+        const step = s.steps[s.pos];
+        s.pos += 1;
+        return step.wait_rc;
+    }
+};
 
 test "exec audit evidence must be a kernel notice for this refusal" {
     const fields = "audit: type=1300 syscall=221 success=no exit=-13 pid=123 comm=probe";

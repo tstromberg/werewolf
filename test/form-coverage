@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Check that service forms declare at least five distinct integration cases.
+
+Shared platform checks do not count. An explicit supplied-code fixture or
+host-side SSH suite counts only for the forms on which the harness runs it.
+This guards coverage quantity; review still judges whether cases are useful.
+"""
+
+import argparse
+from pathlib import Path
+import re
+import sys
+
+
+SSH_CASES = {
+    "ssh-login", "ssh-command-output", "ssh-command-status",
+    "ssh-no-forwarding", "ssh-security-keys-only",
+}
+BASTION_CASES = {
+    "bastion-permitted-destination", "bastion-no-session",
+    "bastion-no-destination", "bastion-not-anothers-destination",
+    "bastion-no-remote", "bastion-pq-required", "bastion-security-keys-only",
+}
+
+
+def records(path):
+    if not path.exists():
+        return
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if line.strip() and not line.lstrip().startswith("#"):
+            yield number, line.split(None, 2)
+
+
+def cases(path):
+    result = set()
+    for number, fields in records(path):
+        if len(fields) != 3 or fields[0] not in {"ok", "gap"}:
+            raise ValueError(f"{path}:{number}: expected KIND NAME COMMAND")
+        name = fields[1]
+        if name in result:
+            raise ValueError(f"{path}:{number}: duplicate check {name}")
+        result.add(name)
+    return result
+
+
+def audit(root):
+    forms = {p.parent.name: p.parent for p in (root / "forms").glob("*/form.yaml")}
+    if not forms:
+        raise ValueError("no forms found")
+    exceptions = {}
+    for number, fields in records(root / "test/form-coverage-exceptions"):
+        if len(fields) != 3 or fields[0] not in forms or fields[0] in exceptions:
+            raise ValueError(f"form-coverage-exceptions:{number}: invalid exception")
+        name, minimum, reason = fields
+        if not minimum.isdigit() or not 0 <= int(minimum) < 5 or not reason.strip():
+            raise ValueError(f"form-coverage-exceptions:{number}: needs a minimum below five and a reason")
+        exceptions[name] = (int(minimum), reason)
+    fixtures = {}
+    for number, fields in records(root / "test/app-fixtures"):
+        if len(fields) != 3 or fields[0] not in forms or fields[0] in fixtures:
+            raise ValueError(f"app-fixtures:{number}: invalid fixture")
+        name, source, checks = fields
+        if source == "java":
+            source_path = root / "test/app-fixture-java/Main.java"
+        else:
+            source_path = root / source
+        if not source_path.exists() or not (root / checks).is_file():
+            raise ValueError(f"app-fixtures:{number}: missing fixture or checks")
+        fixtures[name] = cases(root / checks)
+    boot = (root / "test/boot").read_text()
+    rows = []
+    for name, directory in sorted(forms.items()):
+        own = cases(directory / "test/checks")
+        fixture = fixtures.get(name, set())
+        host = set()
+        if name in {"sshd", "prod-ssh", "playground"}:
+            host = SSH_CASES.copy()
+            if name == "playground":
+                host.remove("ssh-security-keys-only")
+                host.add("ssh-keys-only")
+        elif name == "bastion":
+            host = BASTION_CASES
+        for check in host:
+            if not re.search(r"(?:say ok |refused |^\s+)" + re.escape(check) + r"(?:\s|$)", boot, re.M):
+                raise ValueError(f"test/boot: missing host check {check}")
+        # Counts refer to deployments: an unshipped-code boot and a supplied-
+        # code boot exercise different contracts even when a name is shared.
+        count = len(own) + len(fixture) + len(host)
+        minimum, reason = exceptions.get(name, (5, ""))
+        rows.append((name, count, minimum, len(own), len(fixture), len(host), reason))
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--list", action="store_true", help="show per-form counts and exception reasons")
+    args = parser.parse_args()
+    try:
+        rows = audit(args.root)
+    except (OSError, ValueError) as error:
+        print(f"form-coverage: {error}", file=sys.stderr)
+        return 1
+    failed = []
+    for name, count, minimum, own, fixture, host, reason in rows:
+        if args.list:
+            print(f"{name:20} {count:2} cases ({own} guest, {fixture} supplied-code, {host} host)"
+                  + (f"; exception: {reason}" if reason else ""))
+        if count < minimum:
+            failed.append(f"{name}: {count} cases, needs {minimum}")
+    if failed:
+        for failure in failed:
+            print(f"form-coverage: {failure}", file=sys.stderr)
+        return 1
+    exceptions = sum(bool(row[-1]) for row in rows)
+    print(f"form-coverage: {len(rows) - exceptions} forms meet the five-case minimum; "
+          f"{exceptions} foundation/runtime exceptions")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

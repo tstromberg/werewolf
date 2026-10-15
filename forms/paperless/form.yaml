@@ -4,22 +4,18 @@
 # ImageMagick, poppler and qpdf are Wolfi's packages, not copies frozen
 # in Paperless's container image. Valkey is the valkey form, on its
 # socket. Sign-up is closed. The administrator comes from the config.
-# SQLite and the files are in /data/svc/paperless. See
+# PostgreSQL holds the database; document files are in /data/svc/paperless. See
 # forms/paperless/README.md.
 base: prod
 
-with: [valkey, caddy]
-
-# SQLite creates its database and journal as mode 0644, which has no
-# group write, so the directory's ACL cannot grant it. The preload adds
-# the bit for files in the library, and the four users share them.
-programs: [paperless-group.so]
+with: [postgresql, valkey, caddy]
 
 packages:
   # The interpreter, and what the wheels link. howl build-apk names the rest.
   - python-3.13
   - libstdc++
   - libgcc
+  - libpq-17
   - zlib
   # OCR and the file tools, Wolfi's, so a later package replaces them.
   - tesseract
@@ -37,6 +33,7 @@ packages:
 # The checks sign in with curl, which keeps the token.
 dev:
   - curl
+  - postgresql-17-client
 
 # make check's (forms/README.md): four Paperless services, Valkey and Caddy.
 check:
@@ -45,18 +42,18 @@ check:
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
+  kernel-write-xor-execute: the postgresql form permits JIT, though this form starts PostgreSQL with jit=off
   programs-no-interpreters: python3 runs Paperless, which is what this form is for
-  processes-services-leashed: the four services share one library, so the files they make stay writable by the group
 
 services:
-  # The web server, as its own user, in the valkey group so it can open
-  # the socket. It owns the library and shares it with its group: the
-  # consumer, the worker and the scheduler write there too. paperless-init
+  # The components share the paperless UNIX identity and private scratch
+  # files, as upstream expects. The valkey group grants its queue socket.
+  # Each still has separate service rules and process limits. paperless-init
   # makes the directories and waits for Valkey, then the database is
   # migrated and the administrator is made from the config, and the ready
   # mark lets the other three start. Sign-up is closed. Page cleaning is
-  # off: Wolfi does not package unpaper. It reaches Valkey's socket and
-  # nothing else.
+  # off: Wolfi does not package unpaper. It reaches the local Valkey and
+  # PostgreSQL sockets; neither needs a network listener.
   paperless:
     exec: /usr/lib/paperless/bin/python3 -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1 paperless.asgi:application
     before:
@@ -65,12 +62,12 @@ services:
       - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py manage_superuser --skip-checks
       - /usr/lib/werewolf/paperless-init ready
     user: paperless
+    shared-user: true
     group: valkey
-    share: group
     # netlink: glibc lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
     listen: [tcp/8000 loopback]
-    connect: /run/svc/valkey/valkey.sock
+    connect: [/run/svc/valkey/valkey.sock, /run/svc/postgres/.s.PGSQL.5432]
     run: /usr/lib/paperless/bin/python3
     secret:
       - PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
@@ -83,11 +80,15 @@ services:
     memory: 768
     nofile: 16384
     env:
-      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
       - PYTHONPATH=/usr/lib/paperless/app
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DBENGINE=postgresql
+      - PAPERLESS_DBHOST=/run/svc/postgres
+      - PAPERLESS_DBNAME=postgres
+      - PAPERLESS_DBPASS=
+      - PAPERLESS_DBUSER=paperless
       - PAPERLESS_DATA_DIR=/data/svc/paperless
       - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
       - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
@@ -100,8 +101,8 @@ services:
       - PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS=false
       - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
 
-  # The consumer, the worker and the scheduler. Each has its own user, in
-  # paperless's group, and writes the library. They wait for the ready
+  # The consumer, the worker and the scheduler share paperless's identity
+  # and write the library and upload scratch files. They wait for the ready
   # mark, so they do not open the database mid-migration. The consumer
   # watches the consume folder. It and the worker run the OCR tools.
   # Django's startup check runs Tesseract, so the scheduler may too.
@@ -109,11 +110,13 @@ services:
   paperless-consumer:
     exec: /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py document_consumer
     before: /usr/lib/werewolf/paperless-init wait
-    user: paperless-consumer
-    group: [valkey, paperless]
+    user: paperless
+    shared-user: true
+    group: valkey
     pledge: stdio rpath wpath inet unix netlink connect proc exec watch
-    connect: /run/svc/valkey/valkey.sock
-    write: /data/svc/paperless
+    connect: [/run/svc/valkey/valkey.sock, /run/svc/postgres/.s.PGSQL.5432]
+    write: [/data/svc/paperless, /run/svc/paperless/tmp]
+    read: /run/svc/paperless
     run:
       - /usr/lib/paperless/bin/python3
       - /usr/bin/tesseract
@@ -134,15 +137,19 @@ services:
     memory: 768
     nofile: 4096
     env:
-      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
       - PYTHONPATH=/usr/lib/paperless/app
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DBENGINE=postgresql
+      - PAPERLESS_DBHOST=/run/svc/postgres
+      - PAPERLESS_DBNAME=postgres
+      - PAPERLESS_DBPASS=
+      - PAPERLESS_DBUSER=paperless
       - PAPERLESS_DATA_DIR=/data/svc/paperless
       - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
       - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
-      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-consumer/tmp
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless/tmp
       - PAPERLESS_STATICDIR=/usr/lib/paperless/static
       - PAPERLESS_TIME_ZONE=UTC
       - PAPERLESS_OCR_LANGUAGE=eng
@@ -154,11 +161,13 @@ services:
   paperless-worker:
     exec: /usr/lib/paperless/bin/python3 -m celery --app paperless worker --loglevel INFO --pool=solo --without-mingle --without-gossip
     before: /usr/lib/werewolf/paperless-init wait
-    user: paperless-worker
-    group: [valkey, paperless]
+    user: paperless
+    shared-user: true
+    group: valkey
     pledge: stdio rpath wpath inet unix netlink connect proc exec
-    connect: /run/svc/valkey/valkey.sock
-    write: /data/svc/paperless
+    connect: [/run/svc/valkey/valkey.sock, /run/svc/postgres/.s.PGSQL.5432]
+    write: [/data/svc/paperless, /run/svc/paperless/tmp]
+    read: /run/svc/paperless
     run:
       - /usr/lib/paperless/bin/python3
       - /usr/bin/tesseract
@@ -179,15 +188,19 @@ services:
     memory: 768
     nofile: 4096
     env:
-      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
       - PYTHONPATH=/usr/lib/paperless/app
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DBENGINE=postgresql
+      - PAPERLESS_DBHOST=/run/svc/postgres
+      - PAPERLESS_DBNAME=postgres
+      - PAPERLESS_DBPASS=
+      - PAPERLESS_DBUSER=paperless
       - PAPERLESS_DATA_DIR=/data/svc/paperless
       - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
       - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
-      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-worker/tmp
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless/tmp
       - PAPERLESS_STATICDIR=/usr/lib/paperless/static
       - PAPERLESS_TIME_ZONE=UTC
       - PAPERLESS_OCR_LANGUAGE=eng
@@ -197,13 +210,15 @@ services:
       - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
 
   paperless-beat:
-    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless beat --loglevel INFO
+    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless beat --loglevel INFO --schedule /data/svc/paperless/celerybeat-schedule
     before: /usr/lib/werewolf/paperless-init wait
-    user: paperless-beat
-    group: [valkey, paperless]
+    user: paperless
+    shared-user: true
+    group: valkey
     pledge: stdio rpath wpath inet unix netlink connect proc exec
-    connect: /run/svc/valkey/valkey.sock
-    write: /data/svc/paperless
+    connect: [/run/svc/valkey/valkey.sock, /run/svc/postgres/.s.PGSQL.5432]
+    write: [/data/svc/paperless, /run/svc/paperless/tmp]
+    read: /run/svc/paperless
     run:
       - /usr/lib/paperless/bin/python3
       - /usr/bin/tesseract
@@ -212,18 +227,22 @@ services:
     config: settings /run/config/paperless-beat/settings.json
     setting: domain hostname required as DOMAIN
     render: env site
-    memory: 128
+    memory: 256
     nofile: 1024
     env:
-      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
       - PYTHONPATH=/usr/lib/paperless/app
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DBENGINE=postgresql
+      - PAPERLESS_DBHOST=/run/svc/postgres
+      - PAPERLESS_DBNAME=postgres
+      - PAPERLESS_DBPASS=
+      - PAPERLESS_DBUSER=paperless
       - PAPERLESS_DATA_DIR=/data/svc/paperless
       - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
       - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
-      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-beat/tmp
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless/tmp
       - PAPERLESS_STATICDIR=/usr/lib/paperless/static
       - PAPERLESS_TIME_ZONE=UTC
       - PAPERLESS_OCR_LANGUAGE=eng
@@ -253,3 +272,17 @@ services:
       - XDG_CONFIG_HOME=/run/svc/caddy
       - HOME=/run/svc/caddy
       - GOMEMLIMIT=384MiB
+
+  # The local database uses peer authentication only. Paperless's schema
+  # and roles are made by pg-init before the server accepts connections.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres -c jit=off
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    pledge: stdio rpath wpath proc ipc unix listen connect
+    run:
+      - /usr/bin/initdb
+      - /usr/lib/werewolf/sh-shim
+      - /usr/bin/locale
+    read: /run/werewolf/import
+    share: shared

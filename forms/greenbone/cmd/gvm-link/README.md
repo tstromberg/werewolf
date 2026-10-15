@@ -21,7 +21,7 @@ gvmd and gsad are separate images. Each one's `/run` is its own directory on the
 
 ## Detailed design
 
-runit starts gvm-link as root, because the socket has to be created in gsad's directory and that directory is not group-writable. `/etc/werewolf/gvm-link` names the two host paths. gvm-link binds the listen socket, gives it to `_glink` and the group `_oci-gsad`, mode 0660, then becomes `_glink` with only `_oci-gvmd` as a supplementary group and no capabilities. A system group, one below 65536, is refused. After that it accepts, connects and copies. A GMP command still needs the administrator password.
+Leash runs gvm-link as `_glink` with supplementary groups `_oci-gvmd` and `_oci-gsad` and no capabilities. Because gsad declares `share: group`, leash creates `/run/svc/gsad/run` with mode `02770` and group `_oci-gsad`. `/etc/werewolf/gvm-link` names the two host paths. gvm-link binds the listen socket inside `/run/svc/gsad/run`, where it inherits group `_oci-gsad`, sets mode 0660, and then accepts, connects to gvmd's socket, and copies. A GMP command still needs the administrator password.
 
 ## Drawbacks
 
@@ -30,5 +30,4 @@ The forwarder is a program we maintain. It is the cost of two images that must s
 ## Alternatives Considered
 
 - Mode 0666. Any local user could then open gvmd.
-- Making gvm-link a leashed service with `group:`. The leash could set the group, and could not create a socket in gsad's directory.
 - One image for both programs. The published images do not ship both binaries.

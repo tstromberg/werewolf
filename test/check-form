@@ -36,6 +36,7 @@ fi
 [ ! -e "$FORM_DIR/test/config" ] || "$FORM_DIR/test/config" "$c-config"
 "$HOWL" pack --build --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
 own=${FORM_CHECKS:-$FORM_DIR/test/checks}
+[ -z "${FORM_CHECKS:-}" ] || [ -f "$own" ] || { echo "check-form: missing checks $own" >&2; exit 1; }
 [ -e "$own" ] || own=
 awk -v skip="${SKIP:-}" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) drop[s[i]] = 1 }
 	!($2 in drop)' test/checks ${own:+"$own"} >"$c-checks"

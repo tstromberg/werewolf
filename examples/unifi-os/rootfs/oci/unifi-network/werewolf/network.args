@@ -5,6 +5,7 @@
 -Dfile.encoding=UTF-8
 -Djava.awt.headless=true
 -Dunifi.core.enabled=true
+-Dunifi-os.server=true
 -Dunifi.mongodb.service.enabled=false
 -Dunifi.rmq.enabled=false
 -Dspring.profiles.active=unifi-os

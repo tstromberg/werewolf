@@ -4,3 +4,5 @@ ok  samba-new-user   echo new-user >/tmp/samba-new; smbclient //10.0.2.15/carol 
 ok  samba-old-pass   ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'alice%werewolf-check-password' -c 'ls' >/tmp/samba-old-pass 2>&1
 ok  samba-removed    ! smbclient //10.0.2.15/bob -m SMB3 --client-protection=encrypt -U 'bob%werewolf-other-password' -c 'ls' >/tmp/samba-removed 2>&1
 ok  samba-new-other  ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'carol%werewolf-new-password' -c 'get hi.txt /tmp/samba-other' >/tmp/samba-new-other 2>&1
+
+ok  samba-new-account id carol && ! id bob && c=$(id -u carol) && chpst -u samba grep -q "^carol:$c:" /run/svc/samba/private/smbpasswd

@@ -89,7 +89,15 @@ evidence still fails, including when printk rate limiting suppresses it.
 Failures name the failed operation and numeric errno, or the probe child's
 wait status. A timeout reports the child PID, its confirmed EACCES return,
 and the number of kernel records read; it does not claim that every
-failure means an audit record was absent. The timeout remains 100 ms.
+failure means an audit record was absent. The timeout remains 100 ms;
+queued records are drained before declaring a timeout, including when the
+reader was descheduled or delivery raced the end of `poll`. Draining is
+bounded at 4096 reads, with a separate diagnostic if that limit is reached.
+Repeated scans can exhaust the kernel's printk burst (100 records in five
+seconds); `kauditd_printk_skb: ... callbacks suppressed` identifies real lost
+evidence, which still fails. Attack scans on werewolf lock their shared
+fixtures so concurrent scans cannot delete one another's probe directories
+or mistake another scan's files for a successful attack.
 This improves the usual playground scan; large filesystem trees, a
 metadata connection timeout or `sshd -T` can still take longer than 200 ms.
 

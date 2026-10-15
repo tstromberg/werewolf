@@ -2,7 +2,7 @@
 
 An ARM64 integration spike for UniFi OS Server 5.1.42 on Werewolf. Its
 [manifest](form.yaml) includes the reusable PostgreSQL, MongoDB and
-RabbitMQ forms. It is outside the released catalog while compatibility
+RabbitMQ and nginx forms. It is outside the released catalog while compatibility
 work remains. See the [design](../../docs/design/unifi-os.md).
 
 ## Security Posture
@@ -10,7 +10,12 @@ work remains. See the [design](../../docs/design/unifi-os.md).
 Each application runs under its own leash. Images are pinned and baked
 into the verified root. Database and broker ports are loopback-only.
 The vendor's privileged initialization scripts are replaced by local
-setup code; the hardware identity adapter handles one read-only call.
+setup code; a native adapter answers fixed identity and OS version queries.
+A separate [D-Bus adapter](cmd/unifi-systemd/README.md) reads real runit
+state over a Unix socket authenticated with kernel peer credentials.
+A separate [nginx supervisor](cmd/unifi-nginx/README.md) validates and
+reloads its own master on Core's fixed, authenticated request. nginx reads
+shared configuration and TLS files while Core's private data stays closed.
 
 ## Getting Started
 
@@ -24,8 +29,14 @@ howl create unifi-os --build --with ./examples/unifi-os --config ./config
 
 This is a diagnostic prototype, not a working replacement console yet.
 Use `howl console unifi-os` to inspect startup. The components under test
-are UniFi Core and Network; identity, cloud connectivity and nginx
-integration remain to be verified. No public OS console is exposed yet.
+are UniFi Core, Network and the nginx console; identity and cloud
+connectivity remain to be verified. Startup checks require both application
+APIs, HTTPS serving and a real nginx worker replacement after reload.
+Reboot checks compare the instance UUID and TLS certificate and require
+retained MongoDB records and RabbitMQ messages.
+Run `make FORM=examples/unifi-os DEV=1 AGAIN_FORMS=unifi-os _check-form`
+after building the diagnostic image to check startup and retained state.
+Identity unit tests run with `node --test examples/unifi-os/test/identity.test.mjs`.
 
 ### Importing data
 
@@ -34,15 +45,30 @@ Use a fresh data disk. Backup restore and upgrades are not validated.
 ### Known Quirks
 
 - Core uses a dedicated VM's `postgres` database for this first probe.
-- Only the hardware identity call is adapted; other privileged actions fail explicitly.
-- D-Bus service-state compatibility is still required.
+- Identity and OS version queries are adapted; privileged actions fail explicitly.
+- D-Bus covers service state; identity and OS agent services remain inactive.
+- Fresh disks receive an atomically published version-5 instance UUID.
+  Existing identities are preserved; incompatible prototype identities fail
+  with guidance to use a fresh disk. Automatic identity migration is unsupported.
+- Linux's shared printk rate limit can drop audit records during startup
+  bursts. The full smoke check reports this logging failure; it is not excused.
+- nginx uses the vendor's auth rules with packaging changes for shared
+  paths, private runtime files and IPv4. The two verified HTML entry pages
+  include the model metadata Core would otherwise inject at runtime.
 - The image currently comes from a community mirror. Official vendor
   extraction and authentication are required before release.
 - Updates are off while the prototype is being developed.
 
 ### Network Exposure
 
+- listen: tcp/80 *
+- listen: tcp/443 *
+- listen: tcp/8444 * (guest portal, after setup)
 - listen: tcp/8080 *
 - listen: udp/3478 *
 - listen: udp/10001 *
-- Database, broker and application management listeners remain on loopback.
+- Database, broker, Core, and local Network API listeners bind loopback.
+  Werewolf also restricts Network's other management connectors, including
+  support port 28082, to local access even when vendor code binds all interfaces.
+  Runtime checks query the kernel's external ingress lookup, including
+  packets with forged reply source ports, and require public HTTPS to pass.

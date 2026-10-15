@@ -4,7 +4,8 @@
 //! and the users file as text and returns the text to write, so init and
 //! cloud-metadata make the same accounts, and a test needs no machine.
 //!
-//! The users file is one key a line, `NAME [admin] TYPE KEY [COMMENT]`
+//! The users file names an account alone, or one SSH key per line as
+//! `NAME [admin] TYPE KEY [COMMENT]`
 //! (lib/form.zig peopleFile). A person gets uid and gid userId(name), home
 //! /data/home/NAME, the shell given, and a password of "*", which sshd
 //! takes a key for where "!" would refuse one. An admin's keys are root's
@@ -65,9 +66,9 @@ pub fn parse(
         var words = mem.tokenizeAny(u8, line, " \t");
         const name = words.next() orelse continue;
         var rest = words.rest();
-        const admin = mem.startsWith(u8, rest, "admin ");
-        if (admin) rest = mem.trimStart(u8, rest["admin ".len..], " \t");
-        if (rest.len == 0 or !isName(name) or mem.findAny(u8, line, "\r\x00") != null) {
+        const admin = mem.eql(u8, rest, "admin") or mem.startsWith(u8, rest, "admin ");
+        if (admin) rest = mem.trimStart(u8, rest["admin".len..], " \t");
+        if ((admin and rest.len == 0) or !isName(name) or mem.findAny(u8, line, "\r\x00") != null) {
             try refused.append(gpa, try gpa.print(
                 "'{s}': not NAME [admin] TYPE KEY [COMMENT]",
                 .{shown(line)},
@@ -80,6 +81,7 @@ pub fn parse(
             try out.append(gpa, .{ .name = name, .keys = &.{}, .admin = false });
             break :blk &out.items[out.items.len - 1];
         };
+        if (rest.len == 0) continue;
         var keys = try gpa.alloc([]const u8, person.keys.len + 1);
         @memcpy(keys[0..person.keys.len], person.keys);
         keys[person.keys.len] = rest;
@@ -211,6 +213,46 @@ fn shown(s: []const u8) []const u8 {
 }
 
 const testing = std.testing;
+
+test "keyless people have stable real accounts, no SSH keys or admin rights" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const base: Files = .{
+        .passwd = "root:x:0:0::/root:/bin/sh\n",
+        .group = "root:x:0:\n",
+        .shadow = "root:!:::::::\n",
+    };
+    const first = try apply(gpa, base, "alice\nbob\n", "/sbin/nologin");
+    try testing.expectEqual(2, first.keys.len);
+    try testing.expectEqualStrings("", first.keys[0].text);
+    try testing.expectEqualStrings("", first.root_keys);
+    try testing.expect(mem.indexOf(
+        u8,
+        first.passwd,
+        try gpa.print("alice:x:{d}:{d}:", .{ userId("alice"), userId("alice") }),
+    ) != null);
+    const next = try apply(
+        gpa,
+        .{
+            .passwd = first.passwd,
+            .group = first.group,
+            .shadow = first.shadow,
+            .made = first.made,
+        },
+        "carol\nalice\nalice admin\nroot\n",
+        "/sbin/nologin",
+    );
+    try testing.expectEqual(2, next.keys.len);
+    try testing.expectEqual(2, next.refused.len);
+    try testing.expectEqualStrings("", next.root_keys);
+    try testing.expectEqualStrings("bob", next.removed[0]);
+    try testing.expect(mem.indexOf(
+        u8,
+        next.passwd,
+        try gpa.print("alice:x:{d}:{d}:", .{ userId("alice"), userId("alice") }),
+    ) != null);
+}
 
 test "apply: accounts for the people named, admins' keys root's, the gone removed" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);

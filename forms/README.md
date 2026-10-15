@@ -123,7 +123,8 @@ file ownership before updating a machine that used the old id.
    `packages`; and its `net`.
 2. its `services`: how leash starts each, as whom, on which ports
    ([cmd/leash](../cmd/leash/leash.zig) lists the directives).
-3. `forms/NAME/test/checks`: what proves it works, and what it refuses.
+3. `forms/NAME/test/checks`: at least five distinct integration cases proving
+   what works and what is refused ([coverage policy](../docs/testing.md#form-integration-coverage)).
 4. `make check-NAME`, then name each posture failure in `weaknesses`
    with its excuse, or fix it.
 

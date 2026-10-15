@@ -24,10 +24,6 @@ weaknesses:
   kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
   network-fence-unbypassable: OpenVAS keeps CAP_NET_RAW and CAP_NET_ADMIN for privileged scanning, so isolate this machine from services it must not scan
 
-accounts:
-  users:
-    - username: _glink
-
 # make check's (forms/README.md): gvmd, the scanner and the feed
 # beside PostgreSQL.
 check:
@@ -99,7 +95,7 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: tcp/9392 loopback
     connect: /run/manager.sock
-    share: shared
+    share: group
     write: /var/log/gvm
     memory: 256
     nofile: 8192
@@ -109,6 +105,19 @@ services:
       - GSAD_DO_CHROOT=0
       - GSAD_HTTP_ONLY=1
       - GSAD_FOREGROUND=1
+
+  # gvm-link, as _glink in the groups _oci-gvmd and _oci-gsad, carrying
+  # gvmd's socket into gsad's /run directory.
+  gvm-link:
+    exec: /usr/lib/werewolf/gvm-link
+    user: _glink
+    group: [_oci-gvmd, _oci-gsad]
+    pledge: stdio rpath wpath unix listen connect proc
+    read: /etc/werewolf/gvm-link
+    write: /run/svc/gsad/run
+    connect: /run/svc/gvmd/run/gvmd.sock
+    memory: 64
+    nofile: 1024
 
   # The scanner, as _oci-openvas, inside its image. It is the one
   # service that keeps CAP_NET_RAW and CAP_NET_ADMIN, for alive

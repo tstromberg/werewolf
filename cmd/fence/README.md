@@ -49,7 +49,8 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    Arrivals pass to served ports, from connected ports, or as ICMP. Denied
    TCP, UDP, other transports, tunnels and IPsec get no reply; other
    protocols get "unreachable". Local and loopback traffic always pass.
-   A `loopback` listen has no rule, so only this machine reaches it.
+   Private TCP ports drop arrivals before reply allowances, even if a
+   daemon binds all interfaces; local traffic reaches them first.
    Allowed traffic with no route fails as "network unreachable", not
    EACCES, so clients try the next address.
 2. **Landlock**, for every process: TCP binds only to the policy's ports
@@ -57,7 +58,9 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    ports. Files are readable anywhere but `/dev`; programs run only from
    `/usr` and `/oci`; writes go only to `/run`, `/tmp`, `/var/tmp`,
    `/dev/shm`, `/data` and binds under image roots; sockets and FIFOs only
-   in `/run` and those roots' `/run` and `/tmp`. `/dev` is closed, even to
+   in `/run`, those roots' `/run` and `/tmp`, and declared writable shared
+   directories on both sides of their binds. Read-only shares get no write
+   grant. `/dev` is closed, even to
    reads, but for null, zero, full, random, urandom, kmsg, terminals, input
    devices, ptys if allowed, and a PL061 GPIO chip. No process may mount.
    Every refusal is audited, after exec too.
@@ -84,7 +87,7 @@ the bounding set are built in; DHCP changes only resolver grants.
 | --- | --- |
 | Root removes the rules | That needs CAP_NET_ADMIN, gone after fence. No one can lift Landlock. |
 | Raw or packet sockets below the rules | That needs CAP_NET_RAW, gone after fence. DHCP's engine holds the one packet socket, locked to DHCP replies. |
-| A reply forged by its source port | **Open, by design:** it reaches any socket, including one listening on a port the kernel picked (`listen()` without `bind()`, unseen by Landlock). It needs code already running here, and leash refuses `listen` to services that did not promise it. |
+| A reply forged by its source port | Explicit private TCP ports drop arrivals before reply allowances. Other sockets remain **open, by design**, including kernel-picked ports; leash refuses `listen` unless promised. |
 | Root signals the mount broker or DHCP | Landlock ABI 6 scoping blocks signals and abstract sockets out of the domain. |
 | Root drives GPIO lines | Only a PL061 (`arm,pl061`) gets ioctls: the chip a VM wires its power button to. |
 

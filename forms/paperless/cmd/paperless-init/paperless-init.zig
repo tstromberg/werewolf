@@ -1,6 +1,6 @@
 //! paperless-init prepares the library the four Paperless services share.
 //! With no argument it makes the directories, clears the ready mark and
-//! waits for Valkey. `ready`, after migrate, writes the mark. `wait`,
+//! waits for Valkey and PostgreSQL. `ready`, after migrate, writes the mark. `wait`,
 //! the other services' first command, returns once the mark is there.
 
 const std = @import("std");
@@ -9,8 +9,9 @@ const Dir = Io.Dir;
 const linux = std.os.linux;
 
 const data = "/data/svc/paperless";
-const ready = "/data/svc/paperless/ready";
+const ready = "/run/svc/paperless/ready";
 const sock = "/run/svc/valkey/valkey.sock";
+const postgres_sock = "/run/svc/postgres/.s.PGSQL.5432";
 
 const dirs = [_][]const u8{
     data ++ "/media/documents/originals",
@@ -21,7 +22,6 @@ const dirs = [_][]const u8{
     data ++ "/log",
     data ++ "/consume",
     data ++ "/llm_index",
-    "/run/svc/paperless/tmp",
 };
 
 const Mode = enum { begin, ready, wait };
@@ -33,22 +33,45 @@ pub fn main(init: std.process.Init) !void {
         say(io, "{s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    run(io, args) catch |err| {
+    run(io, args, init.environ_map.get("PAPERLESS_SCRATCH_DIR")) catch |err| {
         say(io, "{s}", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
-fn run(io: Io, args: []const []const u8) !void {
+fn run(io: Io, args: []const []const u8, scratch: ?[]const u8) !void {
     switch (try modeOf(args)) {
         .begin => {
+            try requirePostgresLibrary(io, Dir.cwd(), data);
+            try ensure(io, scratch orelse return error.NoScratchDirectory);
             for (dirs) |path| try ensure(io, path);
             clearReady();
-            try waitValkey(io);
+            try waitSocket(io, sock);
+            try waitSocket(io, postgres_sock);
         },
         .ready => try markReady(io),
-        .wait => try waitReady(io),
+        .wait => {
+            try requirePostgresLibrary(io, Dir.cwd(), data);
+            try ensure(io, scratch orelse return error.NoScratchDirectory);
+            try waitReady(io);
+        },
     }
+}
+
+fn requirePostgresLibrary(io: Io, root: Dir, path: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    const db = try std.mem.print(&buf, "{s}/db.sqlite3", .{path});
+    root.access(io, db, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    say(
+        io,
+        "SQLite library found: export it from the previous image and import into PostgreSQL; " ++
+            "keeping the existing data",
+        .{},
+    );
+    return error.SqliteMigrationRequired;
 }
 
 fn modeOf(args: []const []const u8) !Mode {
@@ -91,17 +114,17 @@ fn waitReady(io: Io) !void {
     return error.NotReady;
 }
 
-fn waitValkey(io: Io) !void {
+fn waitSocket(io: Io, path: []const u8) !void {
     var i: u32 = 0;
     while (i < 60) : (i += 1) {
-        if (valkeyUp()) {
-            say(io, "valkey is up", .{});
+        if (socketUp(path)) {
+            say(io, "{s} is up", .{path});
             return;
         }
         pause();
     }
-    say(io, "valkey is not listening", .{});
-    return error.NoValkey;
+    say(io, "{s} is not listening", .{path});
+    return error.NoDatabaseSocket;
 }
 
 fn pause() void {
@@ -109,12 +132,13 @@ fn pause() void {
     _ = linux.nanosleep(&req, null);
 }
 
-fn valkeyUp() bool {
+fn socketUp(path: []const u8) bool {
     const fd = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
     defer _ = linux.close(@intCast(fd));
     var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-    @memcpy(addr.path[0..sock.len], sock);
+    if (path.len >= addr.path.len) return false;
+    @memcpy(addr.path[0..path.len], path);
     return linux.errno(linux.connect(
         @intCast(fd),
         @ptrCast(&addr),
@@ -128,10 +152,9 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 
-test "the directories are the library, the queue's scratch, and the consume folder" {
-    try std.testing.expectEqual(9, dirs.len);
+test "the shared directories are the library and the consume folder" {
+    try std.testing.expectEqual(8, dirs.len);
     try std.testing.expectEqualStrings(data ++ "/consume", dirs[6]);
-    try std.testing.expectEqualStrings("/run/svc/paperless/tmp", dirs[8]);
 }
 
 test "ready and wait are the only arguments" {
@@ -140,4 +163,21 @@ test "ready and wait are the only arguments" {
     try std.testing.expectEqual(Mode.wait, try modeOf(&.{ "paperless-init", "wait" }));
     try std.testing.expectError(error.BadMode, modeOf(&.{ "paperless-init", "go" }));
     try std.testing.expectError(error.BadMode, modeOf(&.{ "paperless-init", "ready", "now" }));
+}
+
+test "an existing SQLite library blocks a new empty PostgreSQL archive" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try requirePostgresLibrary(io, tmp.dir, ".");
+    try tmp.dir.writeFile(io, .{ .sub_path = "db.sqlite3", .data = "existing library" });
+    try std.testing.expectError(
+        error.SqliteMigrationRequired,
+        requirePostgresLibrary(io, tmp.dir, "."),
+    );
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "existing library",
+        try tmp.dir.readFile(io, "db.sqlite3", &buf),
+    );
 }
