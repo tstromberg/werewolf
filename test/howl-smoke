@@ -5,6 +5,11 @@
 # takes --build, this checkout's forms, so none needs werewolf's repository.
 howl=$1 smoke=$2/adhoc/smoke
 fail() { echo "howl-smoke: $1"; exit 1; }
+"$howl" versions -h >/dev/null 2>&1 || fail "howl versions -h"
+out=$("$howl" run --with playground --version 20261014T232908Z --build 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q -- '--version requires' || fail "version silently selected a source build"
+out=$("$howl" create version-check --with playground --version ../image 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q -- '--version takes' || fail "create accepted a version path"
 "$howl" run --build -h >/dev/null 2>&1 || fail "howl run -h"
 "$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
 "$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"

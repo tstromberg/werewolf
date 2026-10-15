@@ -13,8 +13,10 @@ shows the chains.
 [forms-catalog.md](forms-catalog.md) lists every form. Each boots the same
 way: stage0 opens its `root.erofs` read-only through dm-verity and hands over
 to init ([design/verified-boot.md](design/verified-boot.md)). `DEV=1` adds
-busybox and a console shell to any form, for finding out why something does
-not work; what ships is built without it.
+busybox and a console shell to any form. Howl's `--dev` also layers in root
+SSH using a local Ed25519 key managed under `$XDG_DATA_HOME/howl/keys/dev/`;
+`howl ssh` selects that key for the VM. These are local debugging conveniences,
+and what ships is built without them.
 
 ## The runtime forms
 

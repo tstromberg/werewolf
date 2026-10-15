@@ -31,7 +31,7 @@ def draft(targets, trust='release/protected'):
     if not manifests or len({m['provenance']['run'] for m in manifests}) != 1:
         raise ValueError('a release carries the bundles of one workflow run')
     serial = max(m['serial'] for m in manifests)
-    tag = 'protected-' + serial
+    tag = 'base-images-' + serial
     provenance = manifests[0]['provenance']
     lines = []
     for m in manifests:
@@ -40,7 +40,7 @@ def draft(targets, trust='release/protected'):
             m['form'], m['provider'], m['arch'], m['descriptor'])
         lines.append('- `%s`, serial %s: [R2 bundle](%s/boot.json), evidence `%s-gates.json`, '
                      'manifest `%s-downloads.json`.' % (prefix, m['serial'], mirror, prefix, prefix))
-    notes = ('Protected images built from %s in [GitHub Actions](%s).\n\n%s\n\n'
+    notes = ('Base images built from %s in [GitHub Actions](%s).\n\n%s\n\n'
              'Each boot/image manifest and detached signature is byte-identical to its R2 bundle. '
              'Each standalone qcow2 has the same disk contents as the authenticated compressed raw disk; '
              'its size and SHA-256 are covered by the target\'s downloads manifest and RSA/SHA-256 signature.\n\n'
@@ -53,7 +53,7 @@ def draft(targets, trust='release/protected'):
         body = Path(temporary) / 'notes.md'
         body.write_text(notes)
         command(['gh', 'release', 'create', tag, '--draft', '--target', provenance['commit'],
-                 '--title', 'Protected images ' + serial, '--notes-file', str(body),
+                 '--title', 'Base images ' + serial, '--notes-file', str(body),
                  *[str(path) for path in assets]])
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:
         output.write('tag=' + tag + '\n')

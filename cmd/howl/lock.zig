@@ -129,9 +129,21 @@ pub fn inputs(io: Io, gpa: Allocator, s: native.Spec) ![64]u8 {
     if (s.published) {
         if (std.mem.findScalar(u8, s.form, '/') != null)
             frame(&h, &try formHash(io, gpa, s.form));
+        if (s.dev) {
+            var failure: forms.Failure = .{};
+            const dev_chain = try forms.chain(io, gpa, Dir.cwd(), "sshd", &failure);
+            for (dev_chain) |fm| {
+                frame(&h, fm.name);
+                frame(&h, &try formHash(io, gpa, fm.dir));
+            }
+        }
     } else {
         var why: forms.Failure = .{};
-        const chain = try forms.chain(io, gpa, Dir.cwd(), s.form, &why);
+        var chain = try forms.chain(io, gpa, Dir.cwd(), s.form, &why);
+        if (s.dev) {
+            var dev_why: @import("howl.zig").Why = .{};
+            chain = try @import("howl.zig").addDevSsh(io, gpa, chain, &dev_why);
+        }
         for (chain) |fm| {
             frame(&h, fm.name);
             frame(&h, &try formHash(io, gpa, fm.dir));

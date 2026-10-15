@@ -40,32 +40,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
-        # The groups of make check (Makefile): forms is every form booted;
-        # shellfree every form rebuilt and booted as it ships; integrity the
-        # slot, its unsigned refusal and verity; cloud the metadata, no-data
-        # and lease boots, and on x86_64 the ad-hoc form, whose OCI image is
-        # pulled; persist the UEFI-firmware power-cut run (skipped
-        # on emulated arm). x86_64 runs them all under KVM. arm64 has no
-        # KVM, so rather than emulate every form it runs them natively under
-        # systemd-nspawn (native, test/cage); integrity and cloud still
-        # emulate minimal and prod there, asserting the kernel, boot-chain
-        # and attack checks a container cannot carry. forms, shellfree and
-        # native each split over runners (SHARD=K/N): 19 jobs in all, under
-        # the account's 20 at once, so none waits for another to end.
+        # The groups of make check (Makefile), on x86_64 under KVM: forms is
+        # every form booted; shellfree every form rebuilt and booted as it
+        # ships; integrity the slot, verity and the deadman; cloud the
+        # metadata, no-data and lease boots and the ad-hoc form, whose OCI
+        # image is pulled; persist the UEFI-firmware power-cut run. forms and
+        # shellfree split over runners (SHARD=K/N). arm64 runs every group
+        # under KVM on the self-hosted runner (vm-arm64), so these 10 jobs
+        # leave room in the account's 20 hosted at once for kernel-build's
+        # and glibc-build's publishes.
         group: [integrity, cloud, persist]
         include:
-          - { runner: ubuntu-26.04-arm, group: native, shard: 1, shards: 3 }
-          - { runner: ubuntu-26.04-arm, group: native, shard: 2, shards: 3 }
-          - { runner: ubuntu-26.04-arm, group: native, shard: 3, shards: 3 }
-          - { runner: ubuntu-26.04, group: forms, shard: 1, shards: 4 }
-          - { runner: ubuntu-26.04, group: forms, shard: 2, shards: 4 }
-          - { runner: ubuntu-26.04, group: forms, shard: 3, shards: 4 }
-          - { runner: ubuntu-26.04, group: forms, shard: 4, shards: 4 }
-          - { runner: ubuntu-26.04, group: shellfree, shard: 1, shards: 3 }
-          - { runner: ubuntu-26.04, group: shellfree, shard: 2, shards: 3 }
-          - { runner: ubuntu-26.04, group: shellfree, shard: 3, shards: 3 }
-    runs-on: ${{ matrix.runner }}
+          - { group: forms, shard: 1, shards: 4 }
+          - { group: forms, shard: 2, shards: 4 }
+          - { group: forms, shard: 3, shards: 4 }
+          - { group: forms, shard: 4, shards: 4 }
+          - { group: shellfree, shard: 1, shards: 3 }
+          - { group: shellfree, shard: 2, shards: 3 }
+          - { group: shellfree, shard: 3, shards: 3 }
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -105,7 +98,7 @@ jobs:
         # The groups that build every form build the compiled tutorial
         # applications, which compile on the host (cmd/howl/app.zig) for an
         # image with no toolchain.
-        if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
+        if: matrix.group == 'forms' || matrix.group == 'shellfree'
         run: |
           command -v javac || sudo apt-get install -y default-jdk-headless
           test/ci-compilers
@@ -117,7 +110,7 @@ jobs:
       # stamps are touched to say the packages are current.
       - name: Restore melange packages
         id: melange
-        if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
+        if: matrix.group == 'forms' || matrix.group == 'shellfree'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
@@ -131,20 +124,11 @@ jobs:
         # A boot a CPU: a guest has two (CHECK_QEMU's -smp 2) but spends
         # most of its seconds waiting on its services, so four at once on
         # four CPUs keep them busy. The forms jobs check demo, so persist
-        # need not first (PERSIST_AFTER). The runner is thrown away after,
-        # so test/cage may raise its link and memfd sysctls to werewolf's
-        # own, and the native attacks on them run for real.
-        env:
-          CAGE_HARDEN_HOST: 1
+        # need not first (PERSIST_AFTER).
         run: make -k -j"$(nproc)" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
-      # x86 form checks already include these suites. ARM's ordinary form
-      # checks use nspawn, so also boot the native clients once under QEMU.
-      - name: Shell-free integration clients and persistent data
-        if: matrix.group == 'native' && matrix.shard == 1
-        run: make check-native-tests
-      # One job an architecture saves the Zig cache, when this week's has
-      # no entry for these sources yet: every check job compiles the same
-      # programs, and integrity is off the critical path.
+      # integrity saves the Zig cache, when this week's has no entry for
+      # these sources yet: every check job compiles the same programs, and
+      # integrity is off the critical path.
       - name: Save the Zig cache
         if: always() && matrix.group == 'integrity' && steps.zig.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -185,11 +169,11 @@ jobs:
             build/*/check/**/*.log
             build/*/check/*-native/results.json
 
-  # arm64 forms as VMs, as x86_64 boots them. Hosted arm runners have no KVM,
-  # so the check job runs arm64 forms in containers on the runner's own
-  # kernel; this job boots werewolf's kernel and every form under KVM on the
-  # self-hosted runner vars.WEREWOLF_ARM64_CHECK_RUNNER names (a JSON list of
-  # labels). It is never form-images' runner, which holds the protected image
+  # arm64's whole check, as x86_64's: hosted arm runners have no KVM, so this
+  # job boots werewolf's kernel and every form under KVM on the self-hosted
+  # runner vars.WEREWOLF_ARM64_CHECK_RUNNER names (a JSON list of labels).
+  # Outside contributors' pull requests skip it and check x86_64 alone; when
+  # the runner is offline, the job waits for it. It is never form-images' runner, which holds the protected image
   # key: a pull request can rewrite this file, so the condition below is not
   # what keeps others' code off the machine; GitHub's approval of outside
   # contributors' runs is. The runner's account has no sudo and reaches
@@ -202,7 +186,7 @@ jobs:
     # The fallback is never used (the if needs the variable); it keeps an unset
     # variable from failing the workflow should runs-on be evaluated anyway.
     runs-on: ${{ fromJSON(vars.WEREWOLF_ARM64_CHECK_RUNNER || '["ubuntu-26.04-arm"]') }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -233,13 +217,25 @@ jobs:
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
-      - name: Boot and check every form, and every form as it ships
+      - name: Boot and check every group
         # A boot a CPU, as the hosted jobs run them, but no more than memory
         # holds: a guest takes 1 GiB, or its form's check memory, up to 4.
         run: |
           jobs=$(awk -v cpus="$(nproc)" '/^MemAvailable:/ { n = int($2 / 4194304); if (n < 1) n = 1; print (n < cpus ? n : cpus) }' /proc/meminfo)
           echo "vm-arm64: $jobs boots at once"
-          make -k -j"$jobs" check-forms check-shellfree
+          make -k -j"$jobs" check-forms check-shellfree check-integrity check-cloud check-persist
+      # arm64's only job saves its melange packages, as the check job's
+      # forms jobs do x86_64's: saved even when a check fails.
+      - name: Save melange packages
+        if: >-
+          always() && steps.melange.outcome == 'success' && steps.melange.outputs.cache-hit != 'true'
+          && hashFiles('build/vendor/stamps/**') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            build/vendor/packages
+            build/vendor/stamps
+          key: ${{ steps.melange.outputs.cache-primary-key }}
       - name: Keep the build and console logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

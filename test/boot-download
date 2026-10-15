@@ -59,7 +59,7 @@ class Downloads(unittest.TestCase):
             boot_certificate=hashlib.sha256(der).hexdigest(), permit_host='192.168.5.2', permit_port=9443, pcr11='2' * 64)
         self.manifest['configuration'] = dict(form='playground', interface=dict(files=[], settings=[]),
             ports=[22], dhcp=True, ssh='files', lima_managed=True)
-        self.calls, self.verifications = [], []
+        self.calls, self.urls, self.verifications = [], [], []
         self.fault = None
         self.validator = dict(version='test-validator')
         self.now = datetime.datetime(2026, 10, 13, 1, tzinfo=datetime.timezone.utc).timestamp()
@@ -75,6 +75,9 @@ class Downloads(unittest.TestCase):
 
     def fetch(self, url, path, limit, expected=None):
         name = url.rsplit('/', 1)[1]
+        if '/releases/download/' in url:
+            name = name.removeprefix('playground-lima-aarch64-')
+        self.urls.append(url)
         self.calls.append(name)
         raw = self.payloads[name]
         if self.fault == name:
@@ -111,6 +114,80 @@ class Downloads(unittest.TestCase):
         self.assertEqual(bytes([1] * 32), (first / 'slot/release.id').read_bytes())
         self.assertEqual((first / 'slot/vmlinuz').stat().st_ino,
                          (first / 'prebuilt/aarch64' / self.manifest['image']['build'] / 'vmlinuz').stat().st_ino)
+
+    def test_explicit_old_version_preserves_latest_floor_and_updates_still_advance(self):
+        latest = self.download()
+        latest_floor = self.floors()[0]
+        original = latest_floor.read_bytes()
+        self.request['version'] = 'base-images-20261012T000000Z'
+        self.manifest['image']['serial'] = '20261012T000000Z'
+        self.publish()
+        old = self.download()
+        self.assertNotEqual(latest, old)
+        self.assertEqual(original, latest_floor.read_bytes())
+        self.assertEqual(2, len(self.floors()))
+        self.assertTrue(any('/releases/download/base-images-20261012T000000Z/' in url for url in self.urls))
+        count = len(self.calls)
+        self.assertEqual(old, self.download())
+        self.assertEqual(count, len(self.calls))
+        del self.request['version']
+        self.manifest['image']['serial'] = '20261013T010000Z'
+        self.publish()
+        self.download(self.now + 301)
+        self.assertEqual('20261013T010000Z', json.loads(latest_floor.read_text())['serial'])
+
+    def test_timestamp_falls_back_only_for_missing_new_tag(self):
+        self.request['version'] = '20261013T000000Z'
+        urls = []
+        def transport(url, path, limit, expected=None):
+            urls.append(url)
+            if '/base-images-' in url:
+                raise ValueError('not published (HTTP 404)')
+            return self.fetch(url, path, limit, expected)
+        downloads.download(self.request, self.admit, self.verify, self.validator, transport, self.now)
+        self.assertIn('/base-images-20261013T000000Z/', urls[0])
+        self.assertTrue(all('/protected-20261013T000000Z/' in url for url in urls[1:]))
+
+    def test_versioned_downloads_still_require_vendor_signatures(self):
+        self.request['version'] = 'protected-20261013T000000Z'
+        self.publish('foreign')
+        with self.assertRaisesRegex(ValueError, 'BadSignature'):
+            self.download()
+        self.assertEqual(['boot.json.sig', 'boot.json'], self.calls)
+        self.assertEqual([], self.floors())
+
+    def test_version_is_never_a_path_or_arbitrary_url(self):
+        for version in ('', 'latest', '../older', 'https://foreign.test/image',
+                        'base-images-20261013T000000Z/../other'):
+            self.request['version'] = version
+            with self.assertRaises(ValueError):
+                self.download()
+        self.assertEqual([], self.calls)
+
+    def test_version_discovery_paginates_and_filters_complete_matching_targets(self):
+        prefix = 'playground-lima-aarch64-'
+        assets = [dict(name=prefix + name) for name in downloads.FILES +
+                  ('boot.json', 'boot.json.sig', 'latest.json', 'latest.json.sig', 'disk.img.zst')]
+        def release(tag, **changes):
+            return dict(dict(tag_name=tag, draft=False, prerelease=False, assets=assets), **changes)
+        pages = [
+            [release('base-images-20261013T000000Z'),
+             release('protected-20261012T000000Z'),
+             release('base-images-20261014T000000Z', draft=True),
+             release('base-images-20261015T000000Z', prerelease=True),
+             release('base-images-20261011T000000Z', assets=assets[:-1]),
+             release('20261010T000000Z')] + [release('legacy')] * 94,
+            [release('base-images-20261016T000000Z')],
+        ]
+        urls = []
+        def transport(url, path, limit):
+            urls.append(url)
+            path.write_text(json.dumps(pages[len(urls) - 1]))
+        self.assertEqual(['base-images-20261016T000000Z', 'base-images-20261013T000000Z',
+                          'protected-20261012T000000Z'],
+                         downloads.versions('playground', 'lima', 'aarch64', transport))
+        self.assertEqual(2, len(urls))
+        self.assertTrue(urls[1].endswith('page=2'))
 
     def test_foreign_or_modified_heads_fetch_no_artifacts_and_create_no_floor(self):
         for change in ('foreign', 'modified'):

@@ -1038,10 +1038,17 @@ fn plan(
     names: []const u8,
 ) !B {
     var f: forms.Failure = .{};
-    const chain = forms.chainIn(io, gpa, Dir.cwd(), names, s.form, &f) catch |err| switch (err) {
+    var chain = forms.chainIn(io, gpa, Dir.cwd(), names, s.form, &f) catch |err| switch (err) {
         error.Form => return steps.fail(f.text),
         else => |e| return e,
     };
+    if (s.dev) {
+        var dev_why: howl.Why = .{};
+        chain = howl.addDevSsh(io, gpa, chain, &dev_why) catch |err| switch (err) {
+            error.Refused => return steps.fail(dev_why.text),
+            else => |e| return e,
+        };
+    }
     const name = chain[chain.len - 1].name;
     var from_repo: std.ArrayList([]const u8) = .empty;
     if (s.published) for (chain) |c| {

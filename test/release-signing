@@ -83,7 +83,7 @@ class ReleaseSigning(unittest.TestCase):
         self.assertNotIn('PRIVATE_SENTINEL_DO_NOT_LOG', result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which('jq'), 'release selection integration requires jq')
-    def test_legacy_comparison_finds_release_beyond_a_page_of_protected_tags(self):
+    def test_legacy_comparison_finds_release_beyond_a_page_of_base_image_tags(self):
         with tempfile.TemporaryDirectory(prefix='ww-release-selection-') as temporary:
             root = Path(temporary)
             dist, binaries = root / 'dist', root / 'bin'
@@ -93,7 +93,8 @@ class ReleaseSigning(unittest.TestCase):
             manifest.write_text('{\n  "build": "unchanged",\n  "kernel": "unchanged"\n}\n')
             pages = root / 'pages.json'
             pages.write_text(json.dumps([
-                [dict(draft=False, tag_name='protected-20261014T000000Z') for _ in range(100)],
+                [dict(draft=False, tag_name=prefix + '20261014T000000Z')
+                 for prefix in ('protected-', 'base-images-') for _ in range(50)],
                 [dict(draft=True, tag_name='20261012T000000Z'), dict(draft=False, tag_name='20261010T091704Z')]]))
             fake = binaries / 'gh'
             fake.write_text('''#!/usr/bin/env python3

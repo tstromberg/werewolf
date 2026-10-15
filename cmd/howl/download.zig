@@ -35,6 +35,18 @@ pub fn latest(
     arch: howl.Arch,
     why: *howl.Why,
 ) !boot.Request {
+    return selected(io, gpa, form, provider, arch, null, why);
+}
+
+pub fn selected(
+    io: Io,
+    gpa: Allocator,
+    form: []const u8,
+    provider: howl.Platform,
+    arch: howl.Arch,
+    version: ?[]const u8,
+    why: *howl.Why,
+) !boot.Request {
     if (!@import("form").isName(form)) return why.refuse(
         "protected downloads require a published form name; use --build for a custom image",
         .{},
@@ -63,7 +75,8 @@ pub fn latest(
         .form = form,
         .provider = @tagName(provider),
         .arch = @tagName(arch),
-    }, .{}), why);
+        .version = version,
+    }, .{ .emit_null_optional_fields = false }), why);
     const result = try std.process.run(gpa, io, .{
         .argv = &.{ "python3", script, try std.process.executablePathAlloc(io, gpa), config },
         .stdout_limit = .limited(32 << 10),
@@ -76,4 +89,80 @@ pub fn latest(
     const request = try std.json.parseFromSliceLeaky(boot.Request, gpa, result.stdout, .{});
     if (!std.mem.eql(u8, request.channel, channel)) return error.WrongImageChannel;
     return request;
+}
+
+pub fn validVersion(tag: []const u8) bool {
+    const serial = std.mem.cutPrefix(u8, tag, "base-images-") orelse
+        std.mem.cutPrefix(u8, tag, "protected-") orelse tag;
+    if (serial.len != 16 or serial[8] != 'T' or serial[15] != 'Z') return false;
+    for (serial, 0..) |c, i| {
+        if (i != 8 and i != 15 and !std.ascii.isDigit(c)) return false;
+    }
+    return true;
+}
+
+/// versions lists releases carrying a complete bundle for one deployment target.
+pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
+    var form: []const u8 = "playground";
+    var provider: ?howl.Platform = null;
+    var arch = howl.hostArch();
+    var json = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--json")) {
+            json = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help")) {
+            return Io.File.stdout().writeStreamingAll(
+                io,
+                "usage: howl versions [--with FORM] [--on qemu|lima] [--arch ARCH] [--json]\n" ++
+                    "List base image releases; install with run/create --version SERIAL|TAG.\n",
+            );
+        }
+        const flag, const value = try howl.flagValue(args, &i, why);
+        if (std.mem.eql(u8, flag, "--with")) {
+            form = value;
+        } else if (std.mem.eql(u8, flag, "--on")) {
+            provider = std.meta.stringToEnum(howl.Platform, value) orelse
+                return why.refuse("--on {s}: versions supports qemu or lima", .{value});
+        } else if (std.mem.eql(u8, flag, "--arch")) {
+            arch = howl.archName(value) orelse return why.refuse(
+                "unknown architecture {s}",
+                .{value},
+            );
+        } else return why.refuse("{s}: versions takes --with, --on, --arch and --json", .{flag});
+    }
+    if (!@import("form").isName(form)) return why.refuse(
+        "versions requires one published form name",
+        .{},
+    );
+    const on = howl.engine(io, gpa, provider).on;
+    if (on != .qemu and on != .lima) return why.refuse("versions supports qemu or lima", .{});
+    const root = "build/boot-download";
+    try Dir.cwd().createDirPath(io, root);
+    const script = root ++ "/boot-download";
+    try howl.writePrivate(io, gpa, script, files.boot_download, why);
+    const target = @tagName(arch orelse return error.UnsupportedHostArch);
+    const provider_name = @tagName(on);
+    const format = if (json) "json" else "text";
+    const result = try std.process.run(gpa, io, .{
+        .argv = &.{ "python3", script, "versions", form, provider_name, target, format },
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(8192),
+    });
+    if (result.term != .exited or result.term.exited != 0)
+        return why.refuse(
+            "image version discovery failed: {s}",
+            .{std.mem.trim(u8, result.stderr, "\n ")},
+        );
+    try Io.File.stdout().writeStreamingAll(io, result.stdout);
+}
+
+test "image versions are release tags, never paths or URLs" {
+    try std.testing.expect(validVersion("protected-20261014T232908Z"));
+    try std.testing.expect(validVersion("base-images-20261014T232908Z"));
+    try std.testing.expect(validVersion("20261014T232908Z"));
+    for ([_][]const u8{ "", "latest", "protected-../x", "protected-20261014T232908Z/a" }) |tag|
+        try std.testing.expect(!validVersion(tag));
 }

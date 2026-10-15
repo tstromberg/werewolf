@@ -139,7 +139,7 @@ class ProtectedExport(unittest.TestCase):
         self.assertIn('--draft', argv)
         self.assertEqual('a' * 40, argv[argv.index('--target') + 1])
         self.assertEqual({str(path.resolve()) for path in self.copy.iterdir()}, set(argv[-len(list(self.copy.iterdir())):]))
-        self.assertEqual('protected-' + self.manifest['image']['serial'], tag)
+        self.assertEqual('base-images-' + self.manifest['image']['serial'], tag)
         self.assertEqual('tag=' + tag + '\n', (self.work / 'outputs').read_text())
 
     def test_github_never_uploads_extra_or_tampered_files(self):

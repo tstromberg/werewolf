@@ -34,15 +34,17 @@ const json = std.json;
 
 pub const usage =
     \\usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--published] [--json]   browse forms; an exact name shows setup and commands
+    \\       howl versions [--with FORM] [--on qemu|lima] [--arch ARCH] [--json]   available base image releases
     \\       howl build --with FORM,... [--build] [--disable=secureboot,tpm,ipe] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl test --with FORM [--arch ARCH]   run integration and production-variant boot checks from this checkout
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] " ++
+    "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] " ++
+    "[--size TYPE] " ++
     "[--allow-from me|CIDR] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -90,6 +92,7 @@ pub fn main(init: std.process.Init) void {
             @"build-apk",
             form,
             forms,
+            versions,
             _build,
             _bhyve,
             _firecracker,
@@ -122,6 +125,7 @@ pub fn main(init: std.process.Init) void {
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
         .form => adhoc.form(io, gpa, args[2..], &why),
         .forms => @import("discovery.zig").command(io, gpa, args[2..], &why),
+        .versions => @import("download.zig").versions(io, gpa, args[2..], &why),
         // Internal: the Makefile's image targets (build.zig).
         ._build => native.buildTargets(io, gpa, args[2..], &why),
         .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
@@ -294,6 +298,40 @@ pub fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms
         error.Form => why.refuse("{s}", .{f.text}),
         error.OutOfMemory => error.OutOfMemory,
     };
+}
+
+/// devChain adds local developer SSH to a form while keeping that form last
+/// in the chain, so its name and service declarations remain authoritative.
+pub fn devChain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
+    const original = try chain(io, gpa, form, why);
+    return addDevSsh(io, gpa, original, why);
+}
+
+/// addDevSsh layers local developer SSH into an already-resolved form chain.
+pub fn addDevSsh(io: Io, gpa: Allocator, original: []const forms.Form, why: *Why) ![]const forms.Form {
+    var failure: forms.Failure = .{};
+    const access = forms.chain(io, gpa, Dir.cwd(), "sshd", &failure) catch |err| switch (err) {
+        error.Form => return why.refuse("{s}", .{failure.text}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    var out: std.ArrayList(forms.Form) = .empty;
+    const top = original[original.len - 1];
+    for (original[0 .. original.len - 1]) |f| try out.append(gpa, f);
+    for (access) |f| {
+        if (std.mem.eql(u8, f.dir, top.dir)) continue;
+        var seen = false;
+        for (out.items) |have| if (std.mem.eql(u8, have.dir, f.dir)) {
+            seen = true;
+            break;
+        };
+        if (!seen) try out.append(gpa, f);
+    }
+    const algorithm: forms.Node = .{ .scalar = .{ .raw = "ssh-ed25519", .text = "ssh-ed25519" } };
+    const dev_settings: forms.Node = .{ .map = &.{.{ .key = "pubkey-accepted-algorithms", .value = algorithm }} };
+    const override = try forms.merge(gpa, .{ .map = &.{} }, .{ .map = &.{.{ .key = "sshd", .value = dev_settings }} });
+    const top_spec = try forms.merge(gpa, top.spec, override);
+    try out.append(gpa, .{ .name = top.name, .dir = top.dir, .spec = top_spec, .images = top.images });
+    return out.items;
 }
 
 /// interface returns the flags svcs declare in their `config`, `setting`
@@ -1084,6 +1122,11 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     );
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
     if (std.mem.eql(u8, verb, "create")) {
+        try row(
+            w,
+            "--version TAG",
+            "install a protected GitHub release; updates follow the latest channel",
+        );
         try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");
         try row(
             w,
@@ -1439,6 +1482,7 @@ const Launch = struct {
     dev: bool,
     local: bool,
     yes: bool,
+    version: ?[]const u8 = null,
     args: []const []const u8,
 
     pub fn protected(l: Launch) bool {
@@ -1453,9 +1497,19 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
     const yes, const before_disable = try takeFlag(gpa, more, &.{"--yes"});
     var args: std.ArrayList([]const u8) = .empty;
     var given: ?[]const u8 = null;
+    var version: ?[]const u8 = null;
     var i: usize = 0;
     while (i < before_disable.len) : (i += 1) {
         const a = before_disable[i];
+        if (std.mem.eql(u8, a, "--version") or std.mem.startsWith(u8, a, "--version=")) {
+            if (version != null) return why.refuse("--version given twice", .{});
+            _, version = try flagValue(before_disable, &i, why);
+            if (!@import("download.zig").validVersion(version.?)) return why.refuse(
+                "--version takes a timestamp or base-images-SERIAL release tag; use howl versions",
+                .{},
+            );
+            continue;
+        }
         if (!std.mem.eql(u8, a, "--disable") and !std.mem.startsWith(u8, a, "--disable=")) {
             try args.append(gpa, a);
             continue;
@@ -1471,11 +1525,16 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
             "without all three: --disable=" ++ every_protection,
         .{given.?},
     );
+    if (version != null and (from_tree or !disabled.eql(.empty))) return why.refuse(
+        "--version requires a protected image download; omit --build and --disable",
+        .{},
+    );
     return .{
         .disabled = disabled,
         .dev = dev,
         .local = from_tree,
         .yes = yes,
+        .version = version,
         .args = args.items,
     };
 }
@@ -1553,6 +1612,27 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     }) |line| try testing.expectError(error.Refused, launchFlags(arena.allocator(), line, &why));
 }
 
+test "versioned installs retain the download profile and reject conflicting modes" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: Why = .{};
+    const launch = try launchFlags(
+        arena.allocator(),
+        &.{ "playground", "--version=20261014T232908Z", "--on", "qemu" },
+        &why,
+    );
+    try testing.expectEqualStrings("20261014T232908Z", launch.version.?);
+    try testing.expect(launch.protected() and !launch.local);
+    try testing.expectEqualSlices([]const u8, &.{ "playground", "--on", "qemu" }, launch.args);
+    for ([_][]const []const u8{
+        &.{ "--version", "20261014T232908Z", "--build" },
+        &.{ "--version", "20261014T232908Z", "--disable=secureboot,tpm,ipe" },
+        &.{ "--version", "20261014T232908Z", "--version", "20261014T232908Z" },
+        &.{ "--version", "../image" },
+        &.{"--version"},
+    }) |line| try testing.expectError(error.Refused, launchFlags(arena.allocator(), line, &why));
+}
+
 /// madeOn returns the platform create recorded for name, or null.
 pub fn madeOn(io: Io, gpa: Allocator, name: []const u8) ?Platform {
     const path = gpa.print("{s}/engine", .{machineDir(gpa, name) catch return null}) catch
@@ -1600,12 +1680,13 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             "custom code requires --build; signed downloads deploy a published form",
             .{},
         );
-        o.boot_image = try @import("download.zig").latest(
+        o.boot_image = try @import("download.zig").selected(
             io,
             gpa,
             o.form,
             on,
             try localArch(why),
+            launch.version,
             why,
         );
         const descriptor = try @import("boot-image.zig").admitHead(
@@ -1711,7 +1792,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     else
         false;
     if (!given_keys) {
-        if (@import("boot-config.zig").forForm(o.form)) |definition| {
+        if (dev) {
+            o.own_keys = try keys.devPublic(io, gpa);
+        } else if (@import("boot-config.zig").forForm(o.form)) |definition| {
             if (definition.ssh != .disabled) o.own_keys = try keys.offerFor(
                 io,
                 gpa,
@@ -1776,6 +1859,13 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     const dir = try machineDir(gpa, name);
     try Dir.cwd().createDirPath(io, dir);
     try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), @tagName(on), why);
+    const dev_key_marker = try gpa.print("{s}/dev", .{dir});
+    if (dev and !given_keys) {
+        try writePrivate(io, gpa, dev_key_marker, "yes\n", why);
+    } else Dir.cwd().deleteFile(io, dev_key_marker) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return why.refuse("{s}: {s}", .{ dev_key_marker, @errorName(err) }),
+    };
     switch (on) {
         .qemu => try local.createQemu(io, gpa, o, name, tar, tell, why),
         .gcp => try cloud.createGcp(io, gpa, o, name, tar, w, why),
@@ -1795,6 +1885,18 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
 pub fn listens(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const u16 {
     if (@import("boot-config.zig").forForm(form)) |definition| return definition.ports;
     const c = try chain(io, gpa, form, why);
+    var f: forms.Failure = .{};
+    return forms.listens(gpa, c, &f) catch |err| switch (err) {
+        error.Form => why.refuse("{s}", .{f.text}),
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// listensDev reports the ports of a local developer VM, including its
+/// automatically added SSH service.
+pub fn listensDev(io: Io, gpa: Allocator, form: []const u8, dev: bool, why: *Why) ![]const u16 {
+    if (!dev) return listens(io, gpa, form, why);
+    const c = try devChain(io, gpa, form, why);
     var f: forms.Failure = .{};
     return forms.listens(gpa, c, &f) catch |err| switch (err) {
         error.Form => why.refuse("{s}", .{f.text}),
