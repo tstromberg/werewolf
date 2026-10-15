@@ -33,7 +33,7 @@ programs forward, so a fix to `fence` reached no `howl`-built machine.
 
 ## Detailed design
 
-The world file is the spec and apk is the solver: a host and machine resolve the same answer.
+The world file is the spec, apk the solver: host and machine resolve the same answer.
 
 **The image is its world.** The machine above has world `local-shop
 werewolf-format4`. `local-shop` depends on `prod-form`, `cloudflared-form`,
@@ -50,9 +50,9 @@ as two forms may ship one path; and in-tree melange recipes' packages. Each
 version is its commit's time, so a clean tree packs the same bytes. Every
 package depends on `werewolf-formatN`. CI never deletes one.
 
-**What is not published** (forms outside `forms/`, OCI trees, `--app`) stays
-in the image, and each update copies it forward from the running slot.
-With `updates.from`, [manifest apply](manifest.md) uses a persistent signed repository and format 3's `local-NAME`.
+**What is not published** (forms outside `forms/`, OCI trees, `--app`) stays in the
+image, copied forward from the running slot at each update. With `updates.from`,
+[manifest apply](manifest.md) uses a persistent signed repository and `local-NAME`.
 
 **What howl builds.** A form named is the published one, fetched and checked
 against the signed index (lib/apk.zig), which the machine updates; one not yet
@@ -79,9 +79,9 @@ a machine on N takes N's newest and logs `held` each check, until reinstalled.
    publishes changed programs, and a published machine took eight.
 3. Built: `NAME-form` packages, fetched by name; stage0 is a package; howl
    builds with no checkout, holding the tree's files it uses (files.zig).
-4. Declined 2026-10-10: an `@local` repository in the image, signed by a
-   throwaway key. It stores local content twice and adds signing machinery,
-   where copying forward is built and tested; manifest apply instead explicitly opts into a persistent key and remote repository.
+4. Declined 2026-10-10: an `@local` repository in the image, signed by a throwaway
+   key, stores local content twice and adds signing machinery where copying forward
+   is built and tested; manifest apply opts into a persistent key instead.
 5. Built: the release path is gone; releases serve installs.
 
 ## Drawbacks
@@ -106,10 +106,8 @@ an image CI booted first.
 malicious `werewolf-init` to every machine, so its private half lives only in
 a CI secret and offline. The updater refuses older versions, and a new slot
 boots once before it is kept. compose parses signed data as root, from
-packages whose binaries root runs anyway. The image's own repository is
-trusted through dm-verity, as copied files are today. The host can withhold
-or replay, never forge. apk following package-laid links as root remains a
-known gap.
+packages whose binaries root runs anyway. The host can withhold or replay,
+never forge. apk following package-laid links as root remains a known gap.
 
 ## Reliability Considerations
 

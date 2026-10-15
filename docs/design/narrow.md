@@ -37,7 +37,6 @@ leash cannot mount.
 narrow /usr/bin/ffmpeg pledge stdio rpath wpath proc
 narrow /usr/bin/ffmpeg read /data/svc/mastodon/media
 narrow /usr/bin/ffmpeg write /run/svc/mastodon-sidekiq
-narrow /usr/bin/ffmpeg memory 1024
 ```
 
 **The build.** PROGRAM is a path a `run` line names (leash checks it is an
@@ -54,21 +53,18 @@ leash parks the service without it. The application is pointed at it by its own 
 (`FFMPEG_BINARY`). The service may run leash and read its service file.
 
 **The run.** leash, run by the link (AT_EXECFN) as the service, inside its
-leash: closes at exec all descriptors but 0, 1 and 2; refuses root; reads
-`/etc/sv/NAME/service` if root's alone; builds a Landlock domain of a
-narrower floor (`/usr`, `/proc`, the CPU list, `/etc/ld.so.cache`,
-`/etc/localtime`, three devices), its paths, and the program and its loader
-to run, closing TCP, abstract sockets and signals; caps `RLIMIT_DATA`;
+leash: refuses root; reads `/etc/sv/NAME/service` if root's alone; builds a
+Landlock domain of a narrower floor (`/usr`, `/proc`, the CPU list,
+`/etc/ld.so.cache`, `/etc/localtime`, three devices), its paths, and the
+program and its loader to run, closing TCP, abstract sockets and signals;
 enters it; logs `leash: {"event":"narrow",...}` on stderr; pledges; and
-`execveat`s the program with its arguments and environment, less what the
-`secret` lines name. Domains and filters stack: the service's leash and the
-seal still hold. A refusal is a `"refused"` line on stderr and exit 1;
-refused calls and paths are audited as the service's are.
+`execveat`s the program with its arguments and environment. Domains and
+filters stack: the service's leash and the seal still hold. A refusal is a
+`"refused"` line on stderr and exit 1; refused calls and paths are audited
+as the service's are.
 
 ## Drawbacks
 
-- `memory` caps the private memory it maps, not resident memory: a child
-  cannot join a cgroup of its own without root. The service's still holds.
 - The service may still run the program unnarrowed: narrowing keeps the
   program from the service, not the service from the program.
 
@@ -90,8 +86,6 @@ refused calls and paths are audited as the service's are.
 | The program widens its leash | Its lines come from the dm-verity root; domains and filters only stack, under `no_new_privs`. |
 | The service escapes through leash | Unprivileged and not run by a link, leash refuses; by one, it only adds limits. |
 | The service fakes the narrowing, answering leash's calls from a seccomp listener | The seal refuses a listener once it holds (lib/seal.zig); posture's `kernel-seccomp-listener`. |
-| The service's secrets | Not in its environment; Landlock's ptrace scope hides the service's `/proc/PID/environ` and memory. |
-| A socket the service left open | Closed at exec; no socket promise, no TCP. |
 
 ## Reliability Considerations
 

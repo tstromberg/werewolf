@@ -4,7 +4,7 @@ const forms = @import("form");
 const howl = @import("howl.zig");
 
 const syntax = "usage: howl test --with FORM [--arch ARCH]\n" ++
-    "Builds and runs check-FORM and check-shellfree-FORM under QEMU.\n" ++
+    "Runs native clients where declared, otherwise legacy checks, plus production boot.\n" ++
     "Uses this checkout; logs remain in build/ARCH/check/.";
 
 pub fn command(
@@ -42,12 +42,29 @@ pub fn command(
     const manifest = try gpa.print("forms/{s}/form.yaml", .{name});
     std.Io.Dir.cwd().access(io, manifest, .{}) catch
         return why.refuse("no {s}; test one form from this checkout", .{manifest});
+    var legacy = false;
+    const native = blk: {
+        const path = try gpa.print("forms/{s}/test/native.json", .{name});
+        const raw = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 10)) catch |err| {
+            if (err == error.FileNotFound) break :blk false;
+            return why.refuse("{s}: {s}", .{ path, @errorName(err) });
+        };
+        const plan = std.json.parseFromSliceLeaky(
+            struct { legacy: bool = false },
+            gpa,
+            raw,
+            .{ .ignore_unknown_fields = true },
+        ) catch
+            return why.refuse("invalid native test plan: {s}", .{path});
+        legacy = plan.legacy;
+        break :blk true;
+    };
     const argv = &.{
         howl.make_cmd,
         "--no-print-directory",
         "-k",
         try gpa.print("ARCH={t}", .{target}),
-        try gpa.print("check-{s}", .{name}),
+        try gpa.print("check-{s}{s}", .{ if (native and !legacy) "native-tests-" else "", name }),
         try gpa.print("check-shellfree-{s}", .{name}),
     };
     // An outer make's dry-run flags or command-line overrides must not turn
@@ -55,7 +72,16 @@ pub fn command(
     var env = try howl.environ.clone(gpa);
     defer env.deinit();
     for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |key| _ = env.swapRemove(key);
-    howl.say(io, "testing {s} on {t}; logs in build/{t}/check/", .{ name, target, target });
+    howl.say(io, "testing {s} on {t} ({s}); logs in build/{t}/check/", .{
+        name,   target,
+        if (native and legacy)
+            "native clients plus legacy DEV checks"
+        else if (native)
+            "native clients, no DEV"
+        else
+            "legacy DEV checks",
+        target,
+    });
     const err = std.process.replace(io, .{ .argv = argv, .environ_map = &env });
     return why.refuse("{s}: {s}", .{ howl.make_cmd, @errorName(err) });
 }

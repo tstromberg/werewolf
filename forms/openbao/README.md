@@ -1,13 +1,16 @@
 # OpenBao - Hardened VM
 
-[OpenBao](https://openbao.org) stores secrets. You bring the TLS certificate, the unseal key, and an admin password. The form's manifest is [form.yaml](form.yaml).
+[OpenBao](https://openbao.org) stores secrets. You bring the TLS certificate, the unseal
+key, and an admin password. The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/openbao/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/openbao/index.html).
 
 ## Security Posture
 
 - OpenBao runs as its own user. The root is read-only. Secrets live on `/data`.
-- The unseal key, the certificate, and the admin password are files you pass in. They are not in the image.
+- The unseal key, the certificate, and the admin password are files you pass in. They
+  are not in the image.
 - The API listens on the address you name. There is no shell.
 
 ## Getting Started
@@ -25,7 +28,8 @@ printf '%s' 'a long admin password' >config/openbao/admin-password
 howl create openbao --with openbao --config config --api-addr https://bao.home.arpa:8200
 ```
 
-Initialize and unseal at `https://bao.home.arpa:8200`. The first steps are in [OpenBao's documentation](https://openbao.org/docs/concepts/seal/).
+Initialize and unseal at `https://bao.home.arpa:8200`. The first steps are in [OpenBao's
+documentation](https://openbao.org/docs/concepts/seal/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -41,11 +45,13 @@ howl create openbao --with openbao --on gcp --allow-from me --config config \
 	--api-addr https://bao.example.com:8200
 ```
 
-`--allow-from me` admits your address to port 8200. Use a certificate for the name clients will use.
+`--allow-from me` admits your address to port 8200. Use a certificate for the name
+clients will use.
 
 ### Importing data
 
-There is no database import. Initialize this server, then unseal it with the key file. A second create keeps the data disk and refuses a new import.
+There is no database import. Initialize this server, then unseal it with the key file. A
+second create keeps the data disk and refuses a new import.
 
 ### Known Quirks
 

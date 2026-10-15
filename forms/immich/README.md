@@ -1,16 +1,21 @@
 # Immich - Hardened VM
 
-A photo and video library, with the phone apps: [Immich](https://immich.app) 3, from the image the project publishes, with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
+A photo and video library, with the phone apps: [Immich](https://immich.app) 3, from the
+image the project publishes, with PostgreSQL, Valkey and Caddy. The form's manifest is
+[form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/immich/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/immich/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- Node and PostgreSQL may compile as they run. Named in `form.yaml`. The image's shell is not started.
+- Node and PostgreSQL may compile as they run. Named in `form.yaml`. The image's shell
+  is not started.
 
 ## Getting Started
 
@@ -23,7 +28,10 @@ howl create immich --with immich \
 	--admin-password admin-password
 ```
 
-Open `https://photos.home.arpa` and sign in as `me@example.com`. The password is in `admin-password`, 12 to 72 characters. The first start builds tables and loads place names before Caddy opens. The phone app uses the same URL. Libraries and albums are in [Immich's documentation](https://docs.immich.app/).
+Open `https://photos.home.arpa` and sign in as `me@example.com`. The password is in
+`admin-password`, 12 to 72 characters. The first start builds tables and loads place
+names before Caddy opens. The phone app uses the same URL. Libraries and albums are in
+[Immich's documentation](https://docs.immich.app/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -34,22 +42,29 @@ howl create immich --with immich --on gcp --allow-from me \
 	--admin-name 'Your Name' --admin-password admin-password
 ```
 
-Sign in at `https://photos.example.com`. The library, thumbnails and nightly database dumps are in `/data/svc/immich`.
+Sign in at `https://photos.example.com`. The library, thumbnails and nightly database
+dumps are in `/data/svc/immich`.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
+in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The
+same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
 
 ```sh
 howl create immich --with immich --import ./dump
 ```
 
-Files the application stores itself are not on that disk. Bring those through the service after it is up.
+Files the application stores itself are not on that disk. Bring those through the
+service after it is up.
 
 ### Known Quirks
 
-- There is no sign-up page. The administrator is made from the config, and adds everyone else.
-- Version checks, telemetry and machine learning are off. Face recognition is not in this form.
+- There is no sign-up page. The administrator is made from the config, and adds everyone
+  else.
+- Version checks, telemetry and machine learning are off. Face recognition is not in
+  this form.
 - Search uses pgvector, which Immich accepts in place of VectorChord.
 - Immich 4 would be a change to this form. A 3.x release follows the next image.
 - The image is large. Give the machine several gigabytes.

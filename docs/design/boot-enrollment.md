@@ -43,14 +43,14 @@ Native mode refuses ambiguous selectors, unexpected EFI paths and missing state.
 
 ### Host enrollment
 
-The host keeps its boot key at mode 0600 beside private machine state.
-It signs systemd-boot and the UKI before constructing the disk. New local QEMU
-machines use Secure Boot firmware and per-machine enrolled variable storage.
-Existing disks retain their enrollment; missing keys or variables fail closed.
-`WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` select a channel-compatible signer.
-Firmware discovery and enrollment use local packages, or the existing Linux
-build VM on macOS. Plain firmware is not a silent fallback for new machines. Cloud builds retain
-private per-machine disk outputs; a build lock protects shared intermediates.
+The host keeps its boot key at mode 0600 beside private machine state. It signs
+systemd-boot and the UKI before constructing the disk. New local QEMU machines use
+Secure Boot firmware and per-machine enrolled variable storage. Existing disks retain
+their enrollment; missing keys or variables fail closed. `WEREWOLF_BOOT_KEY` and
+`WEREWOLF_BOOT_CRT` select a channel-compatible signer. Firmware discovery and
+enrollment use local packages, or the existing Linux build VM on macOS. Plain firmware
+is not a silent fallback for new machines. Cloud builds retain private per-machine disk
+outputs; a build lock protects shared intermediates.
 
 The QEMU command attaches firmware code read-only and variable state separately.
 On x86, SMM isolates authenticated variable writes. Arm enrollment flash is
@@ -64,11 +64,11 @@ a host-verified direct launch would require a separate trust design.
 
 ### Protected rollback
 
-TPM policy must keep the current and retained last-known-good releases bootable.
-A healthy commit preserves its predecessor; retire releases when replacing that fallback.
-Signed boot identity must match protected authorization before handover.
-The [exact-pair retirement protocol](tpm-ab-retirement.md) replaces the serial prototype.
-Its opt-in guest checks, provisioning and actual QEMU x86_64 power cuts are verified.
+TPM policy must keep the current and retained last-known-good releases bootable. A
+healthy commit preserves its predecessor; retire releases when replacing that fallback.
+Signed boot identity must match protected authorization before handover. The [exact-pair
+retirement protocol](tpm-ab-retirement.md) replaces the serial prototype. Its opt-in
+guest checks, provisioning and actual QEMU x86_64 power cuts are verified.
 
 Guest root must not replace the protected anchor, clear the TPM, or provision
 a replacement index with weaker permissions. Hierarchy credentials remain on
@@ -78,14 +78,14 @@ Unprovisioned devices fail mandatory boot and cannot pass protected-rollback pos
 
 ### Clouds
 
-AWS AMIs can carry enrolled UEFI data. GCP images accept signature databases.
-Those paths must bind the certificate to the signed disk and enable enforcement
-on the instance. Azure uses a specialized TrustedLaunchSupported gallery definition and a
+AWS AMIs can carry enrolled UEFI data. GCP images accept signature databases. Those
+paths must bind the certificate to the signed disk and enable enforcement on the
+instance. Azure uses a specialized TrustedLaunchSupported gallery definition and a
 version with NoSignatureTemplate plus our PK/KEK/db, then enables Trusted Launch.
-Uploads verify the actual loader and UKI against their certificate first.
-Azure requests explicitly use JSON and read back the exact enrollment before launch.
-Tests distinguish argument construction from live firmware acceptance.
-Azure firmware inconsistently reports SetupMode=1; reliable deployment remains blocked.
+Uploads verify the actual loader and UKI against their certificate first. Azure requests
+explicitly use JSON and read back the exact enrollment before launch. Tests distinguish
+argument construction from live firmware acceptance. Azure firmware inconsistently
+reports SetupMode=1; reliable deployment remains blocked.
 
 ## Drawbacks
 
@@ -109,12 +109,12 @@ actual device commands and hierarchy reset paths, not just serial comparisons.
 
 ## Reliability Considerations
 
-Initial tests use disposable keys, cloned variables and local TPM state.
-They prove A/B updates, tamper, unsigned image, wrong signer and loader-option
-override rejection. QEMU x86_64 TPM-gated boots refuse retired releases, missing
-TPMs and unmeasured UKIs. Power cuts preserve B; commit and operator rollback retain
-both members. Lima arm64 and Linux QEMU are verified.
-Cloud enrollment follows the proposed [TPM bootstrap design](cloud-tpm-enrollment.md).
-References: [systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml),
-[QEMU variables](https://www.qemu.org/docs/master/devel/uefi-vars.html),
-[GCP enrollment](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images).
+Initial tests use disposable keys, cloned variables and local TPM state. They prove A/B
+updates, tamper, unsigned image, wrong signer and loader-option override rejection. QEMU
+x86_64 TPM-gated boots refuse retired releases, missing TPMs and unmeasured UKIs. Power
+cuts preserve B; commit and operator rollback retain both members. Lima arm64 and Linux
+QEMU are verified. Cloud enrollment follows the proposed [TPM bootstrap
+design](cloud-tpm-enrollment.md). References:
+[systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml), [QEMU
+variables](https://www.qemu.org/docs/master/devel/uefi-vars.html), [GCP
+enrollment](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images).

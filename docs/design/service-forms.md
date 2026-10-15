@@ -1,10 +1,10 @@
 # Service forms
 
-Proposed, 2026-10-07. Built: `caddy`, `valkey`, `openbao`, `step-ca`,
-`wordpress`, `bastion` and `tailscale` (forms/NAME/README.md); `haproxy`,
-`mariadb-local`, `mariadb-tcp`, `wordpress-mariadb` and `valkey-tcp` 2026-10-10. `unbound` and `wireguard`
-wait (below), on [listen-udp.md](listen-udp.md).
-What follows them is [forms-catalog.md](forms-catalog.md).
+Proposed, 2026-10-07. Built: `caddy`, `valkey`, `openbao`, `step-ca`, `wordpress`,
+`bastion` and `tailscale` (forms/NAME/README.md); `haproxy`, `mariadb-local`,
+`mariadb-tcp`, `wordpress-mariadb` and `valkey-tcp` 2026-10-10. `unbound` and
+`wireguard` wait (below), on [listen-udp.md](listen-udp.md). What follows them is
+[forms-catalog.md](forms-catalog.md).
 
 ## Summary
 

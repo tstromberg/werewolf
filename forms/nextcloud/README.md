@@ -1,12 +1,15 @@
 # Nextcloud - Hardened VM
 
-Files, calendars and contacts for a household: [Nextcloud](https://nextcloud.com) 35, with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
+Files, calendars and contacts for a household: [Nextcloud](https://nextcloud.com) 35,
+with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/nextcloud/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/nextcloud/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -23,7 +26,10 @@ howl create nextcloud --with nextcloud \
 	--admin-password admin-password
 ```
 
-Open `https://cloud.home.arpa` and sign in as `alice`. The password is in `admin-password`. The first start installs Nextcloud before the site answers. Phone and desktop apps use the same URL. Clients are in [Nextcloud's documentation](https://docs.nextcloud.com/).
+Open `https://cloud.home.arpa` and sign in as `alice`. The password is in
+`admin-password`. The first start installs Nextcloud before the site answers. Phone and
+desktop apps use the same URL. Clients are in [Nextcloud's
+documentation](https://docs.nextcloud.com/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -34,22 +40,30 @@ howl create nextcloud --with nextcloud --on gcp --allow-from me \
 	--admin-password admin-password --admin-email alice@example.com
 ```
 
-Sign in at `https://cloud.example.com`. Nobody else can sign up: add people under Accounts. `--phone-region` is an ISO country code, for numbers written without one. Change the password in Nextcloud; a later start does not reset it.
+Sign in at `https://cloud.example.com`. Nobody else can sign up: add people under
+Accounts. `--phone-region` is an ISO country code, for numbers written without one.
+Change the password in Nextcloud; a later start does not reset it.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
+in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The
+same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
 
 ```sh
 howl create nextcloud --with nextcloud --import ./dump
 ```
 
-Files the application stores itself are not on that disk. Bring those through the service after it is up.
+Files the application stores itself are not on that disk. Bring those through the
+service after it is up.
 
 ### Known Quirks
 
-- The web installer is not in the image, and the web updater is off. A new Nextcloud arrives with the machine's next image.
-- Apps from the app store install into `/data`. One that brings its own program does not run, because `/data` cannot execute files.
+- The web installer is not in the image, and the web updater is off. A new Nextcloud
+  arrives with the machine's next image.
+- Apps from the app store install into `/data`. One that brings its own program does not
+  run, because `/data` cannot execute files.
 - Background jobs run every five minutes. You do not start them.
 - Files live in `/data/svc/nextcloud`. The code does not.
 

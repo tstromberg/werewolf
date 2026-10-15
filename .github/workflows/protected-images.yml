@@ -1,10 +1,8 @@
-# Publication requires exact-artifact lifecycle evidence; legacy signed releases
-# cannot satisfy these gates. Linux QEMU is the first GHA publication target.
+# Pull requests prove the protected QEMU lifecycle with disposable trust before
+# merge. form-images.yml builds, gates and publishes the real images.
 name: protected-images
 
 on:
-  schedule:
-    - cron: '37 * * * *'
   pull_request:
     paths:
       - 'boot/**'
@@ -29,61 +27,19 @@ on:
       - '!**/*.md'
       - 'forms/**/rootfs/**/*.md'
       - '!**/__pycache__/**'
-  push:
-    branches: [main]
-    paths:
-      - 'boot/**'
-      - 'cmd/**'
-      - 'forms/**'
-      - 'lib/**'
-      - 'Makefile'
-      - 'tools/local-prerequisites'
-      - 'test/local-prerequisites'
-      - 'test/ci-setup'
-      - 'cmd/howl/**'
-      - 'lib/prebuilt.zig'
-      - 'lib/cmdline.zig'
-      - 'files.zig'
-      - 'tools/boot-download'
-      - 'release/*protected*'
-      - 'release/prepare-protected'
-      - 'release/protected/**'
-      - 'test/boot-*'
-      - 'test/protected-*'
-      - 'test/check-published-*'
-      - 'test/check-protected-*'
-      - '.github/workflows/protected-images.yml'
-      - '!**/*.md'
-      - 'forms/**/rootfs/**/*.md'
-      - '!**/__pycache__/**'
   workflow_dispatch:
-    inputs:
-      build:
-        description: Build and publish gated signed images to GitHub and R2
-        type: boolean
-        default: true
-      force:
-        description: Publish even if these inputs were already published successfully
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: protected-images-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   admission:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
-    outputs:
-      serial: ${{ steps.serial.outputs.value }}
-      serial1: ${{ steps.serial.outputs.update1 }}
-      serial2: ${{ steps.serial.outputs.update2 }}
-      key: ${{ steps.inputs.outputs.key }}
-      build: ${{ inputs.force || steps.seen.outputs.cache-hit != 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -94,37 +50,16 @@ jobs:
         run: |
           make -j"$(nproc)" test
           make howl
-      - name: Resolve one package snapshot for both independent copies
-        id: inputs
-        run: |
-          python3 release/protected-inputs build/host/howl x86_64 build/protected-inputs
-          echo "key=protected-v1-$(cat build/protected-inputs/inputs)" >>"$GITHUB_OUTPUT"
-      - name: Already published successfully?
-        id: seen
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: build/protected-inputs/inputs
-          key: ${{ steps.inputs.outputs.key }}
-          lookup-only: true
+      - name: Resolve one package snapshot
+        run: python3 release/protected-inputs build/host/howl x86_64 build/protected-inputs
       - name: Keep the resolved public package locks
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: protected-inputs
           path: build/protected-inputs/
-      - name: One serial for both independent copies
-        id: serial
-        run: |
-          python3 - <<'PY' >>"$GITHUB_OUTPUT"
-          import datetime
-          start = datetime.datetime.now(datetime.timezone.utc)
-          for offset, name in enumerate(('value', 'update1', 'update2')):
-              serial = (start + datetime.timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')
-              print('%s=%s' % (name, serial))
-          PY
 
   qemu-validation:
     needs: admission
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !inputs.build)
     runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
@@ -155,205 +90,3 @@ jobs:
             build/protected-qemu-validation/result.json
             build/protected-qemu-validation/gates.json
             build/protected-cache/**/build.log
-
-  build:
-    needs: admission
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      needs.admission.outputs.build == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && inputs.build))
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        copy: [1, 2]
-        target:
-          - {runner: ubuntu-26.04, arch: x86_64, provider: qemu}
-    runs-on: ${{ matrix.target.runner }}
-    timeout-minutes: 120
-    env:
-      SOURCE_DATE_EPOCH: '0'
-      PYTHONDONTWRITEBYTECODE: '1'
-      WEREWOLF_PROTECTED_INPUTS: ${{ github.workspace }}/build/protected-inputs
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install pinned tools
-        run: sudo test/ci-setup
-      - name: Build the signing host tool
-        run: make howl
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: protected-inputs
-          path: build/protected-inputs
-      - name: Use the shared image package locks
-        run: mkdir -p build/lock && cp build/protected-inputs/*.lock.json build/lock/
-      # Deliberately no compiled-kernel cache restore: these two candidate copies
-      # must have independent source/object trees. Forms within each job share
-      # the verified prerequisite cache, with host-only policy/module signing.
-      - name: Build protected forms with dedicated host keys
-        env:
-          WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
-          WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
-          TARGET_ARCH: ${{ matrix.target.arch }}
-          TARGET_PROVIDER: ${{ matrix.target.provider }}
-          IMAGE_SERIAL: ${{ needs.admission.outputs.serial }}
-          UPDATE_SERIAL_1: ${{ needs.admission.outputs.serial1 }}
-          UPDATE_SERIAL_2: ${{ needs.admission.outputs.serial2 }}
-        run: |
-          set -eu
-          for form in playground prod prod-ssh; do
-            python3 release/with-protected-keys python3 release/build-protected \
-              "$form" "$TARGET_PROVIDER" "$TARGET_ARCH" "$IMAGE_SERIAL" "dist/protected/$form"
-          done
-          for offset in 1 2; do
-            if [ "$offset" = 1 ]; then serial=$UPDATE_SERIAL_1; else serial=$UPDATE_SERIAL_2; fi
-            python3 release/with-protected-keys python3 release/build-protected \
-              playground "$TARGET_PROVIDER" "$TARGET_ARCH" "$serial" "dist/protected/playground-update-$offset"
-          done
-      - name: Keep public candidates without deployment authorization
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: protected-${{ matrix.target.arch }}-${{ matrix.target.provider }}-${{ matrix.copy }}
-          path: |
-            dist/protected/
-            !dist/protected/**/boot.json.sig
-      - name: Keep public build logs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: protected-logs-${{ matrix.target.arch }}-${{ matrix.target.provider }}-${{ matrix.copy }}
-          path: build/protected-cache/**/build.log
-
-  compare:
-    needs: build
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          pattern: protected-*
-          path: candidates
-      - name: Complete signed disks, slots and descriptors match
-        run: |
-          set -eu
-          for target in x86_64-qemu; do
-            diff -r "candidates/protected-$target-1" "candidates/protected-$target-2"
-          done
-
-  qemu-lifecycle:
-    needs: compare
-    # QEMU/KVM, OVMF and swtpm exercise the complete protected lifecycle on a
-    # disposable hosted Linux runner. Lima requires its own runtime evidence.
-    runs-on: ubuntu-26.04
-    environment: release
-    timeout-minutes: 45
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: protected-x86_64-qemu-1
-          path: candidates
-      - name: Install pinned runtime and host tools
-        run: sudo test/ci-setup
-      - name: Build native host admission tool
-        run: make howl
-      - name: Privately authorize exact candidates for lifecycle tests
-        env:
-          WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
-          WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
-        run: |
-          python3 release/with-protected-keys python3 release/authorize-protected \
-            build/host/howl qemu candidates/playground candidates/playground-update-1 candidates/playground-update-2
-      - name: Default downloads, owner isolation and complete A/B recovery
-        run: |
-          python3 test/check-published-lifecycle build/host/howl candidates/playground \
-            candidates/playground-update-1 candidates/playground-update-2 build/protected-lifecycle
-      - name: Retain the exact verified release and artifact-bound gates
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: protected-verified-qemu
-          path: |
-            candidates/playground/
-            build/protected-lifecycle/gates.json
-      - name: Retain public lifecycle evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: protected-qemu-evidence
-          path: |
-            build/protected-lifecycle/*.log
-            build/protected-lifecycle/evidence.jsonl
-            build/protected-lifecycle/result.json
-
-  publish-qemu:
-    needs: [admission, qemu-lifecycle]
-    runs-on: ubuntu-26.04
-    environment: release
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    timeout-minutes: 20
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: protected-verified-qemu
-          path: verified
-      - name: Install pinned host admission tools
-        run: sudo test/ci-setup
-      - name: Build native host admission tool
-        run: make howl
-      - name: Export identical signed downloads and an authenticated standalone qcow2
-        env:
-          WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
-          WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
-        run: |
-          python3 release/with-protected-keys python3 release/export-protected \
-            build/host/howl verified/candidates/playground verified/build/protected-lifecycle/gates.json \
-            qemu release-assets
-      - name: Create the GitHub release as a draft
-        id: github
-        run: |
-          python3 release/github-protected verified/candidates/playground \
-            verified/build/protected-lifecycle/gates.json qemu release-assets
-      - name: Attest every release asset
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        with:
-          subject-path: release-assets/*
-      - name: Re-admit and publish immutable objects before authenticated heads
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          python3 release/publish-protected build/host/howl verified/candidates/playground \
-            verified/build/protected-lifecycle/gates.json qemu release-assets
-      - name: Fresh public HTTPS download and complete native admission
-        run: |
-          python3 release/check-protected-download build/host/howl verified/candidates/playground qemu release-assets
-      - name: Publish the GitHub release after exact public R2 parity passes
-        env:
-          RELEASE_TAG: ${{ steps.github.outputs.tag }}
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: protected-inputs
-          path: build/protected-inputs
-      - name: Remember inputs only after both public destinations pass
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: build/protected-inputs/inputs
-          key: ${{ needs.admission.outputs.key }}

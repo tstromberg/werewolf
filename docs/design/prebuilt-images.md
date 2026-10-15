@@ -63,9 +63,9 @@ refuse older releases, serial reuse with different content and releases
 over a day ahead. Equal initial serial requires the running root hash.
 The floor is recorded before installation and never silently lowered.
 
-Each parked root retains its signed manifest, signature and command line.
-Native EFI receives the authenticated stage0 archive and optional UKI. Installation rechecks the parked bytes
-before arming, and automatic reboot rechecks them again. Native updates
+Each parked root retains its signed manifest, signature and command line. Native EFI
+receives the authenticated stage0 archive and optional UKI. Installation rechecks the
+parked bytes before arming, and automatic reboot rechecks them again. Native updates
 remove an obsolete UKI; verification refuses an unselected leftover UKI.
 
 An explicit operator `try` may select an older image, but verifies its

@@ -61,6 +61,7 @@ independent syscall-audit reproducer against this kernel and a second
 kernel, with audit configuration and counters captured before privileges
 are dropped.
 
-Kernel references: [rule evaluation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditsc.c),
-[rule installation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditfilter.c),
+Kernel references: [rule
+evaluation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditsc.c), [rule
+installation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditfilter.c),
 [audit UAPI](https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/audit.h).

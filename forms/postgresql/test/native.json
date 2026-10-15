@@ -1,0 +1,45 @@
+{
+  "format": "werewolf-native-tests/1",
+  "packages": ["postgresql-17-client"],
+  "drivers": [
+    {
+      "name": "test-postgres",
+      "source": "driver.zig",
+      "mode": "sql",
+      "user": "postgres",
+      "pledge": "stdio rpath wpath proc unix connect exec",
+      "read": ["/run/svc/postgres"],
+      "connect": ["/run/svc/postgres/.s.PGSQL.5432"],
+      "run": ["/usr/bin/psql"],
+      "cases": {
+        "seed": ["ready", "locale", "write", "persisted-row", "utf8", "rollback"],
+        "verify": ["ready", "locale", "persisted-row", "utf8", "rollback"]
+      }
+    },
+    {
+      "name": "test-postgres-denied",
+      "source": "driver.zig",
+      "mode": "denied",
+      "user": "nobody",
+      "pledge": "stdio rpath wpath proc unix connect exec",
+      "read": ["/run/svc/postgres"],
+      "connect": ["/run/svc/postgres/.s.PGSQL.5432"],
+      "run": ["/usr/bin/psql"],
+      "cases": {"seed": ["peer-refused"], "verify": ["peer-refused"]}
+    },
+    {
+      "name": "test-postgres-policy",
+      "source": "driver.zig",
+      "mode": "policy",
+      "user": "postgres",
+      "pledge": "stdio rpath wpath proc exec",
+      "read": ["/etc/sv/postgres/service", "/run/svc/postgres"],
+      "connect": [],
+      "run": ["/usr/lib/werewolf/sh-shim", "/usr/lib/werewolf/test-postgres-policy"],
+      "cases": {
+        "seed": ["shim-policy", "shim-output", "shim-discard", "shim-file-refused", "no-tcp-listener"],
+        "verify": ["shim-policy", "shim-output", "shim-discard", "shim-file-refused", "no-tcp-listener"]
+      }
+    }
+  ]
+}

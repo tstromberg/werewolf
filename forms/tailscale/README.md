@@ -1,8 +1,11 @@
 # Tailscale - Hardened VM
 
-A [Tailscale](https://tailscale.com) subnet router. The image supplies the service. Boot configuration supplies the routes and the auth key. The form's manifest is [form.yaml](form.yaml).
+A [Tailscale](https://tailscale.com) subnet router. The image supplies the service. Boot
+configuration supplies the routes and the auth key. The form's manifest is
+[form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/tailscale/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/tailscale/index.html).
 
 ## Security Posture
 
@@ -22,7 +25,9 @@ printf '%s' 'tskey-auth-REPLACE' >config/tailscale/auth-key
 howl create tailscale --with tailscale --config config
 ```
 
-Replace `tskey-auth-REPLACE` with a tagged, preauthorized, single-use key before you create the machine. Approve the advertised subnet in the admin console. Routes and grants are in [Tailscale's documentation](https://tailscale.com/kb/1019/subnets).
+Replace `tskey-auth-REPLACE` with a tagged, preauthorized, single-use key before you
+create the machine. Approve the advertised subnet in the admin console. Routes and
+grants are in [Tailscale's documentation](https://tailscale.com/kb/1019/subnets).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -38,7 +43,8 @@ howl create tailscale --with tailscale --on gcp --allow-from me --config config
 
 ### Importing data
 
-The tailnet already has its nodes. This machine starts empty and joins with the auth key. There is no database to import.
+The tailnet already has its nodes. This machine starts empty and joins with the auth
+key. There is no database to import.
 
 ### Known Quirks
 

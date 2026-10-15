@@ -9,7 +9,23 @@ pub const format = "werewolf-image/1";
 pub const metadata = "/usr/share/werewolf/image-update";
 pub const max_manifest = 1 << 20;
 pub const max_artifact: u64 = 8 << 30;
+/// Package is an installed package. origin is its source package, or
+/// ORIGIN:VERSION for a rebuild of Wolfi's source (rebuiltFrom), which
+/// stands for that source in CVE comparisons.
 pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
+
+/// rebuiltFrom returns ORIGIN:VERSION from provides, the value of an apk
+/// `p:` line, when it names the Wolfi source the package rebuilds, as
+/// glibc-neutered's `wolfi-origin:glibc-2.44:2.44-r8` does; otherwise null.
+pub fn rebuiltFrom(provides: []const u8) ?[]const u8 {
+    var it = mem.tokenizeScalar(u8, provides, ' ');
+    while (it.next()) |p| {
+        const source = mem.cutPrefix(u8, p, "wolfi-origin:") orelse continue;
+        const i = mem.findScalarLast(u8, source, ':') orelse continue;
+        if (i > 0 and i + 1 < source.len) return source;
+    }
+    return null;
+}
 pub const Artifact = struct { sha256: []const u8, size: u64 };
 pub const Files = struct {
     vmlinuz: Artifact,
@@ -361,6 +377,15 @@ fn fixture() Manifest {
             .cmdline = a,
         },
     };
+}
+
+test rebuiltFrom {
+    try testing.expectEqualStrings(
+        "glibc-2.44:2.44-r8",
+        rebuiltFrom("glibc=2.44-r18 wolfi-origin:glibc-2.44:2.44-r8 so:libc.so.6=6").?,
+    );
+    try testing.expectEqual(null, rebuiltFrom("so:libc.so.6=6 cmd:ldconfig=2.44-r8"));
+    try testing.expectEqual(null, rebuiltFrom("wolfi-origin:glibc-2.44 wolfi-origin::1"));
 }
 
 test "signed image identity and complete artifact contract" {

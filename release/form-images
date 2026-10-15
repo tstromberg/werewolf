@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Resolve, independently build, test and publish all supported form/architecture pairs."""
+"""Resolve every form, build its protected images twice, test, gate and publish them."""
 import argparse
 import datetime
+import filecmp
 import gzip
 import hashlib
 import importlib.machinery
@@ -21,8 +22,22 @@ import image_notes as notes
 
 HOWL = Path('build/host/howl').resolve()
 FORM = Path('build/host/form').resolve()
-resolver = importlib.machinery.SourceFileLoader('form_input_resolver', 'release/protected-inputs').load_module()
-builder = importlib.machinery.SourceFileLoader('form_security_builder', 'tools/local-prerequisites').load_module()
+TRUST = Path('release/protected').resolve()
+# check-published-lifecycle drives a shell over ssh. Forms without one have
+# no lifecycle gates yet (docs/design/image-release-testing.md).
+GATED = ('playground',)
+CHECKS = {'coverage', 'integration', 'reproducible'}
+
+
+def load(name, path):
+    return importlib.machinery.SourceFileLoader(name, path).load_module()
+
+
+resolver = load('form_input_resolver', 'release/protected-inputs')
+builder = load('form_protected_builder', 'release/build-protected')
+exporter = load('form_protected_export', 'release/export-protected')
+publisher = load('form_protected_publisher', 'release/publish-protected')
+mirror = load('form_protected_download', 'release/check-protected-download')
 
 
 def run(args, **kwargs):
@@ -111,6 +126,12 @@ def resolve(arch, shard, shards, output):
     shared_inputs(arch, output)
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     serial = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    try:
+        previous = catalog.read_index(TRUST / 'image.crt')
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        # Nothing is skipped on faith: without the signed index, rebuild.
+        print('form-images: published index unreadable; rebuilding every form: %s' % error, file=sys.stderr, flush=True)
+        previous = {}
     plan = dict(format='werewolf-form-plan/1', arch=arch, shard=shard, shards=shards, targets=[])
     for form in selected:
         target = dict(form=form, arch=arch, status='resolution failed')
@@ -138,15 +159,26 @@ def resolve(arch, shard, shards, output):
             write(snapshot / 'tools.json', versions)
             digest = resolved_identity(form, arch, snapshot, chain)
             target.update(inputs=digest, commit=commit, serial=serial)
-            previous = catalog.read_public(form, arch, 'release/boot.crt')
-            target['status'] = 'unchanged' if previous and previous['inputs'] == digest and \
-                os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
+            rows = [previous.get((form, provider, arch), {}) for provider in catalog.PROVIDERS[arch]]
+            settled = all(r.get('inputs') == digest and r.get('status') in catalog.SETTLED for r in rows)
+            target['status'] = 'unchanged' if settled and os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
             write(snapshot / 'input.json', dict(chain=chain,
                   **{k: target[k] for k in ('form', 'arch', 'inputs', 'commit', 'serial')}))
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             print('form-images: %s/%s resolution failed: %s' % (form, arch, error), file=sys.stderr, flush=True)
         write(output / 'plan.json', plan)
     write(output / 'plan.json', plan)
+
+
+def bundles(target):
+    """Each provider's bundle, plus the two updates a gated form's lifecycle installs."""
+    start = datetime.datetime.strptime(target['serial'], '%Y%m%dT%H%M%SZ')
+    for provider in catalog.PROVIDERS[target['arch']]:
+        yield provider, provider, target['serial']
+        if target['form'] in GATED:
+            for n in (1, 2):
+                later = (start + datetime.timedelta(seconds=n)).strftime('%Y%m%dT%H%M%SZ')
+                yield '%s-update-%d' % (provider, n), provider, later
 
 
 def install_locks(snapshot):
@@ -156,21 +188,6 @@ def install_locks(snapshot):
         for path in root.glob('*.lock.json'):
             if not path.name.startswith('melange-'):
                 shutil.copyfile(path, lockdir / path.name)
-
-
-def prerequisites(arch, snapshot):
-    key = Path(os.environ['WEREWOLF_BOOT_KEY']).resolve()
-    cert = Path('release/boot.crt').resolve()
-    cache = Path('build/form-image-security').resolve()
-    cache.mkdir(parents=True, exist_ok=True)
-    base = cache / 'base.tar'
-    # Each job starts without compiled artifacts. Forms in that job share only
-    # these pinned prerequisites; the other copy builds on an independent runner.
-    if not base.exists():
-        pins = [a for p in builder.package_pins(snapshot / 'kernel.lock.json', arch) for a in ('-p', p)]
-        run(['apko', '--workdir', 'boot', 'build-minirootfs', '--build-arch', arch,
-             *pins, 'kernel.yaml', base])
-    return builder.build(Path.cwd(), cache, arch, base, key, cert)
 
 
 def archive_inputs(snapshot, output):
@@ -207,7 +224,7 @@ def local_packages(snapshot, arch, package_dir=Path('build/vendor/packages')):
     return packages
 
 
-def build_one(target, snapshot, security, output):
+def build_one(target, snapshot, output):
     form, arch = target['form'], target['arch']
     chain = json.loads((snapshot / 'input.json').read_text())['chain']
     if resolved_identity(form, arch, snapshot, chain) != target['inputs']:
@@ -215,75 +232,47 @@ def build_one(target, snapshot, security, output):
     if json.loads((snapshot / 'tools.json').read_text()) != tool_versions(compiler(form)):
         raise ValueError('build tools changed after input resolution')
     install_locks(snapshot)
-    key, cert = Path(os.environ['WEREWOLF_BOOT_KEY']).resolve(), Path('release/boot.crt').resolve()
-    work = Path('build/form-image-work') / arch
-    disk = (work / (form + '.raw')).resolve()
-    env = dict(os.environ, SOURCE_DATE_EPOCH='0', UKI_STUB=str(security / 'linux.efi.stub'),
-               WEREWOLF_FORM_INPUTS=str(snapshot), WEREWOLF_PROTECTED_INPUTS=str(snapshot.parent))
-    run([HOWL, '_build', '--with', form, '--arch', arch, '--build', work,
-         '--ipe-kernel', security / 'rootfs.tar', '--ipe-key', key, '--ipe-cert', cert,
-         '--ipe-updates', catalog.PUBLIC + '/' + form, '--image-serial', target['serial'],
-         '--boot-key', key, '--boot-cert', cert, '--boot-native', '--disk', disk,
-         # Catalog disks carry no TPM enrollment yet (docs/releases.md); say so.
-         '--disable=tpm',
-         '--disk-args', 'console=' + ('ttyAMA0' if arch == 'aarch64' else 'ttyS0'), 'disk', 'prebuilt'], env=env)
-    built = work / (form + '-ipe')
-    if (built / 'meta/usr/share/werewolf/dev').exists():
-        raise ValueError('development images cannot be published')
+    os.environ['WEREWOLF_FORM_INPUTS'] = str(snapshot)
     output.mkdir(parents=True)
-    run(['qemu-img', 'convert', '-c', '-f', 'raw', '-O', 'qcow2', disk, output / 'disk.qcow2'])
-    run(['qemu-img', 'check', '-f', 'qcow2', output / 'disk.qcow2'])
-    run(['qemu-img', 'compare', '-f', 'raw', '-F', 'qcow2', disk, output / 'disk.qcow2'])
-    for name in ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi'):
-        shutil.copyfile(built / 'slot' / name, output / name)
-    for name in ('latest.json', 'latest.json.sig'):
-        shutil.copyfile(built / 'prebuilt' / arch / name, output / name)
-    shutil.copyfile(cert, output / 'boot.crt')
+    for name, provider, serial in bundles(target):
+        work = Path('build/protected-images') / (arch + '-' + provider) / form
+        try:
+            builder.build(form, provider, arch, serial, output / name)
+            if (work / (form + '-ipe') / 'meta/usr/share/werewolf/dev').exists():
+                raise ValueError('development images cannot be published')
+        finally:
+            # Disposable outputs: keep a shard within the runner's disk.
+            shutil.rmtree(work, ignore_errors=True)
     archive_inputs(snapshot, output / 'inputs.tar.gz')
     write(output / 'packages.json', notes.inventory(snapshot, form, arch, local_packages(snapshot, arch)))
-    candidate = {k: target[k] for k in ('form', 'arch', 'inputs', 'commit', 'serial')}
-    candidate.update(format='werewolf-form-image/1', profile='uefi-ipe/1',
-                     files={name: catalog.record(output / name) for name in sorted(catalog.ASSETS)})
-    write(output / 'candidate.json', candidate)
-    catalog.verify_candidate(output, cert)
-    # These are disposable build outputs, never machine enrollment or caches
-    # shared with another job. Keep each shard within the runner's disk budget.
-    disk.unlink()
-    shutil.rmtree(built)
-    shutil.rmtree(work / 'oci', ignore_errors=True)
 
 
 def build(snapshot, output):
     snapshot, output = Path(snapshot).resolve(), Path(output).resolve()
     plan = json.loads((snapshot / 'plan.json').read_text())
     native(plan['arch'])
-    os.environ['SOURCE_DATE_EPOCH'] = '0'
+    # As release/build-protected runs: work trees hold signing inputs.
+    os.umask(0o077)
+    os.environ.update(SOURCE_DATE_EPOCH='0', WEREWOLF_PROTECTED_INPUTS=str(snapshot))
     output.mkdir(parents=True, exist_ok=False)
     results = []
     try:
-        os.environ['WEREWOLF_PROTECTED_INPUTS'] = str(snapshot)
         if json.loads((snapshot / 'tools.json').read_text()) != tool_versions():
             raise ValueError('security build tools changed after input resolution')
-        security = prerequisites(plan['arch'], snapshot) if any(t['status'] == 'build' for t in plan['targets']) else None
         for target in plan['targets']:
             result = dict(target)
             results.append(result)
             if target['status'] != 'build':
                 continue
             try:
-                with (output / (target['form'] + '.log')).open('wb') as log:
-                    # Child output is retained separately for each form.
-                    with redirect(log):
-                        build_one(target, snapshot / target['form'], security, output / target['form'])
+                # Child output is retained separately for each form.
+                with (output / (target['form'] + '.log')).open('wb') as log, redirect(log):
+                    build_one(target, snapshot / target['form'], output / target['form'])
                 result['status'] = 'built'
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                 result['status'] = 'build failed'
                 print('form-images: %s build failed: %s' % (target['form'], error), file=sys.stderr, flush=True)
                 shutil.rmtree(output / target['form'], ignore_errors=True)
-                work = Path('build/form-image-work') / plan['arch']
-                (work / (target['form'] + '.raw')).unlink(missing_ok=True)
-                shutil.rmtree(work / (target['form'] + '-ipe'), ignore_errors=True)
-                shutil.rmtree(work / 'oci', ignore_errors=True)
             write(output / 'results.json', results)
     finally:
         write(output / 'results.json', results)
@@ -310,36 +299,45 @@ class redirect:
             os.close(saved)
 
 
-def check_one(target, snapshot, first, second, output):
-    one, _ = catalog.verify_candidate(first, 'release/boot.crt')
-    two, _ = catalog.verify_candidate(second, 'release/boot.crt')
-    if one != two or (first / 'candidate.json').read_bytes() != (second / 'candidate.json').read_bytes():
-        raise ValueError('independent form image builds differ')
-    if any(one[k] != target[k] for k in ('form', 'arch', 'inputs', 'commit', 'serial')):
-        raise ValueError('candidate differs from resolved inputs')
+def same(first, second):
+    names = [sorted(str(p.relative_to(root)) for p in root.rglob('*')) for root in (first, second)]
+    if names[0] != names[1]:
+        raise ValueError('independent form image builds hold different files')
+    for name in names[0]:
+        one, two = first / name, second / name
+        if one.is_symlink() or two.is_symlink():
+            raise ValueError('form image builds must not hold links')
+        if one.is_file() and not filecmp.cmp(one, two, shallow=False):
+            raise ValueError('independent form image builds differ: ' + name)
+
+
+def check_one(target, snapshot, first, second, output, lifecycle):
+    form, arch = target['form'], target['arch']
+    same(first, second)
+    descriptors = {}
+    for name, _, serial in bundles(target):
+        manifest = json.loads(catalog.read(first / name / 'boot.json'))
+        if (manifest['form'], manifest['image']['arch'], manifest['image']['serial']) != (form, arch, serial):
+            raise ValueError('bundle differs from its resolved target: ' + name)
+        descriptors[name] = catalog.sha(first / name / 'boot.json')
     install_locks(snapshot)
     env = dict(os.environ, WEREWOLF_FORM_INPUTS=str(snapshot))
-    run([sys.executable, 'test/form-coverage', '--form', target['form']], env=env)
-    run([HOWL, 'test', '--with', target['form'], '--arch', target['arch']], env=env)
-    with tempfile.TemporaryDirectory(prefix='ww-release-disk-') as temporary:
-        dist = Path(temporary)
-        prefix = target['form'] + '-' + target['arch']
-        files = {}
-        for name, original in [('disk.qcow2', 'disk.qcow2'), ('uki', 'uki.efi'), ('boot.crt', 'boot.crt')]:
-            os.link(first / original, dist / (prefix + '-' + name))
-            files[name] = one['files'][original]
-        write(dist / (prefix + '.json'), dict(files=files))
-        run(['make', '--no-print-directory', 'FORM=' + target['form'], 'ARCH=' + target['arch'],
-             'IPE=1', 'DIST=' + str(dist), '_check-dist'], env=env)
-    report = dict(format='werewolf-form-tests/1', candidate=catalog.sha(first / 'candidate.json'),
-                  checks={name: True for name in sorted(catalog.CHECKS)},
-                  **{k: target[k] for k in ('form', 'arch', 'inputs')})
-    shutil.copytree(first, output)
-    write(output.parent / (target['form'] + '-tests.json'), report)
+    run([sys.executable, 'test/form-coverage', '--form', form], env=env)
+    run([HOWL, 'test', '--with', form, '--arch', arch], env=env)
+    output.mkdir(parents=True)
+    for name in ('inputs.tar.gz', 'packages.json'):
+        shutil.copyfile(first / name, output / name)
+    # The bundle descriptors bind this evidence to the exact bytes gated later.
+    write(output / 'tests.json', dict(format='werewolf-form-tests/1', bundles=descriptors,
+          checks={name: True for name in sorted(CHECKS)}, **{k: target[k] for k in ('form', 'arch', 'inputs')}))
+    if form in GATED:
+        for name, _, _ in bundles(target):
+            shutil.copytree(first / name, lifecycle / form / name)
 
 
-def check(snapshot, first, second, output):
-    snapshot, first, second, output = map(lambda p: Path(p).resolve(), (snapshot, first, second, output))
+def check(snapshot, first, second, output, lifecycle):
+    snapshot, first, second, output, lifecycle = map(lambda p: Path(p).resolve(),
+                                                     (snapshot, first, second, output, lifecycle))
     plan = json.loads((snapshot / 'plan.json').read_text())
     native(plan['arch'])
     output.mkdir(parents=True, exist_ok=False)
@@ -351,98 +349,220 @@ def check(snapshot, first, second, output):
             try:
                 with (output / (target['form'] + '.log')).open('wb') as log, redirect(log):
                     check_one(target, snapshot / target['form'], first / target['form'], second / target['form'],
-                              output / target['form'])
+                              output / target['form'], lifecycle)
                 result['status'] = 'passed'
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                 result['status'] = 'tests or reproducibility failed'
                 print('form-images: %s verification failed: %s' % (target['form'], error), file=sys.stderr, flush=True)
                 shutil.rmtree(output / target['form'], ignore_errors=True)
+                shutil.rmtree(lifecycle / target['form'], ignore_errors=True)
         write(output / 'results.json', results)
     return any(t['status'] in ('tests or reproducibility failed', 'resolution failed') for t in results)
 
 
-def publish(snapshots, verified, store):
-    snapshots, verified = Path(snapshots), Path(verified)
-    if os.environ.get('GITHUB_REPOSITORY') != 'werewolf-linux/werewolf' or \
-            not os.environ.get('GITHUB_RUN_ID', '').isdecimal():
-        raise ValueError('form image publication requires canonical GitHub Actions provenance')
-    key = Path(os.environ['WEREWOLF_BOOT_KEY'])
-    certificate = Path('release/boot.crt')
-    run_url = 'https://github.com/werewolf-linux/werewolf/actions/runs/' + os.environ['GITHUB_RUN_ID']
-    commit = os.environ['GITHUB_SHA']
-    rows, failures = [], False
+def gates(environ):
+    """Lifecycle runners by target. Self-hosted ones are repository variables
+    holding a JSON list of runner labels; a target without one is not gated."""
+    runners = {('qemu', 'x86_64'): '["ubuntu-26.04"]',
+               ('qemu', 'aarch64'): environ.get('ARM64_KVM_RUNNER', ''),
+               ('lima', 'aarch64'): environ.get('LIMA_RUNNER', '')}
+    include = []
+    for (provider, arch), value in runners.items():
+        if not value:
+            continue
+        labels = json.loads(value)
+        if not isinstance(labels, list) or not labels or not all(isinstance(v, str) and v for v in labels):
+            raise ValueError('a gate runner is a JSON list of labels')
+        include.append(dict(provider=provider, arch=arch, runner=labels))
+    return dict(include=include)
+
+
+def plans(snapshots):
+    targets = {}
+    for path in sorted(Path(snapshots).glob('*/plan.json')):
+        plan = json.loads(path.read_text())
+        for target in plan['targets']:
+            key = (target['form'], target['arch'])
+            if key in targets or target['arch'] != plan['arch']:
+                raise ValueError('foreign or duplicate form image plan')
+            targets[key] = dict(target, shard=plan['shard'])
+    return targets
+
+
+def verified_results(verified):
+    results = {}
+    for path in sorted(Path(verified).glob('verified-*/results.json')):
+        for result in json.loads(path.read_text()):
+            results[(result['form'], result['arch'])] = dict(result, directory=path.parent / result['form'])
+    return results
+
+
+def index(store):
+    """The published rows, or none before the first publication."""
+    with tempfile.TemporaryDirectory(prefix='ww-form-index-') as temporary:
+        raw = Path(temporary) / 'index.json'
+        if not store.fetch('index.json', raw):
+            return {}
+        return catalog.open_index(catalog.read(raw, 4 << 20), TRUST / 'image.crt')
+
+
+def inventory(store, latest, work):
+    """The package inventory a previous release signed, if it carried one."""
+    names = ('downloads.json', 'downloads.json.sig', 'packages.json')
+    for name in names[:2]:
+        if not store.fetch(latest['object'] + '/' + name, work / name):
+            raise ValueError('previous release manifest is missing')
+    catalog.verify_signature(catalog.read(work / names[0], 4 << 20), catalog.read(work / names[1], 512),
+                             TRUST / 'image.crt')
+    signed = json.loads(catalog.read(work / names[0], 4 << 20))
+    if signed['descriptor'] != latest['descriptor'] or 'packages.json' not in signed['files']:
+        return None
+    expected = signed['files']['packages.json']
+    if not store.fetch(latest['object'] + '/packages.json', work / names[2]) or \
+            catalog.record(work / names[2]) != dict(sha256=expected['sha256'], size=expected['size']):
+        raise ValueError('previous release package inventory is missing or changed')
+    return json.loads(catalog.read(work / names[2], 4 << 20))
+
+
+def export_one(directory, targets, results, previous, store, assets):
+    report = json.loads(catalog.read(directory / 'gates.json', 64 << 10))
+    bundle = directory / 'bundle'
+    manifest = json.loads(catalog.read(bundle / 'boot.json'))
+    form, provider, arch = manifest['form'], report['provider'], manifest['image']['arch']
+    key = catalog.namespace(form, provider, arch)
+    target, result = targets[(form, arch)], results[(form, arch)]
+    if target['commit'] != os.environ['GITHUB_SHA'] or result['status'] != 'passed':
+        raise ValueError('gated bundle is not this workflow\'s verified build')
+    verified = result['directory']
+    tests = json.loads(catalog.read(verified / 'tests.json'))
+    if tests['inputs'] != target['inputs'] or set(tests['checks']) != CHECKS or \
+            any(v is not True for v in tests['checks'].values()) or \
+            tests['bundles'].get(provider) != catalog.sha(bundle / 'boot.json'):
+        raise ValueError('gated bundle differs from the verified build')
+    with tempfile.TemporaryDirectory(prefix='ww-form-extras-') as temporary:
+        work = Path(temporary)
+        latest = previous.get((form, provider, arch), {}).get('latest')
+        old = inventory(store, latest, work) if latest else None
+        packages = json.loads(catalog.read(verified / 'packages.json', 4 << 20))
+        release = notes.release(dict(form=form, provider=provider, arch=arch, serial=manifest['image']['serial'],
+                                     commit=target['commit']), packages, latest if old else None, old)
+        write(work / 'release-notes.json', release)
+        (work / 'release-notes.html').write_text(notes.page(release), encoding='utf-8')
+        extras = {name: verified / name for name in ('inputs.tar.gz', 'packages.json', 'tests.json')}
+        extras.update({name: work / name for name in ('release-notes.json', 'release-notes.html')})
+        output = assets / key.replace('/', '-')
+        exporter.export(str(HOWL), bundle, report, provider, output, TRUST, publisher.preparation, extras)
+    return dict(form=form, provider=provider, arch=arch, bundle=str(bundle.resolve()),
+                gates=str((directory / 'gates.json').resolve()), assets=str(output))
+
+
+def export(snapshots, verified, gated, store, assets, listing):
+    """Sign release assets for every bundle that passed its lifecycle gates.
+    A target that fails here is left out; publish records it as failed."""
+    exporter.provenance()
+    targets, results = plans(snapshots), verified_results(verified)
+    previous = index(store)
+    assets = Path(assets).resolve()
+    assets.mkdir(parents=True, exist_ok=False)
+    exported = []
+    for directory in sorted(Path(gated).glob('gated-*')):
+        try:
+            exported.append(export_one(directory, targets, results, previous, store, assets))
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print('form-images: %s export failed: %s' % (directory.name, error), file=sys.stderr, flush=True)
+    write(listing, exported)
+    output(targets=len(exported))
+
+
+def output(**values):
+    if path := os.environ.get('GITHUB_OUTPUT'):
+        with Path(path).open('a') as stream:
+            stream.writelines('%s=%s\n' % item for item in values.items())
+
+
+def publish(snapshots, verified, gated_targets, listing, store):
+    """Advance each exported target, then sign the catalog of every target."""
+    provenance = exporter.provenance()
+    key = os.environ['WEREWOLF_PROTECTED_IMAGE_KEY']
+    targets, results = plans(snapshots), verified_results(verified)
+    previous = index(store)
+    exported = {catalog.namespace(t['form'], t['provider'], t['arch']): t
+                for t in json.loads(Path(listing).read_text())}
+    published = {}
+    for name, target in sorted(exported.items()):
+        try:
+            report = json.loads(catalog.read(target['gates'], 64 << 10))
+            assets = Path(target['assets'])
+            publisher.publish(str(HOWL), Path(target['bundle']), report, target['provider'], store, TRUST, assets)
+            if store.bucket.startswith('s3://'):
+                mirror.check(str(HOWL), target['bundle'], target['provider'], assets)
+            signed = json.loads(catalog.read(assets / (name.replace('/', '-') + '-downloads.json'), 4 << 20))
+            published[name] = dict(serial=signed['serial'], commit=signed['provenance']['commit'],
+                                   descriptor=signed['descriptor'], object=name + '/objects/' + signed['descriptor'],
+                                   size=signed['files']['disk.qcow2']['size'])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print('form-images: %s publication failed: %s' % (name, error), file=sys.stderr, flush=True)
+    # The GitHub release carries every exported target, so it follows R2 only
+    # when all of them are there.
+    output(released=str(published.keys() == exported.keys()).lower())
+    rows = []
     descriptions = catalog.descriptions()
+    for form in forms():
+        for arch in catalog.ARCHES:
+            target = targets.get((form, arch))
+            status = target['status'] if target else 'resolution or runner failed'
+            if target is None:
+                try:
+                    if arch not in query('archs', form):
+                        status = 'unsupported architecture'
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            for provider in catalog.PROVIDERS[arch]:
+                name = catalog.namespace(form, provider, arch)
+                last = previous.get((form, provider, arch), {})
+                row = dict(form=form, provider=provider, arch=arch, status=status, run=provenance['run'],
+                           **descriptions.get(form, {}))
+                if 'latest' in last:
+                    row['latest'] = last['latest']
+                if status == 'unchanged':
+                    row.update({k: last[k] for k in ('status', 'inputs', 'run') if k in last})
+                elif status == 'build':
+                    row['inputs'] = target['inputs']
+                    result = results.get((form, arch), {}).get('status')
+                    if result != 'passed':
+                        row['status'] = 'build, tests or reproducibility failed'
+                    elif name in published:
+                        row.update(status=catalog.PUBLISHED, latest=published[name])
+                    elif name in exported:
+                        row['status'] = 'publication failed'
+                    elif form not in GATED:
+                        row['status'] = catalog.UNGATED
+                    elif (provider, arch) not in gated_targets:
+                        row['status'] = catalog.NO_RUNNER
+                    else:
+                        row['status'] = 'lifecycle gates or export failed'
+                rows.append(catalog.validate(row))
     with tempfile.TemporaryDirectory(prefix='ww-image-catalog-') as temporary:
         work = Path(temporary)
-        for plan_path in sorted(snapshots.glob('*/plan.json')):
-            plan = json.loads(plan_path.read_text())
-            name = 'verified-' + plan['arch'] + '-' + str(plan['shard'])
-            result_path = verified / name / 'results.json'
-            results = {t['form']: t for t in json.loads(result_path.read_text())} if result_path.exists() else {}
-            for target in plan['targets']:
-                form, arch = target['form'], target['arch']
-                namespace = catalog.identity(form, arch)
-                row = dict(form=form, arch=arch, status=results.get(form, target)['status'], run=run_url,
-                           **descriptions.get(form, {}))
-                if target['status'] == 'build' and row['status'] != 'passed':
-                    row['status'] = 'build, tests or reproducibility failed'
-                try:
-                    if row['status'] == 'passed':
-                        directory = verified / name / form
-                        candidate = json.loads((directory / 'candidate.json').read_text())
-                        if candidate['commit'] != commit or any(candidate[k] != target[k] for k in
-                                                               ('form', 'arch', 'inputs', 'serial')):
-                            raise ValueError('release inputs or source differ from this workflow')
-                        report = json.loads((verified / name / (form + '-tests.json')).read_text())
-                        catalog.publish(directory, report, store, key, certificate, run_url)
-                        row['status'] = 'published'
-                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-                    row['status'] = 'publication failed'
-                    print('form-images: %s publication failed: %s' % (namespace, error), file=sys.stderr, flush=True)
-                previous = work / 'previous'
-                if store.fetch(namespace + '/current.json', previous):
-                    row['latest'] = catalog.open_head(previous.read_bytes(), certificate, form, arch)
-                elif row['status'] == 'unchanged':
-                    row['status'] = 'published head missing; rebuild required'
-                failures |= row['status'] not in ('published', 'unchanged', 'unsupported architecture')
-                rows.append(row)
-        expected = {(form, arch) for form in forms() for arch in catalog.ARCHES}
-        seen = {(r['form'], r['arch']) for r in rows}
-        if not seen <= expected or len(seen) != len(rows):
-            raise ValueError('foreign or duplicate form catalog plan; previous index is retained')
-        for form, arch in sorted(expected - seen):
-            status = 'resolution or runner failed'
-            try:
-                if arch not in query('archs', form):
-                    status = 'unsupported architecture'
-            except (OSError, subprocess.SubprocessError):
-                pass
-            row = dict(form=form, arch=arch, status=status, run=run_url,
-                       **descriptions.get(form, {}))
-            if store.fetch(catalog.identity(form, arch) + '/current.json', work / 'previous'):
-                row['latest'] = catalog.open_head((work / 'previous').read_bytes(), certificate, form, arch)
-            rows.append(row)
-            failures |= status != 'unsupported architecture'
-        rows.sort(key=lambda r: (r['form'], r['arch']))
-        write(work / 'index-data.json', dict(format='werewolf-form-catalog/1', forms=rows))
-        (work / 'index.json').write_bytes(catalog.envelope(json.loads((work / 'index-data.json').read_text()), key))
-        store.upload('index.json', work / 'index.json')
+        (work / 'index.json').write_bytes(catalog.envelope(dict(format=catalog.FORMAT, forms=rows), key))
+        catalog.open_index((work / 'index.json').read_bytes(), TRUST / 'image.crt')
+        store.upload('index.json', work / 'index.json', False)
         for form in forms():
-            page = work / 'form.html'
-            page.write_text(catalog.page([r for r in rows if r['form'] == form], form + ' images'))
-            store.upload(form + '/index.html', page)
+            (work / 'form.html').write_text(catalog.page([r for r in rows if r['form'] == form], form + ' images'))
+            store.upload(form + '/index.html', work / 'form.html', False)
         (work / 'index.html').write_text(catalog.page(rows))
-        store.upload('index.html', work / 'index.html')
-        if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
-            with Path(summary).open('a', encoding='utf-8') as stream:
-                stream.write('### Form images\n\n| Form | Architecture | Latest attempt | Latest passing release |\n'
-                             '| --- | --- | --- | --- |\n')
-                for row in rows:
-                    latest = row.get('latest')
-                    link = '[Release notes](' + catalog.PUBLIC + '/' + latest['object'] + '/release-notes.html)' \
-                        if latest else 'Not published'
-                    stream.write('| %s | %s | %s | %s |\n' % (row['form'], row['arch'], row['status'], link))
-    return failures
+        store.upload('index.html', work / 'index.html', False)
+    if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
+        with Path(summary).open('a', encoding='utf-8') as stream:
+            stream.write('### Form images\n\n| Form | Target | Latest attempt | Latest published |\n'
+                         '| --- | --- | --- | --- |\n')
+            for row in rows:
+                latest = row.get('latest')
+                link = '[%s](%s/%s/release-notes.html)' % (latest['serial'], catalog.PUBLIC, latest['object']) \
+                    if latest else 'Not published'
+                stream.write('| %s | %s/%s | %s | %s |\n' % (row['form'], row['provider'], row['arch'],
+                                                            row['status'], link))
+    return any(r['status'] not in catalog.SETTLED | {'unsupported architecture'} for r in rows)
 
 
 def main():
@@ -450,6 +570,7 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     matrix = commands.add_parser('matrix')
     matrix.add_argument('--shards', type=int, default=8)
+    commands.add_parser('gates')
     resolve_parser = commands.add_parser('resolve')
     resolve_parser.add_argument('arch', choices=catalog.ARCHES)
     resolve_parser.add_argument('shard', type=int)
@@ -459,18 +580,24 @@ def main():
     build_parser.add_argument('snapshot')
     build_parser.add_argument('output')
     check_parser = commands.add_parser('check')
-    for name in ('snapshot', 'first', 'second', 'output'):
+    for name in ('snapshot', 'first', 'second', 'output', 'lifecycle'):
         check_parser.add_argument(name)
+    export_parser = commands.add_parser('export')
+    for name in ('snapshots', 'verified', 'gated', 'assets', 'listing'):
+        export_parser.add_argument(name)
     publish_parser = commands.add_parser('publish')
-    publish_parser.add_argument('snapshots')
-    publish_parser.add_argument('verified')
+    for name in ('snapshots', 'verified', 'listing'):
+        publish_parser.add_argument(name)
     args = parser.parse_args()
+    store = publisher.Store(os.environ.get('PROTECTED_BUCKET', 's3://werewolf/boot/v1'))
     if args.command == 'matrix':
         if not 1 <= args.shards <= 32:
             raise ValueError('use between 1 and 32 shards')
         print(json.dumps(dict(include=[dict(arch=arch, runner=runner, shard=shard, shards=args.shards)
             for arch, runner in [('x86_64', 'ubuntu-26.04'), ('aarch64', 'ubuntu-26.04-arm')]
             for shard in range(1, args.shards + 1)])))
+    elif args.command == 'gates':
+        print(json.dumps(gates(os.environ)))
     elif args.command == 'resolve':
         if not 1 <= args.shard <= args.shards <= 32:
             raise ValueError('invalid form image shard')
@@ -478,9 +605,12 @@ def main():
     elif args.command == 'build':
         return build(args.snapshot, args.output)
     elif args.command == 'check':
-        return check(args.snapshot, args.first, args.second, args.output)
+        return check(args.snapshot, args.first, args.second, args.output, args.lifecycle)
+    elif args.command == 'export':
+        export(args.snapshots, args.verified, args.gated, store, args.assets, args.listing)
     elif args.command == 'publish':
-        return publish(args.snapshots, args.verified, catalog.Store(os.environ.get('IMAGES_BUCKET', 's3://werewolf/images/v1')))
+        gated = {(t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']}
+        return publish(args.snapshots, args.verified, gated, args.listing, store)
     return False
 
 

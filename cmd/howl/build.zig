@@ -142,6 +142,8 @@ const BuildOptions = struct {
     /// from its repository.
     local: bool = false,
     disabled: cmdline.Protections = .empty,
+    /// on is the provider a protected build's bundle is for: lima or qemu.
+    on: ?howl.Platform = null,
     dir: []const u8 = "dist",
     arch: howl.Arch,
     format: DiskFormat = .qcow2,
@@ -190,6 +192,9 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.dir = v;
         } else if (std.mem.eql(u8, a, "--disable")) {
             o.disabled = try howl.disableValue(v, why);
+        } else if (std.mem.eql(u8, a, "--on")) {
+            o.on = std.meta.stringToEnum(howl.Platform, v) orelse
+                return why.refuse("--on {s}: lima or qemu", .{v});
         } else if (std.mem.eql(u8, a, "--arch")) {
             arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
         } else if (std.mem.eql(u8, a, "--app")) {
@@ -219,7 +224,8 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes --build, --disable, -o, --arch, --format, --app, --ipe-kernel, " ++
+            "{s}: build takes --build, --disable, --on, -o, --arch, --format, --app, " ++
+                "--ipe-kernel, " ++
                 "--ipe-key, --ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert " ++
                 "and --boot-native, --tpm-pub, --tpm-firmware, --permit-host and " ++
                 "--permit-port\n{s}",
@@ -232,6 +238,11 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             (o.boot_key != null or o.boot_cert != null or o.boot_native)) or
         (o.disabled.contains(.tpm) and (o.tpm_pub != null or o.tpm_firmware)))
         return why.refuse("--disable names a protection the other flags give", .{});
+    if (o.on) |on| if ((on != .lima and on != .qemu) or !o.disabled.eql(.empty)) return why.refuse(
+        "--on {t}: a protected build's bundle is for lima or qemu; a disk without --on is for " ++
+            "the rest",
+        .{on},
+    );
     o.form = form orelse return why.refuse("no form\n{s}", .{howl.usage});
     o.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
     return o;
@@ -251,7 +262,6 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     const dir = o.dir;
     const format = o.format;
     _ = try howl.chain(io, gpa, ref, why);
-    const ab = try howl.appBuild(io, gpa, ref, o.arch, o.app, why);
     const command = try gpa.print("howl build {s}", .{std.mem.join(gpa, " ", args) catch ref});
     var steps: progress.Steps = try .init(io, gpa, why, .{
         .verbose = verbose,
@@ -259,6 +269,32 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a }),
         .first = howl.start_phase,
     });
+    if (o.disabled.eql(.empty)) {
+        // Every protection, as create deploys it: a bundle any machine on
+        // the provider enrolls, signed with the user's own keys.
+        const provider = o.on orelse if (@import("builtin").os.tag == .macos) .lima else .qemu;
+        const out = try gpa.print("{s}/{s}-{t}-{s}", .{ dir, f, provider, a });
+        try Dir.cwd().createDirPath(io, dir);
+        Dir.cwd().deleteTree(io, out) catch {};
+        _ = try @import("local-secure.zig").localBundle(
+            io,
+            gpa,
+            &steps,
+            .{ .form = ref, .app = o.app, .local = o.local },
+            provider,
+            o.arch,
+            try gpa.print("_build/{s}", .{f}),
+            out,
+            why,
+        );
+        _ = try steps.finish();
+        howl.say(io, "{s}: Secure Boot, the TPM and IPE, for {t}; signed with your keys", .{
+            out,
+            provider,
+        });
+        return;
+    }
+    const ab = try howl.appBuild(io, gpa, ref, o.arch, o.app, why);
     const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (!o.disabled.contains(.ipe) and
         o.ipe_kernel == null)
         try @import("prerequisites.zig").resolve(io, gpa, &steps, o.arch, why)
@@ -772,6 +808,13 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         steps.why,
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
+    // Native test roots are instrumentation, never distributable releases.
+    if (goals.qcow2 or goals.prebuilt) for (b.chain) |fm| {
+        const marker = try gpa.print("{s}/rootfs/usr/share/werewolf/test-image", .{fm.dir});
+        if (Dir.cwd().access(io, marker, .{})) |_| {
+            return steps.fail("native test images cannot be exported as release artifacts");
+        } else |err| if (err != error.FileNotFound) return err;
+    };
     if (previous) |rec| b.locked_images = rec.images;
     const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt;
     // A lock needs image digests, but no downloaded or unpacked layers.
@@ -1180,6 +1223,10 @@ test buildOptions {
         .aarch64,
         &why,
     )).disabled.eql(.full));
+    try testing.expectEqual(
+        .qemu,
+        (try buildOptions(&.{ "prod", "--on", "qemu" }, .aarch64, &why)).on.?,
+    );
     // A build gives each protection itself, so it takes any list.
     try testing.expect((try buildOptions(
         &.{ "prod", "--disable=secureboot,tpm" },
@@ -1196,6 +1243,7 @@ test buildOptions {
         &.{ "a", "--disable=secureboot,tpm,ipe", "--ipe-kernel", "k.tar" },
         &.{ "a", "--disable=secureboot,tpm,ipe", "--boot-key", "k.pem" },
         &.{ "a", "--disable=secureboot" },
+        &.{ "a", "--disable=secureboot,tpm,ipe", "--on", "qemu" },
         &.{ "a", "--disable=ipe", "--ipe-cert", "c.pem" },
         &.{ "a", "--disable=tpm", "--tpm-firmware" },
     }) |args| try testing.expectError(error.Refused, buildOptions(args, .aarch64, &why));

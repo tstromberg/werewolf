@@ -18,7 +18,6 @@ pub const protected_trust = @embedFile("release/protected/trust.json");
 pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");
 pub const protected_image_certificate = @embedFile("release/protected/image.crt");
 pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
-pub const catalog_boot_certificate = @embedFile("release/boot.crt");
 pub const forms_catalog = @embedFile("docs/forms-catalog.md");
 
 /// posture_known are the posture checks every form of a kind fails.

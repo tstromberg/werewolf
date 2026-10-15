@@ -475,6 +475,8 @@ pub const Options = struct {
     /// nothing given up, the machine is protected.
     disabled: cmdline.Protections = .empty,
     boot_image: ?@import("boot-image.zig").Request = null,
+    /// built is the build of boot_image when howl made it here (--build).
+    built: ?@import("local-secure.zig").Built = null,
     production_download: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
@@ -1744,8 +1746,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
                 return;
             }
             keep = cached == .configure;
-            if (cached == .miss and
-                o.local) try @import("local-secure.zig").refreshSource(io, gpa, o, name, why);
+            if (cached == .miss and o.local)
+                try @import("local-secure.zig").resumeLocal(io, gpa, &o, name, tell, why);
         }
         if (o.protected() and madeOn(io, gpa, name) != null) keep = true;
         if (!keep) if (madeOn(
@@ -1766,6 +1768,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         // Resolve and check it before anything is built or made.
         o.allow_from = try cloud.allowSource(io, gpa, a, why);
     }
+    // A protected --build machine enrolls a bundle built here, as a
+    // download's machine enrolls werewolf's.
+    if (o.protected() and o.local and o.boot_image == null)
+        try @import("local-secure.zig").resumeLocal(io, gpa, &o, name, tell, why);
     // Record the platform, so delete, console and ssh find the machine.
     const dir = try machineDir(gpa, name);
     try Dir.cwd().createDirPath(io, dir);

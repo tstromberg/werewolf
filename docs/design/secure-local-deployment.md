@@ -2,9 +2,10 @@
 
 ## Summary
 
-Deploy Lima and Linux QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM retirement.
-The local host and its stored TPM state are trusted; guest root and guest disks are not.
-Status: Lima lifecycle passed with Melange-built inputs and native Mac firmware enrollment.
+Deploy Lima and Linux QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM
+retirement. The local host and its stored TPM state are trusted; guest root and guest
+disks are not. Status: Lima lifecycle passed with Melange-built inputs and native Mac
+firmware enrollment.
 
 ## Background
 
@@ -29,31 +30,30 @@ The secured profile combines host enrollment, signing and permit issuance.
 
 ### Provider
 
-Use `vmType: qemu`, enrolled firmware and Lima's persistent `tpm: true` support.
-Keep the TPM state in the instance's private `swtpm` directory across restarts.
-Expose only its emulated guest device; neither state nor control sockets are mounts.
-Linux QEMU uses the same authorities, with a private host supervisor for persistent swtpm.
-QEMU receives its control socket; the guest receives only the emulated TPM device.
-Missing enrolled backing state fails; shutdown must finish before authority removal.
-Use a TPM-enabled EFI stub and compare predicted PCR 11 against actual boots.
-The default Alpine stub disables measurement and cannot serve this profile.
-Build the measured stub from `boot/stub-source` with `tools/build-tpm-stub` on Linux.
+Use `vmType: qemu`, enrolled firmware and Lima's persistent `tpm: true`. Keep the TPM
+state in the instance's private `swtpm` directory across restarts and expose only the
+emulated guest device: neither state nor control sockets are mounts. Linux QEMU uses the
+same authorities, with a private host supervisor for persistent swtpm; QEMU receives the
+control socket, the guest only the device. Missing enrolled backing state fails, and
+shutdown must finish before authority removal. Use a TPM-enabled EFI stub and compare
+predicted PCR 11 against actual boots: the default Alpine stub disables measurement, so
+build the measured one from `boot/stub-source` with `tools/build-tpm-stub` on Linux.
 
 ### Invocation and prerequisites
 
-`howl run --build` selects this profile on an arm64 Mac or native Linux.
-Published downloads remain gated in [the publication design](published-secure-boot.md).
-Without overrides, howl creates a private host IPE identity and caches matching builds.
-Cache identities bind architecture, Alpine base, public signer, sources and builder bytes.
-Checksummed completion records reject altered or incomplete cached artifacts.
-All three IPE overrides must be supplied together; `UKI_STUB` can override the measured stub.
-Mac builds use the existing Melange QEMU runner with a stock Alpine kernel and matching modules.
-An isolated Linux guest supplies native Kbuild and EFI/TPM tools; private keys stay on the Mac.
-Public firmware and native enrollment dependencies are hash-pinned; no Ubuntu VM is required.
-A separate temporary module signer stays in the builder and is deleted after compilation.
-Host authorities and public release objects persist beneath the machine directory.
-`--build` honors caller boot credentials; absent credentials are managed locally.
-`--dev` requires `--disable=secureboot,tpm,ipe`, which selects the legacy deployment path.
+`howl run --build` selects this profile on an arm64 Mac or native Linux. Published
+downloads remain gated in [the publication design](published-secure-boot.md). Without
+overrides, howl creates a private host IPE identity and caches matching builds; a cache
+identity binds architecture, Alpine base, public signer, sources and builder bytes, and
+a checksummed completion record rejects altered or incomplete artifacts. All three IPE
+overrides must be supplied together; `UKI_STUB` can override the measured stub. Mac
+builds use the Melange QEMU runner with a stock Alpine kernel and matching modules: an
+isolated Linux guest supplies native Kbuild and EFI/TPM tools, private keys stay on the
+Mac, firmware and enrollment dependencies are hash-pinned, and a temporary module
+signer is deleted after compilation. `--build` seals a bundle as CI seals werewolf's,
+signed with keys in `$XDG_DATA_HOME/howl`; the machine enrolls it as it would a
+download, so the image holds nothing of one machine. `--dev` requires
+`--disable=secureboot,tpm,ipe`, the legacy deployment path.
 
 ### Enrollment
 
@@ -67,35 +67,34 @@ retain recovery credentials and report the partial state rather than reset silen
 
 ### Images and permits
 
-Use a consistent host-held signer across a machine's authorized release images.
-New roots select the enrolled firmware PK; legacy roots retain their embedded TPM verification key.
-The image manifest, embedded UKI identity and host PCR mapping must agree.
-Boot, IPE and update signing identities must match their enrolled authorities.
-Source builds enroll caller boot credentials, or create a unique managed signer when absent.
-The host signs a transition only after authenticating the old record and candidate,
-checking retained membership, validating release/PCR mappings and serializing issuance.
-Deliver only public signed permits; guest code authenticates them against the TPM.
-Permit delivery and release publication must survive host-service restart.
-Guest root can request updates or cause denial of service; it cannot grant authority.
-Only the current published candidate can receive a new transition signature.
-Historical registrations cannot reauthorize retired roots; completed transitions may resume.
-Publication refuses older heads. Signature checks and a lock serialize bounded issuance.
-The root declares the permit host/port; [signed config](machine-transport.md) supplies its public TLS CA.
-Hourly host refreshes rebuild only when pinned inputs or the builder change.
+Use one host-held signer across a machine's authorized release images. New roots select
+the enrolled firmware PK; legacy roots retain their embedded TPM verification key. The
+image manifest, embedded UKI identity and host PCR mapping must agree, and boot, IPE and
+update signing identities must match their enrolled authorities. A bundle is signed with
+the caller's boot credentials, or the user's managed signer. The host signs a transition
+only after authenticating the old record and candidate, checking retained membership and
+release/PCR mappings, under a lock that serializes issuance; only the current published
+candidate can receive one, historical registrations cannot reauthorize retired roots,
+completed transitions may resume, and publication refuses older heads. Only public
+signed permits are delivered, which guest code authenticates against the TPM; delivery
+and publication survive host-service restart. Guest root can request updates or cause
+denial of service, never grant authority. The root declares the permit host and port;
+[signed config](machine-transport.md) supplies its public TLS CA. A rerun rebuilds only
+when pinned inputs or the builder change, and offers the result as an update.
 
 ### Startup and existing machines
 
-Create the Lima instance, provision its own simulator state, then start the guest.
-Report readiness only after the required guest checks succeed.
-Restart preserves disk, firmware variables, hierarchy credentials and TPM state; unchanged runs reuse live guests.
-An existing machine without this profile requires explicit recreation or migration;
-configuration changes cannot turn an older non-enforcing image into an enforcing one.
+Create the Lima instance, provision its own simulator state, then start the guest, and
+report readiness only after the required guest checks succeed. Restart preserves disk,
+firmware variables, hierarchy credentials and TPM state; unchanged runs reuse live
+guests. An existing machine without this profile needs explicit recreation or
+migration: configuration changes cannot make an older image enforcing.
 
 ## Drawbacks
 
 - Requires QEMU, swtpm, a measured stub and an IPE kernel matching the signer.
 - Host permit issuance adds persistent state and an availability dependency.
-- First-use kernel compilation requires native build dependencies and takes longer than VM boot.
+- First-use kernel compilation needs native build dependencies and outlasts a VM boot.
 
 ## Alternatives Considered
 
@@ -106,15 +105,14 @@ configuration changes cannot turn an older non-enforcing image into an enforcing
 
 ## Security Considerations
 
-New profiles use PK for TPM authority, matching KEK and pinned db; old roots keep embedded keys.
-Host keys and private state must never appear in roots, config disks or guest mounts.
-Reject unknown anchors, missing TPMs, wrong keys and unsigned or retired images.
-Firmware must trust only UKIs that require mandatory TPM checks.
+New profiles use PK for TPM authority, matching KEK and pinned db; old roots keep
+embedded keys. Host keys and private state must never appear in roots, config disks or
+guest mounts. Reject unknown anchors, missing TPMs, wrong keys and unsigned or retired
+images. Firmware must trust only UKIs that require mandatory TPM checks.
 
 ## Reliability Considerations
 
-Test creation, restart, healthy update, rollback, failed trials and retirement cuts.
-Check explicit rejection of retired releases, missing TPMs and unmeasured UKIs.
-Validate provisioning against independent TPM tools and retain only public evidence.
-The CLI regression covers updates, rollback, restart, failed trials, tampering and NV cuts.
-VM/simulator process kills do not prove physical TPM power-loss atomicity.
+The CLI regression covers creation, restart, updates, rollback, failed trials,
+tampering, retirement and NV cuts, and the rejection of retired releases, missing TPMs
+and unmeasured UKIs; provisioning is validated against independent TPM tools, keeping
+only public evidence. Killing VM and simulator does not prove TPM power-loss atomicity.

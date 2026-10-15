@@ -35,19 +35,17 @@ input refused whole at the first thing not understood; no knobs) and Unix
 
 ## Detailed design
 
-**Baked (built).** howl pins a tag to its digest once and prints it.
-`crane export REF@sha256:…` verifies every blob and flattens the layers
-into one tar; `howl _unpack` writes it to `rootfs/oci/NAME` with no
-environment, confined on Linux by Landlock to that directory. It refuses
-the whole image at the first entry it does not accept, and keeps no
-setuid bit or file capability. The image's config becomes a service file
-(cmd/howl/adhoc.zig) whose entrypoint must be ELF: a `#!` script's
-interpreter would have to run too. The refusals, limits, mapping and the
-root's contents are in [forms.md](../forms.md#forms-from-the-command-line).
-At build howl makes each bind point empty, replacing links too; before
-fence, init binds the service's `/proc`, devices and own `noexec`
-directories (cmd/init/oci.zig), and the mount tool opens each target
-without following links. The tree is in the dm-verity root, so no link
+**Baked (built).** howl pins a tag to its digest once and prints it. `crane export
+REF@sha256:…` verifies every blob and flattens the layers into one tar; `howl _unpack`
+writes it to `rootfs/oci/NAME` with no environment, confined on Linux by Landlock to
+that directory. It refuses the whole image at the first entry it does not accept, and
+keeps no setuid bit or file capability. The image's config becomes a service file
+(cmd/howl/adhoc.zig) whose entrypoint must be ELF: a `#!` script's interpreter would
+have to run too. The refusals, limits, mapping and the root's contents are in
+[applications.md](../applications.md#forms-from-the-command-line). At build howl makes
+each bind point empty, replacing links too; before fence, init binds the service's
+`/proc`, devices and own `noexec` directories (cmd/init/oci.zig), and the mount tool
+opens each target without following links. The tree is in the dm-verity root, so no link
 appears in between, the race runc's CVE-2021-30465 used.
 
 **Baked by the build (built).** A form's `image: REPO:TAG` is resolved at

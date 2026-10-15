@@ -13,6 +13,20 @@ const Trust = struct {
     permit_port: u16,
 };
 
+/// trust is howl's embedded protected trust (release/protected/trust.json).
+fn trust(gpa: Allocator) !Trust {
+    const t = try std.json.parseFromSliceLeaky(Trust, gpa, files.protected_trust, .{});
+    if (!std.mem.eql(u8, t.format, "werewolf-boot-trust/1") or t.permit_port == 0)
+        return error.BadProtectedTrust;
+    return t;
+}
+
+/// permitPort is the host port every protected machine takes its updates
+/// and permits from, whether werewolf or the user built its image.
+pub fn permitPort(gpa: Allocator) !u16 {
+    return (try trust(gpa)).permit_port;
+}
+
 pub fn latest(
     io: Io,
     gpa: Allocator,
@@ -26,9 +40,7 @@ pub fn latest(
         .{},
     );
     if (provider != .lima and provider != .qemu) return error.BadSecuredProvider;
-    const trust = try std.json.parseFromSliceLeaky(Trust, gpa, files.protected_trust, .{});
-    if (!std.mem.eql(u8, trust.format, "werewolf-boot-trust/1") or trust.permit_port == 0)
-        return error.BadProtectedTrust;
+    const t = try trust(gpa);
     const root = "build/boot-download";
     try Dir.cwd().createDirPath(io, root);
     const script = root ++ "/boot-download";
@@ -40,10 +52,10 @@ pub fn latest(
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const config = try gpa.print("{s}/{s}/{s}-{t}-{t}.json", .{ cwd, root, form, provider, arch });
     const channel = try gpa.print("https://{s}:{d}/{s}", .{
-        if (provider == .lima) "192.168.5.2" else "10.0.2.2", trust.permit_port, form,
+        if (provider == .lima) "192.168.5.2" else "10.0.2.2", t.permit_port, form,
     });
     try howl.writePrivate(io, gpa, config, try std.json.Stringify.valueAlloc(gpa, .{
-        .source = howl.environ.get("WEREWOLF_BOOT_MIRROR") orelse trust.source,
+        .source = howl.environ.get("WEREWOLF_BOOT_MIRROR") orelse t.source,
         .cache = try gpa.print("{s}/build/boot-cache", .{cwd}),
         .boot_certificate = try gpa.print("{s}/{s}", .{ cwd, code }),
         .image_certificate = try gpa.print("{s}/{s}", .{ cwd, image }),

@@ -1,67 +1,54 @@
 # Available forms
 
-A **form** defines the software and permissions of a Werewolf VM. Choose one
-below and follow its setup guide for configuration, credentials and how to
-connect. Names link to a guide where one exists, or to the manifest for a
-building block or example.
-
-For your own application, start with the [language tutorials](../examples/README.md).
-The `-app` forms need your code supplied through `--app`; the `-example` forms
-include a sample application. Runtime forms such as `python` supply the
-interpreter and leave the service definition to you.
+A form says what a werewolf machine is for: its packages, services and
+permissions. Pick one below and follow its guide; a name links to the guide
+where one exists, else to the form's manifest. For your own application,
+start with the [language tutorials](../examples/README.md): the `-app` forms
+take your code through `--app`, the `-example` forms carry a sample, and a
+runtime form such as `python` supplies the interpreter and leaves the
+service to you ([applications.md](applications.md)).
 
 ## Get started
 
-Browse and inspect forms from the command line:
-
 ```sh
-howl forms                       # this checkout, or the signed catalog outside it
-howl forms database              # search names and descriptions
-howl forms caddy                 # setup guide, architectures and commands
-howl forms --published --arch arm64  # published image inventory for one architecture
-howl test --with caddy            # integration and production-variant boot checks
+howl forms                            # this checkout, or the signed catalog outside it
+howl forms database                   # search names and descriptions
+howl forms caddy                      # setup guide, architectures and commands
+howl forms --published --arch arm64   # published images for one architecture
+howl test --with caddy                # integration and production-variant boot checks
 ```
 
-Follow the [installation steps](../README.md#try-it), then try the Node.js
-sample locally from the checkout:
+After the [installation steps](../README.md#try-it), try the Node.js sample
+from the checkout:
 
 ```sh
 howl run --build --with node-example
 ```
 
-For a service, open its guide below first: many need credentials or certificates
-before they start. `howl pack --build --with FORM -h` lists that form’s
-configuration flags. Replace `FORM` with its name.
-
-`--build` uses this checkout. Secure deployment is the default; using a
-prebuilt download requires a published protected image for the selected form,
-host and architecture. See the [host support table](../README.md#secure-boot)
-and [howl guide](../cmd/howl/README.md) for deployment options.
+Open a service's guide first: many need credentials or certificates before
+they start, and `howl pack --build --with FORM -h` lists the form's
+configuration flags. `--build` uses this checkout. Secure deployment is the
+default, and a prebuilt download needs a published protected image for the
+form, host and architecture: see the [host support table](../README.md#secure-boot)
+and the [howl guide](../cmd/howl/README.md).
 
 ## Images and downloads
 
-Browse the [image catalog](https://dist.werewolf-linux.org/images/v1/index.html)
-or use `howl forms --published`. Each form has a page with arm64 and x86_64
-downloads, package release notes, signatures, test evidence and the latest attempt's status. A failed
-test or build keeps the previous passing image. Unsupported architectures are
-listed explicitly: Overleaf's upstream image currently supports x86_64 only.
+Browse the [image catalog](https://dist.werewolf-linux.org/boot/v1/index.html)
+or run `howl forms --published`. Each form's page lists its targets (QEMU on
+arm64 and x86_64, Lima on arm64) with downloads, package release notes,
+signatures, test evidence and the latest attempt's status; a failed build,
+test or gate keeps the previous published image. Unsupported architectures
+are listed: Overleaf's upstream image is x86_64 only.
+[form-images.md](form-images.md) explains how the
+[workflow](../.github/workflows/form-images.yml) builds every form with every
+protection, and why only gated targets are published.
 
-The [form-image workflow](../.github/workflows/form-images.yml) discovers every
-form, resolves package and OCI versions, builds each changed target independently
-twice, and requires matching bytes and passing tests on that architecture.
-See [verification and deployment instructions](releases.md#form-image-catalog).
-Publishing a `NAME-form` APK package is separate from publishing a boot disk.
-
-Catalog disks use signed UEFI boot, IPE and signed complete-slot updates. They
-require firmware enrollment and boot configuration. Custom application forms
-still need your code and a corresponding signed update channel.
-
-`howl run` and `howl create` also require TPM enrollment in their protected mode.
-Their prebuilt downloads currently cover `playground` on x86_64 QEMU and arm64
-Lima; the [protected download guide](releases.md#downloading-a-protected-qcow2)
-describes that separate path. A catalog qcow2 does not satisfy its lifecycle
-gates or create owner keys and a host permit service. For other forms, use
-`howl run --build --with FORM` from the checkout and follow its setup guide.
+`howl run` and `howl create` download a published target, today `playground`
+([form-images.md](form-images.md#downloading-a-protected-qcow2)), and enroll
+its firmware and TPM. For any other form, run `howl run --build --with FORM`
+from the checkout and follow its guide: the same protections, signed with
+your own keys.
 
 ## Alphabetical list
 
@@ -164,7 +151,7 @@ gates or create owner keys and a host permit service. For other forms, use
 | [valkey-tcp](../forms/valkey-tcp/README.md) | Valkey for network clients on TCP port 6379, with a configured memory limit. |
 | [vaultwarden](../forms/vaultwarden/README.md) | A Bitwarden-compatible password manager server. |
 | [velociraptor](../forms/velociraptor/README.md) | A Velociraptor server for endpoint visibility and investigation. |
-| [webshell-example](../forms/webshell-example/form.yaml) | A deliberately vulnerable Python application for testing confinement. |
+| [webshell-example](../forms/webshell-example/README.md) | A deliberately vulnerable Python application for testing confinement. |
 | [wordpress](../forms/wordpress/README.md) | WordPress backed by SQLite, served through nginx. |
 | [wordpress-mariadb](../forms/wordpress-mariadb/README.md) | WordPress backed by MariaDB on a local UNIX socket. |
 | [zeek](../forms/zeek/README.md) | Network traffic analysis on a configured interface, writing JSON logs to persistent data. |
@@ -172,6 +159,6 @@ gates or create owner keys and a host permit service. For other forms, use
 
 ## Create your own form
 
-The [form authoring guide](forms.md) explains how to define an application,
-services and permissions. The [manifest reference](../forms/README.md) documents
-`form.yaml` and the files a form can supply.
+[forms.md](forms.md) explains how to define an application, its services
+and permissions; [forms/README.md](../forms/README.md) documents `form.yaml`
+and the files a form can supply.

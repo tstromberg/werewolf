@@ -34,10 +34,12 @@ general-purpose UDP or ICMP routing.
 
 ## Basic usage
 
-Start with [local test deployment](../../forms/tailscale/README.md#local-test-deployment-lima-qemu-firecracker)
-or [cloud production deployment](../../forms/tailscale/README.md#cloud-production-deployment-aws-gcp-azure-proxmox).
-Both use `tailscale/settings.json` and a private `auth-key` file. Lima carries
-them as NoCloud data files; GCP carries them in a base64 config tar.
+Start with [local test
+deployment](../../forms/tailscale/README.md#local-test-deployment-lima-qemu-firecracker)
+or [cloud production
+deployment](../../forms/tailscale/README.md#cloud-production-deployment-aws-gcp-azure-proxmox).
+Both use `tailscale/settings.json` and a private `auth-key` file. Lima carries them as
+NoCloud data files; GCP carries them in a base64 config tar.
 
 The tutorial includes a narrow tailnet grant, route approval, client tests,
 updates and cleanup. Use a new single-use enrollment key for each VM.

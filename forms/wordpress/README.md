@@ -1,8 +1,10 @@
 # WordPress - Hardened VM
 
-[WordPress](https://wordpress.org) on SQLite, behind nginx. The form's manifest is [form.yaml](form.yaml).
+[WordPress](https://wordpress.org) on SQLite, behind nginx. The form's manifest is
+[form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/wordpress/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/wordpress/index.html).
 
 ## Security Posture
 
@@ -27,7 +29,8 @@ howl create wordpress --with wordpress --config config \
 	--url https://blog.home.arpa --admin-email me@example.com
 ```
 
-Open `https://blog.home.arpa` and sign in as `admin`. Posts and users are in [WordPress's documentation](https://wordpress.org/documentation/).
+Open `https://blog.home.arpa` and sign in as `admin`. Posts and users are in
+[WordPress's documentation](https://wordpress.org/documentation/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -39,11 +42,13 @@ howl create wordpress --with wordpress --on gcp --allow-from me --config config 
 	--url https://blog.example.com --admin-email me@example.com
 ```
 
-`--allow-from me` admits your address to port 80. Point the name at the machine. The URL is stored at first install.
+`--allow-from me` admits your address to port 80. Point the name at the machine. The URL
+is stored at first install.
 
 ### Importing data
 
-Export the old site as WXR and import it under Tools, once the site answers. The host cannot write the SQLite file.
+Export the old site as WXR and import it under Tools, once the site answers. The host
+cannot write the SQLite file.
 
 ### Known Quirks
 

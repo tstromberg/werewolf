@@ -289,8 +289,9 @@ pub fn defaultId(name: []const u8) u32 {
 }
 
 /// apko returns the chain's merged apko config (form.apko, with extra),
-/// filling omitted account ids with defaultId(name), and adding an account
-/// for each undeclared service user. A user with no uid gets its own group,
+/// and werewolf's key (package.keyring), filling omitted account ids with
+/// defaultId(name), and adding an account for each undeclared service
+/// user. A user with no uid gets its own group,
 /// home /var/empty and shell /sbin/nologin unless overridden; a same-named
 /// declared group supplies its gid. It refuses two services that run as
 /// one user, since strict share could not then keep them apart. It also
@@ -304,7 +305,15 @@ pub fn apko(
     extra: []const []const u8,
     f: *Failure,
 ) !form.Node {
-    const merged = try form.apko(gpa, forms, extra);
+    // werewolf's key, which signs minimal's glibc repository and, published,
+    // werewolf's own.
+    const key = try gpa.dupe(
+        form.Node,
+        &.{.{ .scalar = .{ .raw = package.keyring, .text = package.keyring } }},
+    );
+    const keyring = try gpa.dupe(form.Entry, &.{.{ .key = "keyring", .value = .{ .list = key } }});
+    const add = try gpa.dupe(form.Entry, &.{.{ .key = "contents", .value = .{ .map = keyring } }});
+    const merged = try form.merge(gpa, try form.apko(gpa, forms, extra), .{ .map = add });
     const top = forms[forms.len - 1].dir;
     var declared: std.array_hash_map.String(void) = .empty;
     var declared_groups: std.array_hash_map.String(u32) = .empty;
@@ -502,21 +511,17 @@ pub fn formDepends(gpa: Allocator, fm: Form) ![]const []const u8 {
 
 /// published returns config for a build that takes werewolf's programs, and
 /// the forms named in from_repo, from werewolf's repository: its repository
-/// and keyring added, and its packages each such form as NAME-form, which
-/// brings its own, then the other forms' packages and programs, extra, and
-/// the format pin. Every image's programs come with the form built on none,
-/// or are named when that form is not from the repository. keyring must be
-/// named as the index's signature names the key.
+/// added, and its packages each such form as NAME-form, which brings its
+/// own, then the other forms' packages and programs, extra, and the format
+/// pin. Every image's programs come with the form built on none, or are
+/// named when that form is not from the repository. apko gave config the key.
 pub fn published(
     gpa: Allocator,
     config: form.Node,
     forms: []const Form,
     from_repo: []const []const u8,
     extra: []const []const u8,
-    keyring: []const u8,
 ) !form.Node {
-    if (!mem.eql(u8, std.fs.path.basename(keyring), package.repository_key))
-        return error.KeyringName;
     var names: std.array_hash_map.String(void) = .empty;
     for (forms) |fm| {
         const repo = for (from_repo) |n| {
@@ -536,7 +541,7 @@ pub fn published(
     const list = try gpa.alloc(form.Node, names.count());
     for (names.keys(), list) |p, *n| n.* = .{ .scalar = .{ .raw = p, .text = p } };
 
-    // The packages replace the chain's; the repository and key join its.
+    // The packages replace the chain's; the repository joins its.
     var contents: std.ArrayList(form.Entry) = .empty;
     if (config.get("contents")) |c| if (c == .map) for (c.map) |e|
         if (!mem.eql(u8, e.key, "packages")) try contents.append(gpa, e);
@@ -548,18 +553,14 @@ pub fn published(
         e);
     if (config.get("contents") == null)
         try top.append(gpa, .{ .key = "contents", .value = .{ .map = contents.items } });
-    const one = struct {
-        fn of(a: Allocator, text: []const u8) !form.Node {
-            return .{ .list = try a.dupe(
-                form.Node,
-                &.{.{ .scalar = .{ .raw = text, .text = text } }},
-            ) };
-        }
-    };
-    const repo = try gpa.dupe(form.Entry, &.{
-        .{ .key = "repositories", .value = try one.of(gpa, package.repository) },
-        .{ .key = "keyring", .value = try one.of(gpa, keyring) },
-    });
+    const url = try gpa.dupe(
+        form.Node,
+        &.{.{ .scalar = .{ .raw = package.repository, .text = package.repository } }},
+    );
+    const repo = try gpa.dupe(
+        form.Entry,
+        &.{.{ .key = "repositories", .value = .{ .list = url } }},
+    );
     const add = try gpa.dupe(form.Entry, &.{.{ .key = "contents", .value = .{ .map = repo } }});
     return form.merge(gpa, .{ .map = top.items }, .{ .map = add });
 }

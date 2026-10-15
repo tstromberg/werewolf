@@ -11,6 +11,9 @@ import sys
 import tempfile
 
 downloads = importlib.machinery.SourceFileLoader('export_downloads', 'tools/boot-download').load_module()
+# The form pipeline adds what the bundle was built from and how it changed;
+# the signed manifest covers them like every other asset.
+EXTRAS = {'inputs.tar.gz', 'packages.json', 'tests.json', 'release-notes.json', 'release-notes.html'}
 
 
 def run(args, **kwargs):
@@ -101,7 +104,7 @@ def verify(directory, bundle, report, provider, trust):
             raise ValueError('download manifest describes another protected bundle')
         original = sources(bundle, trust)
         required = set(original) | {'disk.qcow2', 'gates.json'}
-        if set(signed['files']) != required:
+        if not required <= set(signed['files']) <= required | EXTRAS:
             raise ValueError('download manifest has incomplete or unexpected files')
         for name, record in signed['files'].items():
             if set(record) != {'asset', 'sha256', 'size'} or record['asset'] != prefix + '-' + name:
@@ -122,7 +125,7 @@ def verify(directory, bundle, report, provider, trust):
     return signed
 
 
-def export(howl, bundle, report, provider, output, trust='release/protected', preparation=None):
+def export(howl, bundle, report, provider, output, trust='release/protected', preparation=None, extras=None):
     if preparation is None:
         preparation = importlib.machinery.SourceFileLoader('export_preparation', 'release/prepare-protected').load_module()
     bundle, output, trust = Path(bundle).resolve(), Path(output).resolve(), Path(trust).resolve()
@@ -137,7 +140,12 @@ def export(howl, bundle, report, provider, output, trust='release/protected', pr
         prefix = '%s-%s-%s' % (plan['form'], provider, plan['arch'])
         staging = work / 'assets'
         staging.mkdir()
-        for name, source in sources(bundle, trust).items():
+        originals = sources(bundle, trust)
+        if extras is not None:
+            if not set(extras) <= EXTRAS:
+                raise ValueError('unexpected release extras')
+            originals.update(extras)
+        for name, source in originals.items():
             shutil.copyfile(source, staging / (prefix + '-' + name))
         downloads.atomic(staging / (prefix + '-gates.json'), report)
         raw = work / 'disk.raw'

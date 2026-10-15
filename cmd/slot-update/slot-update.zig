@@ -1307,23 +1307,30 @@ pub const Package = prebuilt.Package;
 
 /// parseInstalled parses an apk installed database, sorted by name. Records
 /// end at a blank line; P is the name, V the version, o the origin (source
-/// package), which defaults to the name.
+/// package), which defaults to the name, and p what it provides, which may
+/// name the Wolfi source it rebuilds instead (prebuilt.rebuiltFrom).
 pub fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
     var out: std.ArrayList(Package) = .empty;
     var p: Package = .{ .name = "", .version = "", .origin = "" };
+    var rebuilt: ?[]const u8 = null;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (line.len == 0) {
+            if (rebuilt) |r| p.origin = r;
             if (p.name.len > 0) try out.append(gpa, finish(p));
             p = .{ .name = "", .version = "", .origin = "" };
+            rebuilt = null;
         } else if (std.mem.startsWith(u8, line, "P:")) {
             p.name = line[2..];
         } else if (std.mem.startsWith(u8, line, "V:")) {
             p.version = line[2..];
         } else if (std.mem.startsWith(u8, line, "o:")) {
             p.origin = line[2..];
+        } else if (std.mem.startsWith(u8, line, "p:")) {
+            rebuilt = prebuilt.rebuiltFrom(line[2..]);
         }
     }
+    if (rebuilt) |r| p.origin = r;
     if (p.name.len > 0) try out.append(gpa, finish(p));
     std.mem.sort(Package, out.items, {}, struct {
         fn lt(_: void, a: Package, b: Package) bool {
@@ -1420,7 +1427,8 @@ test backwards {
 }
 
 /// diffOrigins lists source packages present in both old and new at
-/// different versions, once each.
+/// different versions, once each. A rebuild counts as the Wolfi source and
+/// version it names (prebuilt.Package), so Wolfi's CVE fixes match it.
 pub fn diffOrigins(
     gpa: Allocator,
     old: []const Package,
@@ -1428,15 +1436,24 @@ pub fn diffOrigins(
 ) ![]const cve.OriginChange {
     var out: std.ArrayList(cve.OriginChange) = .empty;
     for (new) |n| {
-        const o = for (old) |p| {
-            if (std.mem.eql(u8, p.origin, n.origin)) break p.version;
+        const to = sourceOf(n);
+        const from = for (old) |p| {
+            const s = sourceOf(p);
+            if (std.mem.eql(u8, s.origin, to.origin)) break s.version;
         } else continue;
-        if (std.mem.eql(u8, o, n.version)) continue;
+        if (std.mem.eql(u8, from, to.version)) continue;
         for (out.items) |c| {
-            if (std.mem.eql(u8, c.origin, n.origin)) break;
-        } else try out.append(gpa, .{ .origin = n.origin, .from = o, .to = n.version });
+            if (std.mem.eql(u8, c.origin, to.origin)) break;
+        } else try out.append(gpa, .{ .origin = to.origin, .from = from, .to = to.version });
     }
     return out.items;
+}
+
+/// sourceOf returns the origin and version p's CVEs are counted under.
+fn sourceOf(p: Package) struct { origin: []const u8, version: []const u8 } {
+    const i = std.mem.findScalarLast(u8, p.origin, ':') orelse
+        return .{ .origin = p.origin, .version = p.version };
+    return .{ .origin = p.origin[0..i], .version = p.origin[i + 1 ..] };
 }
 
 /// buildHash identifies a build: the first 16 hex digits of the sha256 of
@@ -1543,6 +1560,26 @@ test "installed database, diffs and origins" {
 
     try testing.expectEqualStrings((try buildHash(a, new, "k")), (try buildHash(a, new, "k")));
     try testing.expect(!std.mem.eql(u8, try buildHash(a, new, "k"), try buildHash(a, old, "k")));
+}
+
+test "a rebuild of Wolfi's glibc counts as the Wolfi glibc it rebuilds" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const wolfi = try parseInstalled(a, "P:glibc-2.44\nV:2.44-r8\no:glibc-2.44\n");
+    const rebuilt = "P:glibc-neutered-2.44\nV:2.44-r{d}\no:glibc-neutered-2.44\n" ++
+        "p:glibc=2.44-r{d} wolfi-origin:glibc-2.44:2.44-r{d}\n";
+    const r18 = try parseInstalled(a, try a.print(rebuilt, .{ 18, 18, 8 }));
+    const r19 = try parseInstalled(a, try a.print(rebuilt, .{ 19, 19, 9 }));
+    try testing.expectEqualStrings("glibc-2.44:2.44-r8", r18[0].origin);
+    // Moving to the rebuild of the same Wolfi glibc fixes nothing.
+    try testing.expectEqual(0, (try diffOrigins(a, wolfi, r18)).len);
+    // The next rebuild carries Wolfi's r9: its fixes are Wolfi's (r8, r9].
+    const changes = try diffOrigins(a, r18, r19);
+    try testing.expectEqual(1, changes.len);
+    try testing.expectEqualStrings("glibc-2.44", changes[0].origin);
+    try testing.expectEqualStrings("2.44-r8", changes[0].from);
+    try testing.expectEqualStrings("2.44-r9", changes[0].to);
 }
 
 test {

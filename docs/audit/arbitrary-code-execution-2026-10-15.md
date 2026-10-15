@@ -115,7 +115,7 @@ the helper.
 
 ---
 
-## 4. `before` Hooks Run Without Seccomp `pledge` and Remain Executable When `pledge` Contains `exec`
+## 4. `before` Hooks Run Without Seccomp `pledge` and Stay Executable With `exec`
 
 - **Files:**
   - `cmd/leash/leash.zig`
@@ -159,11 +159,11 @@ also had to be placed in `gitea`'s runtime `run:` list solely for `gitea-init`
   - `forms/minimal/form.yaml`, `forms/sshd/form.yaml`
 
 ### Mechanism
-When `login` is true (`caps: login` on `sshd`), `cmd/leash/leash.zig`
-initializes Landlock with `.only_bind = true` (`handled_access_fs = 0`), leaving
-interactive sessions under `fence`'s `/usr` and `/oci` execute grants.
-Administrative tools in `/usr/bin` and `/usr/sbin` (`/usr/bin/apk`,
-`/usr/sbin/e2fsck`, `/usr/sbin/mke2fs`, `/usr/bin/cryptsetup`) are world-executable (`0o755`).
+When `login` is true (`caps: login` on `sshd`), `cmd/leash/leash.zig` initializes
+Landlock with `.only_bind = true` (`handled_access_fs = 0`), leaving interactive
+sessions under `fence`'s `/usr` and `/oci` execute grants. Administrative tools in
+`/usr/bin` and `/usr/sbin` (`/usr/bin/apk`, `/usr/sbin/e2fsck`, `/usr/sbin/mke2fs`,
+`/usr/bin/cryptsetup`) are world-executable (`0o755`).
 
 ### Remediation
 - Restrict administrative binaries (`/usr/bin/apk`, `/usr/sbin/e2fsck`,

@@ -44,14 +44,13 @@ spent 18 ms finding no VMBus.
 4. **Pledge** (`lib/sandbox.zig`): every capability but CAP_SYS_MODULE
    gone, from the bounding set too, securebits locked; a seccomp filter of
    `finit_module`, `read`, `write`, `close` and exit, killing anything else.
-5. **Load** each with `finit_module` on its open file, so the kernel reads
-   and checks what is on disk, not a copy. A built-in module counts as
-   loaded; one whose hardware is absent (ENODEV, EOPNOTSUPP) as absent.
-   Untagged lines load first. Then stage0 names tags on stdin, one a line,
-   and each tag's lines load as it arrives: `hyperv` at once if
-   `/sys/bus/vmbus` exists (the slot's disk may sit behind it), `esp` with
-   `werewolf.esp`, then a `none` sentinel to leave unused tags unloaded. Tagged lines not named are skipped; if stdin ends with
-   no tag named, every line loads.
+5. **Load** each with `finit_module` on its open file, so the kernel reads and checks
+   what is on disk, not a copy. A built-in module counts as loaded; one whose hardware
+   is absent (ENODEV, EOPNOTSUPP) as absent. Untagged lines load first. Then stage0
+   names tags on stdin, one a line, and each tag's lines load as it arrives: `hyperv` at
+   once if `/sys/bus/vmbus` exists (the slot's disk may sit behind it), `esp` with
+   `werewolf.esp`, then a `none` sentinel to leave unused tags unloaded. Tagged lines
+   not named are skipped; if stdin ends with no tag named, every line loads.
 6. **Close** the loader (`kernel.modules_disabled=1`) whatever happened,
    and read it back: the kernel's answer, not the write's, is reported.
 

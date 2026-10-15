@@ -48,6 +48,15 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     run('--with=caddy', '--arch=arm64', status=17, HOWL_TEST_EXIT='17')
     assert 'ARCH=aarch64' in json.loads(record.read_text())['args']
     run('--with', 'caddy')
+    native = root / 'forms/caddy/test/native.json'
+    native.parent.mkdir()
+    native.write_text('{}')
+    assert 'native clients, no DEV' in run('--with', 'caddy').stderr
+    assert json.loads(record.read_text())['args'][-2:] == ['check-native-tests-caddy', 'check-shellfree-caddy']
+    native.write_text('{"legacy":true}')
+    assert 'native clients plus legacy DEV checks' in run('--with', 'caddy').stderr
+    assert json.loads(record.read_text())['args'][-2:] == ['check-caddy', 'check-shellfree-caddy']
+    native.unlink()
     record.unlink()
     for args in [[], ['--with'], ['caddy'], ['--with', 'missing'],
                  ['--with', 'caddy,sshd'], ['--with', '../caddy'],

@@ -1,0 +1,9 @@
+# What the postdoc-server form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-postdoc-server; test/boot; forms/demo/test/console has
+# the format). Given no API token, postdoc parks before it downloads or
+# serves anything, and says why; so does the tunnel, given none.
+
+seen    postdoc-needs-token     leash: \{"event":"down","service":"postdoc","why":"config api-token: FileNotFound"\}
+seen    tunnel-needs-token      leash: \{"event":"down","service":"cloudflared","why":"secret TUNNEL_TOKEN: /run/config/cloudflared/token: FileNotFound"\}
+unseen  postdoc-leashed         leash: \{"event":"start","service":"postdoc"

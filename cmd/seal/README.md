@@ -20,9 +20,9 @@ anyone may run:
       app          stdio rpath inet listen
       slot-keep    (werewolf's own: the machine's promises alone)
     refused this boot:
-      keyctl           never     1 time, last by pid 97, first at 2026-10-07 01:14:03 UTC
-    never allowed: bpf perf_event_open init_module ...
-    never allowed for what they ask: socket and socketpair (a family no promise names); ...
+      keyctl never 1 time, last by pid 97, first at 2026-10-07 01:14:03 UTC
+    never allowed: bpf perf_event_open init_module ... never allowed for what they ask:
+    socket and socketpair (a family no promise names); ...
 
 ## Goals
 

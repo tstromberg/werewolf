@@ -81,7 +81,7 @@ under QEMU (`--on qemu`), a loopback port forwarded to it. `howl stop` ends
 `run`'s machine, and `howl delete web` removes `web`. The Python tutorial's
 form takes a setting, `--greeting TEXT`, as an example of handing an
 application per-machine values
-([docs/forms.md](../docs/forms.md#without-a-form---app)).
+([docs/applications.md](../docs/applications.md#without-a-form---app)).
 
 `run` replaces its machine each time, `/data` and all, so it boots what you
 last built. `create` of a name that exists keeps the machine's `/data`:

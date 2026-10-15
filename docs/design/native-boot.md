@@ -34,12 +34,12 @@ GPT, two partitions; every GUID, UUID, serial number and time is fixed.
 | EFI system, FAT32, 256 MiB | systemd-boot at the removable-media path (`EFI/BOOT/BOOTAA64.EFI` or `BOOTX64.EFI`), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz` and `stage0.zst` |
 | ext4 (`/boot`), the rest | `slot/{a,b}/root.erofs`, `state/{0,1}`; init adds `data/`, which is bind-mounted at `/data` |
 
-The removable-media path needs no NVRAM entry, so the disk boots wherever
-it is attached. stage0 finds the ext4 partition by `werewolf.slots=UUID`. systemd-boot sorts
-entries by `sort-key`, then newest `version`, with any entry out of tries
-last. No default is set, so the newest slot not known bad wins; slot a's
-version is 1980, older than any update's. `make disk` needs no Linux: it
-uses `boot/gpt.zig` (no `sfdisk`), mtools and `mke2fs -d`.
+The removable-media path needs no NVRAM entry, so the disk boots wherever it is
+attached. stage0 finds the ext4 partition by `werewolf.slots=UUID`. systemd-boot sorts
+entries by `sort-key`, then newest `version`, with any entry out of tries last. No
+default is set, so the newest slot not known bad wins; slot a's version is 1980, older
+than any update's. `make disk` needs no Linux: it uses `boot/gpt.zig` (no `sfdisk`),
+mtools and `mke2fs -d`.
 
 The updater knows the disk by `werewolf.esp`. It builds the other slot as
 always, and asks the mount broker — which never lends the EFI partition

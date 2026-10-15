@@ -140,6 +140,11 @@ jobs:
         env:
           CAGE_HARDEN_HOST: 1
         run: make -k -j"$(nproc)" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+      # x86 form checks already include these suites. ARM's ordinary form
+      # checks use nspawn, so also boot the native clients once under QEMU.
+      - name: Shell-free integration clients and persistent data
+        if: matrix.group == 'native' && matrix.shard == 1
+        run: make check-native-tests
       # One job an architecture saves the Zig cache, when this week's has
       # no entry for these sources yet: every check job compiles the same
       # programs, and integrity is off the critical path.
@@ -170,4 +175,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: check-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
-          path: build/*/check/*.log
+          path: |
+            build/*/check/**/*.log
+            build/*/check/*-native/results.json

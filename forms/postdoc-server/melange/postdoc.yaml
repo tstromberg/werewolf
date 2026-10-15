@@ -1,0 +1,52 @@
+# postdoc for werewolf's postdoc-server form, as Wolfi would package it:
+# built by melange in Wolfi's environment with Wolfi's Rust, from a
+# commit on main, since postdoc tags no releases. Its engines (cleave,
+# scan, isomer) come from git at the commits Cargo.lock pins. The
+# allocator is the jemalloc linked into the binary, as on every host of
+# the fleet. A new commit is a new version and expected-commit; howl
+# rebuilds when this file changes.
+package:
+  name: postdoc
+  version: 0.2.0_git20261015
+  epoch: 0
+  description: Worker and server coordination for the Atomdrift analysis fleet
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cargo-auditable
+      - clang
+      - cmake
+      - git
+      - perl
+      - pkgconf
+      - rust-1.98
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/atomdrift-project/postdoc
+      branch: main
+      expected-commit: 3645381f3603b62fae87e503daabdfdfe5c2c53a
+
+  # Cargo's own git, not libgit2, fetches the engines: it follows the
+  # environment's CA bundle and proxy as the rest of the build does.
+  - runs: |
+      export CARGO_NET_GIT_FETCH_WITH_CLI=true
+      cargo auditable build --release --locked
+      install -Dm755 target/release/postdoc ${{targets.destdir}}/usr/bin/postdoc
+
+  - uses: strip
+
+update:
+  enabled: false
+  exclude-reason: postdoc tags no releases; bump version and expected-commit by hand

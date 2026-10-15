@@ -2,9 +2,10 @@
 
 ## Summary
 
-leash starts a service someone else wrote (nginx, PostgreSQL, a JVM app) as
-its own user, confined by Landlock for files and TCP ports, a seccomp pledge
-and a cgroup, with no capability but a low port's, or `net_raw` and `net_admin` when the file names them; and narrows a program it runs.
+leash starts a service someone else wrote (nginx, PostgreSQL, a JVM app) as its own
+user, confined by Landlock for files and TCP ports, a seccomp pledge and a cgroup, with
+no capability but a low port's, or `net_raw` and `net_admin` when the file names them;
+and narrows a program it runs.
 
 ## Background
 
@@ -27,11 +28,13 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | `nofile N`, `memory MIB`, `cpu WEIGHT` | open-file limit; `memory.max` (resident memory, not address space); `cpu.weight`, a share of contended CPUs |
 | `share strict\|shared\|browseable\|group`, `group NAME...` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`); others by name, and services whose users have its user's group, writing too (`02771`, with a default ACL that makes what is made there the group's, whatever the umask). `group` joins other services' users' groups, to reach what they share with them (Valkey's socket) |
 | `root /oci/NAME`, `dir PATH` | run inside an image in the root (docs/design/adhoc.md), without `render`; start directory |
-| `narrow PROGRAM KEY WORD...` | run a `run` program narrowed: `pledge` (within the service's, no network), `read`, `write` (within the service's), `memory MIB` (`RLIMIT_DATA`) ([narrow.md](../../docs/design/narrow.md)) |
+| `narrow PROGRAM KEY WORD...` | run a `run` program narrowed: `pledge` (within the service's, no network), `read`, `write` (within the service's) ([narrow.md](../../docs/design/narrow.md)) |
 
 ## Goals
 
-- No service runs as root, or with a capability its file does not name. A low port keeps `CAP_NET_BIND_SERVICE`. `caps` keeps `net_raw` and `net_admin`, and only when the machine allows `packet` and `netadmin`.
+- No service runs as root, or with a capability its file does not name: a low port keeps
+  `CAP_NET_BIND_SERVICE`; `caps` keeps `net_raw` and `net_admin` only where the machine
+  allows `packet` and `netadmin`.
 - A service reaches only the files, programs, ports and calls it declares.
 - Its process tree is bounded (memory, 4096 tasks) and killed when it stops.
 - A bad file never half-starts a service: it parks and logs why.
@@ -42,35 +45,32 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 
 ## Detailed design
 
-1. **As root:** make fd 0 `/dev/null`; parse the whole file; check
-   `requires`; read secrets and configs; make `/run/svc/NAME` and, while
-   `/data` is usable, `/data/svc/NAME`, giving each (never its contents) to
-   the user with the mode `share` asks; set `nofile`; join
-   `/run/cgroup/svc/NAME` with `memory.max` and `pids.max` 4096. With `root`,
-   chroot now, so every later path resolves in the image. Build a Landlock
-   ruleset: the floor (`/usr`, `/proc`, a few files in `/etc` and `/dev`;
-   with `root`, the whole image read-only), its directories and paths, each
-   program and its ELF loader, its ports. `read`/`write` paths are opened with no symlink
-   anywhere, since another service could plant one in `/data`.
-2. **Drop root:** empty the bounding set but the capabilities it keeps, set
-   groups to its `group` lines' alone, set gid and uid, keep those
-   capabilities ambient, set `no_new_privs`, and fail if root returns.
+1. **As root:** make fd 0 `/dev/null`; parse the whole file; check `requires`; read
+   secrets and configs; make `/run/svc/NAME` and, while `/data` is usable,
+   `/data/svc/NAME`, the user's (never their contents) with the mode `share` asks; set
+   `nofile`; join `/run/cgroup/svc/NAME` (`memory.max`, `pids.max` 4096). With `root`,
+   chroot now, so every later path resolves in the image. Build a Landlock ruleset: the
+   floor (`/usr`, `/proc`, a few files in `/etc` and `/dev`; with `root`, the whole
+   image read-only), its directories and paths, each program and its ELF loader, its
+   ports; a path is opened with no symlink anywhere, as another service could plant one.
+2. **Drop root:** empty the bounding set but the capabilities it keeps, set groups to
+   its `group` lines' alone, set gid and uid, keep those capabilities ambient, set
+   `no_new_privs`, and fail if root returns.
 3. **Confined:** apply Landlock (also scoping signals and abstract sockets),
    copy configs, run `service-config`, then each `before`.
-4. **Pledge and exec:** install a filter returning ENOSYS outside the
-   promises, stacked on the seal (none while the machine learns), then
-   `execveat` a descriptor opened earlier, which a pledge without `exec`
-   allows. It starts in `dir`, else its data or (no `/data`) run directory.
-5. **Narrowed:** run by `/etc/sv/NAME/narrow/PROGRAM`, the build's link
-   for a `narrow` line, leash stacks that program's lines on the service's
-   leash (a smaller floor without accounts or network files; its paths; it
-   alone runnable; no TCP; its pledge) and execs it, without secrets.
+4. **Pledge and exec:** install a filter returning ENOSYS outside the promises, stacked
+   on the seal (none while the machine learns), then `execveat` a descriptor opened
+   earlier, which a pledge without `exec` allows. It starts in `dir`, else its data or
+   (no `/data`) run directory.
+5. **Narrowed:** run by `/etc/sv/NAME/narrow/PROGRAM`, the build's link for a `narrow`
+   line, leash stacks that program's lines on the service's leash (a smaller floor
+   without accounts or network files; its paths; it alone runnable; no TCP; its pledge)
+   and execs it.
 
 ## Drawbacks
 
-- A dynamic program needs its ELF loader runnable, and the loader can run
-  any readable program on an exec mount (`/usr`), still under its confinement.
-- Landlock grants exec per file, so allowing one busybox applet allows all.
+- A dynamic program's ELF loader, runnable, can run any readable program on `/usr`,
+  still confined; and Landlock grants exec per file, so one busybox applet allows all.
 - `before` and `service-config` run before the pledge, and see secrets.
 - Below Landlock ABI 6 (werewolf's kernel has 6), signals and abstract
   sockets are not scoped; below ABI 4, a service with ports parks.
@@ -90,11 +90,11 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | Another service reading its files or reaching its sockets | Its directories are `0700` unless `share` opens them; `shared` (`0711`) admits only names one already knows. From Landlock ABI 9 a service reaches only the sockets its `connect` names, its own and those beneath what it writes. The build refuses a `read`, `write` or `connect` inside a strict service's directory (`lib/compose.zig`). |
 | A fork bomb, or a child outliving its service | `pids.max` 4096, in a cgroup joined as root that it cannot leave; `leash-reap`, its `./finish`, writes `cgroup.kill`. |
 | Forged console lines | fd 0 is `/dev/null`; no device ioctls are granted. |
-| A narrowed program widening itself | Its lines come from the verified root, and Landlock domains and filters only stack; it keeps no descriptor but 0, 1 and 2. |
+| A narrowed program widening itself | Its lines come from the verified root, and Landlock domains and filters only stack. |
 
 ## Reliability Considerations
 
-- **Park or retry:** what waiting cannot fix parks the service via runsv's
-  control pipe; a path not made yet, or a missing `exec`, is retried.
+- **Park or retry:** what waiting cannot fix parks the service via runsv's control
+  pipe; a path not made yet, or a missing `exec`, is retried.
 - **Tested:** posture's `processes-services-leashed`, `-service-dirs` and
   `-leash-attack`, and `make check`'s `cgrouped`, on every form with a service.

@@ -38,9 +38,11 @@ class Store:
 
     def upload(self, key, source, immutable):
         if self.bucket.startswith('s3://'):
+            kind = 'text/html; charset=utf-8' if key.endswith('.html') else \
+                'application/json' if key.endswith('.json') else 'application/octet-stream'
             subprocess.run(['aws', 's3', 'cp', '--only-show-errors', '--endpoint-url', ENDPOINT,
                 '--cache-control', 'public,max-age=31536000,immutable' if immutable else 'no-cache',
-                str(source), self.bucket + '/' + key], check=True,
+                '--content-type', kind, str(source), self.bucket + '/' + key], check=True,
                 env=dict(os.environ, AWS_DEFAULT_REGION='auto'))
         else:
             destination = Path(self.bucket) / key

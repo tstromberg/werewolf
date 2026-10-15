@@ -1,0 +1,86 @@
+# postdoc-server: prod, with postdoc's analysis server
+# (https://github.com/atomdrift-project/postdoc), Scan's /v1 API, behind
+# a Cloudflare Tunnel (the cloudflared form): postdoc answers on loopback
+# alone, and the tunnel carries callers to it, so the machine opens no
+# port for them. Every route but /_/health wants the bearer token from
+# the config. Operators reach the machine by security key (the sshd
+# form). Wolfi does not ship postdoc: melange builds it
+# (forms/postdoc-server/melange/postdoc.yaml). Its rules and model are
+# downloaded at start into /data/svc/postdoc. See
+# forms/postdoc-server/README.md.
+base: prod
+
+with: [cloudflared, sshd]
+
+packages:
+  # What the melange build links, from Wolfi. libc and libm come with the base.
+  - libgcc
+  - libstdc++
+
+# yara-x, beneath cleave, compiles its rules to WebAssembly and wasmtime
+# compiles that to machine code as the server starts.
+allow: [jit]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: wasmtime compiles the server's rules to machine code as it runs (allow jit)
+  network-no-login: sshd, by security key, is how operators reach the server; busybox-full brings telnetd too, which nothing starts
+  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
+  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
+  programs-no-shell: busybox-full's shell, for those who log in
+
+# make check's, for this form alone (forms/README.md). Online: the server
+# downloads its rules and model before it answers. They take about
+# 600 MB of /data.
+check:
+  memory: 4096
+
+services:
+  # cloudflared, as the cloudflared form has it, but it may also reach
+  # postdoc on loopback: the tunnel's origin is http://localhost:49999.
+  cloudflared:
+    exec: /usr/bin/cloudflared --no-autoupdate --metrics 127.0.0.1:2000 --protocol quic tunnel --grace-period 2s run
+    user: cloudflared
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/2000 loopback]
+    connect: [udp/7844 tcp/7844 tcp/443 tcp/80 udp/53 tcp/53 tcp/49999]
+    secret: TUNNEL_TOKEN /run/config/cloudflared/token
+    memory: 256
+    nofile: 4096
+    env: [HOME=/run/svc/cloudflared, GOMEMLIMIT=192MiB]
+
+  # postdoc serve, as its own user: it binds 127.0.0.1:49999, its default,
+  # which fence lets no one outside reach; it reaches hopper (HTTPS, or
+  # HTTP on hopper's own 8081), updates.atomdrift.org for its rules and
+  # model, the packages and references it is asked about, and a
+  # resolver. The API token is a file only postdoc reads, never its
+  # environment; its digest alone stays in memory. hopper is optional: a
+  # setting, SCAN_HOPPER, with its token a secret, HOPPER_TOKEN; without
+  # it, verdicts stay on this machine. The companion idle worker is off:
+  # it would run postdoc again in a cgroup of the server's own, and leash
+  # gives a service none to make. Rules, model and the local index live
+  # in /data/svc/postdoc, kept across reboots. No memory cap: postdoc
+  # sizes its own ceiling from the machine and sheds work below it.
+  postdoc:
+    exec: /usr/bin/postdoc serve --token-file /run/svc/postdoc/api-token
+    user: postdoc
+    pledge: stdio rpath wpath inet unix netlink connect listen proc memfd
+    listen: [tcp/49999 loopback]
+    connect:
+      - tcp/443 tcp/80 tcp/8081
+      - udp/53 tcp/53
+    config:
+      - api-token /run/config/postdoc/api-token
+      - settings /run/config/postdoc/settings.json
+    secret: HOPPER_TOKEN /run/config/postdoc/hopper-token optional
+    setting: hopper url as SCAN_HOPPER
+    render: env hopper
+    nofile: 65536
+    env:
+      - HOME=/run/svc/postdoc
+      - XDG_DATA_HOME=/data/svc/postdoc
+      - XDG_CACHE_HOME=/data/svc/postdoc/cache
+      - TMPDIR=/data/svc/postdoc
+      - SCAN_IDLE_WORKER_SLOTS=0
+      - SCAN_NO_UPDATE_CHECK=1

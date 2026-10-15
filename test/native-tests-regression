@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Fail closed on incomplete, replayed or forged-looking native test transcripts."""
+import copy
+import contextlib
+import importlib.machinery
+import io
+import json
+import os
+from pathlib import Path
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+native = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests').load_module()
+
+
+class Protocol(unittest.TestCase):
+    def setUp(self):
+        self.plan = native.read_plan('postgresql')
+        self.context = dict(run='a' * 32, phase='seed')
+        self.records = []
+        for d in self.plan['drivers']:
+            self.records.extend(dict(event='case', suite=d['name'], case=name, status='pass', **self.context)
+                                for name in d['cases']['seed'])
+            self.records.append(dict(event='driver', suite=d['name'], status='pass', **self.context))
+        self.records.append(dict(event='complete', status='pass', **self.context))
+
+    def validate(self, records):
+        return native.validate('other service: ready\n' + '\n'.join('werewolf-test: ' + json.dumps(r) for r in records),
+                               self.plan, self.context)
+
+    def test_complete(self):
+        self.assertEqual(self.validate(self.records), 12)
+
+    def test_missing_or_duplicate(self):
+        for i in range(len(self.records)):
+            with self.subTest(i=i):
+                with self.assertRaises(ValueError):
+                    self.validate(self.records[:i] + self.records[i + 1:])
+                with self.assertRaises(ValueError):
+                    self.validate(self.records[:i] + [self.records[i]] + self.records[i:])
+
+    def test_failed_wrong_run_wrong_phase_unknown_case(self):
+        for key, value in [('status', 'fail'), ('run', 'b' * 32), ('phase', 'verify'), ('case', 'invented')]:
+            with self.subTest(key=key):
+                records = copy.deepcopy(self.records)
+                records[0][key] = value
+                with self.assertRaises(ValueError):
+                    self.validate(records)
+
+    def test_driver_failure_is_not_hidden_by_passed_assertions(self):
+        records = copy.deepcopy(self.records)
+        records[-2]['status'] = 'fail'
+        with self.assertRaises(ValueError):
+            self.validate(records)
+
+    def test_no_completion_or_completion_without_assertions(self):
+        for records in ([], self.records[:-1], self.records[-1:], self.records + self.records[:1]):
+            with self.assertRaises(ValueError):
+                self.validate(records)
+
+    def test_malformed_record(self):
+        for raw in ('{', 'x' * 4097, 'null', '[]'):
+            with self.subTest(raw=raw[:30]):
+                with self.assertRaises(ValueError):
+                    native.validate('werewolf-test: ' + raw, self.plan, self.context)
+
+
+class Plans(unittest.TestCase):
+    def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
+        plan = native.read_plan('greenbone')
+        self.assertTrue(plan['legacy'])
+        self.assertEqual(plan['packages'], [])
+        self.assertEqual(plan['drivers'][0]['user'], '_oci-gvmd')
+
+    def test_config_cannot_replace_context_or_read_arbitrary_host_files(self):
+        original = native.read_plan('greenbone')
+        for config in ({'context': '/run/config/gvmd/admin-password'},
+                       {'password': '/etc/shadow'}, {'password': '/run/config/../secret'},
+                       {'password\nrun': '/run/config/gvmd/admin-password'}):
+            plan = copy.deepcopy(original)
+            plan['drivers'][0]['config'] = config
+            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaises(ValueError):
+                    native.read_plan('greenbone')
+
+    def test_root_driver_and_invalid_legacy_flag_refused(self):
+        for change in ('root', 'legacy'):
+            plan = native.read_plan('greenbone')
+            if change == 'root':
+                plan['drivers'][0]['user'] = 'root'
+            else:
+                plan['legacy'] = 'false'
+            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaises(ValueError):
+                    native.read_plan('greenbone')
+
+
+class Payload(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.base = self.root / 'base'
+        self.test = self.root / 'native-test-base'
+        for root in (self.base, self.test):
+            for name in ('etc/sv/postgres/service', 'etc/werewolf/allow/jit',
+                         'usr/share/werewolf/etc/passwd', 'usr/share/werewolf/etc/group'):
+                native.write(root / 'ro' / name, name + '\n')
+            for name in ('pledge', 'net', 'weaknesses'):
+                native.write(root / 'meta/usr/share/werewolf' / name, name + '\n')
+            self.archive(root / 'rootfs.tar', {'usr/bin/postgres': b'production database'})
+            self.archive(root / 'overlay.tar', {'usr/lib/werewolf/init': b'production init'})
+
+    def archive(self, path, files):
+        with tarfile.open(path, 'w') as archive:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+
+    def compare(self):
+        with patch.dict(os.environ, BUILD=str(self.root)), contextlib.redirect_stdout(io.StringIO()):
+            native.compare('base', 'aarch64')
+
+    def test_client_addition(self):
+        self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database', 'usr/bin/psql': b'client'})
+        self.compare()
+
+    def test_replaced_runtime_or_overlay_refused(self):
+        for archive, files in [('rootfs.tar', {'usr/bin/postgres': b'changed server'}),
+                               ('overlay.tar', {'usr/lib/werewolf/init': b'changed init'})]:
+            with self.subTest(archive=archive):
+                original = (self.test / archive).read_bytes()
+                self.archive(self.test / archive, files)
+                with self.assertRaises(ValueError):
+                    self.compare()
+                (self.test / archive).write_bytes(original)
+
+    def test_service_or_identity_or_seal_change_refused(self):
+        for name in ('ro/etc/sv/postgres/service', 'ro/usr/share/werewolf/etc/passwd',
+                     'meta/usr/share/werewolf/pledge'):
+            with self.subTest(name=name):
+                path = self.test / name
+                original = path.read_bytes()
+                path.write_bytes(b'weakened')
+                with self.assertRaises(ValueError):
+                    self.compare()
+                path.write_bytes(original)
+
+    def test_shell_addition_refused(self):
+        for shell in ('bin/sh', 'bin/ash', 'usr/bin/dash', 'usr/bin/busybox'):
+            with self.subTest(shell=shell):
+                self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database', shell: b'shell'})
+                with self.assertRaises(ValueError):
+                    self.compare()
+
+    def test_owner_and_directory_permissions_preserved(self):
+        def archive(path, uid, mode):
+            with tarfile.open(path, 'w') as output:
+                directory = tarfile.TarInfo('usr')
+                directory.type = tarfile.DIRTYPE
+                directory.mode = mode
+                output.addfile(directory)
+                executable = tarfile.TarInfo('usr/bin/postgres')
+                executable.uid = uid
+                executable.size = 1
+                output.addfile(executable, io.BytesIO(b'x'))
+        archive(self.base / 'rootfs.tar', 0, 0o755)
+        for uid, mode in ((123, 0o755), (0, 0o777)):
+            with self.subTest(uid=uid, mode=mode):
+                archive(self.test / 'rootfs.tar', uid, mode)
+                with self.assertRaises(ValueError):
+                    self.compare()
+
+
+if __name__ == '__main__':
+    unittest.main()

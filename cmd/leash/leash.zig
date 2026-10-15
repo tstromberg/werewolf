@@ -485,13 +485,9 @@ fn narrowLink(path: []const u8) ?Link {
 /// its leash. It reads the program's narrow lines from the service's file,
 /// root's on the verified root; stacks on the service's Landlock domain and
 /// pledge its own, which no_new_privs lets it install; and becomes the
-/// program, with the arguments it was given and the environment less the
-/// service's secrets.
+/// program.
 fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !noreturn {
     const l: Leash = .{ .io = io, .ctl = null, .name = link.service, .narrowed = true };
-    // Close all but stdin, stdout and stderr: a descriptor the
-    // service left open, a socket above all, would reach past the narrowing.
-    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const file = try gpa.printSentinel("/etc/sv/{s}/service", .{link.service}, 0);
     const text = readRootFile(gpa, file) catch |err|
         l.fail(.park, "{s}: {s}", .{ file, @errorName(err) });
@@ -524,11 +520,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     for (n.read) |p| allowPath(l, rules, gpa, p, read_tree, false);
     for (n.write) |p| allowPath(l, rules, gpa, p, write_tree, false);
     allowProgram(l, rules, gpa, n.program);
-    if (n.memory) |mib| {
-        const max = @as(u64, mib) << 20;
-        if (linux.errno(linux.setrlimit(.DATA, &.{ .cur = max, .max = max })) != .SUCCESS)
-            l.fail(.park, "memory {d}: refused", .{mib});
-    }
     const learn = learning();
     rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     record(io, .stderr(), .{
@@ -537,7 +528,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         .program = n.program,
         .landlock = rules.abi,
         .pledge = try words(gpa, n.pledge),
-        .memory = n.memory,
         .pledged = !learn,
     });
 
@@ -550,7 +540,8 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         l.fail(.park, "exec {s}: {s}", .{ n.program, @tagName(linux.errno(prog_rc)) });
     const argv = try gpa.allocSentinel(?[*:0]const u8, m.args.vector.len, null);
     for (m.args.vector, argv) |a, *p| p.* = a;
-    const envp = try unsecret(gpa, m.environ.block.slice, s.secrets);
+    const envp = try gpa.allocSentinel(?[*:0]const u8, m.environ.block.slice.len, null);
+    for (m.environ.block.slice, envp) |e, *p| p.* = e;
     pledgeAndExec(l, prog_rc, n.program, n.pledge, learn, argv.ptr, envp.ptr);
 }
 
@@ -581,25 +572,6 @@ fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
         off += got;
     }
     return buf;
-}
-
-/// unsecret returns environ without loader variables (LD_*) or the variables
-/// the service's secret lines name, so a narrowed program does not hold them.
-fn unsecret(
-    gpa: Allocator,
-    environ: []const ?[*:0]const u8,
-    secrets: []const service.Secret,
-) ![:null]?[*:0]const u8 {
-    var kept: std.ArrayList(?[*:0]const u8) = .empty;
-    for (environ) |e| {
-        const entry = std.mem.span(e orelse continue);
-        const name = entry[0 .. std.mem.findScalar(u8, entry, '=') orelse entry.len];
-        if (std.mem.startsWith(u8, name, "LD_")) continue;
-        for (secrets) |sec| {
-            if (std.mem.eql(u8, sec.name, name)) break;
-        } else try kept.append(gpa, e);
-    }
-    return kept.toOwnedSliceSentinel(gpa, null);
 }
 
 /// learning reports whether the machine is learning pledges: werewolf.seal=learn
@@ -1299,22 +1271,6 @@ test "a narrowed program's floor is within its service's" {
         const writes = f.access & sandbox.write_file != 0;
         try testing.expectEqual(std.mem.eql(u8, f.path, "/dev/null"), writes);
     }
-}
-
-test unsecret {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const environ = [_:null]?[*:0]const u8{ "PATH=/usr/bin", "TOKEN=hunter2", "TOKENS=x", "LANG" };
-    const kept = try unsecret(
-        arena.allocator(),
-        &environ,
-        &.{.{ .name = "TOKEN", .path = "/run/config/x" }},
-    );
-    try testing.expectEqual(3, kept.len);
-    try testing.expectEqualStrings("PATH=/usr/bin", std.mem.span(kept[0].?));
-    try testing.expectEqualStrings("TOKENS=x", std.mem.span(kept[1].?));
-    try testing.expectEqualStrings("LANG", std.mem.span(kept[2].?));
-    try testing.expectEqual(null, kept[kept.len]);
 }
 
 test usesJit {

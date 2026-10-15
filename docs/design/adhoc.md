@@ -7,7 +7,7 @@ cmd/init/oci.zig, leash `root`), but for the open items below.
 
 A werewolf machine from a command line alone: forms, Wolfi packages and
 OCI images, mixed freely. The flags write a form directory
-([docs/forms.md](../forms.md#forms-from-the-command-line)) that the build
+([docs/applications.md](../applications.md#forms-from-the-command-line)) that the build
 builds and `howl form -o` keeps, so a one-shot machine and a kept one are
 the same files. Only the operator writes policy.
 
@@ -33,7 +33,7 @@ path, kept open); shell entrypoints.
 ## Detailed design
 
 **The flags are form.yaml's keys**
-([the grammar](../forms.md#forms-from-the-command-line),
+([the grammar](../applications.md#forms-from-the-command-line),
 [manifest.md](manifest.md)): `--services.web.listen tcp/8080` is that
 line of that service, so one grammar covers every key and every leash
 directive, by the key table in `lib/form.zig`; `-f FILE` reads a

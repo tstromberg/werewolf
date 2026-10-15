@@ -1,8 +1,10 @@
 # Mastodon - Hardened VM
 
-[Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and Caddy. The form's manifest is [form.yaml](form.yaml).
+[Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and Caddy.
+The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mastodon/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/mastodon/index.html).
 
 ## Security Posture
 
@@ -26,7 +28,9 @@ howl create mastodon --with mastodon \
 	--owner-password owner-password
 ```
 
-Open `https://social.home.arpa` and sign in as the owner. The domain is the server's name from then on. Administration is in [Mastodon's documentation](https://docs.joinmastodon.org/).
+Open `https://social.home.arpa` and sign in as the owner. The domain is the server's
+name from then on. Administration is in [Mastodon's
+documentation](https://docs.joinmastodon.org/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -37,11 +41,14 @@ howl create mastodon --with mastodon --on gcp --allow-from me \
 	--owner-password owner-password
 ```
 
-`--allow-from me` admits your address to ports 80 and 443. Point the domain at the machine before you create it.
+`--allow-from me` admits your address to ports 80 and 443. Point the domain at the
+machine before you create it.
 
 ### Importing data
 
-`--import` streams `*.sql` into the `postgres` database, and one `dump.rdb` into Valkey, once, while data is first made. Media and settings files are not on that disk. A cloud cannot attach it. Delete the machine before a second import.
+`--import` streams `*.sql` into the `postgres` database, and one `dump.rdb` into Valkey,
+once, while data is first made. Media and settings files are not on that disk. A cloud
+cannot attach it. Delete the machine before a second import.
 
 ```sh
 howl create mastodon --with mastodon --import ./dump \

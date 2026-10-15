@@ -118,18 +118,18 @@ def changes(before, after, keys):
 
 
 def release(candidate, current, previous=None, old_inventory=None):
-    """The baseline is the authoritative previous passing form/architecture head."""
-    form, arch = candidate['form'], candidate['arch']
+    """The baseline is the target's previous published release."""
+    form, provider, arch = candidate['form'], candidate['provider'], candidate['arch']
     validate(current, form, arch)
     if previous is not None:
-        if previous['form'] != form or previous['arch'] != arch or old_inventory is None:
+        if not previous['object'].startswith('/'.join((form, provider, arch, 'objects', ''))) or old_inventory is None:
             raise ValueError('release notes need the matching previous package inventory')
         validate(old_inventory, form, arch)
     elif old_inventory is not None:
         raise ValueError('initial release notes cannot have a previous inventory')
     old = old_inventory or dict(packages=[], images=[])
-    return dict(format='werewolf-form-release-notes/1', form=form, arch=arch, serial=candidate['serial'],
-                commit=candidate['commit'],
+    return dict(format='werewolf-form-release-notes/1', form=form, provider=provider, arch=arch,
+                serial=candidate['serial'], commit=candidate['commit'],
                 previous={k: previous[k] for k in ('serial', 'commit', 'object')} if previous else None,
                 packages=changes(old['packages'], current['packages'], ('scope', 'name')),
                 images=changes(old['images'], current['images'], ('form', 'service')))
@@ -137,7 +137,7 @@ def release(candidate, current, previous=None, old_inventory=None):
 
 def page(notes):
     escape = html.escape
-    title = notes['form'] + ' / ' + notes['arch'] + ' — ' + notes['serial']
+    title = ' / '.join((notes['form'], notes['provider'], notes['arch'])) + ' — ' + notes['serial']
     body = ['<!doctype html><html lang="en"><meta charset="utf-8">',
             '<meta name="viewport" content="width=device-width,initial-scale=1">',
             '<title>' + escape(title) + '</title>',
@@ -145,7 +145,7 @@ def page(notes):
             'table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.6rem;border-bottom:1px solid #bbb}'
             'code{overflow-wrap:anywhere}a{color:#1265ac}</style>',
             '<h1>' + escape(title) + '</h1>',
-            '<p><a href="../../../index.html">Form images</a> · <a href="release-notes.json">JSON changes</a> · '
+            '<p><a href="../../../../index.html">Form images</a> · <a href="release-notes.json">JSON changes</a> · '
             '<a href="packages.json">Package inventory</a> · <a href="downloads.json">Signed manifest</a></p>']
     previous = notes['previous']
     if previous:

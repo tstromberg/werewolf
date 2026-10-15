@@ -11,7 +11,7 @@ health = importlib.machinery.SourceFileLoader('publishing_health', 'release/repo
 
 class Health(unittest.TestCase):
     def setUp(self):
-        self.run = dict(name='protected-images', workflow_id=42, run_number=7,
+        self.run = dict(name='form-images', workflow_id=42, run_number=7,
                         conclusion='failure', html_url='https://github.com/org/repo/actions/runs/7', head_sha='a' * 40)
 
     def commands(self, issues=(), latest=7):
@@ -32,13 +32,13 @@ class Health(unittest.TestCase):
 
     def test_first_failure_opens_one_issue_and_retry_updates_the_same_issue(self):
         self.assertEqual(('issue', 'create'), self.commands()[-1][:2])
-        issues = [dict(number=12, title='Publishing blocked: protected-images')]
+        issues = [dict(number=12, title='Publishing blocked: form-images')]
         self.assertEqual(('issue', 'edit', '12'), self.commands(issues)[-1][:3])
 
     def test_recovery_closes_existing_issue_without_creating_one_for_healthy_runs(self):
         self.run['conclusion'] = 'success'
         self.assertFalse(any(c[:2] == ('issue', 'create') for c in self.commands()))
-        issues = [dict(number=12, title='Publishing blocked: protected-images')]
+        issues = [dict(number=12, title='Publishing blocked: form-images')]
         self.assertEqual(('issue', 'close', '12'), self.commands(issues)[-1][:3])
 
     def test_delayed_failure_does_not_reopen_recovered_issue(self):
@@ -46,7 +46,7 @@ class Health(unittest.TestCase):
         self.assertFalse(any(c[:2] in [('issue', 'create'), ('issue', 'edit')] for c in calls))
 
     def test_unrelated_title_is_never_edited(self):
-        calls = self.commands([dict(number=12, title='protected-images user question')])
+        calls = self.commands([dict(number=12, title='form-images user question')])
         self.assertEqual(('issue', 'create'), calls[-1][:2])
 
 

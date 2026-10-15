@@ -1,4 +1,4 @@
-//! Browse forms in a checkout or the authenticated public image catalog.
+//! Browse forms in a checkout or the signed catalog of published images.
 const std = @import("std");
 const forms = @import("form");
 const howl = @import("howl.zig");
@@ -7,16 +7,17 @@ const mem = std.mem;
 const Io = std.Io;
 const Allocator = mem.Allocator;
 
-const public = "https://dist.werewolf-linux.org/images/v1";
 const repository = "https://github.com/werewolf-linux/werewolf/blob/main/";
 const syntax = "usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--published] [--json]\n" ++
     "List forms, search names and descriptions, or show one form's setup and commands.\n" ++
     "Uses this checkout when present; otherwise the signed published catalog.\n" ++
-    "--build uses this checkout; --published shows current image availability.";
+    "--build uses this checkout; --published shows which images run/create can download.";
 
-const Image = struct { object: []const u8, serial: []const u8, profile: []const u8 };
+const Image = struct { object: []const u8, serial: []const u8 };
 const Row = struct {
     form: []const u8,
+    /// Each provider of a published architecture is its own image.
+    provider: []const u8 = "",
     arch: howl.Arch,
     summary: []const u8 = "",
     guide: []const u8 = "",
@@ -80,8 +81,20 @@ fn checkout(io: Io, gpa: Allocator, why: *howl.Why) ![]Row {
     return rows.items;
 }
 
+/// mirror is where werewolf publishes images and their catalog.
+fn mirror(gpa: Allocator) ![]const u8 {
+    if (howl.environ.get("WEREWOLF_BOOT_MIRROR")) |url| return url;
+    const trust = try std.json.parseFromSliceLeaky(
+        struct { source: []const u8 },
+        gpa,
+        files.protected_trust,
+        .{ .ignore_unknown_fields = true },
+    );
+    return trust.source;
+}
+
 fn catalogKey(gpa: Allocator) !@import("apk").Key {
-    const pem = files.catalog_boot_certificate;
+    const pem = files.protected_image_certificate;
     const begin = "-----BEGIN CERTIFICATE-----";
     const end = mem.find(u8, pem, "-----END CERTIFICATE-----") orelse return error.BadCatalogKey;
     var base64: std.ArrayList(u8) = .empty;
@@ -92,10 +105,9 @@ fn catalogKey(gpa: Allocator) !@import("apk").Key {
     return @import("tpm").firmware.certificateKey(der);
 }
 
-fn published(io: Io, gpa: Allocator, why: *howl.Why) ![]Row {
-    const mirror = howl.environ.get("WEREWOLF_IMAGES_MIRROR") orelse public;
-    @import("prebuilt").channel(mirror) catch
-        return why.refuse("the form catalog mirror must be an HTTPS directory", .{});
+fn published(io: Io, gpa: Allocator, base: []const u8, why: *howl.Why) ![]Row {
+    @import("prebuilt").channel(base) catch
+        return why.refuse("the image mirror must be an HTTPS directory", .{});
     const result = std.process.run(gpa, io, .{
         .argv = &.{
             "curl",       "--fail",
@@ -104,7 +116,7 @@ fn published(io: Io, gpa: Allocator, why: *howl.Why) ![]Row {
             "=https",     "--proto-redir",
             "=https",     "--connect-timeout",
             "10",         "--max-time",
-            "45",         try gpa.print("{s}/index.json", .{mirror}),
+            "45",         try gpa.print("{s}/index.json", .{base}),
         },
         .stdout_limit = .limited(4 << 20),
         .stderr_limit = .limited(8192),
@@ -170,7 +182,8 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     if (local and remote) return why.refuse("--build and --published conflict", .{});
     const have_checkout = if (Io.Dir.cwd().access(io, "forms", .{})) |_| true else |_| false;
     local = local or (!remote and have_checkout);
-    const all = if (local) try checkout(io, gpa, why) else try published(io, gpa, why);
+    const base = try mirror(gpa);
+    const all = if (local) try checkout(io, gpa, why) else try published(io, gpa, base, why);
     var selected: std.ArrayList(Row) = .empty;
     const exact = if (query) |q| for (all) |row| {
         if (mem.eql(u8, row.form, q)) break true;
@@ -178,7 +191,10 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     for (all) |row| {
         if (!forms.isName(row.form) or !printable(row.summary) or !printable(row.status) or
             !printable(row.guide) or
-            (row.guide.len > 0 and !mem.startsWith(u8, row.guide, repository)))
+            (row.guide.len > 0 and !mem.startsWith(u8, row.guide, repository)) or
+            (!local and !mem.eql(u8, row.provider, "qemu") and !mem.eql(u8, row.provider, "lima")))
+            return error.BadCatalogEntry;
+        if (row.latest) |latest| if (!printable(latest.object) or !printable(latest.serial))
             return error.BadCatalogEntry;
         if (arch != null and arch.? != row.arch) continue;
         if (query) |q| {
@@ -200,7 +216,9 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     mem.sort(Row, selected.items, {}, struct {
         fn less(_: void, a: Row, b: Row) bool {
             const order = mem.order(u8, a.form, b.form);
-            return if (order == .eq) @backingInt(a.arch) < @backingInt(b.arch) else order == .lt;
+            if (order != .eq) return order == .lt;
+            if (a.arch != b.arch) return @backingInt(a.arch) < @backingInt(b.arch);
+            return mem.order(u8, a.provider, b.provider) == .lt;
         }
     }.less);
     var out = Io.File.stdout().writerStreaming(io, &.{});
@@ -216,15 +234,17 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     if (exact) {
         const row = selected.items[0];
         try w.print("\n{s}\n{s}\nSetup: {s}\nImages: {s}/{s}/index.html\n", .{
-            row.form, row.summary, row.guide, public, row.form,
+            row.form, row.summary, row.guide, base, row.form,
         });
         for (selected.items) |item| {
-            try w.print("  {t}: {s}{s}\n", .{
-                item.arch, if (item.latest != null) "qcow2 available; " else "", item.status,
-            });
+            if (local) {
+                try w.print("  {t}: {s}\n", .{ item.arch, item.status });
+                continue;
+            }
+            try w.print("  {s}/{t}: {s}\n", .{ item.provider, item.arch, item.status });
             if (item.latest) |latest| try w.print(
-                "    Release notes: {s}/{s}/release-notes.html\n",
-                .{ public, latest.object },
+                "    Image {s}; release notes: {s}/{s}/release-notes.html\n",
+                .{ latest.serial, base, latest.object },
             );
         }
         try w.print(
@@ -232,14 +252,14 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
                 "  howl run --build --with {s}\n  howl create {s} --build --with {s}\n" ++
                 "  howl test --with {s}\n\n" ++
                 "Add the configuration flags shown by pack and the setup guide.\n" ++
-                "Without --build, run/create require a published protected image.\n" ++
-                "Catalog qcow2 availability alone does not establish protected-download support.\n",
+                "Without --build, run/create download a published image for the provider and\n" ++
+                "architecture; with --build they make one here, signed with your keys.\n",
             .{ row.form, row.form, row.form, row.form, row.form },
         );
         return;
     }
     try w.writeAll(
-        "\nFORM                     ARCHITECTURES       QCOW2               DESCRIPTION\n",
+        "\nFORM                     ARCHITECTURES       PUBLISHED           DESCRIPTION\n",
     );
     var previous: []const u8 = "";
     for (selected.items) |row| {
@@ -247,12 +267,16 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         previous = row.form;
         var arches: Io.Writer.Allocating = .init(gpa);
         var images: Io.Writer.Allocating = .init(gpa);
+        var seen: std.EnumSet(howl.Arch) = .empty;
         for (selected.items) |item| if (mem.eql(u8, item.form, row.form)) {
-            if (arches.written().len > 0) try arches.writer.writeByte(',');
-            try arches.writer.print("{t}", .{item.arch});
+            if (!seen.contains(item.arch)) {
+                seen.insert(item.arch);
+                if (arches.written().len > 0) try arches.writer.writeByte(',');
+                try arches.writer.print("{t}", .{item.arch});
+            }
             if (item.latest != null) {
                 if (images.written().len > 0) try images.writer.writeByte(',');
-                try images.writer.print("{t}", .{item.arch});
+                try images.writer.print("{s}/{t}", .{ item.provider, item.arch });
             }
         };
         try w.print("{s: <24} {s: <19} {s: <19} {s}\n", .{
@@ -268,7 +292,7 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         });
     }
     try w.writeAll("\nUse howl forms NAME for setup, images and run/test commands.\n");
-    if (local) try w.writeAll("Use --published to check current qcow2 availability.\n");
+    if (local) try w.writeAll("Use --published to see which images run/create can download.\n");
 }
 
 test "catalog trust is a valid pinned RSA certificate" {

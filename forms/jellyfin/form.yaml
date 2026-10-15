@@ -51,7 +51,6 @@ services:
       - /usr/bin/ffmpeg pledge stdio rpath wpath proc
       - /usr/bin/ffmpeg read /data/svc/jellyfin
       - /usr/bin/ffmpeg write /data/svc/jellyfin
-      - /usr/bin/ffmpeg memory 1024
     memory: 2048
     nofile: 65536
     env:

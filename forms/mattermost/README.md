@@ -1,12 +1,15 @@
 # Mattermost - Hardened VM
 
-Team chat: [Mattermost](https://mattermost.com) Team Edition 11.7, the extended-support release, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
+Team chat: [Mattermost](https://mattermost.com) Team Edition 11.7, the extended-support
+release, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mattermost/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/mattermost/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -23,7 +26,9 @@ howl create mattermost --with mattermost \
 	--admin-email alice@example.com --admin-password admin-password
 ```
 
-Open `https://chat.home.arpa` and sign in as `alice`. The password is in `admin-password`. The first start migrates the database, so give it a few minutes. Teams and channels are in [Mattermost's documentation](https://docs.mattermost.com/).
+Open `https://chat.home.arpa` and sign in as `alice`. The password is in
+`admin-password`. The first start migrates the database, so give it a few minutes. Teams
+and channels are in [Mattermost's documentation](https://docs.mattermost.com/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -34,23 +39,30 @@ howl create mattermost --with mattermost --on gcp --allow-from me \
 	--admin-email alice@example.com --admin-password admin-password
 ```
 
-Sign in at `https://chat.example.com`. Point the name at the machine with an A record. Invite people with the team's link. Mail is off until you set SMTP in System Console. `--admin` is 3 to 22 characters. The password is 12 to 72 bytes.
+Sign in at `https://chat.example.com`. Point the name at the machine with an A record.
+Invite people with the team's link. Mail is off until you set SMTP in System Console.
+`--admin` is 3 to 22 characters. The password is 12 to 72 bytes.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
+in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud
+cannot attach the disk.
 
 ```sh
 howl create mattermost --with mattermost --import ./dump
 ```
 
-Files the application stores itself are not on that disk. Bring those through the service after it is up.
+Files the application stores itself are not on that disk. Bring those through the
+service after it is up.
 
 ### Known Quirks
 
 - Open sign-up is off. A stranger needs an invitation.
 - Plugin uploads are off. A plugin is code.
-- The admin is created before Caddy opens the port. A later start does not reset the password.
+- The admin is created before Caddy opens the port. A later start does not reset the
+  password.
 - Wolfi's Mattermost package lags upstream. This form runs the image's 11.7 line.
 
 ### Network Exposure

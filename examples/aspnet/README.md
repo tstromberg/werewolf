@@ -52,12 +52,12 @@ After boot checks pass, werewolf checks for system updates, then every 20 hours.
 It builds updates into a new image and reboots, keeping the previous image
 for rollback. Both images share `/data`; rolling back does not undo data changes.
 
-This is a [framework-dependent application](https://learn.microsoft.com/en-us/dotnet/core/deploying/#publish-as-framework-dependent):
-Wolfi's .NET 10 runtime packages and the kernel update automatically. Your
-code and any NuGet dependencies stay as built. Changes to those need a new
-image, as does a .NET major-version upgrade.
-After changing only the SDK, remove `build/*/aspnet-example*/application.stamp`
-so the next build publishes the app again.
+This is a [framework-dependent
+application](https://learn.microsoft.com/en-us/dotnet/core/deploying/#publish-as-framework-dependent):
+Wolfi's .NET 10 runtime packages and the kernel update automatically. Your code and any
+NuGet dependencies stay as built. Changes to those need a new image, as does a .NET
+major-version upgrade. After changing only the SDK, remove
+`build/*/aspnet-example*/application.stamp` so the next build publishes the app again.
 
 For application changes, rebuild, try it here, then create a machine under a
 new name:
@@ -66,8 +66,8 @@ new name:
 build/host/howl create aspnet-v2 --with aspnet-example --on gcp --allow-from me
 ```
 
-Check the new VM before moving traffic. New VMs start with empty data;
-migrate any saved data first. See the [update guide](../README.md#change-update-and-remove).
+Check the new VM before moving traffic. New VMs start with empty data; migrate any saved
+data first. See the [update guide](../README.md#change-update-and-remove).
 
 ## Clean up
 

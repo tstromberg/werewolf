@@ -1,8 +1,10 @@
 # mox - Hardened VM
 
-[mox](https://github.com/mjl-/mox) is the mail server: SMTP, submission, and IMAP, plus a web admin. The form's manifest is [form.yaml](form.yaml).
+[mox](https://github.com/mjl-/mox) is the mail server: SMTP, submission, and IMAP, plus
+a web admin. The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mox/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/mox/index.html).
 
 ## Security Posture
 
@@ -22,7 +24,8 @@ howl create mox --with mox --domain example.com --postmaster alice \
 	--relay-login postmaster --relay-password relay-password
 ```
 
-Open `https://example.com` and sign in as the postmaster. Mailboxes and DNS are in [mox's documentation](https://github.com/mjl-/mox).
+Open `https://example.com` and sign in as the postmaster. Mailboxes and DNS are in
+[mox's documentation](https://github.com/mjl-/mox).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -35,7 +38,8 @@ howl create mox --with mox --on gcp --allow-from me --domain example.com \
 	--relay-password relay-password
 ```
 
-`--allow-from me` admits your address to the mail ports and to 443. Point the domain's MX at the machine.
+`--allow-from me` admits your address to the mail ports and to 443. Point the domain's
+MX at the machine.
 
 ### Importing data
 

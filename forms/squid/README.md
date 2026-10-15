@@ -1,12 +1,16 @@
 # Squid - Hardened VM
 
-An egress proxy: [Squid](https://www.squid-cache.org) connects to port 443 of the names you list, from the networks you list, and to nothing else. No cache and no cache manager. The form's manifest is [form.yaml](form.yaml).
+An egress proxy: [Squid](https://www.squid-cache.org) connects to port 443 of the names
+you list, from the networks you list, and to nothing else. No cache and no cache
+manager. The form's manifest is [form.yaml](form.yaml).
 
-[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/squid/index.html).
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/squid/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -18,7 +22,10 @@ howl create squid --with squid \
 	--domains .github.com --domains pypi.org
 ```
 
-On a client, `HTTPS_PROXY=http://ADDRESS:3128`, where ADDRESS is the address howl prints. A CONNECT to a listed name's port 443 returns `200 Connection established`. Anything else is 403. The directives Squid itself accepts are in [Squid's documentation](https://wiki.squid-cache.org/SquidFaq/ConfiguringSquid).
+On a client, `HTTPS_PROXY=http://ADDRESS:3128`, where ADDRESS is the address howl
+prints. A CONNECT to a listed name's port 443 returns `200 Connection established`.
+Anything else is 403. The directives Squid itself accepts are in [Squid's
+documentation](https://wiki.squid-cache.org/SquidFaq/ConfiguringSquid).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -28,11 +35,14 @@ howl create squid --with squid --on gcp --allow-from me \
 	--domains .github.com --domains .githubusercontent.com --domains pypi.org
 ```
 
-`--networks` is up to 32 ranges, besides the machine itself. `--domains` is up to 32 names: `pypi.org` is that host, `.github.com` is that name and everything under it. A whole top-level domain (`.com`) is refused.
+`--networks` is up to 32 ranges, besides the machine itself. `--domains` is up to 32
+names: `pypi.org` is that host, `.github.com` is that name and everything under it. A
+whole top-level domain (`.com`) is refused.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
+This machine starts empty. What it must remember is in the create command or `--config`.
+There is no database to import.
 
 ### Known Quirks
 

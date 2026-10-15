@@ -2,10 +2,10 @@
 
 ## Summary
 
-sh-shim is not a shell. Programs that insist on `sh -c COMMAND` get it in
-its place: it runs COMMAND's one program with sh's words and refuses
-other shell syntax, apart from trailing `/dev/null` redirects. The `sh-shim` form makes it
-`/bin/sh` where nothing else is, and lets every leashed service run it.
+sh-shim is not a shell. Programs that insist on `sh -c COMMAND` get it in its place: it
+runs COMMAND's one program with sh's words and refuses other shell syntax, apart from
+trailing `/dev/null` redirects. The `sh-shim` form makes it `/bin/sh` where nothing else
+is, and lets every leashed service run it.
 
 ## Background
 
@@ -38,10 +38,10 @@ those programs, so it hands no service anything new.
   later form's replaces it; the updater links it last, only if absent.
   The form's `allow: [sh]` grants its file, by inode: never busybox.
   PostgreSQL owns the alias and grants execution only in its service’s run list.
-- **Called** only as `sh -c [--] COMMAND [NAME [ARG...]]`; glibc and musl
-  pass `--`. NAME and ARGs, sh's `$0`, `$1`..., expand nowhere. Alone, as
-  a login, with an option (`-e`, `-s`) or a script: `sh-shim: not a shell` and exit 1. Run set-user-ID or
-  with gained capabilities (AT_SECURE): 126, since PATH is a caller's.
+- **Called** only as `sh -c [--] COMMAND [NAME [ARG...]]`; glibc and musl pass `--`.
+  NAME and ARGs, sh's `$0`, `$1`..., expand nowhere. Alone, as a login, with an option
+  (`-e`, `-s`) or a script: `sh-shim: not a shell` and exit 1. Run set-user-ID or with
+  gained capabilities (AT_SECURE): 126, since PATH is a caller's.
 - **Words** split on spaces and tabs. A single-quoted piece is literal; a
   double-quoted one too, but may not hold `$`, a backtick or `\`, which
   sh would expand there. Touching pieces are one word: `a'b c'` is `ab c`.
@@ -55,10 +55,10 @@ those programs, so it hands no service anything new.
   `>` to the literal `/dev/null`, optionally quoted, once each; `2>&1` only
   after stdout targets `/dev/null`, once. No other words follow. Parse first,
   then change descriptors; closed standard descriptors survive exec correctly.
-- **Running:** a first word with a `/` is executed as given; any other is
-  looked for along `PATH` (`/usr/sbin:/usr/bin:/sbin:/bin` when unset),
-  skipping empty and relative entries. The environment passes unchanged. No program: 127. One that
-  cannot run (Landlock's EACCES, a script with no `#!`): 126.
+- **Running:** a first word with a `/` is executed as given; any other is looked for
+  along `PATH` (`/usr/sbin:/usr/bin:/sbin:/bin` when unset), skipping empty and relative
+  entries. The environment passes unchanged. No program: 127. One that cannot run
+  (Landlock's EACCES, a script with no `#!`): 126.
 - **Logs** only on error, as `sh-shim: ...`, naming the refused character
   or word, never the command, which may hold a secret.
 
@@ -93,8 +93,8 @@ those programs, so it hands no service anything new.
 
 - **Fails loudly:** one error line and a non-zero exit. One parse into buffers sized to
   Linux's largest argument, one `execve` per `PATH` entry.
-- **Tested:** 16 unit tests, including PostgreSQL commands and redirect refusals: words and quotes, every refused byte and
-  control character, sh's own words, assignments, the calls it accepts,
-  the buffers' bounds, `PATH`, 2000 random commands against `/bin/sh` and
-  100,000 of random bytes. `make check-sh-shim` runs it on a machine;
-  `check-cron` runs a job through it, leashed, by the allowance alone.
+- **Tested:** 16 unit tests, including PostgreSQL commands and redirect refusals: words
+  and quotes, every refused byte and control character, sh's own words, assignments, the
+  calls it accepts, the buffers' bounds, `PATH`, 2000 random commands against `/bin/sh`
+  and 100,000 of random bytes. `make check-sh-shim` runs it on a machine; `check-cron`
+  runs a job through it, leashed, by the allowance alone.

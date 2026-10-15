@@ -44,7 +44,7 @@ FORM_REF := $(FORM)
 override FORM := $(notdir $(patsubst %/,%,$(FORM)))
 # These goals need no form tool, and install-deps runs before there is a Zig.
 FORMLESS = install-deps install uninstall howl $(HOWL) clean help \
-	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint
+	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint doc-fix
 ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
 FORM_ASK = :
 else
@@ -143,9 +143,12 @@ apko_lock = mkdir -p $(LOCK) && cd $(dir $(1)) && \
 $(FORM_LOCK): $(FORM_FILES) | $(FORM_APKO)
 	$(call apko_lock,$(FORM_APKO))
 # Keep an unchanged config's mtime, as howl does, or howl rebuilds the root.
+# The config names werewolf's key in $(BUILD)/keys (lib/package.zig's keyring).
 $(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
-	mkdir -p $(dir $@) && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
-		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; }
+	mkdir -p $(dir $@) $(BUILD)/keys && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
+		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; } && \
+		{ cmp -s release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub || \
+			cp release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub; }
 $(BOOT_LOCKS): $(LOCK)/%.lock.json: boot/%.yaml
 	$(call apko_lock,$<)
 relock:
@@ -345,6 +348,9 @@ _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
 	@python3 test/howl-test $(HOWL)
 	@python3 test/howl-forms $(HOWL)
+	@python3 test/native-tests-regression
+	@zig test test/native/driver.zig
+	@zig test --dep test-driver -Mroot=forms/greenbone/test/driver.zig -Mtest-driver=test/native/driver.zig
 _test/howl-lock: $(HOWL)
 	@python3 test/howl-lock $(HOWL)
 
@@ -460,6 +466,7 @@ EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M 
 QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
+NATIVE_TEST_FORMS := $(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
@@ -575,6 +582,22 @@ check-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
 	@$(CHECK_MAKE) FORM=$* _check-form
 
+# Native clients are a separate generated form, never DEV and never a member
+# of /etc/sv. Compare their baseline before booting, then reuse one data disk.
+.PHONY: check-native-tests _check-native-tests
+check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
+$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
+	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= image)
+	python3 test/native-tests prepare $* $(ARCH)
+	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= image)
+	BUILD=$(BUILD) python3 test/native-tests compare $* $(ARCH)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= NATIVE_FORM=$* _check-native-tests
+_check-native-tests:
+	@$(CHECK_ENV) python3 test/native-tests run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
+
+# Keep legacy checks until all their security assertions have native equivalents.
+$(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
+
 # Test the actual application-carrier form with code in its verified image,
 # as well as its ordinary boot without code. A separate name avoids sharing
 # disks, configuration or logs with check-FORM under make -j.
@@ -615,7 +638,7 @@ check-bastion check-people: check-%: $(HOWL) $(TEST_SK) | _check-shared
 	@test/$*-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
 	@$(call built,$*,$(CHECK_MAKE) FORM=$(CHECK)/$*-check image)
 	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(call check_port,22200,$(if $(filter bastion,$*),bastion,prod-ssh)) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
-$(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
+$(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree
 _check-shellfree:
@@ -802,7 +825,7 @@ help:
 
 # BEGIN: lint-install .
 LINTERS := yamllint-lint zig-lint doc-lint
-FIXERS := zig-fix
+FIXERS := zig-fix doc-fix
 .PHONY: lint _lint fix $(LINTERS) $(FIXERS)
 lint: _lint
 _lint:
@@ -860,3 +883,5 @@ $(DOC_CHECK): tools/doc-check.zig
 	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/doc-check.zig
 doc-lint: $(DOC_CHECK)
 	$(DOC_CHECK) $(DOC_SOURCES)
+doc-fix: $(DOC_CHECK)
+	$(DOC_CHECK) --fix $(DOC_SOURCES)
