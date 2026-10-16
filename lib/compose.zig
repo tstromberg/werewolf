@@ -953,9 +953,10 @@ fn serviceDirOwner(path: []const u8) ?[]const u8 {
     return null;
 }
 
-/// privileges refuses a capability the chain did not allow, and a shared
-/// directory no one writes or that a service reaches without joining the
-/// owner's group. The first writer in service-name order owns the path.
+/// privileges refuses a capability the chain did not allow, a memfd promise
+/// without the jit allowance, and a shared directory no one writes or that a
+/// service reaches without joining the owner's group. The first writer in
+/// service-name order owns the path.
 /// Other forms name neither, so they are unchanged.
 fn privileges(
     io: Io,
@@ -975,6 +976,16 @@ fn privileges(
             return f.fail(gpa, "{s}: caps net_raw: the chain does not allow packet", .{s.path});
         if (parsed.caps & service.cap.net_admin != 0 and !allows(allowed, "netadmin"))
             return f.fail(gpa, "{s}: caps net_admin: the chain does not allow netadmin", .{s.path});
+        // A memory file is the one writable place no mount flag covers, and
+        // W^X sees only one mapping at a time: written, then mapped as code,
+        // it runs wherever IPE is off (docs/security.md). Only a form that
+        // already runs code it writes may promise it.
+        if (parsed.pledge.contains(.memfd) and !allows(allowed, "jit"))
+            return f.fail(
+                gpa,
+                "{s}: pledge memfd: a memory file maps as code; the chain does not allow jit",
+                .{s.path},
+            );
         if (parsed.caps & service.cap.login != 0 and
             (!mem.eql(u8, s.name, "sshd") or !allows(allowed, "pty")))
             return f.fail(
@@ -1517,6 +1528,26 @@ test "pledge: a path inside a strict service's directory fails the build" {
             try testing.expect(mem.find(u8, f.text, "/data/svc/db/x") != null);
         } else try testing.expectEqualStrings("stdio rpath\n", try got);
     }
+}
+
+test "privileges: a memfd promise needs the jit allowance" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/app");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = "" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/x/rootfs/etc/sv/app/service",
+        .data = "exec /a\nuser app\npledge stdio memfd\n",
+    });
+    var f: Failure = .{};
+    const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
+    try testing.expectError(error.Form, privileges(io, gpa, tmp.dir, forms, &.{}, &f));
+    try testing.expect(mem.find(u8, f.text, "pledge memfd") != null);
+    try privileges(io, gpa, tmp.dir, forms, &.{"jit"}, &f);
 }
 
 test "apko: a service user apko.yaml does not name gets an account, its id its name's hash" {

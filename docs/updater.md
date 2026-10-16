@@ -58,7 +58,7 @@ off (lib/update-policy.zig, [update-policy.md](design/update-policy.md)).
 
 | Step | |
 | --- | --- |
-| `userland`, `kernel` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, and `linux-werewolf` from the repository the image's kernel came from (`kernel-repository`); then, as root and offline, `apk add --initdb` them into new roots: packages verified with the image's keys, the kernel with werewolf's alone (`/etc/werewolf/kernel-keys`). |
+| `userland`, `kernel` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, and `linux-werewolf` from the repository the image's kernel came from (`kernel-repository`); then, as root and offline, `apk add --initdb` them into new roots: packages verified with the image's keys, the kernel with werewolf's alone (`/etc/werewolf/kernel-keys`). The kernel's config must still hold what the build required of it (lib/ipe.zig, lib/image.zig), or the check stops. |
 | `compare` | Diff the new packages and kernel against the running image's. Nothing newer, anything older (an old signed index installs as readily as a new one), or a build that rolled back before: log `check` or `skip` and stop. |
 | `cves` | Fetch the CVE sources and find what the update fixes, in children of their own. |
 | `compose` | Compose what the forms derive, as the build does (`lib/compose.zig`): files, accounts, network policy, promises, kernel arguments. |
@@ -71,12 +71,12 @@ When the slot is due, the service writes wall notices a minute, fifteen
 seconds and a second ahead, naming each package, CVE and risk
 ([current.md](design/current.md)), logs `reboot` and reboots; a second
 update reboot waits an hour after the last, and any earlier reboot boots
-the slot too. `slot-keep` commits the slot once it is healthy, which
-includes the updater writing `/run/werewolf/updater-ready`; anything else
-ends on the previous slot ([native-boot.md](design/native-boot.md)), and
-`outcome` then logs `commit` or `rollback`, putting a rolled-back build in
-`bad`. `build`, everywhere, is the first 16 hex digits of the sha256 of a
-slot's package list and kernel.
+the slot too. `slot-keep` commits the slot once it is healthy, which includes the
+updater writing `/run/werewolf/updater-ready` and posture reporting no failure the
+image does not excuse; anything else ends on the previous slot
+([native-boot.md](design/native-boot.md)), and `outcome` then logs `commit` or
+`rollback`, putting a rolled-back build in `bad`. `build`, everywhere, is the first
+16 hex digits of the sha256 of a slot's package list and kernel.
 
 ## Trust and separation
 

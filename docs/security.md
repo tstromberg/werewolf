@@ -72,20 +72,19 @@ the kernel starts itself sit outside init's seal, so init empties
 
 ## What an attacker can keep or execute
 
-The root is EROFS, read-only, with no writable layer, and dm-verity
-checks each block as it is read; the expected hash comes from stage0, so
-this rests on the boot chain ([verified-boot.md](design/verified-boot.md)).
-Writable mounts refuse execution, setuid bits and, outside device
-filesystems, device files. Fence permits execution beneath `/usr` and
-`/oci`; leash narrows each service further. The image has no setuid or
-setgid file, and init drops the capabilities for loading kernel code,
-reaching hardware, tracing and making device nodes.
-Memory-Deny-Write-Execute refuses a mapping both writable and executable
-in every process, unless the form allows `jit`. None of this makes an
-interpreter's input trustworthy: a runtime can run a script from
-writable storage. Images built with [IPE](design/ipe.md) hold native
-executables and mappings to one verified filesystem named by a signed
-policy; IPE does not authenticate scripts either.
+The root is EROFS, read-only, with no writable layer, and dm-verity checks each block
+as it is read; the expected hash comes from stage0, so this rests on the boot chain
+([verified-boot.md](design/verified-boot.md)). Writable mounts refuse execution,
+setuid bits and, outside device filesystems, device files. Fence permits execution
+beneath `/usr` and `/oci`; leash narrows each service further. The image has no setuid
+or setgid file, and init drops the capabilities for loading kernel code, reaching
+hardware, tracing and making device nodes. Memory-Deny-Write-Execute refuses a mapping
+both writable and executable in every process, unless the form allows `jit`; a memory
+file (`memfd`) escapes it and the mount flags once mapped, so only such a form may
+promise it. None of this makes an interpreter's input trustworthy: a runtime can run a
+script from writable storage. Images built with [IPE](design/ipe.md) hold native
+executables and mappings to one verified filesystem named by a signed policy; IPE does
+not authenticate scripts either.
 
 Persistent state lives on `/data`, LUKS2 when a key is supplied. init
 formats only blank storage; a volume it cannot open is left untouched,

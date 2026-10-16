@@ -19,8 +19,10 @@ in the entry name
 ## Goals
 
 - Commit a slot only when it works: every other service up for a minute,
-  `/data` usable, and, if the form has an updater, the updater ready. A
-  broken updater is the one failure no later update could undo.
+  `/data` usable, if the form has an updater, the updater ready, and
+  posture failing nothing the image does not excuse. A broken updater is
+  the one failure no later update could undo; a lost protection would be
+  measured as normal by every later boot.
 - Never commit on a guess. A slot not shown to work is left for the deadman.
 - Change the loader only through the mount broker, and only for as long as
   the write takes.
@@ -47,6 +49,10 @@ runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
    changes, so a crash loop is visible before the deadman acts. Then, if
    `/etc/sv/autoupdate` exists, it waits for `/run/werewolf/updater-ready`,
    which slot-update writes once its setup succeeds, logging this once.
+   Then it reads posture's report, `/run/werewolf/posture.json`: a check
+   that fails without an excuse in the image's weaknesses, or a report it
+   cannot read, means the slot is never committed, and it parks saying so.
+   posture parks itself after writing, so its health says nothing.
 3. **Not with `/data` gone.** If `/run/werewolf/nodata` exists, it logs its
    reason and commits nothing.
 4. **systemd-boot**: the broker renames the counting entry to
@@ -75,7 +81,7 @@ A slot that boots but cannot serve, or cannot update, would be kept for good.
 
 | Risk | Mitigation |
 | --- | --- |
-| A broken update committed | Only after every service has run a minute, /data works, and the updater is ready. |
+| A broken update committed | Only after every service has run a minute, /data works, the updater is ready, and posture fails nothing unexcused. |
 | A path from the command line | Slot a or b; the broker derives entry paths itself. |
 | Writing the loader | Through the mount broker, mounted detached for one write. |
 | Its own privilege | Root, in fence's domain and sealed; only the broker can mount. |

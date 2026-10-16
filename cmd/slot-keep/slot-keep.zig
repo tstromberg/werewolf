@@ -1,6 +1,7 @@
 //! slot-keep makes this boot's slot the loader's default once every service
-//! has run for a minute, /data works, and the updater is ready. Until then
-//! stage0's deadman reboots into the last good slot. See README.md.
+//! has run for a minute, /data works, the updater is ready, and posture
+//! fails nothing the image does not excuse. Until then stage0's deadman
+//! reboots into the last good slot. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -12,6 +13,7 @@ const sandbox = @import("sandbox");
 
 const committed = "/run/werewolf/committed";
 const updater_ready = "/run/werewolf/updater-ready";
+const posture_report = "/run/werewolf/posture.json";
 const nodata = "/run/werewolf/nodata";
 const wait = 15;
 
@@ -29,7 +31,8 @@ pub fn main(init: std.process.Init) !void {
     if (cmd.esp == null or cmd.slot == null) park(io);
     const entry = try gpa.print("werewolf-{s}", .{@tagName(cmd.slot orelse .a)});
 
-    var said = false;
+    var said_updater = false;
+    var said_posture = false;
     // After two minutes, log the service that blocks the commit whenever it
     // changes. Otherwise a crash loop ends in a deadman rollback with nothing
     // on the console to say why.
@@ -51,11 +54,31 @@ pub fn main(init: std.process.Init) !void {
             }
             continue;
         }
-        if (!exists(io, "/etc/sv/autoupdate") or exists(io, updater_ready)) break;
-        // A slot whose updater cannot run could never be updated away from,
-        // so it is never kept. Log this once.
-        if (!said) say(io, "the updater has not said it can update; not committing", .{});
-        said = true;
+        if (exists(io, "/etc/sv/autoupdate") and !exists(io, updater_ready)) {
+            // A slot whose updater cannot run could never be updated away
+            // from, so it is never kept. Log this once.
+            if (!said_updater) say(
+                io,
+                "the updater has not said it can update; not committing",
+                .{},
+            );
+            said_updater = true;
+            continue;
+        }
+        // posture parks itself once it has written its report, so a healthy
+        // posture service says nothing about what it found.
+        if (!exists(io, "/etc/sv/posture")) break;
+        switch (verdict(gpa, readAll(io, gpa, posture_report))) {
+            .clean => break,
+            .pending => {
+                if (!said_posture) say(io, "posture has not reported; not committing", .{});
+                said_posture = true;
+            },
+            .failing => |why| {
+                say(io, "posture {s}; not committing", .{why});
+                park(io);
+            },
+        }
     }
 
     try commitEsp(io, gpa, entry);
@@ -141,6 +164,46 @@ fn serviceHealthy(status: [20]u8, now: u64) bool {
     };
 }
 
+/// Verdict is what posture's report says about this slot.
+const Verdict = union(enum) { pending, clean, failing: []const u8 };
+
+/// verdict judges posture's report (cmd/posture, posture_report): pending
+/// until it is written, failing with the checks the image does not excuse,
+/// or with why the report cannot be read, else clean. A slot that fails a
+/// protection its image did not declare is never kept, whatever its
+/// services say: a kernel or program that lost a protection must not
+/// become the slot every later update is measured against.
+fn verdict(gpa: Allocator, text: []const u8) Verdict {
+    if (text.len == 0) return .pending;
+    const Report = struct {
+        summary: struct { fail: usize = 0 } = .{},
+        known: ?struct { unexpected: []const []const u8 = &.{} } = null,
+    };
+    const r = std.json.parseFromSliceLeaky(Report, gpa, text, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| return .{
+        .failing = gpa.print("wrote a report this cannot read: {s}", .{@errorName(err)}) catch
+            "wrote a report this cannot read",
+    };
+    if (r.known) |k| {
+        if (k.unexpected.len == 0) return .clean;
+        return .{
+            .failing = gpa.print(
+                "fails {s}, which this image does not excuse",
+                .{std.mem.join(gpa, " ", k.unexpected) catch "checks"},
+            ) catch "fails checks this image does not excuse",
+        };
+    }
+    if (r.summary.fail == 0) return .clean;
+    return .{
+        .failing = gpa.print(
+            "fails {d} checks, and the image excuses none",
+            .{r.summary.fail},
+        ) catch
+            "fails checks, and the image excuses none",
+    };
+}
+
 /// markCommitted creates the file that tells stage0's deadman not to reboot.
 fn markCommitted(io: Io) !void {
     // Retirement belongs to inactive-slot replacement; commit keeps both releases.
@@ -167,7 +230,7 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     defer f.close(io);
     var buf: [4096]u8 = undefined;
     var r = f.readerStreaming(io, &buf);
-    return r.interface.allocRemaining(gpa, .limited(1 << 20)) catch "";
+    return r.interface.allocRemaining(gpa, .limited(4 << 20)) catch "";
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -197,6 +260,38 @@ fn statusOf(state: u8, want: u8, ago: u64) [20]u8 {
     st[17] = want;
     st[19] = state;
     return st;
+}
+
+test verdict {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    try testing.expectEqual(Verdict.pending, verdict(gpa, ""));
+    try testing.expectEqual(Verdict.clean, verdict(
+        gpa,
+        \\{"summary":{"pass":80,"fail":2,"skip":1},
+        \\ "known":{"unexpected":[],"now_passing":["x"]},"checks":[]}
+        ,
+    ));
+    try testing.expectEqualStrings(
+        "fails kernel-lockdown processes-leash-attack, which this image does not excuse",
+        verdict(
+            gpa,
+            \\{"summary":{"fail":2},"known":{"unexpected":["kernel-lockdown",
+            \\ "processes-leash-attack"],"now_passing":[]}}
+            ,
+        ).failing,
+    );
+    // No weaknesses compared: every failure counts.
+    try testing.expectEqual(Verdict.clean, verdict(gpa, "{\"summary\":{\"fail\":0}}"));
+    try testing.expectEqualStrings(
+        "fails 3 checks, and the image excuses none",
+        verdict(gpa, "{\"summary\":{\"fail\":3}}").failing,
+    );
+    try testing.expectEqualStrings(
+        "wrote a report this cannot read: UnexpectedEndOfInput",
+        verdict(gpa, "{\"summary\":").failing,
+    );
 }
 
 test serviceHealthy {

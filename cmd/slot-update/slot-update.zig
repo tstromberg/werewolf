@@ -625,6 +625,8 @@ pub const Update = struct {
             &.{ "--repository", repository },
             &.{"linux-werewolf"},
         );
+        u.step = "kernel-config";
+        try slot.checkKernelConfig(u, work_dir ++ "/kernel");
 
         u.step = "compare";
         const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));

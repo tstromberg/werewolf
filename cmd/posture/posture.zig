@@ -276,7 +276,8 @@ pub const Report = struct {
     /// time (/etc/werewolf/allow). The checks still measure them.
     allow: []const []const u8 = &.{},
     summary: struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 },
-    /// known compares failures with the image's weaknesses, if it lists any.
+    /// known compares failures with the image's weaknesses, on a werewolf
+    /// image. slot-keep commits a slot only when unexpected is empty.
     known: ?Known = null,
     checks: []const Check,
 };
@@ -489,8 +490,9 @@ pub const Posture = struct {
             .fail => r.summary.fail += 1,
             .skip => r.summary.skip += 1,
         };
-        const text = if (p.werewolf) p.read(weaknesses_path) else "";
-        if (text.len > 0) r.known = try compare(p.gpa, p.checks.items, text);
+        // On a werewolf image every failure is compared, so one with no
+        // weaknesses file excuses none: slot-keep commits on this.
+        if (p.werewolf) r.known = try compare(p.gpa, p.checks.items, p.read(weaknesses_path));
         return r;
     }
 
