@@ -40,10 +40,10 @@ the runtime's own build, as [glibc-neutered](glibc-neutered.md) puts libc's in l
 
 **Repositories.** `openjdk-build`, `python-build` and `php-build` copy glibc-build's
 pipeline. `refresh` captures Wolfi's recipe, unchanged, for each stream `policy.json`
-names (OpenJDK 21 and 27, Python 3.13 and 3.14, PHP 8.4). `derive` renames each package
-`-neutered`, provides and replaces Wolfi's names, adds `wolfi-origin:` so the updater
-still matches Wolfi's CVE fixes (lib/prebuilt.zig), and stops when the recipe drifts;
-patches apply with `git apply --check`. CI signs into `apk/RUNTIME` on R2.
+names (OpenJDK 21 and 27, Python 3.13 and 3.14, PHP 8.5). `derive` keeps Wolfi's names
+with epoch 1000 × revision + Wolfi's, above Wolfi's rebuilds, adds `wolfi-origin:` for
+CVE matching (lib/prebuilt.zig), and stops on drift; patches apply without fuzz.
+CI signs into `apk/RUNTIME` on R2 and files what stops a Wolfi build as an issue.
 
 **Phase 1, compiled-in defaults.** What Wolfi builds, less these:
 - OpenJDK: ignore `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and `_JAVA_OPTIONS`; jlink
@@ -52,12 +52,12 @@ patches apply with `git apply --check`. CI signs into `apk/RUNTIME` on R2.
   `!*`, the system property ignored; `Unsafe` memory access denied, and native access
   unless a jar's manifest on the root grants `Enable-Native-Access`.
 - CPython: isolated by default in `PyConfig` (no `PYTHON*` variables, user site or
-  unsafe path); no `--enable-loadable-sqlite-extensions`; `_ctypes` in a subpackage of
-  its own, since a process that can write its memory can remove any check.
+  unsafe path); no `--enable-loadable-sqlite-extensions`; `_ctypes` refused unless
+  allowed, since a process that can write its memory can remove any check.
 - PHP: ignore `PHPRC` and `PHP_INI_SCAN_DIR`; a `disable_functions` floor (`exec`,
   `system`, `passthru`, `shell_exec`, `proc_open`, `popen`, `pcntl_exec`, `dl`) that
-  `php.ini` cannot lift; `unserialize` without `allowed_classes` refuses objects;
-  `allow_url_include`, the `phar://` wrapper and the OPcache file cache off; no phpdbg.
+  `php.ini` cannot lift; `unserialize` makes objects only of classes it is given;
+  `allow_url_include`, `phar://` and the OPcache file cache off; no phpdbg or PEAR.
 
 **Allowances.** A form takes a protection back in `allow:`, as it takes `jit` today:
 `allow: [jit, php:proc_open, java:deserialize]`, in the runtime's own names; the build

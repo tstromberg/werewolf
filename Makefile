@@ -149,7 +149,12 @@ $(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
 		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; } && \
 		{ cmp -s release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub || \
 			cp release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub; }
-$(BOOT_LOCKS): $(LOCK)/%.lock.json: boot/%.yaml
+$(LOCK)/kernel.lock.json: boot/kernel.yaml release/packages.pub
+	mkdir -p $(BUILD)/boot $(BUILD)/keys && \
+		cp boot/kernel.yaml $(BUILD)/boot/kernel.yaml && \
+		cp release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub
+	$(call apko_lock,$(BUILD)/boot/kernel.yaml)
+$(LOCK)/boot.lock.json: boot/boot.yaml
 	$(call apko_lock,$<)
 relock:
 	rm -f $(LOCKS)
