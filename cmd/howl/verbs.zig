@@ -30,8 +30,8 @@ const testing = std.testing;
 
 /// sshTo is howl ssh [NAME] [-- COMMAND...]. It execs ssh as root into a
 /// machine here, run's without a name: under QEMU on its forwarded port,
-/// under Firecracker at its tap address, on Lima at its DHCP lease address,
-/// or through limactl shell when Lima gives no address.
+/// under Firecracker at its tap address, and on Lima at the lease or forwarded
+/// port. Dev Lima runs use the forwarded port so a stale lease cannot misroute.
 pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     var rest: []const []const u8 = args;
     var command: []const []const u8 = &.{};
@@ -63,12 +63,16 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         "-o", try gpa.print("HostKeyAlias={s}", .{name}),
         "-o", "LogLevel=ERROR",
     });
-    if (Dir.cwd().access(io, try gpa.print("{s}/dev", .{dir}), .{})) |_| {
+    const dev_access = if (Dir.cwd().access(io, try gpa.print("{s}/dev", .{dir}), .{})) |_|
+        true
+    else |_|
+        false;
+    if (dev_access) {
         try pinned.appendSlice(gpa, &.{
             "-i", try @import("keys.zig").devPrivatePath(io, gpa),
             "-o", "IdentitiesOnly=yes",
         });
-    } else |_| {}
+    }
     var argv: std.ArrayList([]const u8) = .empty;
     if (on == .qemu) {
         if (qemu.running(
@@ -100,10 +104,12 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             .limited(64 << 10),
         ) catch "";
         const managed = lima.isManaged(yaml);
-        const addr = if (managed) null else lima.addressOf(io, gpa, name);
+        // Dev VMs use Lima's forwarded port: their lease can outlive a
+        // recreated VM and point ssh at a stale, unreachable guest address.
+        const addr = limaAddress(managed, dev_access, lima.addressOf(io, gpa, name));
         // Root, by Lima's forwarded port, when its config tar gave root keys.
         const secured = std.mem.find(u8, yaml, "# werewolf lima: secure\n") != null;
-        const port = if ((managed or secured) and try rootKeyed(io, gpa, dir))
+        const port = if (dev_access or ((managed or secured) and try rootKeyed(io, gpa, dir)))
             lima.sshPort(io, gpa, name)
         else
             null;
@@ -133,6 +139,20 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     try argv.appendSlice(gpa, command);
     const err = std.process.replace(io, .{ .argv = argv.items });
     return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
+}
+
+/// limaAddress suppresses DHCP leases for managed and dev VMs: managed VMs
+/// have no vzNAT lease, and a dev VM's cached lease can belong to an older
+/// instance. Both use Lima's forwarded SSH port.
+fn limaAddress(managed: bool, dev_access: bool, address: ?[]const u8) ?[]const u8 {
+    return if (managed or dev_access) null else address;
+}
+
+test "dev Lima SSH ignores a stale lease and uses the forwarded port" {
+    const stale = "192.168.64.36";
+    try testing.expectEqual(@as(?[]const u8, null), limaAddress(false, true, stale));
+    try testing.expectEqual(@as(?[]const u8, null), limaAddress(true, false, stale));
+    try testing.expectEqualStrings(stale, limaAddress(false, false, stale).?);
 }
 
 /// rootKeyed reports whether the config tar in dir gives root keys.

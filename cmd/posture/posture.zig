@@ -451,7 +451,8 @@ pub const Posture = struct {
         );
     }
 
-    /// allowances returns the names in /etc/werewolf/allow (lib/allow.zig), sorted.
+    /// allowances returns the names in /etc/werewolf/allow (lib/allow.zig), a
+    /// runtime's as RUNTIME:NAME, sorted.
     pub fn allowances(p: *Posture) ![]const []const u8 {
         if (!p.werewolf) return &.{};
         var names: std.ArrayList([]const u8) = .empty;
@@ -462,7 +463,21 @@ pub const Posture = struct {
         ) catch return names.items;
         defer d.close(p.io);
         var it = d.iterate();
-        while (it.next(p.io) catch null) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+        while (it.next(p.io) catch null) |e| {
+            // A runtime's directory holds its allowances, listed as RUNTIME:NAME.
+            const runtime = std.meta.stringToEnum(allow.Runtime, e.name) orelse {
+                try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+                continue;
+            };
+            if (e.kind != .directory) continue;
+            var sub = d.openDir(p.io, e.name, .{ .iterate = true }) catch continue;
+            defer sub.close(p.io);
+            var names_in = sub.iterate();
+            while (names_in.next(p.io) catch null) |n| try names.append(
+                p.gpa,
+                try p.gpa.print("{t}:{s}", .{ runtime, n.name }),
+            );
+        }
         std.mem.sort([]const u8, names.items, {}, lessString);
         return names.items;
     }

@@ -34,7 +34,7 @@ FORM ?= sshd
 FORM_TOOL = build/host/form
 FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
-compose_modules = --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
+compose_modules = --dep allow --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
 FORM_TOOL_MODULES = --dep form --dep compose -Mroot=tools/form.zig $(call compose_modules,compose)
@@ -179,7 +179,7 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
-	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
+	--dep service --dep package --dep allow -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig

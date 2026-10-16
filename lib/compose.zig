@@ -7,6 +7,7 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
+const allow = @import("allow");
 const form = @import("form");
 const seal = @import("seal");
 const service = @import("service");
@@ -111,9 +112,16 @@ pub fn compose(
         try gpa.print("{d}\n", .{every}),
     );
     if (upd.off) try ro.deleteTree(io, "etc/sv/autoupdate");
-    // One empty file per allowance, for init, fence and posture.
+    // One empty file per allowance, for init, fence and posture; a runtime's
+    // (RUNTIME:NAME) in its runtime's directory, for that runtime's build.
     try ro.createDirPath(io, "etc/werewolf/allow");
-    for (allowed) |a| try put(io, ro, try gpa.print("etc/werewolf/allow/{s}", .{a}), "");
+    for (allowed) |a| {
+        const path = if (allow.RuntimeAllowance.parse(a)) |r| path: {
+            try ro.createDirPath(io, try gpa.print("etc/werewolf/allow/{t}", .{r.runtime}));
+            break :path try gpa.print("etc/werewolf/allow/{t}/{s}", .{ r.runtime, r.name });
+        } else try gpa.print("etc/werewolf/allow/{s}", .{a});
+        try put(io, ro, path, "");
+    }
     const sshd_config = try form.sshdConfig(gpa, forms, f);
     if (sshd_config.len > 0) {
         try ro.createDirPath(io, "etc/ssh/sshd_config.d");
@@ -1834,7 +1842,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     ;
     const web_form =
         \\base: minimal
-        \\allow: [jit]
+        \\allow: [jit, php:proc_open]
         \\net:
         \\  - listen tcp/80
         \\  - connect web tcp/443
@@ -1876,6 +1884,8 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         .{ "etc/sv/minimal/run", "minimal's\n" },
         .{ "etc/sv/web/service", web_service },
         .{ "etc/werewolf/allow/jit", "" },
+        // A runtime's allowance, in its runtime's directory.
+        .{ "etc/werewolf/allow/php/proc_open", "" },
         // The chain's accounts are added as apko adds them; only root is in group 0.
         .{ "usr/share/werewolf/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n" ++
             "sync:x:5:65533:sync:/sbin:/bin/sync\n" ++ added },

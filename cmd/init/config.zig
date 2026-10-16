@@ -108,7 +108,29 @@ pub fn metadata(m: *Machine) void {
     _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
     if (exists("/run/config/authorized_keys"))
         keys(m, "root", m.read("/run/config/authorized_keys"));
+    // --dev gets key-only root SSH. OpenSSH rejects a shadow password
+    // beginning with '!', even for public-key authentication. Replace that
+    // lock marker with an unusable hash only when howl supplied its explicit
+    // dev marker and root keys; PasswordAuthentication and PAM stay disabled.
+    if (exists("/run/config/dev") and
+        std.mem.eql(u8, trim(m.read("/run/config/dev")), "yes") and
+        exists("/run/config/authorized_keys") and
+        m.read("/run/config/authorized_keys").len > 0)
+    {
+        const shadow = devRootShadow(m.gpa, m.read("/run/werewolf/shadow")) catch
+            return say("dev SSH: out of memory", .{});
+        m.write("/run/werewolf/shadow", shadow, 0o600);
+    }
     if (exists("/run/config/users")) users(m, m.read("/run/config/users"));
+}
+
+/// devRootShadow makes a locked root account acceptable to OpenSSH's
+/// public-key path. '*' remains an invalid password hash, while the sshd
+/// policy disables password and PAM authentication.
+fn devRootShadow(gpa: Allocator, shadow: []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, shadow, "root:!") orelse return try gpa.dupe(u8, shadow);
+    if (start > 0 and shadow[start - 1] != '\n') return try gpa.dupe(u8, shadow);
+    return try std.mem.concat(gpa, u8, &.{ shadow[0..start], "root:*", shadow[start + 6 ..] });
 }
 
 /// users makes the config's people their accounts (lib/people.zig): the
@@ -397,6 +419,20 @@ fn readLimaFile(gpa: Allocator, io: Io, dir: Dir, name: []const u8) ![]const u8 
     var buf: [4096]u8 = undefined;
     var reader = f.readerStreaming(io, &buf);
     return reader.interface.allocRemaining(gpa, .limited(32 * 1024));
+}
+
+test "dev root SSH changes only the lock marker" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const shadow = "root:!:::::::\nnobody:!:::::::\n";
+    try testing.expectEqualStrings(
+        "root:*:::::::\nnobody:!:::::::\n",
+        try devRootShadow(arena.allocator(), shadow),
+    );
+    try testing.expectEqualStrings(
+        "nobody:!:::::::\n",
+        try devRootShadow(arena.allocator(), "nobody:!:::::::\n"),
+    );
 }
 
 test "Lima data is bounded and never follows links" {
