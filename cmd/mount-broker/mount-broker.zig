@@ -53,6 +53,9 @@ fn setUp() !void {
         "munmap",        "mremap",    "fsync",      "mkdirat",         "unlinkat", "renameat",
         "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
     }) |name| f.allow(name);
+    f.allowArg("open_tree", 2, open_tree_flags);
+    f.allowArg("move_mount", 4, move_mount_f_empty_path | move_mount_t_empty_path);
+    f.allowTwo("mount_setattr", 2, linux.AT.EMPTY_PATH, 4, @sizeOf(MountAttr));
     f.allowArg("ioctl", 1, dm.dev_remove);
     // Classic mount(2) may only remount read-only (at shutdown), and
     // umount2 may not detach lazily, so neither can mount or move anything.
@@ -207,6 +210,13 @@ const fsconfig_set_string = 1;
 const fsconfig_cmd_create = 6;
 const move_mount_f_empty_path = 0x4;
 const move_mount_t_empty_path = 0x40;
+const open_tree_flags: u32 = 1 | @as(u32, @bitCast(linux.O{ .CLOEXEC = true }));
+const MountAttr = extern struct {
+    set: u64,
+    clear: u64 = 0,
+    propagation: u64 = 0,
+    userns: u64 = 0,
+};
 
 /// makeMount returns a detached read-write mount of dev. The caller owns
 /// the mount descriptor; closing it ends a mount that was never attached.
@@ -273,7 +283,8 @@ fn roleForOp(op: []const u8) !broker.Role {
     if (std.mem.eql(u8, op, "esp-disarm") or std.mem.eql(u8, op, "esp-arm") or
         std.mem.eql(u8, op, "esp-inspect") or std.mem.eql(u8, op, "esp-install") or
         std.mem.eql(u8, op, "slot-root") or std.mem.eql(u8, op, "slot-decl") or
-        std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state"))
+        std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state") or
+        std.mem.eql(u8, op, "installer-runtime"))
         return .updater;
     return error.UnknownEspOperation;
 }
@@ -292,6 +303,11 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
     if (std.mem.eql(u8, op, "shutdown")) {
         if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
         shutdown(log);
+        return "ok\n";
+    }
+    if (std.mem.eql(u8, op, "installer-runtime")) {
+        if (!std.mem.eql(u8, request, "installer-runtime")) return error.BadRequest;
+        try installerRuntime();
         return "ok\n";
     }
     log.event("esp operation", .{ .role = @tagName(role), .op = op });
@@ -696,6 +712,76 @@ fn validStagedDir(st: linux.Statx) bool {
         st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
 }
 
+const installer_usr = "/data/svc/autoupdate/usr";
+
+/// Only immutable /usr is attached, read-only, at this one checked directory.
+fn installerRuntime() !void {
+    const flags: linux.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true };
+    const how: OpenHow = .{
+        .flags = @as(u32, @bitCast(flags)),
+        .resolve = resolve_no_symlinks,
+    };
+    const target = try fdOf(
+        linux.syscall4(
+            .openat2,
+            @bitCast(@as(isize, linux.AT.FDCWD)),
+            @intFromPtr(installer_usr),
+            @intFromPtr(&how),
+            @sizeOf(OpenHow),
+        ),
+        "open installer target",
+    );
+    defer _ = linux.close(target);
+    var dst: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(
+            target,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .TYPE = true, .MODE = true, .UID = true, .GID = true, .INO = true },
+            &dst,
+        ),
+        "stat installer target",
+    );
+    if (!validStagedDir(dst)) return error.UnsafeInstallerTarget;
+    var src: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(linux.AT.FDCWD, "/usr", 0, .{ .INO = true }, &src),
+        "stat immutable usr",
+    );
+    if (dst.ino == src.ino and dst.dev_major == src.dev_major and dst.dev_minor == src.dev_minor)
+        return;
+    const tree = try fdOf(
+        linux.syscall3(
+            .open_tree,
+            @bitCast(@as(isize, linux.AT.FDCWD)),
+            @intFromPtr("/usr"),
+            open_tree_flags,
+        ),
+        "clone immutable usr",
+    );
+    defer _ = linux.close(tree);
+    const attr: MountAttr = .{ .set = 1 | attr_nosuid | attr_nodev };
+    const made_readonly = linux.syscall5(
+        .mount_setattr,
+        @intCast(tree),
+        @intFromPtr(""),
+        linux.AT.EMPTY_PATH,
+        @intFromPtr(&attr),
+        @sizeOf(MountAttr),
+    );
+    _ = try sandbox.sys(made_readonly, "make installer runtime read-only");
+    const attached = linux.syscall5(
+        .move_mount,
+        @intCast(tree),
+        @intFromPtr(""),
+        @intCast(target),
+        @intFromPtr(""),
+        move_mount_f_empty_path | move_mount_t_empty_path,
+    );
+    _ = try sandbox.sys(attached, "attach installer runtime");
+}
+
 fn validStagedFile(st: linux.Statx) bool {
     return (st.mode & linux.S.IFMT) == linux.S.IFREG and
         st.nlink == 1 and st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
@@ -1003,7 +1089,26 @@ fn espInspectNow(out: []u8) ![]const u8 {
     return w.buffered();
 }
 
+test "installer runtime accepts no paths and belongs only to the updater" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var log: Log = .{};
+    var output: [256]u8 = undefined;
+    try std.testing.expectError(error.BadRequest, handleRequest(
+        &log,
+        .updater,
+        "installer-runtime /tmp/other",
+        &output,
+    ));
+    try std.testing.expectError(error.NotSlotService, handleRequest(
+        &log,
+        .keeper,
+        "installer-runtime",
+        &output,
+    ));
+}
+
 test "each broker operation belongs to one socketpair role" {
+    try std.testing.expectEqual(broker.Role.updater, try roleForOp("installer-runtime"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-status"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-commit"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("esp-disarm"));
@@ -1027,6 +1132,7 @@ test "each broker operation belongs to one socketpair role" {
 /// Each step runs whatever the last one did.
 fn shutdown(log: *Log) void {
     linux.sync();
+    _ = linux.umount2(installer_usr, 0);
     var mounts_buf: [16 << 10]u8 = undefined;
     const mounts = readFile("/proc/self/mounts", &mounts_buf);
     if (isMounted(mounts, "/data")) {

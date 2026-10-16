@@ -17,7 +17,7 @@ import tempfile
 PEER = '10.77.0.2'
 WAN = '198.51.100.2'
 CLIENT = '10.77.0.1'
-GROUPS = {5353: '224.0.0.251', 1900: '239.255.255.250'}
+GROUPS = {5353: '224.0.0.251'}
 PAYLOAD = b'werewolf-lan-fixture'
 
 
@@ -55,8 +55,6 @@ def probe():
                 sock.settimeout(0.6)
                 sock.bind(('', request.get('source', 0)))
                 if request['kind'] == 'out':
-                    if request['address'] == '255.255.255.255':
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                     sock.sendto(PAYLOAD, (request['address'], request['port']))
                 else:
                     print('listening', flush=True)
@@ -130,9 +128,6 @@ def inside(fence, parent_net, parent_mount):
                         (207, PEER, port, True), (207, WAN, 0, False),
                         (207, WAN, port, False), (208, PEER, port, False),
                         (208, group, port, False), (207, '224.0.0.252', 0, False)]
-                if port == 1900:
-                    outgoing += [(207, '255.255.255.255', 0, True),
-                                 (208, '255.255.255.255', port, False)]
                 for uid, address, source, allowed in outgoing:
                     client.stdin.write(json.dumps(dict(kind='out', uid=uid, address=address,
                                                        port=port, source=source)) + '\n')

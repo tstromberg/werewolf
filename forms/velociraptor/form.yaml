@@ -22,8 +22,8 @@ services:
   # Velociraptor, as its own user. velociraptor-setup generates the server
   # config once and sets the administrator from the config. A missing
   # password or domain parks it. It may bind the frontend and, on
-  # loopback, the GUI, the API and monitoring; it reaches a resolver and
-  # nothing else, and the only program it may run is itself.
+  # loopback, the GUI, the API and monitoring. The GUI reaches its own API
+  # on 8001; the only program the server may run is itself.
   velociraptor:
     exec: /usr/bin/velociraptor --nobanner --tempdir /run/svc/velociraptor --config /data/svc/velociraptor/server.config.yaml frontend
     before: /usr/lib/werewolf/velociraptor-setup
@@ -35,7 +35,7 @@ services:
       - tcp/8889 loopback
       - tcp/8001 loopback
       - tcp/8003 loopback
-    connect: [udp/53 tcp/53]
+    connect: [udp/53 tcp/53 tcp/8001]
     run: /usr/bin/velociraptor
     config:
       - admin-password /run/config/velociraptor/admin-password

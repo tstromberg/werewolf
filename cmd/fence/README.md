@@ -48,7 +48,7 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    allowances, even if a daemon binds all interfaces; local traffic reaches them first.
    Allowed traffic with no route fails as "network unreachable", not EACCES, so clients
    try the next address. UDP `lan` restricts unicast to connected subnets detected at
-   boot, plus mDNS/SSDP groups on 5353/1900 and SSDP limited broadcast. Off-subnet
+   boot, plus mDNS's group on UDP 5353. Other ports add no multicast. Off-subnet
    unicast drops before reply allowances. Changing the address plan needs a reboot; no
    subnet means no incoming unicast grant. See [fence.md](../../docs/design/fence.md).
 2. **Landlock**, for every process: TCP binds only to the policy's ports

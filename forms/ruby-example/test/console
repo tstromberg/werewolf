@@ -5,4 +5,4 @@
 
 seen    app-leashed       leash: \{"event":"start","service":"app"
 seen    app-listening     app: listening on :8080
-unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  service-down      leash: \{"event":"(down|retry(?![^\r\n]*"why":"waiting for syslogd"))"

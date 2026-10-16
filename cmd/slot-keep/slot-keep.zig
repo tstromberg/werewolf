@@ -21,35 +21,38 @@ const wait = 15;
 
 pub fn main(init: std.process.Init) !void {
     broker.keepOnlyClient(.keeper);
+    const io = init.io;
+    const gpa = init.arena.allocator();
+    // The hardened kernel exposes boot arguments only to root. Keep the
+    // immutable text before dropping identity; the keeper needs no later
+    // access to procfs.
+    const boot_line = readAll(io, gpa, "/proc/cmdline");
+    if (boot_line.len == 0) return error.BootCommandLineUnavailable;
     control_fd = @intCast(try sandbox.sys(linux.open(
         "supervise/control",
         .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true },
         0,
     ), "open keeper control"));
     try sandbox.dropKeeping(keeper_id, 0);
-    var rules: [4]sandbox.Rule = undefined;
+    var rules: [3]sandbox.Rule = undefined;
     for ([_][:0]const u8{
         "/etc/sv",
         "/run/runit",
         "/run/werewolf",
-        "/proc/cmdline",
     }, &rules) |path, *rule| {
         rule.* = .{
             .fd = @intCast(try sandbox.sys(
                 linux.open(path, .{ .PATH = true, .CLOEXEC = true }, 0),
                 "open keeper read path",
             )),
-            .access = sandbox.read_file |
-                if (std.mem.eql(u8, path, "/proc/cmdline")) @as(u64, 0) else sandbox.read_dir,
+            .access = sandbox.read_file | sandbox.read_dir,
         };
     }
     try sandbox.landlock(&rules, &.{});
     for (rules) |rule| _ = linux.close(rule.fd);
-    const io = init.io;
-    const gpa = init.arena.allocator();
     // Parse as stage0 does (lib/cmdline.zig).
     var refused: cmdline.Failure = .{};
-    const cmd = cmdline.parse(readAll(io, gpa, "/proc/cmdline"), &refused) orelse {
+    const cmd = cmdline.parse(boot_line, &refused) orelse {
         say(io, "the command line's {s}: {s}; not committing", .{ refused.word, refused.why });
         park(io);
     };

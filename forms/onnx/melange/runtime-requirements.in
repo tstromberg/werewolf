@@ -1,0 +1,4 @@
+flatbuffers
+numpy>=2.5,<3
+packaging>=24
+protobuf>=4.25.8

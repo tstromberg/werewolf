@@ -5,4 +5,4 @@
 
 seen    valkey-leashed    leash: \{"event":"start","service":"valkey"
 seen    valkey-ready      Ready to accept connections unix
-unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  service-down      leash: \{"event":"(down|retry(?![^\r\n]*"why":"waiting for syslogd"))"

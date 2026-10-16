@@ -220,8 +220,8 @@ const Engine = struct {
         f.allowArg("recvfrom", 0, @intCast(e.pkt));
         f.allowArg("write", 0, @intCast(e.sp));
         inline for (.{
-            "poll",      "ppoll",           "clock_gettime", "nanosleep", "clock_nanosleep",
-            "getrandom", "restart_syscall", "exit_group",    "exit",
+            "poll",            "ppoll",      "clock_gettime", "getrandom",
+            "restart_syscall", "exit_group", "exit",
         }) |call| f.allow(call);
         try f.install();
     }
@@ -237,7 +237,7 @@ const Engine = struct {
             if (held) |h| {
                 const t = timers(h.lease, h.t1, h.t2);
                 if (now < h.bound + t.t1) {
-                    sleep(h.bound + t.t1 - now);
+                    _ = try e.wait(false, (h.bound + t.t1 - now) * 1000);
                     continue;
                 }
                 if (now < h.bound + t.lease) {
@@ -252,7 +252,7 @@ const Engine = struct {
                             held = null;
                         },
                         .offer => unreachable,
-                    } else sleep(@max(10, @min(60, left / 2)));
+                    } else _ = try e.wait(false, @as(i64, @max(10, @min(60, left / 2))) * 1000);
                     continue;
                 }
                 try e.send(.expired, h);
@@ -278,13 +278,7 @@ const Engine = struct {
         while (nowMs() < deadline) {
             if (pause > 0) {
                 const ms = @min(pause, deadline - nowMs());
-                if (ms > 0) {
-                    const ts: linux.timespec = .{
-                        .sec = @divFloor(ms, 1000),
-                        .nsec = @mod(ms, 1000) * std.time.ns_per_ms,
-                    };
-                    _ = linux.nanosleep(&ts, null);
-                }
+                if (ms > 0) _ = try e.wait(false, ms);
             }
             pause = if (pause == 0) 250 else @min(pause * 2, 8000);
             const xid = newXid();
@@ -383,7 +377,7 @@ const Engine = struct {
             .halen = 6,
             .addr = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0 },
         };
-        var wait: i64 = 250;
+        var retry_ms: i64 = 250;
         while (nowMs() < deadline) {
             // RFC 2131 has the client fill secs with the seconds since its
             // first broadcast, and some servers act on it.
@@ -391,15 +385,12 @@ const Engine = struct {
             std.mem.writeInt(u16, out[28 + 8 ..][0..2], secs, .big);
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
             e.sent +|= 1;
-            const spread: i64 = newXid() % @as(u32, @intCast(wait));
-            const until = @min(deadline, nowMs() + @divFloor(wait, 2) + spread);
+            const spread: i64 = newXid() % @as(u32, @intCast(retry_ms));
+            const until = @min(deadline, nowMs() + @divFloor(retry_ms, 2) + spread);
             while (true) {
                 const left = until - nowMs();
                 if (left <= 0) break;
-                var fds = [1]linux.pollfd{.{ .fd = e.pkt, .events = linux.POLL.IN, .revents = 0 }};
-                const n = linux.poll(&fds, 1, @intCast(left));
-                if (linux.errno(n) == .INTR) continue;
-                if (try e.sys(n) == 0) break;
+                if (!try e.wait(true, left)) break;
                 var in: [1536]u8 = undefined;
                 const got = linux.recvfrom(e.pkt, &in, in.len, linux.MSG.DONTWAIT, null, null);
                 switch (linux.errno(got)) {
@@ -408,20 +399,35 @@ const Engine = struct {
                     else => {
                         // Sleep out the round: poll would report the error
                         // at once, and we would spin.
-                        const ts: linux.timespec = .{
-                            .sec = @divFloor(left, 1000),
-                            .nsec = @mod(left, 1000) * std.time.ns_per_ms,
-                        };
-                        _ = linux.nanosleep(&ts, null);
+                        _ = try e.wait(false, left);
                         break;
                     },
                 }
                 const payload = unframe(in[0..got]) orelse continue;
                 if (parseReply(payload, xid, e.mac)) |r| if ((r.kind == .offer) == offer) return r;
             }
-            wait = if (e.since() < quick_ms) 250 else @min(wait * 2, 8000);
+            retry_ms = if (e.since() < quick_ms) 250 else @min(retry_ms * 2, 8000);
         }
         return null;
+    }
+
+    /// wait also watches the parent channel during lease and retry delays.
+    /// A hung-up channel ends the engine without relying on signal authority.
+    fn wait(e: *Engine, packet: bool, ms: i64) !bool {
+        const deadline = nowMs() + ms;
+        while (true) {
+            const left = deadline - nowMs();
+            if (left <= 0) return false;
+            var fds = [_]linux.pollfd{
+                .{ .fd = if (packet) e.pkt else -1, .events = linux.POLL.IN, .revents = 0 },
+                .{ .fd = e.sp, .events = 0, .revents = 0 },
+            };
+            const n = linux.poll(&fds, fds.len, @intCast(@min(left, std.math.maxInt(i32))));
+            if (linux.errno(n) == .INTR) continue;
+            _ = try e.sys(n);
+            if (fds[1].revents != 0) return error.ParentGone;
+            if (fds[0].revents != 0) return true;
+        }
     }
 
     fn send(e: *Engine, event: Event, w: Wire) !void {

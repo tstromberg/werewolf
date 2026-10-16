@@ -128,6 +128,11 @@ fn espOk(request: []const u8) !void {
     try callOk(.updater, request);
 }
 
+/// installerRuntime exposes immutable /usr read-only at the fixed apk chroot.
+pub fn installerRuntime() !void {
+    try callOk(.updater, "installer-runtime");
+}
+
 /// espStatus reports whether this boot's entry is already good, still
 /// counting tries, or absent.
 pub fn espStatus() !EspStatus {

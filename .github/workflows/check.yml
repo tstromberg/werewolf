@@ -178,7 +178,8 @@ jobs:
   # what keeps others' code off the machine; GitHub's approval of outside
   # contributors' runs is. The runner's account has no sudo and reaches
   # /dev/kvm through its group; an administrator installs the tools once
-  # (sudo test/ci-setup, a JDK and rustup), and the job checks they are there.
+  # (sudo test/ci-setup, a JDK and rustup). Each checkout restores its public
+  # EFI stubs without root, then checks that the system tools are there.
   vm-arm64:
     if: >-
       vars.WEREWOLF_ARM64_CHECK_RUNNER != '' && (github.event_name == 'push' ||
@@ -191,10 +192,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Check tools and install example compilers
-        # install-deps with no answer installs nothing: it fails, listing what
-        # is missing or at the wrong version, unless all is in place.
+      - name: Restore public EFI stubs and check tools
+        # checkout cleans out/, so these public build inputs must be restored
+        # every run. System tools stay administrator-managed: the second call
+        # fails without installing anything if one is missing or out of date.
         run: |
+          tools/install-deps -y stubs
           tools/install-deps </dev/null
           for tool in javac rustup; do
             command -v "$tool" >/dev/null || { echo "vm-arm64: no $tool on the runner" >&2; exit 1; }

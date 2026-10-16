@@ -2,14 +2,13 @@
 
 ## Summary
 
-Collect local syslog messages on `/dev/log`, with console and file outputs.
+Collect `/dev/log` and kernel messages, with console and file outputs.
 Keep timestamped files for at least 90 days and gzip files older than one day.
 
 ## Background
 
-Service stdout and stderr inherit runit's console. There is no local syslog
-receiver. The `syslog` pledge permits kernel-log reads; application syslog uses
-a UNIX socket instead.
+Service stdout and stderr inherit runit's console. The `syslog` pledge permits
+kernel-log reads; application syslog uses a UNIX socket instead.
 
 ## Goals
 
@@ -21,7 +20,7 @@ a UNIX socket instead.
 
 ## Non-Goals
 
-Remote logging, kernel-log collection, stdout capture, hooks and selector rules.
+Remote logging, stdout capture, hooks and selector rules.
 Local retention is not an authenticated or tamper-proof audit trail.
 
 ## Detailed design
@@ -36,6 +35,14 @@ It receives credentials with `SO_PASSCRED`, rejects truncated datagrams and
 closes any received descriptors. Each bounded record has receive time, kernel
 UID/GID/PID, priority and escaped message text. Sender tags are untrusted text.
 Rate limits apply by UID. The console uses its own nonblocking descriptor.
+Escape controls, quotes, backslashes and non-ASCII bytes inside message text.
+Datagrams always get `source: syslog`; remap claimed LOG_KERN to LOG_USER.
+
+Open `/dev/kmsg` read-only before dropping privileges. Facility zero gets
+`source: kernel`; userspace-injected records get `source: kmsg`. Keep sequence
+and monotonic time, count gaps, and never merge fragments. Kernel input never
+returns to console or kmsg, preventing feedback. The descriptor filter permits
+only kmsg reads. Restarts replay the retained kernel ring.
 
 A second process, `_logfile`, owns only `/data/log` and is chrooted there.
 It receives bounded records through an inherited socketpair. Its seccomp
@@ -70,6 +77,10 @@ cannot also promise lossless ingestion at an unlimited rate.
 Use console-only mode when persistent `/data` is unavailable. Do not quietly
 claim 90-day retention on a RAM filesystem. Console/file selection and the byte
 budget come from a small root-owned configuration read once at startup.
+Expose current storage/kernel health, loss counters and a boottime heartbeat in
+the root-owned `/run/syslog/status`, updated each second. Readiness means the
+receiver is serving, including degraded operation. Counters reset on restart;
+external monitoring must detect stale status, drops and unavailable storage.
 
 ## Drawbacks
 
@@ -95,6 +106,9 @@ receiver can submit false records; this is not a signed audit system.
 Tests cover hostile messages, credentials, truncation, overflow, rotation at
 size and time boundaries, exact compression/expiry ages, restart numbering,
 compression interruption, disk pressure, link attacks and confinement.
+Four coverage-guided fuzz targets exercise framing, kernel parsing, policy and
+gzip recovery validation; their seed corpora also run with the unit tests.
 Shutdown stops application services first, then drains and syncs the logger
 within a deadline before unmounting `/data`. Recent unsynced writes can be lost
-on abrupt power failure; gzip CRCs detect corruption, not malicious changes.
+on abrupt power failure; sync new file/directory entries before accepting data.
+Gzip CRCs detect corruption, not malicious changes.

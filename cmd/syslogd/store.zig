@@ -81,6 +81,9 @@ pub const Store = struct {
         errdefer f.close(s.io);
         const st = try f.stat(s.io);
         if (st.size > p.segment_bytes) return error.UnsafeFile;
+        // File fsync alone does not persist a newly created directory entry.
+        try f.sync(s.io);
+        try syncDir(s.dir, s.io);
         s.active = f;
         s.size = st.size;
         s.opened = now;
@@ -318,7 +321,7 @@ fn syncDir(dir: Dir, io: Io) !void {
     try f.sync(io);
 }
 
-fn verifyGzip(compressed_bytes: []const u8, source: []const u8, window: []u8) !void {
+pub fn verifyGzip(compressed_bytes: []const u8, source: []const u8, window: []u8) !void {
     var input: Io.Reader = .fixed(compressed_bytes);
     var d: std.compress.flate.Decompress = .init(&input, .gzip, window);
     var at: usize = 0;

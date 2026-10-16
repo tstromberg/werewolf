@@ -5,6 +5,7 @@ updates: off
 allow: [node:native]
 
 weaknesses:
+  updates-enabled: deliberately pinned to n8n 1.120.0 for the expression-injection demonstration
   programs-no-interpreters: hardened Node.js runs n8n
   kernel-write-xor-execute: V8 compiles n8n as it runs
 
@@ -13,10 +14,11 @@ check:
 
 services:
   n8n:
-    exec: /usr/bin/node /usr/lib/n8n/node_modules/n8n/bin/n8n start
+    exec: /usr/bin/node --max-old-space-size=1536 /usr/lib/n8n/node_modules/n8n/bin/n8n start
     user: n8n
+    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
     pledge: stdio rpath wpath inet unix netlink listen proc
-    listen: tcp/5678
+    listen: [tcp/5678, tcp/5679 loopback]
     memory: 2048
     nofile: 8192
     env:
@@ -29,6 +31,28 @@ services:
       - N8N_VERSION_NOTIFICATIONS_ENABLED=false
       - N8N_TEMPLATES_ENABLED=false
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
-      - N8N_RUNNERS_ENABLED=false
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=127.0.0.1
+      - N8N_RUNNERS_BROKER_PORT=5679
       - N8N_LOG_OUTPUT=console
       - N8N_SECURE_COOKIE=false
+
+  n8n-runner:
+    exec: /usr/lib/n8n/task-runner-launcher javascript
+    user: n8n-runner
+    pledge: stdio rpath wpath inet unix netlink listen connect proc exec
+    run: /usr/bin/node
+    listen: tcp/5680 tcp/5681 loopback
+    connect: tcp/5679 tcp/5681 loopback
+    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
+    memory: 768
+    nofile: 1024
+    env:
+      - HOME=/data/svc/n8n-runner
+      - N8N_RUNNERS_CONFIG_PATH=/usr/lib/n8n/task-runners.json
+      - N8N_RUNNERS_TASK_BROKER_URI=http://127.0.0.1:5679
+      - N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST=127.0.0.1
+      - N8N_RUNNERS_MAX_CONCURRENCY=2
+      - N8N_RUNNERS_TASK_TIMEOUT=60
+      - N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=15

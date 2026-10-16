@@ -26,6 +26,7 @@ const kernelPackage = @import("cve").kernelPackage;
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
+const installer = @import("installer.zig");
 const control = @import("control.zig");
 const broker = @import("broker");
 const Pending = stage.Pending;
@@ -607,6 +608,13 @@ pub const Update = struct {
     /// work_dir/root and work_dir/kernel and returns the plan. It returns
     /// null, after logging, if nothing changed or a version would go back.
     fn packagesPlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
+        u.step = "installer-runtime";
+        defer installer.clean(u.io, u.gpa, state_dir) catch {};
+        try installer.prepare(u.io, u.gpa, state_dir);
+        broker.installerRuntime() catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
         u.step = "userland";
         try u.apkAdd(
             work_dir ++ "/root",
@@ -1260,13 +1268,11 @@ fn keepDaemonCaps(keep: u32) !void {
 fn execTool(argv: [:null]const ?[*:0]const u8, out: i32) !noreturn {
     try sandbox.closeAllBut(&.{out});
     for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
-    if (linux.geteuid() == 0) {
-        if (std.mem.eql(u8, std.mem.span(argv[0].?), "/usr/bin/apk")) {
-            try keepDaemonCaps(apk_caps);
-        } else {
-            try sandbox.keepOnly(0);
-        }
-    }
+    if (std.mem.eql(u8, std.mem.span(argv[0].?), "/usr/bin/apk")) {
+        try installer.confine(state_dir, try installer.destination(argv));
+        try keepDaemonCaps(apk_caps);
+        try installer.filter();
+    } else if (linux.geteuid() == 0) try sandbox.keepOnly(0);
     const envp = [_:null]?[*:0]const u8{};
     _ = try sandbox.sys(linux.execve(argv[0].?, argv.ptr, &envp), "execve");
     unreachable;
@@ -1630,6 +1636,7 @@ test {
     _ = cve;
     _ = tiers;
     _ = stage;
+    _ = installer;
     _ = slot;
     _ = @import("notice.zig");
 }

@@ -428,8 +428,13 @@ pub fn apkAdd(
     const root_z = try u.gpa.dupeSentinel(u8, root, 0);
     try Dir.cwd().createDirPath(u.io, root);
     _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
+    const inside_root = try u.gpa.print("/work/{s}", .{name});
+    const inside_cache = try u.gpa.print("/cache/{s}", .{name});
     try u.run(try std.mem.concat(u.gpa, []const u8, &.{
-        &.{ "/usr/bin/apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
+        &.{
+            "/usr/bin/apk", "--root",     inside_root,    "--arch", arch,
+            "--cache-dir",  inside_cache, "--no-network",
+        },
         source,
         &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
         packages,

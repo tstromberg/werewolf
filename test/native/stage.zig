@@ -95,11 +95,20 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
-// Landlock rules need existing socket/path inodes. Wait before applying the
-// test client's confinement, then let the client check protocol readiness.
+// Wait for leash's logger gate and the Landlock socket/path inodes before
+// starting the client; its own checks handle application protocol readiness.
 fn ready(io: Io, paths: []const []const u8) !bool {
+    const syslog = blk: {
+        Io.Dir.cwd().access(io, "/usr/lib/werewolf/syslogd", .{}) catch break :blk false;
+        break :blk true;
+    };
     for (0..1200) |_| {
         var present = true;
+        if (syslog) {
+            var flag: [2]u8 = undefined;
+            const value = Io.Dir.cwd().readFile(io, "/run/syslog/ready", &flag) catch "";
+            present = std.mem.eql(u8, value, "1");
+        }
         for (paths) |path| Io.Dir.cwd().access(io, path, .{}) catch {
             present = false;
         };

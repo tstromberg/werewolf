@@ -1,0 +1,5 @@
+ok  onnx-python-version /usr/bin/python3.15 /usr/lib/onnx/check.py version
+ok  onnx-cpu-provider /usr/bin/python3.15 /usr/lib/onnx/check.py providers
+ok  onnx-inference /usr/bin/python3.15 /usr/lib/onnx/check.py inference
+ok  onnx-invalid-shape /usr/bin/python3.15 /usr/lib/onnx/check.py shape
+ok  onnx-unknown-input /usr/bin/python3.15 /usr/lib/onnx/check.py input

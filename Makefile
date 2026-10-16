@@ -358,11 +358,20 @@ $(SYSLOG_PROBE): test/syslog-init.zig cmd/syslogd/policy.zig lib/seal.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep seal --dep log-policy \
 		-Mroot=$< -Mseal=lib/seal.zig -Mlog-policy=cmd/syslogd/policy.zig -femit-bin=$@
-.PHONY: check-syslog
-check-syslog: $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE) $(BUILD)/vmlinuz
+.PHONY: check-syslog fuzz-syslog
+SYSLOG_FUZZ_RUNS ?= 100000
+fuzz-syslog:
+	@for target in 'fuzz syslog' 'fuzz kernel' 'fuzz configuration' 'fuzz gzip'; do \
+		zig build --build-file cmd/syslogd/build.zig test -Dfilter="$$target" \
+			--fuzz=$(SYSLOG_FUZZ_RUNS) --summary all || exit; \
+	done
+
+check-syslog: $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
+	@test -r $(BUILD)/vmlinuz || $(HOWL_BUILD) image
 	python3 test/check-syslog --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
 		--daemon $(call program_bin,syslogd) --probe $(SYSLOG_PROBE) \
-		--leash $(call program_bin,leash) --work $(BUILD)/check/syslog
+		--leash $(call program_bin,leash) --work $(BUILD)/check/syslog \
+		$(if $(SYSLOG_MODULES),--modules $(SYSLOG_MODULES))
 
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)

@@ -36,7 +36,7 @@ limit what it can do.
 | slot-keep | `_slotkeep` (72), no capabilities, read-only Landlock paths and its inherited keeper channel. The mount broker publishes the root-owned committed marker after keeping the EFI entry. Its own control pipe is opened before dropping root. |
 | DHCP | `_dhcp` (67) parses packets; `_netcfg` (73) applies validated leases with NET_ADMIN alone. Only the network-state directory changes owner. Neither side gains another channel or process. |
 | cloud-metadata | `_cloud` (68) fetches; `_usrmgr` (74) checks and rewrites bounded metadata in its scratch directory. A root publisher receives only bounded users/key records, derives accounts through `people.apply`, and keeps CHOWN alone. All three are forked before confinement; neither worker retains UID-changing capabilities. |
-| autoupdate | Keep the existing root coordinator, unprivileged fetchers/readers and fixed mount-broker operations. Local package installation still needs ownership capabilities. Removing them requires a separate image-construction boundary that preserves package authentication, freshness and ownership; renaming the coordinator's UID does not supply that boundary. |
+| autoupdate | Root coordinator, unprivileged fetchers/readers and fixed mount-broker operations. Offline apk is confined to a state-directory chroot with immutable tools, a read-only cache, Landlock and seccomp ([installer boundary](updater-installer.md)). The coordinator still needs a separate construction boundary before giving up its ownership and worker-setup capabilities. |
 | posture | Keep privileged inspection once per boot. Dropping root must not silently skip protected process, account or attack checks. |
 | sshd / sshd-dev | Keep upstream's privileged monitor and unprivileged connection handling. The forwarding-only bastion already runs without root. |
 | debug-shell | Keep the explicit development-only root console; production images cannot enable it. |
@@ -91,8 +91,9 @@ keys: it remains a trusted operation despite separation from transport parsing.
 
 Workers watch a pipe whose write end only the publisher holds, also during
 network waits; its close ends both workers without relying on signal authority.
-Failed transport, framing or confinement
-restarts the supervised program. Unchanged or refused metadata sends a heartbeat;
+DHCP's engine watches its existing parent channel during packet and lease waits.
+Failed transport, framing or confinement restarts the supervised program.
+Unchanged or refused metadata sends a heartbeat;
 each successful account generation is acknowledged before advancing scratch state.
 The keeper marks commit only after the broker completes the EFI operation.
 Guest tests cover shutdown, DHCP, metadata polling and native EFI commit.
