@@ -12,9 +12,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/home-assistant/index.html)
   root is read-only. `/data` is what survives.
 - HTTP's stable configuration is set at each start: loopback behind Caddy, without
   a pending trial that would revert after five minutes without UI confirmation.
-- mDNS (UDP/5353) and SSDP (UDP/1900) discover devices on the LAN. Fence limits
-  discovery to directly connected subnets, standard multicast groups and SSDP
-  limited broadcast;
+- mDNS (UDP/5353) discovers devices on the LAN. Fence limits discovery to
+  directly connected subnets and the standard mDNS multicast group;
   off-subnet unicast to those listeners is dropped, including forged replies.
 
 - The image contains Python. Only `python3 -m homeassistant` is started. Integrations
@@ -62,10 +61,11 @@ The owner's password is set back to the file at each start.
 
 ### LAN discovery
 
+Use a multicast-capable kernel (kernel policy revision 4 enables reception).
 Attach the VM to the same LAN as its devices with a bridge or equivalent network
 that carries multicast. QEMU's user networking, Firecracker's usual NAT, and Lima's
 shared networking do not by themselves provide access to the home's multicast.
-Forwarding UDP/5353 or UDP/1900 through NAT is not a substitute for a LAN attachment.
+Forwarding UDP/5353 through NAT is not a substitute for a LAN attachment.
 
 Discovery uses Home Assistant's Network settings to select interfaces. Firewall
 LAN subnets are fixed at boot; changing the VM's address plan requires a reboot.
@@ -80,8 +80,9 @@ Restore a backup from the web UI after this machine is up.
 ### Known Quirks
 
 - Onboarding is already finished. The first visitor is not offered the setup.
-- mDNS and SSDP discovery are enabled. DHCP packet sniffing, Bluetooth and USB
-  remain off; the service has no raw packet or device access. A network Zigbee
+- mDNS discovery is enabled. SSDP stays off: upstream starts an additional HTTP
+  server on a random port. DHCP packet sniffing, Bluetooth and USB remain off;
+  the service has no raw packet or device access. A network Zigbee
   coordinator can be reached through MQTT.
 - Location starts as the settings you passed. Change it later under Settings, System,
   General.
@@ -92,4 +93,3 @@ Restore a backup from the web UI after this machine is up.
 - listen: tcp/80 *
 - listen: tcp/443 *
 - listen: udp/5353 LAN (mDNS)
-- listen: udp/1900 LAN (SSDP)

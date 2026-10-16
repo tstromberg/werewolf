@@ -16,3 +16,8 @@ if [ "$source" = java ]; then
 else
     cp -R "$source/." "$dest/"
 fi
+
+# Security probes run only in the disposable supplied-code image.
+if [ "$form" = php ]; then
+    cp test/php-security.php "$dest/usr/share/nginx/html/_werewolf-security.php"
+fi

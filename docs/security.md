@@ -164,12 +164,3 @@ CPU mitigations are not forced on every process; werewolf's long-lived
 programs ask for them. Reverse-path filtering conflicts with fence's
 per-user routing. `posture --extended` reports these. The seal costs
 about 25 ns a call (`getpid` on an M4 Max: 150 ns against 125).
-
-## Checking a machine
-
-`/usr/lib/werewolf/posture --json`, as root, tries each protection
-rather than reading its setting, and runs at every boot
-([posture.md](posture.md)); `make check` holds every form's posture to
-the weaknesses it declares ([testing.md](testing.md)). The [sysctl
-review](audit/muse-sysctl-2026-10-12.md) records the reproduced
-`syslog` bypass, its fix and the tested limits.

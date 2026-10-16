@@ -3,7 +3,7 @@
 # plain HTTP on :80 without one). It runs Home Assistant's own image, its
 # stable release pinned by digest when built, in a tree of its own
 # (docs/design/oci.md). Its owner comes from the config, made before it
-# serves, so no visitor is offered onboarding. mDNS and SSDP discover LAN
+# serves, so no visitor is offered onboarding. mDNS discovers LAN
 # devices; Bluetooth and USB need device passthrough. Its configuration and
 # history are in /data/svc/home-assistant. See forms/home-assistant/README.md.
 base: prod
@@ -36,10 +36,10 @@ services:
     # sendfile: aiohttp serves the frontend's files with it.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec sendfile
     run: /usr/local/bin/python3
-    listen: [tcp/8123 loopback, udp/5353 udp/1900 lan]
+    listen: [tcp/8123 loopback, udp/5353 lan]
     connect:
-      # Discovery to connected subnets and these protocols' multicast groups.
-      - udp/5353 udp/1900 lan
+      # Discovery to connected subnets and mDNS's multicast group.
+      - udp/5353 lan
       - tcp/443 tcp/80 udp/53 tcp/53
       # MQTT, MQTT over TLS, ESPHome, Matter, Z-Wave JS.
       - tcp/1883 tcp/8883 tcp/6053 tcp/5580 tcp/3000

@@ -84,16 +84,17 @@ never a form allowance; runtime APKs may contain no `/etc/runtime-hardening` fil
   caches on writable storage. Custom startup snapshots and security reverts refuse.
   Normal worker threads and data access remain. V8 serialization has no object
   gadget behavior like Java serialization or pickle, so there is no deserialize gate.
-- Python and PHP: `inline` denies code from argv or stdin; `writable-source` denies a
-  main script on a mount that is not read-only (so `/data` and `/tmp`). Java's are its
-  jshell JRE removal and the phase-2 `defineClass` seal, both deferred.
+- Python: `inline` gates argv/stdin; `writable-source` gates the main script.
+  PHP checks all compiled files by descriptor, outside OPcache and during preloads;
+  `writable-source` permits writable files, `inline` evaluated and generated code.
+  Metadata failures refuse. Java's jshell and `defineClass` seals remain deferred.
 
-**Phase 2 (deferred).** `defineClass`, `marshal`, `eval`, `zend_compile_string`, Node
-`vm` and custom loaders need provenance; blanket bans break runtime generators.
-
-**Phase 3, default.** `jre`, `python`, `php` app/example forms and `node` use these
-builds. `jre21` and older Node streams await migration; Ruby follows. OCI runtimes need
-replacement. Declare runtime allowances as weaknesses with excuses, like `jit`.
+**Phase 2.** `defineClass`, `marshal`, Python `eval`, Node `vm` and custom loaders
+still need provenance; PHP gates string compilation with `inline`.
+**Form coverage.** Native forms still request PHP 8.4; hardened PHP follows 8.5.
+Migrate writable configuration to data and precompile templates before switching;
+blanket grants restore webshell risk. `jre21`, older Node and OCI runtimes also need
+migration. Declare allowances as weaknesses with excuses, like `jit`.
 
 ## Drawbacks
 
@@ -106,8 +107,7 @@ replacement. Declare runtime allowances as weaknesses with excuses, like `jit`.
 
 - **Hardened and insecure flavors:** duplicate builds/CVE streams and coarse exceptions.
 - **Per-function knobs:** drift as APIs change; groups retain their meaning.
-- **Flags, JVMTI or kernel alone:** re-exec controls argv/environment; kernels see no
-  bytecode.
+- **Flags, JVMTI or kernel alone:** re-exec controls argv/environment, not bytecode.
 
 ## Security Considerations
 
@@ -116,5 +116,5 @@ Deny `native` first: ctypes, FFM or `Unsafe` memory access can remove later chec
 
 ## Reliability Considerations
 
-Phases ship separately. Refusals log and park the service; slot-keep retains the old
-slot. `make check` exercises each app form before release.
+Phases ship separately. Refusals park services; slot-keep retains the old slot.
+`make check` exercises each app form before release.

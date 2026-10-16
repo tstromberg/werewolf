@@ -1,10 +1,11 @@
 #!/bin/sh
-# install-deps [-y] [apko] [zig] installs what building, booting and checking
+# install-deps [-y] [apko] [zig] [stubs] installs what building, booting and checking
 # werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD or NetBSD.
 # The BSDs are experimental: no CI runs them. It shows what it will run and
 # asks first; -y does not ask. With `apko`, `zig` or both, it installs only
 # those, for jobs that need nothing else: resolving packages, or building a
-# tool.
+# tool. `stubs` restores only the public EFI stubs in this checkout, without
+# installing system packages or requiring root.
 #
 # Packages come from the system's package manager, run as root through doas
 # or sudo (Homebrew's runs as the user). Tools a system lacks at the version
@@ -61,9 +62,9 @@ yes='' only=''
 for a; do
 	case $a in
 	-y) yes=1 ;;
-	apko | zig) only="${only:+$only }$a" ;;
+	apko | zig | stubs) only="${only:+$only }$a" ;;
 	*)
-		echo "usage: install-deps [-y] [apko] [zig]" >&2
+		echo "usage: install-deps [-y] [apko] [zig] [stubs]" >&2
 		exit 2
 		;;
 	esac
@@ -95,6 +96,10 @@ apko_version() { # apko's version, as vX.Y.Z, or nothing
 
 melange_version() { # melange's version, as X.Y.Z, or nothing
 	melange version 2>/dev/null | sed -n 's/^GitVersion: *v*//p'
+}
+
+crane_version() { # released crane binaries print X.Y.Z; some builds prefix v
+	crane version 2>/dev/null | sed 's/^v//'
 }
 
 # Per system, set: its name; its package manager (pm) and the commands that
@@ -253,7 +258,7 @@ need_apko='' need_melange='' need_crane='' need_zig='' need_erofs='' need_fc='' 
 if [ -n "$zos" ]; then
 	! wants apko || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
 	! wants zig || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || need_zig=yes
-	[ -n "$only" ] || [ "$(crane version 2>/dev/null)" = "v$crane_version" ] || need_crane=yes
+	[ -n "$only" ] || [ "$(crane_version)" = "$crane_version" ] || need_crane=yes
 fi
 if [ "$zos" = linux ] && [ -z "$only" ]; then
 	[ "$(firecracker --version 2>/dev/null | head -n 1)" = "Firecracker v$fc_version" ] || need_fc=yes
@@ -262,9 +267,10 @@ fi
 [ -n "$only" ] || erofs_ok || need_erofs=yes
 # stubs_ok reports both arches' EFI stubs installed at the pinned version.
 stubs_ok() {
-	[ -f out/tools/stubs/stub_version ] && [ "$(cat out/tools/stubs/stub_version)" = "$stub_version" ]
+	[ -f out/tools/stubs/aarch64/linux.efi.stub ] && [ -f out/tools/stubs/x86_64/linux.efi.stub ] &&
+		[ -f out/tools/stubs/stub_version ] && [ "$(cat out/tools/stubs/stub_version)" = "$stub_version" ]
 }
-[ -n "$only" ] || stubs_ok || need_stubs=yes
+! wants stubs || stubs_ok || need_stubs=yes
 if [ -n "$only" ]; then
 	pkgs=''
 	! wants apko || pkgs=$apko_pkgs
@@ -287,7 +293,7 @@ for p in $pkgs; do
 done
 
 root=''
-if [ -n "$zos" ] && [ "$(id -u)" != 0 ]; then
+if [ "$only" != stubs ] && [ -n "$zos" ] && [ "$(id -u)" != 0 ]; then
 	if command -v doas >/dev/null; then
 		root=doas
 	elif command -v sudo >/dev/null; then
@@ -497,10 +503,12 @@ fi
 if [ -n "$only" ]; then
 	! wants apko || echo "install-deps: apko $(apko_version)"
 	! wants zig || echo "install-deps: zig $(zig version)"
+	! wants stubs || echo "install-deps: EFI stubs $stub_version"
 	exit 0
 fi
 erofs_ok || die "$(in_path mkfs.erofs "$erofs_prefix")"
 [ "$zos" != linux ] || [ "$(melange_version)" = "$melange_version" ] || die "$(in_path melange)"
+[ -z "$zos" ] || [ "$(crane_version)" = "$crane_version" ] || die "$(in_path crane)"
 echo "install-deps: apko $(apko_version), zig $(zig version), $(mkfs.erofs --version | head -n 1)," \
 	"$(qemu-system-"$arch" --version | head -n 1)"
 if [ -e /dev/kvm ] && [ ! -w /dev/kvm ]; then

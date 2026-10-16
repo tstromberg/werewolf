@@ -24,8 +24,15 @@ environment:
       - npm
       - node-gyp
       - python-3.15
+      - go-1.27
 
 pipeline:
+  - uses: fetch
+    with:
+      uri: https://codeload.github.com/n8n-io/task-runner-launcher/tar.gz/871cb76bc35c990f368eaa788f0b4ce7b145e143
+      expected-sha256: f858cda1a8b30ffb91d2ed7b7c89ac2e1ac063319872e907085b976192301e05
+      extract: false
+
   - runs: |
       # Build native addons for the same Node major as the hardened runtime.
       npm ci --omit=dev --ignore-scripts --no-audit --no-fund
@@ -36,6 +43,10 @@ pipeline:
       mkdir -p "$dest"
       cp -a node_modules "$dest/"
       cp package.json package-lock.json "$dest/"
+      mkdir launcher
+      tar -xzf 871cb76bc35c990f368eaa788f0b4ce7b145e143 -C launcher --strip-components=1
+      (cd launcher && CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$dest/task-runner-launcher" ./cmd/launcher)
+      cp task-runners.json "$dest/"
 
 update:
   enabled: false

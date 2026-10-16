@@ -5,5 +5,5 @@
 
 seen    app-leashed       leash: \{"event":"start","service":"app"
 seen    app-listening     Serving /usr/lib/app/www and subdirectories on 0\.0\.0\.0
-unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  service-down      leash: \{"event":"(down|retry(?![^\r\n]*"why":"waiting for syslogd"))"
 unseen  app-failed        Error: |Exception in thread

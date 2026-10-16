@@ -12,7 +12,7 @@
 package:
   name: open-webui
   version: 0.11.4
-  epoch: 0
+  epoch: 1
   description: Self-hosted AI chat interface for Ollama and OpenAI-compatible APIs
   copyright:
     - license: LicenseRef-Open-WebUI
@@ -34,6 +34,9 @@ environment:
     UV_PYTHON_DOWNLOADS: never
     UV_NO_CACHE: "1"
     UV_LINK_MODE: copy
+    # A local wheel's uv_cache.json records its extraction mtime. This
+    # image never installs packages at runtime, so omit installer metadata.
+    UV_NO_INSTALLER_METADATA: "1"
 
 pipeline:
   - uses: fetch
@@ -57,15 +60,23 @@ pipeline:
   - runs: |
       uv venv --python /usr/bin/python3.12 /usr/lib/open-webui
       export VIRTUAL_ENV=/usr/lib/open-webui
-      uv pip install --compile-bytecode --exclude-newer 2026-10-10T00:00:00Z \
+      uv pip install --exclude-newer 2026-10-10T00:00:00Z \
         -r requirements-slim.txt
-      uv pip install --compile-bytecode --no-deps \
+      uv pip install --no-deps \
         open_webui-${{package.version}}-py3-none-any.whl
       d=$(mktemp -d)
       DATA_DIR=$d STATIC_DIR=$d/static USE_SLIM_DOCKER=true WEBUI_SECRET_KEY=build \
         PYTHONDONTWRITEBYTECODE=1 FROM_INIT_PY=true \
         /usr/lib/open-webui/bin/python -c 'import open_webui.main'
       rm -rf "$d"
+
+  # uv's parallel workers compile files in an unpredictable order, which
+  # changes CPython's interned constants and the marshalled bytecode.
+  # compileall sorts its walk; one worker and hash invalidation make the
+  # installed bytecode independent of worker scheduling and source mtimes.
+  - runs: |
+      PYTHONHASHSEED=0 /usr/lib/open-webui/bin/python -m compileall \
+        -q -f -j 1 --invalidation-mode checked-hash /usr/lib/open-webui
 
   - runs: |
       cd /usr/lib/open-webui

@@ -88,8 +88,8 @@ Invariants to keep:
 - **Signed inputs:** package indexes and the tiers feed use separate keys. A leaked feed
   key changes timing within bounds (serial at most a day ahead, expiry at most a week);
   package keys authorize code.
-- **Open:** apk, installing as root, follows links that signed packages lay. Indexes
-  name packages by SHA-1 (forging needs a second preimage); SHA-1 signatures fail.
+- **Offline apk** uses a chroot, a read-only cache, Landlock and no sockets/scripts
+  ([installer boundary](../../docs/design/updater-installer.md)).
 
 ## Reliability Considerations
 

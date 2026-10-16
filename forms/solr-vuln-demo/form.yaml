@@ -4,6 +4,7 @@ base: jre
 updates: off
 
 weaknesses:
+  updates-enabled: this deliberately vulnerable demonstration is pinned to Solr 8.11.0
   programs-no-interpreters: hardened OpenJDK 27 runs deliberately vulnerable Solr
   kernel-write-xor-execute: the JVM compiles Solr as it runs
 

@@ -281,14 +281,12 @@ const Lan = struct {
     }
 };
 
-/// Discovery's standard groups are the only multicast destinations a LAN
-/// port adds. Unicast queries/replies stay within the connected subnets.
+/// Only mDNS adds a multicast destination. Other LAN UDP ports and unicast
+/// mDNS queries/replies stay within the connected subnets.
 const mdns6 = v6(&.{ 0xff, 0x02 }, 0xfb);
-const ssdp6 = v6(&.{ 0xff, 0x02 }, 0x0c);
 fn discoveryGroup(family: u8, port_number: u16) ?[]const u8 {
     return switch (port_number) {
         5353 => if (family == linux.AF.INET) &.{ 224, 0, 0, 251 } else &mdns6,
-        1900 => if (family == linux.AF.INET) &.{ 239, 255, 255, 250 } else &ssdp6,
         else => null,
     };
 }
@@ -557,12 +555,6 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
                 x.dst = group;
                 x.dport = port_number;
                 list.add(x);
-                // SSDP's Sonos fallback sends the same search by limited
-                // broadcast. It stays on the attached network too.
-                if (list.family == linux.AF.INET and port_number == 1900) {
-                    x.dst = &.{ 255, 255, 255, 255 };
-                    list.add(x);
-                }
             };
         }
     } = .{ .out = out, .family = family };
@@ -1300,8 +1292,7 @@ test "LAN subnets exclude default routes, gateways and loopback" {
 
 test "LAN discovery allows on-link peers and groups, refusing other addresses and users" {
     var p = try parsePolicy(
-        "listen 207 udp 5353 lan\nlisten 207 udp 1900 lan\n" ++
-            "connect 207 udp 5353 lan\nconnect 207 udp 1900 lan\nconnect 207 udp 53\n",
+        "listen 207 udp 5353 lan\nconnect 207 udp 5353 lan\nconnect 207 udp 53\n",
     );
     var lan: Lan = .{};
     try lan.add(&.{ 10, 77, 0, 1 }, 24);
@@ -1324,7 +1315,7 @@ test "LAN discovery allows on-link peers and groups, refusing other addresses an
             &.{ 198, 51, 100, 2 }
         else
             &v6(&.{ 0x20, 1, 0x48, 0x60 }, 2);
-        for ([_]u16{ 5353, 1900 }) |port_number| {
+        for ([_]u16{5353}) |port_number| {
             for ([_]u16{ 53, 5353, 1900, 40000 }) |source| {
                 try std.testing.expectEqual(
                     FR_ACT_TO_TBL,

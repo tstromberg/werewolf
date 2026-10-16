@@ -37,9 +37,11 @@ services:
   # php-fpm, as its own user, its socket in its own directory: it reads its
   # configuration and the image, reaches nothing on the network, and runs
   # only itself.
+  # PHP 8.5 includes OPcache at startup; its lock belongs in the service's
+  # directory even during --test, before pool settings apply.
   php-fpm:
-    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf
-    before: /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
+    before: /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
     user: php
     pledge: stdio rpath wpath proc unix listen
     memory: 512

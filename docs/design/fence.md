@@ -57,8 +57,8 @@ only to declared, served, DNS, loopback and metadata ports: rule 200 lets a
 served port answer anyone, so a listener could otherwise reach anywhere.
 
 UDP `lan` lines restrict requests and replies to connected subnets detected at
-boot, plus the standard mDNS or SSDP multicast destination for ports 5353 or
-1900, and SSDP limited broadcast. They add no general multicast or Internet
+boot, plus the standard mDNS multicast destination for port 5353. Other ports
+add no multicast. They add no general multicast or Internet
 access. A changed address plan requires a reboot. Devices on the LAN still need
 authentication.
 

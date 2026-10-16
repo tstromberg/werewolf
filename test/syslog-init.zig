@@ -32,6 +32,23 @@ fn call(rc: usize) !usize {
 fn check(io: Io, gpa: mem.Allocator) !void {
     _ = try call(linux.mount("proc", "/proc", "proc", 0, 0));
     _ = try call(linux.mount("devtmpfs", "/dev", "devtmpfs", 0, 0));
+    // Production kernels have these built in. Older development fixtures
+    // can supply a bounded dependency list through the host test driver.
+    for (0..64) |index| {
+        const name = try gpa.print("/modules/{d}.ko", .{index});
+        const module = Dir.cwd().readFileAlloc(io, name, gpa, .limited(8 << 20)) catch |err|
+            switch (err) {
+                error.FileNotFound => break,
+                else => return err,
+            };
+        const rc = linux.syscall3(
+            .init_module,
+            @intFromPtr(module.ptr),
+            module.len,
+            @intFromPtr(@as([*:0]const u8, "")),
+        );
+        if (linux.errno(rc) != .EXIST) _ = try call(rc);
+    }
     _ = try call(linux.mount("/dev/vda", "/data", "ext4", 0, 0));
     _ = try call(linux.symlink("/run/syslog/dev-log", "/dev/log"));
     const dir = Dir.cwd();
@@ -52,6 +69,7 @@ fn check(io: Io, gpa: mem.Allocator) !void {
     try confined(receiver, "75");
     const writer = try childOf(io, gpa, pid);
     try confined(try status(io, gpa, writer), "76");
+    try waitHealth(io, gpa, "active", "active", false);
     std.debug.print("syslog-check: identities and seccomp verified\n", .{});
     try waitExists(io, try gpa.print("/data/log/{s}.gz", .{old}));
     try waitExists(io, try gpa.print("/data/log/{s}.gz", .{young}));
@@ -62,7 +80,10 @@ fn check(io: Io, gpa: mem.Allocator) !void {
     if (sender_pid == 0) {
         _ = linux.setresgid(65534, 65534, 65534);
         _ = linux.setresuid(65534, 65534, 65534);
-        send("<13>guest[1]: hello\n\x1b[2J") catch linux.exit_group(1);
+        const forbidden = linux.open("/run/syslog/status", .{ .ACCMODE = .WRONLY }, 0);
+        if (linux.errno(forbidden) != .ACCES) linux.exit_group(1);
+        send("<0>kernel[0]: hello\n\x1b[2J\"}\r\nsyslogd: {\"source\":\"kernel\",\"uid\":0}") catch
+            linux.exit_group(1);
         var too_long: [p.max_input + 1]u8 = @splat('x');
         send(&too_long) catch linux.exit_group(1);
         linux.exit_group(0);
@@ -76,14 +97,66 @@ fn check(io: Io, gpa: mem.Allocator) !void {
         const text = dir.readFileAlloc(io, "/data/log/messages", gpa, .limited(1 << 20)) catch "";
         if (mem.find(u8, text, "hello") != null) {
             if (mem.find(u8, text, "\"uid\":65534") == null or
-                mem.find(u8, text, "\\u000a\\u001b[2J") == null or
-                mem.count(u8, text, "\n") != 1) return error.BadRecord;
+                mem.find(u8, text, "\\u000a\\u001b[2J") == null) return error.BadRecord;
+            var lines = mem.splitScalar(u8, text, '\n');
+            var found: usize = 0;
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                if (!mem.startsWith(u8, line, "syslogd: {")) return error.BadRecord;
+                const parsed = try std.json.parseFromSlice(std.json.Value, gpa, line[9..], .{});
+                const o = parsed.value.object;
+                if (mem.find(u8, o.get("message").?.string, "hello") == null) continue;
+                if (!mem.eql(u8, o.get("source").?.string, "syslog") or
+                    o.get("uid").?.integer != 65534 or o.get("priority").?.integer != 8 or
+                    o.count() != 7) return error.ForgedRecord;
+                found += 1;
+            }
+            if (found != 1) return error.ForgedRecord;
             received = true;
             break;
         }
         try io.sleep(.fromMilliseconds(20), .awake);
     }
     if (!received) return error.NoRecord;
+    const boot_log = try dir.readFileAlloc(io, "/data/log/messages", gpa, .limited(4 << 20));
+    if (mem.find(u8, boot_log, "\"source\":\"kernel\"") == null)
+        return error.KernelLogMissing;
+    // A userspace kmsg write may claim PRI 0, but Linux changes its facility.
+    // The daemon must retain that distinction and must not echo it to console.
+    const kmsg: i32 = @intCast(try call(linux.open("/dev/kmsg", .{ .ACCMODE = .WRONLY }, 0)));
+    const injected = "<0>syslog-check-kmsg-injected: kernel: forged\n";
+    _ = try call(linux.write(kmsg, injected, injected.len));
+    _ = linux.close(kmsg);
+    var kmsg_seen = false;
+    for (0..500) |_| {
+        const contents = try dir.readFileAlloc(io, "/data/log/messages", gpa, .limited(4 << 20));
+        var lines = mem.splitScalar(u8, contents, '\n');
+        while (lines.next()) |line| {
+            if (mem.find(u8, line, "syslog-check-kmsg-injected") == null) continue;
+            const parsed = try std.json.parseFromSlice(std.json.Value, gpa, line[9..], .{});
+            const o = parsed.value.object;
+            if (!mem.eql(u8, o.get("source").?.string, "kmsg") or
+                o.get("priority").?.integer < 8 or o.get("uid") != null)
+                return error.ForgedKernelOrigin;
+            kmsg_seen = true;
+        }
+        if (kmsg_seen) break;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    if (!kmsg_seen) {
+        std.debug.print("syslog-check: health {s}\n", .{
+            try dir.readFileAlloc(io, "/run/syslog/status", gpa, .limited(1024)),
+        });
+        return error.KmsgLogMissing;
+    }
+    try io.sleep(.fromMilliseconds(100), .awake);
+    const after_kmsg = try dir.readFileAlloc(io, "/data/log/messages", gpa, .limited(4 << 20));
+    if (mem.count(u8, after_kmsg, "syslog-check-kmsg-injected") != 1)
+        return error.KernelLogFeedback;
+    std.debug.print(
+        "syslog-check: kernel logs, kmsg provenance and feedback prevention verified\n",
+        .{},
+    );
     // Exercise the real launcher and its socket floor, without adding a
     // broad write grant or changing the application's declared promises.
     try dir.createDirPath(io, "/etc/sv/client");
@@ -149,7 +222,7 @@ fn check(io: Io, gpa: mem.Allocator) !void {
     const pressured = try launch();
     try ready(io, pressured);
     try send("<13>guest: pressure-drop");
-    try io.sleep(.fromMilliseconds(100), .awake);
+    try waitHealth(io, gpa, "degraded", "active", true);
     if ((try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.BudgetExceeded;
     try shutdown(io, pressured);
     std.debug.print("syslog-check: pressure preserved young archives\n", .{});
@@ -169,7 +242,7 @@ fn check(io: Io, gpa: mem.Allocator) !void {
     const full_disk = try launch();
     try ready(io, full_disk);
     try send("<13>guest: full-disk-drop");
-    try io.sleep(.fromMilliseconds(100), .awake);
+    try waitHealth(io, gpa, "degraded", "active", true);
     if ((try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.FullDiskWrite;
     if (!exists(io, try gpa.print("/data/log/{s}.gz", .{young}))) return error.YoungFileEvicted;
     try shutdown(io, full_disk);
@@ -180,11 +253,44 @@ fn check(io: Io, gpa: mem.Allocator) !void {
     _ = try call(linux.mount("tmpfs", "/data", "tmpfs", 0, 0));
     const ram_logger = try launch();
     try ready(io, ram_logger);
+    try waitHealth(io, gpa, "unavailable", "active", false);
     try send("<13>guest: console-only");
     try io.sleep(.fromMilliseconds(100), .awake);
     if (exists(io, "/data/log")) return error.VolatileLogging;
     try shutdown(io, ram_logger);
+    _ = try call(linux.rename("/dev/kmsg", "/dev/kmsg.hidden"));
+    const no_kernel = try launch();
+    try ready(io, no_kernel);
+    try waitHealth(io, gpa, "unavailable", "unavailable", false);
+    try shutdown(io, no_kernel);
     std.debug.print("syslog-check: clean shutdown and volatile-data fallback verified\n", .{});
+}
+
+fn waitHealth(
+    io: Io,
+    gpa: mem.Allocator,
+    file: []const u8,
+    kernel: []const u8,
+    dropped: bool,
+) !void {
+    for (0..500) |_| {
+        const text = Dir.cwd().readFileAlloc(
+            io,
+            "/run/syslog/status",
+            gpa,
+            .limited(1024),
+        ) catch "";
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch {
+            try io.sleep(.fromMilliseconds(10), .awake);
+            continue;
+        };
+        const o = parsed.value.object;
+        if (o.get("running").?.bool and mem.eql(u8, o.get("file").?.string, file) and
+            mem.eql(u8, o.get("kernel").?.string, kernel) and
+            (!dropped or o.get("file_dropped").?.integer > 0)) return;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    return error.BadHealthStatus;
 }
 
 fn fixture(io: Io, gpa: mem.Allocator, name: []const u8, text: []const u8) !void {

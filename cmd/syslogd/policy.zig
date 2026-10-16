@@ -9,7 +9,8 @@ pub const segment_bytes = 4 << 20;
 pub const scratch_bytes = 2 * segment_bytes;
 pub const max_segments = 8192;
 pub const max_input = 2048;
-pub const max_record = max_input * 6 + 256;
+pub const max_kernel_input = 8192;
+pub const max_record = max_kernel_input * 6 + 512;
 pub const name_len = 33;
 
 pub const Config = struct {
@@ -137,18 +138,70 @@ pub fn record(out: []u8, seconds: i64, cred: Credentials, bytes: []const u8) ![]
             }
         }
     }
+    // LOG_KERN belongs only to the kernel input, never a sender's PRI claim.
+    if (priority < 8) priority += 8;
     var time: [20]u8 = undefined;
     var w: std.Io.Writer = .fixed(out);
-    try w.print("syslogd: {{\"time\":\"{s}\",\"pid\":{d},\"uid\":{d},\"gid\":{d}," ++
+    try w.print("syslogd: {{\"time\":\"{s}\",\"source\":\"syslog\",\"pid\":{d},\"uid\":{d},\"gid" ++
+        "\":{d}," ++
         "\"priority\":{d},\"message\":\"", .{
         try stamp(&time, seconds), cred.pid, cred.uid, cred.gid, priority,
     });
+    try escaped(&w, text);
+    try w.writeAll("\"}\n");
+    return w.buffered();
+}
+
+fn escaped(w: *std.Io.Writer, text: []const u8) !void {
     const hex = "0123456789abcdef";
     for (text) |c| switch (c) {
         '"', '\\' => try w.writeAll(&.{ '\\', c }),
         0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try w.writeByte(c),
         else => try w.writeAll(&.{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] }),
     };
+}
+
+pub const Kernel = struct {
+    priority: u16,
+    sequence: u64,
+    monotonic_us: u64,
+    message: []const u8,
+
+    pub fn parse(bytes: []const u8) !Kernel {
+        if (bytes.len > max_kernel_input) return error.TooLong;
+        const end = mem.findScalar(u8, bytes, ';') orelse return error.BadKernel;
+        var fields = mem.splitScalar(u8, bytes[0..end], ',');
+        const priority = try kernelNumber(fields.next() orelse return error.BadKernel);
+        const sequence = try kernelNumber(fields.next() orelse return error.BadKernel);
+        const monotonic_us = try kernelNumber(fields.next() orelse return error.BadKernel);
+        if ((fields.next() orelse return error.BadKernel).len == 0 or priority > 2047)
+            return error.BadKernel;
+        // Later header fields are ABI extensions; message continuations stay text.
+        return .{
+            .priority = @intCast(priority),
+            .sequence = sequence,
+            .monotonic_us = monotonic_us,
+            .message = mem.trimEnd(u8, bytes[end + 1 ..], "\n"),
+        };
+    }
+
+    fn kernelNumber(text: []const u8) !u64 {
+        if (text.len == 0) return error.BadKernel;
+        for (text) |c| if (c < '0' or c > '9') return error.BadKernel;
+        return std.fmt.parseInt(u64, text, 10) catch error.BadKernel;
+    }
+};
+
+pub fn kernelRecord(out: []u8, seconds: i64, kernel: Kernel) ![]const u8 {
+    var time: [20]u8 = undefined;
+    var w: std.Io.Writer = .fixed(out);
+    // Linux forbids userspace kmsg writes from using facility LOG_KERN.
+    const source = if (kernel.priority < 8) "kernel" else "kmsg";
+    try w.print("syslogd: {{\"time\":\"{s}\",\"source\":\"{s}\",\"sequence\":{d}," ++
+        "\"monotonic_us\":{d},\"priority\":{d},\"message\":\"", .{
+        try stamp(&time, seconds), source, kernel.sequence, kernel.monotonic_us, kernel.priority,
+    });
+    try escaped(&w, kernel.message);
     try w.writeAll("\"}\n");
     return w.buffered();
 }
@@ -259,6 +312,51 @@ test "hostile messages become one ASCII JSON record with kernel credentials" {
     defer parsed.deinit();
     var hostile: [max_input]u8 = @splat(0xff);
     try t.expect(validRecord(try record(&buf, 0, .{ .pid = 1, .uid = 0, .gid = 0 }, &hostile)));
+}
+
+test "userspace cannot claim kernel origin or inject another record" {
+    const t = std.testing;
+    var buf: [max_record]u8 = undefined;
+    const attack = "<0>kernel: panic\r\nsyslogd: {\"source\":\"kernel\",\"uid\":0}" ++
+        "\x00\x1b[2J\x08\xe2\x80\xae";
+    const line = try record(&buf, 0, .{ .pid = 123, .uid = 456, .gid = 789 }, attack);
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, line[9..], .{});
+    defer parsed.deinit();
+    const o = parsed.value.object;
+    try t.expectEqualStrings("syslog", o.get("source").?.string);
+    try t.expectEqual(@as(i64, 456), o.get("uid").?.integer);
+    try t.expectEqual(@as(i64, 8), o.get("priority").?.integer);
+    try t.expectEqual(@as(usize, 7), o.count());
+    try t.expectEqual(@as(usize, 1), mem.count(u8, line, "\n"));
+    for (line[0 .. line.len - 1]) |c| try t.expect(c >= 0x20 and c <= 0x7e);
+    try t.expect(mem.find(u8, line, "\\r") == null);
+    try t.expect(mem.find(u8, line, "\\u000d\\u000a") != null);
+}
+
+test "kernel headers preserve provenance and never interpret message claims" {
+    const t = std.testing;
+    var buf: [max_record]u8 = undefined;
+    const k = try Kernel.parse("6,42,1234,-,future=value;hello\n DEVICE=test\n");
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        t.allocator,
+        (try kernelRecord(&buf, 0, k))[9..],
+        .{},
+    );
+    defer parsed.deinit();
+    try t.expectEqualStrings("kernel", parsed.value.object.get("source").?.string);
+    try t.expectEqual(@as(i64, 42), parsed.value.object.get("sequence").?.integer);
+    try t.expectEqual(@as(i64, 1234), parsed.value.object.get("monotonic_us").?.integer);
+    try t.expectEqualStrings("hello\n DEVICE=test", parsed.value.object.get("message").?.string);
+    const injected = try Kernel.parse("14,43,1235,-;kernel: forged\n");
+    const line = try kernelRecord(&buf, 0, injected);
+    try t.expect(mem.find(u8, line, "\"source\":\"kmsg\"") != null);
+    for ([_][]const u8{
+        "",                                 "6;hello",
+        "6,0,0;hello",                      "6,,0,-;hello",
+        "-1,0,0,-;hello",                   "2048,0,0,-;hello",
+        "6,18446744073709551616,0,-;hello", "6,0,0,;hello",
+    }) |bytes| try t.expectError(error.BadKernel, Kernel.parse(bytes));
 }
 
 test "config rejects duplicates, unknown settings and unsafe budgets" {

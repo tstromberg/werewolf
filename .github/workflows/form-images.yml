@@ -89,10 +89,10 @@ jobs:
       - name: Resolve package, OCI, recipe environment and source inputs
         env:
           ARCH: ${{ matrix.arch }}
-          SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.shards }}
+          FORM_IMAGES_SHARD: ${{ matrix.shard }}
+          FORM_IMAGES_SHARDS: ${{ matrix.shards }}
           FORM_IMAGES_FORCE: ${{ inputs.force && '1' || '0' }}
-        run: python3 release/form-images resolve "$ARCH" "$SHARD" "$SHARDS" snapshot
+        run: python3 release/form-images resolve "$ARCH" "$FORM_IMAGES_SHARD" "$FORM_IMAGES_SHARDS" snapshot
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
@@ -180,10 +180,10 @@ jobs:
       - name: Require byte-identical builds and passing tests for this form and architecture
         env:
           ARCH: ${{ matrix.arch }}
-          SHARD: ${{ matrix.shard }}
+          FORM_IMAGES_SHARD: ${{ matrix.shard }}
         run: |
           python3 release/form-images check snapshot \
-            "copies/images-$ARCH-$SHARD-1" "copies/images-$ARCH-$SHARD-2" verified lifecycle
+            "copies/images-$ARCH-$FORM_IMAGES_SHARD-1" "copies/images-$ARCH-$FORM_IMAGES_SHARD-2" verified lifecycle
       # Evidence and inventories for every form; bundles only for the forms
       # the lifecycle gates, which alone can be published.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

@@ -191,11 +191,21 @@ def exercise(args, private):
         wait_path(endpoint_channel, process)
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         channel.settimeout(60)
-        channel.connect(str(endpoint_channel))
+        # bind creates the socket path before QEMU starts listening.
+        until = time.monotonic() + 10
+        while True:
+            try:
+                channel.connect(str(endpoint_channel))
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if process.poll() is not None or time.monotonic() >= until:
+                    raise
+                time.sleep(.05)
 
     def refused(label, reason):
         until = time.monotonic() + 90
         while time.monotonic() < until:
+            exited = process.poll() is not None
             log = (work / (label + '.log')).read_bytes()
             if reason.lower() in log.lower():
                 channel.settimeout(.2)
@@ -207,9 +217,11 @@ def exercise(args, private):
                     raise RuntimeError('refused bootstrap emitted unexpected enrollment output')
                 print('pass   signed bootstrap: ' + label + ' refused (' + reason.decode() + ')', flush=True)
                 return
-            if b'protected factory enrollment complete' in log or process.poll() is not None:
+            if b'protected factory enrollment complete' in log or exited:
                 break
-            if b'tpm-enroll: refused:' in log:
+            # Serial output can arrive in pieces even for one guest write.
+            # Do not kill QEMU after seeing only the refusal's prefix.
+            if b'tpm-enroll: refused:' in log and b'\n' in log.split(b'tpm-enroll: refused:', 1)[1]:
                 break
             time.sleep(.1)
         raise RuntimeError(label + ': no expected refusal\n' + log[-4000:].decode(errors='replace'))

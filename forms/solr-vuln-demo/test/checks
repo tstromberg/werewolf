@@ -1,4 +1,5 @@
-ok  solr-demo-admin wget -q -T 10 -O - http://127.0.0.1:8983/solr/ | grep -q -i solr
+# Shared lifecycle checks restart Solr; wait for its HTTP frontend to return.
+ok  solr-demo-admin i=0; until wget -q -T 10 -O - http://127.0.0.1:8983/solr/ | grep -q -i solr; do i=$((i + 1)); [ $i -lt 90 ] || exit 1; sleep 1; done
 ok  solr-demo-version wget -q -T 10 -O - 'http://127.0.0.1:8983/solr/admin/info/system?wt=json' | grep -q '8.11.0'
 ok  solr-demo-cores wget -q -T 10 -O - 'http://127.0.0.1:8983/solr/admin/cores?action=STATUS&wt=json' | grep -q 'status'
 ok  solr-demo-log4j test -f /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar

@@ -38,10 +38,9 @@ before either touches the network.
   only unfragmented UDP from port 67 to 68. For each lease it sends the
   parent a fixed-size message.
 - **The parent** applies leases as `_netcfg` (uid 73), which owns the network
-  state directory. It keeps only CAP_NET_ADMIN and seccomp
-  allows four ioctls (address, netmask, MTU, add route) and send/receive
-  on a preopened DNS routing socket. Landlock limits
-  its writes to `/run/werewolf/network` (`lease.json`, and `resolv.conf`,
+  state directory. It keeps only CAP_NET_ADMIN; seccomp allows four ioctls
+  (address, netmask, MTU, add route) and send/receive on a preopened DNS socket.
+  Landlock limits writes to `/run/werewolf/network` (`lease.json` and `resolv.conf`,
   which `/etc/resolv.conf` links to). It never sees a packet. It checks
   every field of the engine's message again and treats a bad one as a
   compromised engine, ending both. It writes every log line, as JSON.
@@ -93,8 +92,9 @@ Their scripts need a shell; dhclient parses far more of the wire as root.
 
 ## Reliability Considerations
 
-- **A brief link drop** costs a round, not the program.
-- **A DHCP server down past the lease:** the address stays on the NIC.
+- **Parent loss** closes the engine's channel; every wait watches it, including
+  lease-renewal delays, so the packet socket cannot outlive the parent.
+- **A brief link drop** costs a round; an expired lease keeps its address.
 - **A refused MTU or route** is logged and skipped, so keep stays up.
 - **Tested:** `make check-dns` exercises actual renewal under both sandboxes;
   `make check-lease`, and `howl create` on Lima.

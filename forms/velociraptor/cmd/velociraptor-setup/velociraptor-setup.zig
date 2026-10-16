@@ -81,7 +81,7 @@ fn merge(gpa: Allocator, domain: []const u8) ![]const u8 {
         .GUI = .{
             .bind_address = "127.0.0.1",
             .bind_port = 8889,
-            .public_url = try gpa.print("https://{s}/", .{domain}),
+            .public_url = try gpa.print("https://{s}/app/index.html", .{domain}),
         },
         .Frontend = .{
             .hostname = domain,
@@ -151,7 +151,7 @@ test "merge names the machine and keeps the password out" {
     defer arena.deinit();
     const text = try merge(arena.allocator(), "vr.example");
     try testing.expect(std.mem.indexOf(u8, text, "https://vr.example:8000/") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "https://vr.example/") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "https://vr.example/app/index.html") != null);
     try testing.expect(std.mem.indexOf(u8, text, "/data/svc/velociraptor/datastore") != null);
     try testing.expect(std.mem.indexOf(u8, text, "password") == null);
     try testing.expect(std.mem.indexOf(u8, text, "PRIVATE") == null);

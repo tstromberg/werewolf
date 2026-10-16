@@ -14,11 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const ctx = try driver.Run.load(io, gpa, args[3]);
     var ready = false;
     for (0..90) |_| {
-        const response = request(gpa, "/solr/admin/info/system?wt=json", "") catch {
-            try io.sleep(.fromSeconds(1), .awake);
-            continue;
-        };
-        if (response.status == 200) {
+        if (available(gpa, std.mem.eql(u8, ctx.phase, "verify"))) {
             ready = true;
             break;
         }
@@ -47,11 +43,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const query = try gpa.print("/solr/native/select?q=id:{s}&wt=json", .{ctx.run});
     const found = try request(gpa, query, "");
-    const result = try std.json.parseFromSliceLeaky(std.json.Value, gpa, found.body, .{});
-    const response = result.object.get("response").?.object;
-    const docs = response.get("docs").?.array.items;
-    try ctx.result(io, suite, "persisted-document", found.status == 200 and docs.len == 1 and
-        std.mem.eql(u8, docs[0].object.get("id").?.string, ctx.run));
+    try ctx.result(io, suite, "persisted-document", found.status == 200 and
+        hasDocument(gpa, found.body, ctx.run));
     const refused = try request(
         gpa,
         "/solr/admin/cores?action=CREATE&name=escape&instanceDir=/etc/native-solr&configSet=_def" ++
@@ -90,6 +83,24 @@ pub fn main(init: std.process.Init) !void {
         "hardened-java",
         std.mem.startsWith(u8, rest[0..end], "27.") and epoch >= 2000,
     );
+}
+
+fn available(gpa: Allocator, verify: bool) bool {
+    const info = request(gpa, "/solr/admin/info/system?wt=json", "") catch return false;
+    if (info.status != 200) return false;
+    if (!verify) return true;
+    // Jetty answers before persisted cores have reopened. Probe the query
+    // handler, without using the stored document as a readiness condition.
+    const core = request(gpa, "/solr/native/select?q=*:*&rows=0&wt=json", "") catch return false;
+    return core.status == 200;
+}
+
+fn hasDocument(gpa: Allocator, body: []const u8, id: []const u8) bool {
+    const Search = struct { response: struct { docs: []const struct { id: []const u8 } } };
+    const result = std.json.parseFromSliceLeaky(Search, gpa, body, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    return result.response.docs.len == 1 and std.mem.eql(u8, result.response.docs[0].id, id);
 }
 
 fn absent(io: Io, path: []const u8) bool {

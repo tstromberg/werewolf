@@ -32,12 +32,12 @@ const configuration =
     \\# home-assistant-setup. YAML HTTP settings would start a five-minute
     \\# trial and revert without an operator's confirmation in the UI.
     \\
-    \\# default_config, but for dhcp, which needs raw packet access;
+    \\# default_config, but for dhcp, which needs raw packet access; ssdp,
+    \\# which starts a random-port HTTP server;
     \\# bluetooth and usb, which need devices; and go2rtc, which would start
     \\# a program of its own. Network discovery uses unprivileged UDP.
     \\network:
     \\zeroconf:
-    \\ssdp:
     \\assist_pipeline:
     \\backup:
     \\cloud:
