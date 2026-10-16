@@ -47,7 +47,9 @@ services:
     # connect: peer authentication looks the client's uid up, and glibc first
     # tries nscd's socket, which is not there; refused, each login would leave
     # two audit records. It reaches no network: there is no inet promise.
-    pledge: stdio rpath wpath proc ipc unix listen connect
+    # shm: PostgreSQL keeps a small SysV segment even with mmap shared memory.
+    # Linux uses POSIX semaphores; no SysV semaphores or message queues.
+    pledge: stdio rpath wpath proc shm unix listen connect
     run:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim

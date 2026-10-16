@@ -222,8 +222,11 @@ pub fn take(
         .app = app_root,
         .published = @import("published.zig").arch != null,
         .dev = for (p.rest) |arg| {
-            if (std.mem.eql(u8, arg, "--dev")) break true;
+            if (std.mem.eql(u8, arg, "--dev") or std.mem.eql(u8, arg, "--dev=ssh")) break true;
         } else false,
+        .dev_shell = for (p.rest) |arg| {
+            if (std.mem.eql(u8, arg, "--dev=ssh")) break false;
+        } else true,
     }) catch null else null;
     const locked_images: []const locks.Image = if (previous) |record| blk: {
         const requested = record.requested orelse break :blk &.{};

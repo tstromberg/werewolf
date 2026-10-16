@@ -93,7 +93,11 @@ pub fn seed(m: *Machine) void {
         "/run/werewolf",
         "/run/werewolf/keys",
         "/run/runit",
+        "/run/syslog",
     }) |d| mkdir(d, 0o755);
+    const log_link = linux.symlink("/run/syslog/dev-log", "/dev/log");
+    if (linux.errno(log_link) != .SUCCESS and linux.errno(log_link) != .EXIST)
+        say("cannot link /dev/log: {t}", .{linux.errno(log_link)});
     for ([_][]const u8{ "passwd", "group", "shadow" }) |f| {
         const src = m.fmt("/usr/share/werewolf/etc/{s}", .{f});
         const text = m.read(src);
@@ -168,7 +172,14 @@ pub fn kernel(m: *Machine) !void {
     // (lib/audit.zig). The rule is locked and the seal drops
     // CAP_AUDIT_CONTROL, so nothing can stop it before a reboot. Without
     // audit (or in a container), this is logged and passed.
-    audit.enable() catch |err| say("refused execs not logged: {s}", .{@errorName(err)});
+    const demo_audit = init.exists("/etc/werewolf/audit-exec-all");
+    if (demo_audit) {
+        audit.enableAllExec() catch |err| say("execs not logged: {s}", .{@errorName(err)});
+        if (init.executable("/usr/lib/werewolf/vuln-kmsg"))
+            _ = m.run(&.{"/usr/lib/werewolf/vuln-kmsg"});
+    } else {
+        audit.enable() catch |err| say("refused execs not logged: {s}", .{@errorName(err)});
+    }
     // Turn off ICMP redirects on each interface: the kernel honors them if
     // "all" or the interface allows them, and "default" does not reach
     // interfaces that already exist. IPv6 has only the per-interface setting.
@@ -279,10 +290,10 @@ const sysctls = [_][2][]const u8{
     .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },
     .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
     .{ "net/ipv4/tcp_rfc1337", "1" },
-    // Audit records pass printk's rate limit, 10 lines in 5 seconds by
-    // default; posture alone refuses seven execs in a row. 100 keeps a burst
-    // on record and a flood bounded.
-    .{ "kernel/printk_ratelimit_burst", "100" },
+    // kauditd uses printk's shared rate limit without an audit daemon.
+    // Even ordinary startup can exhaust a burst and hide refused execs.
+    // Keep the audit evidence on the captured console, then seal sysctls.
+    .{ "kernel/printk_ratelimit", "0" },
 };
 
 /// lockdownLevel returns the bracketed level in

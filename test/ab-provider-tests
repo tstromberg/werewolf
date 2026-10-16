@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from ab_providers import Provider
+import ab_build
 
 with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
     root = Path(temporary)
@@ -12,6 +13,32 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
     fixture = {'ssh_key': str(root / 'ssh'), 'kernel': 'kernel', 'key': 'signer',
                'cert': 'public', 'channel': 'https://127.0.0.1/image',
                'initial_serial': '20261012T000000Z', 'mode': 'plain', 'arch': 'x86_64'}
+
+    inputs = ['howl', root / 'form', 'x86_64', 'kernel', 'ipe.key', 'ipe.crt',
+              root / 'fixture-build', 'https://127.0.0.1/image', '20261012T000000Z']
+    protected, output = ab_build.arguments(*inputs, 'boot.key', 'boot.crt', 'permit.pub')
+    assert protected[1] == '_build' and protected[-2:] == ['prebuilt', 'qcow2']
+    assert '--boot-native' in protected and '--tpm-pub' in protected
+    assert not any(flag.startswith('--disable') for flag in protected)
+    secure, _ = ab_build.arguments(*inputs, 'boot.key', 'boot.crt')
+    assert '--disable=tpm' in secure
+    plain, _ = ab_build.arguments(*inputs)
+    assert '--disable=secureboot,tpm' in plain
+    native, app_output = ab_build.arguments(
+        *inputs, 'boot.key', 'boot.crt', app=root / 'app', goals=('prebuilt', 'disk'),
+        disk_args='werewolf.ip=10.0.2.15/24')
+    assert '--disable=tpm' in native and '--boot-native' in native
+    assert native[-2:] == ['prebuilt', 'disk'] and app_output.name == 'form-app-ipe'
+    assert native[native.index('--disk-args') + 1] == 'werewolf.ip=10.0.2.15/24'
+    (output / 'slot').mkdir(parents=True)
+    for name in ['vmlinuz', 'stage0.zst', 'root.erofs', 'cmdline', 'uki.efi']:
+        (output / 'slot' / name).write_bytes(b'public artifact')
+    (output / 'disk.qcow2').write_bytes(b'public disk')
+    (output / 'boot.key').write_bytes(b'private signing key')
+    destination = root / 'export'
+    ab_build.export(output, root / 'form', 'x86_64', destination)
+    assert len(list(destination.iterdir())) == 6
+    assert all(b'private signing key' not in path.read_bytes() for path in destination.iterdir())
 
     def machine(kind, suffix):
         work = root / suffix

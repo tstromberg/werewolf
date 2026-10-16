@@ -3,12 +3,18 @@
 # plain HTTP on :80 without one). It runs Home Assistant's own image, its
 # stable release pinned by digest when built, in a tree of its own
 # (docs/design/oci.md). Its owner comes from the config, made before it
-# serves, so no visitor is offered onboarding. Discovery, Bluetooth and
-# USB are off: they wait on multicast and devices. Its configuration and
+# serves, so no visitor is offered onboarding. mDNS and SSDP discover LAN
+# devices; Bluetooth and USB need device passthrough. Its configuration and
 # history are in /data/svc/home-assistant. See forms/home-assistant/README.md.
 base: prod
 
 with: [caddy]
+
+# ctypes imports libffi's native callback trampolines during startup.
+allow: [jit]
+
+weaknesses:
+  kernel-write-xor-execute: Python's ctypes uses libffi callback trampolines (allow jit)
 
 check:
   # The image is 2.3 GB, unpacked in the root; Home Assistant wants 400 MiB.
@@ -20,16 +26,20 @@ services:
   # ports their integrations use, and the internet's by HTTPS. Before it
   # starts, home-assistant-setup writes its configuration and, the first
   # time, its owner. The image's entrypoint is s6-overlay's shell scripts,
-  # so leash runs Python itself, and nothing else in the image can run.
+  # so leash runs Python itself. Its startup also runs Python's site helper;
+  # no other executable in the image may run.
   home-assistant:
     image: ghcr.io/home-assistant/home-assistant:stable
     exec: /usr/local/bin/python3 -m homeassistant --config /data
     before: /usr/lib/werewolf/home-assistant-setup
     dir: /data
     # sendfile: aiohttp serves the frontend's files with it.
-    pledge: stdio rpath wpath inet unix netlink connect listen proc sendfile
-    listen: tcp/8123 loopback
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec sendfile
+    run: /usr/local/bin/python3
+    listen: [tcp/8123 loopback, udp/5353 udp/1900 lan]
     connect:
+      # Discovery to connected subnets and these protocols' multicast groups.
+      - udp/5353 udp/1900 lan
       - tcp/443 tcp/80 udp/53 tcp/53
       # MQTT, MQTT over TLS, ESPHome, Matter, Z-Wave JS.
       - tcp/1883 tcp/8883 tcp/6053 tcp/5580 tcp/3000
@@ -49,7 +59,11 @@ services:
     render: env site
     memory: 1024
     nofile: 65536
-    env: PYTHONDONTWRITEBYTECODE=1
+    env:
+      - PYTHONDONTWRITEBYTECODE=1
+      # Python 3.14 supports musl's posix_spawn. Declare the known platform
+      # instead of Home Assistant executing the loader to identify musl.
+      - _PYTHON_SUBPROCESS_USE_POSIX_SPAWN=1
 
   # Caddy, as its own user, for Home Assistant: it may bind :80 and :443
   # and no other port, reach the ACME CA over HTTPS, a resolver, and Home

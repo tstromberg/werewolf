@@ -1,0 +1,1 @@
+Record successful and refused execs, including EXECVE and PROCTITLE records.

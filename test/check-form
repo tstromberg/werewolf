@@ -62,8 +62,13 @@ cp test/checks-again "$c-checks-again"
 boot "$name-again" "$c-checks-again" "$@"
 ! grep -a -E 'werewolf: (formatting|making LUKS2) ' "$c-again.log" ||
 	{ echo "FAIL   $FORM-again        formatted the disk its first boot left"; exit 1; }
-a=$(grep -a '"event":"host-key"' "$c.log" | grep -a 'kept in /data' |
-	grep -ao '"fingerprint":"[^"]*"' | head -n 1)
-b=$(grep -a '"event":"host-key"' "$c-again.log" | grep -ao '"fingerprint":"[^"]*"' | head -n 1)
+# Production and developer SSH can start in either order. Compare every
+# persistent key by its service path, rather than whichever logs first.
+host_keys() {
+	grep -a '"event":"host-key"' "$1" | grep -a 'kept in /data' |
+		sed -n 's/.*"key":"\([^"]*\)".*"fingerprint":"\([^"]*\)".*/\1 \2/p' | LC_ALL=C sort -u
+}
+a=$(host_keys "$c.log")
+b=$(host_keys "$c-again.log")
 [ -z "$a" ] || [ "$a" = "$b" ] ||
 	{ echo "FAIL   $FORM-again        host key not kept: [$a] then [$b]"; exit 1; }

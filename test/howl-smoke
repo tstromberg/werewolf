@@ -19,6 +19,8 @@ out=$("$howl" create --build smoke --with playground --on firecracker 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'protected deployment is not ready' || fail "default allowed unprotected Firecracker"
 out=$("$howl" create --build smoke --with playground --dev 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q -- '--dev --disable=secureboot,tpm,ipe' || fail "--dev silently disabled protection"
+out=$("$howl" create --build smoke --with playground --dev=ssh 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q -- '--dev=ssh --disable=secureboot,tpm,ipe' || fail "SSH iteration silently disabled protection"
 out=$("$howl" run --build --disable=tpm 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'without all three' || fail "a partial --disable was accepted"
 out=$("$howl" run --build --on gcp 2>&1)

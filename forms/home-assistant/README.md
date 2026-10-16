@@ -10,9 +10,18 @@ instructions](https://dist.werewolf-linux.org/boot/v1/home-assistant/index.html)
 
 - The service runs as its own user, held to the files and ports its manifest names. The
   root is read-only. `/data` is what survives.
+- HTTP's stable configuration is set at each start: loopback behind Caddy, without
+  a pending trial that would revert after five minutes without UI confirmation.
+- mDNS (UDP/5353) and SSDP (UDP/1900) discover devices on the LAN. Fence limits
+  discovery to directly connected subnets, standard multicast groups and SSDP
+  limited broadcast;
+  off-subnet unicast to those listeners is dropped, including forged replies.
 
 - The image contains Python. Only `python3 -m homeassistant` is started. Integrations
   you add later run as that same user.
+
+- `kernel-write-xor-execute`: Python's `ctypes` needs libffi's native callback
+  trampolines at startup, so the form permits `jit`.
 
 ## Getting Started
 
@@ -51,6 +60,18 @@ howl create home-assistant --with home-assistant --on proxmox \
 
 The owner's password is set back to the file at each start.
 
+### LAN discovery
+
+Attach the VM to the same LAN as its devices with a bridge or equivalent network
+that carries multicast. QEMU's user networking, Firecracker's usual NAT, and Lima's
+shared networking do not by themselves provide access to the home's multicast.
+Forwarding UDP/5353 or UDP/1900 through NAT is not a substitute for a LAN attachment.
+
+Discovery uses Home Assistant's Network settings to select interfaces. Firewall
+LAN subnets are fixed at boot; changing the VM's address plan requires a reboot.
+A cloud VM discovers devices on its attached network, not your home's network.
+Do not forward these discovery ports from an Internet router.
+
 ### Importing data
 
 Home Assistant keeps its state in `/data`, and the host cannot write that directory.
@@ -59,8 +80,9 @@ Restore a backup from the web UI after this machine is up.
 ### Known Quirks
 
 - Onboarding is already finished. The first visitor is not offered the setup.
-- Discovery, Bluetooth and USB are off. A Zigbee coordinator is reached over the
-  network, through MQTT, not a dongle.
+- mDNS and SSDP discovery are enabled. DHCP packet sniffing, Bluetooth and USB
+  remain off; the service has no raw packet or device access. A network Zigbee
+  coordinator can be reached through MQTT.
 - Location starts as the settings you passed. Change it later under Settings, System,
   General.
 - The image is large. Give the machine 4 GB.
@@ -69,3 +91,5 @@ Restore a backup from the web UI after this machine is up.
 
 - listen: tcp/80 *
 - listen: tcp/443 *
+- listen: udp/5353 LAN (mDNS)
+- listen: udp/1900 LAN (SSDP)

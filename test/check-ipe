@@ -7,7 +7,7 @@ cat >"$dir/checks" <<'EOF'
 ok  ipe-active       [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ] && [ "$(cat /sys/kernel/security/ipe/policies/werewolf/active)" = 1 ]
 ok  ipe-no-initramfs  ! grep -q boot_verified /sys/kernel/security/ipe/policies/werewolf/policy
 ok  ipe-locked       ! (echo 0 >/sys/kernel/security/ipe/enforce) && [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ]
-ok  ipe-modules      [ "$(cat /sys/module/module/parameters/sig_enforce)" = Y ]
+ok  ipe-modules      if [ -r /sys/module/module/parameters/sig_enforce ]; then [ "$(cat /sys/module/module/parameters/sig_enforce)" = Y ]; else zcat /proc/config.gz | grep -qx '# CONFIG_MODULES is not set'; fi
 EOF
 test/boot ipe "$dir/checks" "$dir/boot.log" "$@" -kernel "$KERNEL" \
 	-initrd "$OUT/initramfs.zst" -append "$CMDLINE"

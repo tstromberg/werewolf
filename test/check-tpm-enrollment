@@ -111,10 +111,13 @@ def main():
                 raise RuntimeError('restart created a second simulator')
             os.kill(first, signal.SIGKILL)
             supervise('stop')
-            supervise('start')
-            supervise('stop')
             if sockets.exists() or (work / 'tpm.pid').exists():
                 raise RuntimeError('TPM service did not remove its private runtime sockets')
+            for _ in range(3):
+                supervise('start')
+                supervise('stop')
+                if sockets.exists() or (work / 'tpm.pid').exists():
+                    raise RuntimeError('TPM shutdown returned before removing its sockets')
             saved = work / 'saved-nv'
             (work / 'swtpm').rename(saved)
             supervise('start', success=False)
@@ -123,6 +126,15 @@ def main():
             saved.rename(work / 'swtpm')
         finally:
             supervise('stop')
+        (work / 'swtpm').rename(work / 'nv')
+        process, endpoint = start(work)
+        try:
+            command('read-pair', public, endpoint, work / 'after-supervisor')
+            if (work / 'after-supervisor').read_bytes() != expected:
+                raise RuntimeError('supervisor restart lost enrollment')
+        finally:
+            process.terminate()
+            process.communicate(timeout=10)
     print('pass   native TPM enrollment and supervisor: private custody, reset refusal, restart, crash recovery')
 
 

@@ -157,6 +157,9 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
     mkdir(run_run, 0o755);
     own(run_run, ids);
     m.mount(&.{ "--bind", run_run, m.fmt("{s}/run", .{dir}) });
+    const logs = m.fmtZ("{s}/run/syslog", .{dir});
+    mkdir(logs, 0o755);
+    m.mount(&.{ "--bind", "-o", "ro", "/run/syslog", logs });
     if (nodata) return;
     mkdir("/data/svc", 0o755);
     const data_dir = m.fmtZ("/data/svc/{s}", .{name});

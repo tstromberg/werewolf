@@ -9,6 +9,9 @@ base: prod
 
 with: [mariadb-tcp, valkey, caddy]
 
+# Exercise login with the real session cookie and CSRF form fields.
+dev: [curl]
+
 # make check's (forms/README.md): PHP's workers beside MariaDB.
 check:
   memory: 6144
@@ -35,8 +38,6 @@ services:
       - /var/www/MISP/app/tmp
     run:
       - /usr/bin/bash
-      - /usr/bin/env
-      - /usr/bin/dash
       - /usr/bin/php8.4
       - /usr/bin/mariadb
       - /usr/bin/mkdir
@@ -47,9 +48,11 @@ services:
       - /usr/bin/sleep
       - /usr/bin/gpg
       - /usr/bin/gpg-agent
+      - /usr/bin/gpgconf
       - /usr/lib/werewolf/misp-serve
-      - /var/www/MISP/app/Console/
-    config: admin-password /run/config/misp/admin-password
+    config:
+      - admin-password /run/config/misp/admin-password
+      - settings /run/config/misp/settings.json
     setting:
       - base-url url required as BASE_URL
       - admin-email string required as ADMIN_EMAIL
@@ -74,7 +77,7 @@ services:
   # MariaDB, as mariadb-tcp runs it, on loopback. The role misp, from
   # the SQL, is the only TCP login, and only MISP's leash reaches it.
   mariadb:
-    exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
+    exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf --bind-address=127.0.0.1
     before: /usr/lib/werewolf/mariadb-init
     user: mariadb
     pledge: stdio rpath wpath unix inet listen proc aio

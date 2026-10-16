@@ -34,7 +34,9 @@ in the entry name
 
 ## Detailed design
 
-runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
+runsv starts it as `/etc/sv/slot-keep/run`, with no arguments. It opens its
+control pipe, becomes `_slotkeep` (uid 72) without capabilities, and enters
+a read-only Landlock domain before judging service health.
 
 1. **Which slot.** It parses the kernel command line as stage0 does
    (`lib/cmdline.zig`). `werewolf.esp` with `werewolf.slot` identifies
@@ -58,7 +60,8 @@ runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
 4. **systemd-boot**: the broker renames the counting entry to
    `werewolf-SLOT.conf` on a detached EFI mount and syncs it. If the loader already
    points at this slot, it skips the write.
-5. **Commit**: it creates `/run/werewolf/committed`, logs one line, and
+5. **Commit**: the broker creates `/run/werewolf/committed`, root-owned,
+   only after keeping the EFI entry. The keeper logs one line and
    parks (`sv down .`). Commit never retires the retained A/B release in the TPM;
    retirement belongs to replacing the inactive slot (docs/design/tpm-ab-retirement.md).
 
@@ -84,7 +87,7 @@ A slot that boots but cannot serve, or cannot update, would be kept for good.
 | A broken update committed | Only after every service has run a minute, /data works, the updater is ready, and posture fails nothing unexcused. |
 | A path from the command line | Slot a or b; the broker derives entry paths itself. |
 | Writing the loader | Through the mount broker, mounted detached for one write. |
-| Its own privilege | Root, in fence's domain and sealed; only the broker can mount. |
+| Its own privilege | Non-root, no capabilities, read-only file access; only its keeper channel can request the commit. |
 
 ## Reliability Considerations
 

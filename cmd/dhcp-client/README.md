@@ -37,7 +37,8 @@ before either touches the network.
   random numbers. The socket's kernel filter, locked before bind, passes
   only unfragmented UDP from port 67 to 68. For each lease it sends the
   parent a fixed-size message.
-- **The parent** applies leases. It keeps only CAP_NET_ADMIN and seccomp
+- **The parent** applies leases as `_netcfg` (uid 73), which owns the network
+  state directory. It keeps only CAP_NET_ADMIN and seccomp
   allows four ioctls (address, netmask, MTU, add route) and send/receive
   on a preopened DNS routing socket. Landlock limits
   its writes to `/run/werewolf/network` (`lease.json`, and `resolv.conf`,

@@ -25,7 +25,7 @@ few seconds of writes.
 
 ## Non-Goals
 
-- Service dependencies or ordering. Every service is stopped at once.
+- General service dependencies. Only the log collector stops after applications.
 - Stopping what runit did not start. runit kills it after stage 3.
 
 ## Detailed design
@@ -38,21 +38,22 @@ few seconds of writes.
   other exit would run stage 3, which kills stage0's deadman and powers off,
   so an uncommitted slot would stay off instead of rebooting into the last
   slot that worked.
-- **Stage 3** sends `d` (TERM, then CONT) to every `/etc/sv/*` at once
+- **Stage 3** sends `d` (TERM, then CONT) to application services at once
   through runsv's control pipe. The pipe is opened non-blocking, so a
   missing runsv is skipped. It reads each `supervise/stat` every 10 ms until
   it says `down` (sv waits 420 ms between checks). After 30 s, services still
   up get `k` (KILL) and 6 s more, enough for leash-reap's 5 s; then it moves
   on, naming each. Every runsv gets `x`. Then `sync`, and the mount broker's
   `shutdown`: it unmounts `/data` (or remounts it read-only if held), removes
-  its LUKS mapping, and remounts `/boot` read-only. If the broker fails,
+  its LUKS mapping, and remounts `/boot` read-only. Before syncing, it stops
+  syslogd with five seconds to drain and one more after KILL. If the broker fails,
   stage 3 logs it and the journal repairs the filesystems on next boot.
 - **Logging**: `werewolf: stopping services`, each service killed, and
   `werewolf: down in 0.011s (services 0.011s, filesystems 0.000s)`.
 
 ## Drawbacks
 
-- Services are not ordered: a client and its database stop together.
+- Application services are not ordered: a client and its database stop together.
 - A service that ignores TERM holds a stop for 30 s.
 
 ## Alternatives Considered
@@ -80,8 +81,8 @@ stage 3, and powered the machine off.
 
 ## Reliability Considerations
 
-- **Bounded**: at most 36 s for the services, then the broker's own bounded
-  shutdown.
+- **Bounded**: at most 36 s for applications and 6 s for syslogd, then the broker's
+  bounded shutdown.
 - **Falls back**: a stage 2 that cannot start retries, and the deadman
   reboots an uncommitted slot into the old one.
 - **Tested**: unit tests for `stageOf` and `isDown`; every `make check` boot

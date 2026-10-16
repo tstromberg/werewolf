@@ -553,7 +553,7 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
     var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });
     defer d.close(u.io);
     var idx: apk.Index = .empty;
-    var signers: std.StringHashMapUnmanaged(void) = .empty;
+    var signers: std.StringHashMapUnmanaged(u8) = .empty;
     const names = try u.listDir(cache);
     for (names) |name| {
         if (!std.mem.startsWith(u8, name, "APKINDEX.")) continue;
@@ -571,13 +571,13 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
             return err;
         };
         const by = apk.signer(u.gpa, raw) catch unreachable;
-        if ((try signers.fetchPut(u.gpa, by, {})) != null) {
+        countIndexSigner(u.gpa, &signers, by) catch |err| {
             for (names) |n| {
                 if (std.mem.startsWith(u8, n, "APKINDEX.")) d.deleteFile(u.io, n) catch {};
             }
             u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
-            return error.DuplicateApkIndex;
-        }
+            return err;
+        };
         try d.deleteFile(u.io, name);
         try d.writeFile(u.io, .{ .sub_path = name, .data = kept, .flags = .{ .exclusive = true } });
     }
@@ -592,6 +592,38 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
         };
     }
     return idx;
+}
+
+/// Werewolf signs both the programs/forms repository and the hardened feed.
+/// Other keys still sign one configured index, and extra copies are refused.
+fn countIndexSigner(
+    gpa: Allocator,
+    signers: *std.StringHashMapUnmanaged(u8),
+    name: []const u8,
+) !void {
+    const entry = try signers.getOrPut(gpa, name);
+    const count: u8 = if (entry.found_existing) entry.value_ptr.* else 0;
+    const maximum: u8 = if (std.mem.eql(u8, name, package.repository_key)) 2 else 1;
+    if (count >= maximum) return error.DuplicateApkIndex;
+    entry.value_ptr.* = count + 1;
+}
+
+test "the programs index and hardened index may share the packages key" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var signers: std.StringHashMapUnmanaged(u8) = .empty;
+    try countIndexSigner(gpa, &signers, package.repository_key);
+    try countIndexSigner(gpa, &signers, package.repository_key);
+    try testing.expectError(
+        error.DuplicateApkIndex,
+        countIndexSigner(gpa, &signers, package.repository_key),
+    );
+    try countIndexSigner(gpa, &signers, "wolfi-signing.rsa.pub");
+    try testing.expectError(
+        error.DuplicateApkIndex,
+        countIndexSigner(gpa, &signers, "wolfi-signing.rsa.pub"),
+    );
 }
 
 /// Held is the format a world names and the newest an index offers.

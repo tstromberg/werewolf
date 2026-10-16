@@ -7,13 +7,14 @@
 # and has no shell: forms that log people in add busybox-full, as does any
 # form built with DEV=1. Every other form includes this one.
 #
-# glibc is werewolf's own (docs/design/glibc-neutered.md): Wolfi's, with no
-# environment tuning, loader injection, external NSS or converters, or nscd.
-# Its repository follows each new build and is signed with werewolf's key,
-# which howl adds. Wolfi stays first: the updater reads its CVE feed there.
+# Hardened Wolfi replacements share one signed feed (glibc and the runtimes).
+# howl and the updater verify that every installed package whose name the feed
+# covers matches its signed index; an unavailable feed or Wolfi fallback fails.
+# Explicit older runtime streams and OCI-contained runtimes remain separate.
+# Wolfi stays first: the updater reads its CVE feed there.
 repositories:
   - https://packages.wolfi.dev/os
-  - https://dist.werewolf-linux.org/apk/glibc
+  - https://dist.werewolf-linux.org/apk/hardened
   - https://dist.werewolf-linux.org/apk
 keyring:
   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
@@ -40,6 +41,14 @@ accounts:
       gid: 66
     - groupname: _update
       gid: 69
+    - groupname: _power
+      gid: 71
+    - groupname: _slotkeep
+      gid: 72
+    - groupname: _syslog
+      gid: 75
+    - groupname: _logfile
+      gid: 76
   users:
     - username: _seal
       uid: 66
@@ -49,6 +58,26 @@ accounts:
     - username: _update
       uid: 69
       gid: 69
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _power
+      uid: 71
+      gid: 71
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _slotkeep
+      uid: 72
+      gid: 72
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _syslog
+      uid: 75
+      gid: 75
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _logfile
+      uid: 76
+      gid: 76
       homedir: /var/empty
       shell: /sbin/nologin
 

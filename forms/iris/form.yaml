@@ -28,12 +28,20 @@ services:
   iris:
     image: ghcr.io/dfir-iris/iriswebapp_app:v2.4.29
     exec: /usr/bin/bash /usr/lib/werewolf/iris-run
-    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    # Gunicorn reasserts its existing worker uid; no CAP_SETUID is retained.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec setuid
     listen: tcp/8000 loopback
     connect: [tcp/5432]
     run:
       - /usr/bin/bash
       - /usr/local/bin/python3.9
+      # iris-run uses these four fixed utilities while it prepares the data
+      # directories and waits for PostgreSQL. No general shell search is
+      # available with the hardened libc, so name each executable exactly.
+      - /usr/bin/cat
+      - /usr/bin/mkdir
+      - /usr/bin/rm
+      - /usr/bin/sleep
     config: admin-password /run/config/iris/admin-password
     memory: 1024
     nofile: 16384
@@ -68,7 +76,7 @@ services:
       hba_file=/usr/share/werewolf-iris/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    pledge: stdio rpath wpath inet proc shm unix listen connect
     listen: [tcp/5432 loopback]
     run:
       - /usr/bin/initdb

@@ -250,11 +250,11 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         try w.print(
             "\nFrom a checkout:\n  howl pack --build --with {s} -h\n" ++
                 "  howl run --build --with {s}\n  howl create {s} --build --with {s}\n" ++
-                "  howl test --with {s}\n\n" ++
+                "  howl test --with {s}\n  howl test --with {s} --iterate\n\n" ++
                 "Add the configuration flags shown by pack and the setup guide.\n" ++
                 "Without --build, run/create download a published image for the provider and\n" ++
                 "architecture; with --build they make one here, signed with your keys.\n",
-            .{ row.form, row.form, row.form, row.form, row.form },
+            .{ row.form, row.form, row.form, row.form, row.form, row.form },
         );
         return;
     }

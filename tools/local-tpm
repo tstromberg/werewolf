@@ -95,16 +95,18 @@ def main():
             try:
                 if not request(directory, 'STOP'):
                     raise RuntimeError('TPM service refused shutdown')
-                return
             except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError):
-                try:
-                    with (authority / 'tpm-service.lock').open('a+b') as guard:
-                        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return
-                except BlockingIOError:
-                    if time.monotonic() > deadline:
-                        raise RuntimeError('TPM service did not finish shutdown')
-                    time.sleep(.1)
+                pass
+            # Acknowledging STOP precedes cleanup. Wait for its lifetime lock
+            # before another start can reuse the socket directory.
+            try:
+                with (authority / 'tpm-service.lock').open('a+b') as guard:
+                    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('TPM service did not finish shutdown')
+                time.sleep(.1)
     if operation != 'start':
         raise ValueError('unknown operation')
     try:

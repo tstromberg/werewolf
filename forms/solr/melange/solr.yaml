@@ -1,0 +1,41 @@
+# Only the application and our bootstrap. Wolfi's solr package also depends on
+# Bash, BusyBox, and OpenJDK 21; none belongs in this package or its runtime deps.
+package:
+  name: solr
+  version: 10.0.0
+  epoch: 0
+  description: Apache Solr, directly launched with hardened OpenJDK 27
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openjdk-27-jre>=27.0.0-r2002
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go-1.27
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://archive.apache.org/dist/solr/solr/${{package.version}}/solr-${{package.version}}-slim.tgz
+      expected-sha256: 95850910d4084a197d9aa5b225d499ac82857eec5cbb54d0511c82a413aa8b17
+      strip-components: 1
+
+  - runs: |
+      dest=${{targets.destdir}}/usr/lib/solr
+      mkdir -p "$dest"
+      cp -a server lib licenses LICENSE.txt NOTICE.txt "$dest/"
+      # The shell launchers, Docker entrypoints and bundled examples stay out.
+      CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$dest/setup" setup.go
+      install -m644 log4j2.xml "$dest/log4j2.xml"
+
+update:
+  enabled: false

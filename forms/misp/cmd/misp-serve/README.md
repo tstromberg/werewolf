@@ -30,8 +30,13 @@ start whatever the leash allows.
 misp-run finishes the database and the administrator, then replaces itself with
 misp-serve. misp-serve forks the seven programs and waits. The arguments are in the
 binary. On SIGTERM, or when any child exits, it signals the others and exits. runit
-starts the service again. Cake is a shell script, so bash stays on the leash; Python
-does not.
+starts the service again. Workers use Cake's PHP entrypoint directly, without its
+shell wrapper or a PATH lookup. Bash is only for the bootstrap; Python never runs.
+
+Before spawning, the launcher refuses inherited administrator, GPG or supervisor
+password variables. Its start record reports that check and the local database/Redis
+settings as booleans, without logging values. Tests inspect that record; they do not
+read another sandbox's private process environment.
 
 ## Drawbacks
 

@@ -6,8 +6,9 @@ ok  otel-grpc-span   printf '\000\000\000\000\000' >/tmp/otel.grpc; curl -sv --h
 # The configuration is the image's with the endpoint filled in: no debug
 # exporter, zpages, pprof or health check. Nothing on the machine listens
 # but the collector on :4317 and :4318, on loopback either: its own
-# metrics (:8888) are off. The key and the tokens are its user's alone.
-ok  otel-config      c=/run/svc/otel-collector/config.json; grep -q '"endpoint": *"127\.0\.0\.1:443"' $c || { echo "no endpoint in $c"; exit 1; }; ! grep -oE 'debug|zpages|pprof|health_check' $c || exit 1; l=$(netstat -ltn | awk 'NR > 2 { n = split($4, a, ":"); print a[n] }' | sort -u | tr '\n' ' '); [ "$l" = '4317 4318 ' ] || { echo "listening: $l"; exit 1; }; for f in tls-key token export-token; do [ "$(stat -c '%U %a' /run/svc/otel-collector/$f)" = 'otelcol 600' ] || { echo "$f: $(stat -c '%U %a' /run/svc/otel-collector/$f)"; exit 1; }; done
+# metrics (:8888) are off. DEV's SSH control port is the test harness. The
+# key and the tokens are its user's alone.
+ok  otel-config      c=/run/svc/otel-collector/config.json; grep -q '"endpoint": *"127\.0\.0\.1:443"' $c || { echo "no endpoint in $c"; exit 1; }; ! grep -oE 'debug|zpages|pprof|health_check' $c || exit 1; l=$(netstat -ltn | awk 'NR > 2 { n = split($4, a, ":"); if (a[n] != 2222) print a[n] }' | sort -u | tr '\n' ' '); [ "$l" = '4317 4318 ' ] || { echo "listening: $l"; exit 1; }; for f in tls-key token export-token; do [ "$(stat -c '%U %a' /run/svc/otel-collector/$f)" = 'otelcol 600' ] || { echo "$f: $(stat -c '%U %a' /run/svc/otel-collector/$f)"; exit 1; }; done
 # The attack: a span without the token, and with a wrong one, is refused,
 # 401 over HTTP and Unauthenticated (16) over gRPC; plain HTTP to :4318
 # gets no further than TLS.

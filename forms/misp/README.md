@@ -55,9 +55,12 @@ The database starts empty. This form does not import a MISP dump.
 
 ### Known Quirks
 
+- Complete MISP's password-change screen when it prompts after the bootstrap login.
 - The database password is `misp`. It is not a secret, and it is not `example`.
 - Twelve characters at least. A GPG key is made once, on `/data`. The passphrase is not
   put in the environment.
+- Login sessions use Cake's writable session directory. The launcher refuses inherited
+  administrator, GPG and supervisor password variables before starting PHP.
 - MISP modules are not started. rsyslog is not started. A worker exiting restarts the
   service.
 

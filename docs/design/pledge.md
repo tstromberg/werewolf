@@ -38,12 +38,26 @@ a cgroup whose `finish` kills the whole tree, detached daemons included.
 A service file's `pledge` names its promises; its `read`, `write`,
 `listen` and `connect` lines give it paths and ports. Each word is as
 narrow as a call number allows, and the risky ones stand alone (`exec`,
-`setuid`, `mount`, `memfd`, `watch`, `ipc`, `splice`). The words are in
+`setuid`, `mount`, `memfd`, `watch`, `shm`, `sem`, `msg`, `splice`). See
 [docs/applications.md](../applications.md#what-the-leash-holds); none brings `ptrace`
 or the `never` calls (lib/README.md). A file without a `pledge` is
 parked: there is no default. `/run/svc/NAME` and `/data/svc/NAME` are
 `0700`, the service user's alone, unless its `share` line opens them
 (`shared` 0711, `browseable` 0755, `group` 02771 with its group writing).
+
+SysV IPC permissions are separate:
+
+| Promise | Calls |
+| --- | --- |
+| `shm` | `shmget`, `shmat`, `shmdt`, `shmctl` |
+| `sem` | `semget`, `semop`, `semtimedop`, `semctl` |
+| `msg` | `msgget`, `msgsnd`, `msgrcv`, `msgctl` |
+
+The former `ipc` promise is rejected. Replace it with only the families the
+service uses: PostgreSQL needs `shm` on Linux; Greenbone's manager needs
+`sem`. No shipped service needs `msg`. These promises do not govern POSIX
+shared memory or POSIX semaphores, which use file mappings and futexes.
+Even with `shm`, the machine seal refuses executable attachments (`SHM_EXEC`).
 
 ### Two filters
 

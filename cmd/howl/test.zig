@@ -4,8 +4,10 @@ const forms = @import("form");
 const howl = @import("howl.zig");
 
 const syntax = "usage: howl test --with FORM [--arch ARCH]\n" ++
-    "Runs native clients where declared, otherwise legacy checks, plus production boot.\n" ++
-    "Uses this checkout; logs remain in build/ARCH/check/.";
+    "       howl test --with FORM --iterate [--driver NAME] [--phase seed|verify]\n" ++
+    "       howl test --with FORM --iterate --reset|--stop\n" ++
+    "Runs the clean release gate, or reuses one disposable SSH VM for iteration.\n" ++
+    "Uses this checkout; logs and iteration state remain under build/.";
 
 pub fn command(
     io: std.Io,
@@ -19,8 +21,29 @@ pub fn command(
     };
     var form: ?[]const u8 = null;
     var arch: ?howl.Arch = null;
+    var iterate = false;
+    var reset = false;
+    var stop = false;
+    var driver: ?[]const u8 = null;
+    var phase: []const u8 = "seed";
+    var phase_given = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--iterate")) {
+            if (iterate) return why.refuse("--iterate given twice", .{});
+            iterate = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--reset")) {
+            if (reset) return why.refuse("--reset given twice", .{});
+            reset = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--stop")) {
+            if (stop) return why.refuse("--stop given twice", .{});
+            stop = true;
+            continue;
+        }
         const flag, const value = try howl.flagValue(args, &i, why);
         if (std.mem.eql(u8, flag, "--with")) {
             if (form != null) return why.refuse("--with given twice; test one form at a time", .{});
@@ -29,11 +52,23 @@ pub fn command(
         } else if (std.mem.eql(u8, flag, "--arch")) {
             if (arch != null) return why.refuse("--arch given twice", .{});
             arch = howl.archName(value) orelse return why.refuse(howl.arch_refusal, .{value});
-        } else return why.refuse("{s}: test takes --with and --arch\n{s}", .{ flag, syntax });
+        } else if (std.mem.eql(u8, flag, "--driver")) {
+            if (driver != null) return why.refuse("--driver given twice", .{});
+            if (!forms.isName(value)) return why.refuse("--driver needs one test driver name", .{});
+            driver = value;
+        } else if (std.mem.eql(u8, flag, "--phase")) {
+            if (phase_given) return why.refuse("--phase given twice", .{});
+            if (!std.mem.eql(u8, value, "seed") and !std.mem.eql(u8, value, "verify"))
+                return why.refuse("--phase is seed or verify", .{});
+            phase = value;
+            phase_given = true;
+        } else return why.refuse("{s}: unsupported test option\n{s}", .{ flag, syntax });
     }
     const name = form orelse return why.refuse("no form\n{s}", .{syntax});
     const target = arch orelse try howl.localArch(why);
-    for ([_][]const u8{ "Makefile", "test/check-form", "test/check-shellfree" }) |path|
+    for ([_][]const u8{
+        "Makefile", "test/check-form", "test/check-shellfree", "test/native-iterate",
+    }) |path|
         std.Io.Dir.cwd().access(io, path, .{}) catch
             return why.refuse(
                 "howl test needs a werewolf checkout; run it from the checkout root",
@@ -59,6 +94,44 @@ pub fn command(
         legacy = plan.legacy;
         break :blk true;
     };
+    if (iterate) {
+        if (!native) return why.refuse("{s} has no test/native.json to iterate", .{name});
+        if (reset and stop) return why.refuse("--reset and --stop are separate operations", .{});
+        if ((reset or stop) and driver != null)
+            return why.refuse("--driver cannot accompany --reset or --stop", .{});
+        if (phase_given and driver == null) return why.refuse("--phase accompanies --driver", .{});
+        const action: []const u8 = if (stop)
+            "stop"
+        else if (reset)
+            "reset"
+        else if (driver != null)
+            "run"
+        else
+            "ensure";
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(gpa, &.{
+            "python3",
+            "test/native-iterate",
+            try std.process.executablePathAlloc(io, gpa),
+            name,
+            try gpa.print("{t}", .{target}),
+            action,
+            phase,
+        });
+        if (driver) |selected| try argv.append(gpa, selected);
+        var env = try howl.environ.clone(gpa);
+        defer env.deinit();
+        for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |key| _ = env.swapRemove(key);
+        howl.say(
+            io,
+            "iterating {s} on {t}; this SSH VM is not release evidence",
+            .{ name, target },
+        );
+        const err = std.process.replace(io, .{ .argv = argv.items, .environ_map = &env });
+        return why.refuse("python3: {s}", .{@errorName(err)});
+    }
+    if (driver != null or phase_given or reset or stop)
+        return why.refuse("--driver, --phase, --reset and --stop require --iterate", .{});
     const argv = &.{
         howl.make_cmd,
         "--no-print-directory",

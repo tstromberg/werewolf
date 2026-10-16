@@ -176,7 +176,10 @@ fn fetchInto(
     var w = file.writerStreaming(io, &buf);
     // Reject oversized responses before write(2) triggers SIGXFSZ. This also
     // bounds chunked, EOF-delimited and decompressed bodies without trusting headers.
+    var bound_buf: [4096]u8 = undefined;
     var bounded: Bounded = .{ .sink = &w.interface, .remaining = maximum };
+    // Streaming readers need writable capacity even to discover EOF.
+    bounded.writer.buffer = &bound_buf;
     const res = client.fetch(.{
         .location = .{ .url = url },
         .response_writer = &bounded.writer,
@@ -184,6 +187,7 @@ fn fetchInto(
         if (bounded.oversized) return error.TooBig;
         return err;
     };
+    try bounded.flush();
     try w.interface.flush();
     if (res.status != .ok) return std.enums.tagName(
         std.http.Status,
@@ -200,7 +204,7 @@ const Bounded = struct {
 
     fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const self: *Bounded = @fieldParentPtr("writer", writer);
-        var total: usize = 0;
+        var total: usize = writer.end;
         for (data, 0..) |slice, i| {
             const count = @mulWithOverflow(slice.len, if (i == data.len - 1) splat else 1);
             const sum = @addWithOverflow(total, count[0]);
@@ -210,11 +214,38 @@ const Bounded = struct {
             }
             total = sum[0];
         }
+        try self.sink.writeAll(writer.buffered());
+        self.remaining -= writer.end;
+        writer.end = 0;
         const written = try self.sink.writeSplat(data, splat);
         self.remaining -= written;
         return written;
     }
+
+    fn flush(self: *Bounded) !void {
+        self.writer.flush() catch |err| {
+            if (self.oversized) return error.TooBig;
+            return err;
+        };
+    }
 };
+
+test "fetch bounds include streamed buffers and permit EOF at the limit" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var buf: [4]u8 = undefined;
+    var bounded: Bounded = .{ .sink = &output.writer, .remaining = 4 };
+    bounded.writer.buffer = &buf;
+    var body_reader = Io.Reader.fixed("abcd");
+    try std.testing.expectEqual(4, try body_reader.streamRemaining(&bounded.writer));
+    // An EOF-delimited reader asks for writable space before its next read.
+    _ = try bounded.writer.writableSliceGreedy(1);
+    try bounded.flush();
+    try std.testing.expectEqualStrings("abcd", output.written());
+    try bounded.writer.writeByte('e');
+    try std.testing.expectError(error.TooBig, bounded.flush());
+    try std.testing.expectEqualStrings("abcd", output.written());
+}
 
 test "fetch bounds count body bytes across writes and reject excess before the file write" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);

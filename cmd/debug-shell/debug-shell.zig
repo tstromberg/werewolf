@@ -45,6 +45,13 @@ pub fn main(init: std.process.Init) !void {
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(line, &refused) orelse park(io, null);
     if (!cmd.debug) park(io, null);
+    const profile = Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/werewolf/dev",
+        gpa,
+        .limited(32),
+    ) catch "";
+    if (std.mem.eql(u8, profile, "ssh\n")) park(io, null);
     if (linux.errno(linux.access("/usr/share/werewolf/dev", linux.F_OK)) != .SUCCESS)
         park(io, "werewolf.debug=1 ignored: only a DEV=1 build gives a console shell");
     if (!executable("/usr/bin/getty") or

@@ -18,6 +18,9 @@ packages:
   - pgvector-17
   - postgresql-17-contrib
 
+# BusyBox wget truncates binary POST bodies at NUL; the upload check uses curl.
+dev: [curl]
+
 # Taken back of werewolf's defaults (lib/allow.zig): V8 compiles Immich to
 # machine code as it runs.
 allow: [jit]
@@ -34,8 +37,8 @@ weaknesses:
 services:
   # Immich, from its project's image, as _oci-immich: the API and its
   # workers, on loopback behind Caddy. It reaches PostgreSQL and Valkey on
-  # loopback and no other address, and runs only node, for its
-  # workers, ffmpeg and ffprobe for video, and pg_dump and gzip for its
+  # loopback and no other address, and runs node for its workers,
+  # the bundled Perl ExifTool, ffmpeg and ffprobe for video, and pg_dump and gzip for its
   # nightly database backup. Its library, thumbnails and backups are its
   # /data, /data/svc/immich on the machine.
   immich:
@@ -46,7 +49,8 @@ services:
     exec: /usr/local/bin/node /usr/src/app/server/dist/main.js
     # netlink: glibc's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
-    listen: [tcp/2283 loopback]
+    # The microservices worker asks the kernel for a private temporary port.
+    listen: [tcp/2283 loopback, tcp/0 loopback]
     connect: [tcp/5432 tcp/6379]
     run:
       - /usr/local/bin/node
@@ -54,6 +58,9 @@ services:
       - /usr/lib/jellyfin-ffmpeg/ffprobe
       - /usr/lib/postgresql/17/bin/pg_dump
       - /usr/bin/gzip
+      - /usr/bin/env
+      - /usr/bin/perl
+      - /usr/src/app/server/node_modules/.pnpm/node_modules/exiftool-vendored.pl/bin/exiftool
     memory: 2560
     env:
       - IMMICH_HOST=127.0.0.1
@@ -79,7 +86,7 @@ services:
       hba_file=/usr/share/werewolf-immich/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    pledge: stdio rpath wpath inet proc shm unix listen connect
     listen: [tcp/5432 loopback]
     run:
       - /usr/bin/initdb

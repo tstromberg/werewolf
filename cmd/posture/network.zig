@@ -479,9 +479,16 @@ fn ssh(p: *Posture) !void {
     const sshd = for ([_][]const u8{ "/usr/sbin/sshd", "/usr/bin/sshd" }) |path| {
         if (exists(p.io, path)) break path;
     } else return;
+    const dev = p.werewolf and exists(p.io, "/etc/sv/sshd-dev/service");
+    if (!dev or exists(p.io, "/etc/sv/sshd/service"))
+        try sshConfig(p, sshd, "/etc/ssh/sshd_config", false);
+    if (dev) try sshConfig(p, sshd, "/etc/ssh/howl-dev.conf", true);
+}
+
+fn sshConfig(p: *Posture, sshd: []const u8, config: []const u8, dev: bool) !void {
     if (p.root) p.work("SSH settings (10 s timeout):", "sshd -T");
     const settings: ?[]const u8 = if (!p.root) null else if (std.process.run(p.gpa, p.io, .{
-        .argv = &.{ sshd, "-T" },
+        .argv = &.{ sshd, "-T", "-f", config },
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(64 << 10),
         .timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } },
@@ -495,7 +502,6 @@ fn ssh(p: *Posture) !void {
     if (settings) |s| {
         try loose.appendSlice(p.gpa, try sshMismatches(p.gpa, s, &ssh_settings));
         try loose.appendSlice(p.gpa, try sshLimits(p.gpa, s, loose.items.len > 0));
-        const config = "/etc/ssh/sshd_config";
         if (statx(p.gpa, config)) |st| if (st.uid != 0 or st.mode & 0o022 != 0)
             try listAdd(p.gpa, &loose, "{s} is not root's alone", .{config});
         // sshd -T lists each host key on a "hostkey PATH" line.
@@ -509,7 +515,7 @@ fn ssh(p: *Posture) !void {
         }
     }
     try p.add(.{
-        .id = "network-ssh-config",
+        .id = if (dev) "network-ssh-dev-config" else "network-ssh-config",
         .area = "network",
         .name = "ssh offers keys and nothing more",
         .why = "Logging in takes a key; no one gets in without a password, through another " ++
@@ -527,7 +533,7 @@ fn ssh(p: *Posture) !void {
     });
     const weak = if (settings) |s| try weakSshCrypto(p.gpa, s) else "";
     try p.add(.{
-        .id = "network-ssh-crypto",
+        .id = if (dev) "network-ssh-dev-crypto" else "network-ssh-crypto",
         .area = "network",
         .name = "ssh uses strong cryptography",
         .why = "No ssh connection can be made with a cipher, MAC, key exchange or signature " ++
@@ -542,7 +548,7 @@ fn ssh(p: *Posture) !void {
     });
     const plain = if (settings) |s| try plainSshKeys(p.gpa, s) else "";
     try p.add(.{
-        .id = "network-ssh-security-keys",
+        .id = if (dev) "network-ssh-dev-security-keys" else "network-ssh-security-keys",
         .area = "network",
         .name = "ssh takes security keys alone",
         .why = "Logging in takes a security key, and a touch of it: a key file copied off " ++

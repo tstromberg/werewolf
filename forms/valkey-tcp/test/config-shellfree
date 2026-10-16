@@ -1,0 +1,4 @@
+#!/bin/sh
+# Use the same password and memory limit for production-console checks.
+set -eu
+exec "$(dirname "$0")/config" "$@"

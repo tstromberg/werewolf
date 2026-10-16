@@ -96,8 +96,16 @@ def operations():
 
 
 def assert_no_build(entries, live):
-    unexpected = [entry for entry in entries if entry[0] in builders and
-                  (live or entry[0] != 'qemu-system-aarch64')]
+    # Resume still authenticates the cached inputs.  Certificate parsing and
+    # signature verification are security checks, not rebuild work.
+    def builds(entry):
+        if entry[0] == 'openssl' and entry[1:2] == ['x509']:
+            return False
+        if entry[0] == 'osslsigncode' and entry[1:2] == ['verify']:
+            return False
+        return entry[0] in builders and (live or entry[0] != 'qemu-system-aarch64')
+
+    unexpected = [entry for entry in entries if builds(entry)]
     if live:
         unexpected += [entry for entry in entries if entry[0] == 'limactl' and entry[1] != 'list']
     if unexpected:

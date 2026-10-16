@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from ab_checks import require_native_initrd
+import ab_build
 
 howl, arch, kernel, key, cert, destination, mode = sys.argv[1:]
 howl, kernel, key, cert = [str(Path(p).resolve()) for p in [howl, kernel, key, cert]]
@@ -44,19 +45,23 @@ name = 'provider-ab-' + mode + '-' + arch.replace('_', '-')
 form = root / name
 form.mkdir()
 (form / 'form.yaml').write_text('''base: prod-ssh
-packages: [openssl]
+packages: [openssl, caddy]
 sshd:
   pubkey-accepted-algorithms: ssh-ed25519
 services:
   ab-https:
-    exec: /usr/bin/openssl s_server -4 -accept 127.0.0.1:443 -cert /usr/share/ab/tls.crt -key /usr/share/ab/tls.key -WWW -quiet
+    exec: /usr/bin/caddy run --config /usr/share/ab/Caddyfile --adapter caddyfile
     user: ab-https
-    pledge: stdio rpath wpath inet listen
+    pledge: stdio rpath wpath inet unix listen proc
     listen: [tcp/443 loopback]
     read: /usr/share/ab
     memory: 256
 weaknesses:
   network-ssh-security-keys: disposable provider fixture accepts a test key file
+  network-no-login: the provider fixture is controlled through SSH
+  programs-no-downloaders: prod-ssh supplies busybox tools for the fixture operator
+  programs-no-interpreters: prod-ssh supplies busybox awk for the fixture operator
+  programs-no-shell: prod-ssh supplies the shell used by the fixture driver
 ''')
 overlay = form / 'rootfs'
 for d in ['usr/share/werewolf', 'usr/share/ab', 'usr/bin', 'etc/ssl/certs']:
@@ -66,6 +71,22 @@ shutil.copyfile(probe, overlay / 'usr/bin/ab-status')
 for filename in ['tls.crt', 'tls.key']:
     shutil.copyfile(root / filename, overlay / 'usr/share/ab' / filename)
 (overlay / 'usr/share/ab/tls.key').chmod(0o644)
+# Permit requests carry a query binding their previous TPM state. Caddy's
+# file server resolves the path; openssl s_server treats the query as a filename.
+(overlay / 'usr/share/ab/Caddyfile').write_text('''{
+    admin off
+    auto_https off
+    servers {
+        protocols h1
+    }
+}
+https://127.0.0.1 {
+    bind 127.0.0.1
+    tls /usr/share/ab/tls.crt /usr/share/ab/tls.key
+    root * /data/svc/ab-https
+    file_server
+}
+''')
 shutil.copyfile(root / 'tls.crt', overlay / 'etc/ssl/certs/ca-certificates.crt')
 channel = 'https://127.0.0.1/image'
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -87,16 +108,16 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
         if not path.is_symlink():
             path.chmod(0o755 if path.is_dir() or path.name == 'ab-status' else 0o644)
     release = root / ('release-' + label)
-    args = [howl, 'build', '--build', '--with', str(form), '--arch', arch, '-o', str(release),
-            '--ipe-kernel', kernel, '--ipe-key', key, '--ipe-cert', cert,
-            '--ipe-updates', channel, '--image-serial', version]
-    if mode == 'secure':
-        args += ['--boot-key', env.get('AB_BOOT_KEY', key), '--boot-cert', env.get('AB_BOOT_CRT', cert), '--boot-native']
+    args, output = ab_build.arguments(
+        howl, form, arch, kernel, key, cert, root / 'build', channel, version,
+        env.get('AB_BOOT_KEY', key) if mode == 'secure' else None,
+        env.get('AB_BOOT_CRT', cert) if mode == 'secure' else None,
+        env.get('WEREWOLF_TPM_PUB'))
     run(args, 'build-' + label)
+    ab_build.export(output, form, arch, release)
     if mode == 'secure':
         require_native_initrd((release / (name + '-' + arch + '-uki')).read_bytes(),
                               (release / (name + '-' + arch + '-stage0.zst')).read_bytes())
-    output = Path('build') / arch / 'ipe' / (name + '-ipe')
     bundle = output / 'prebuilt' / arch
     manifest = json.loads((bundle / 'latest.json').read_text())
     releases[label] = manifest

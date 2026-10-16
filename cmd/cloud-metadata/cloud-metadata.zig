@@ -15,6 +15,8 @@ const out_dir = "/run/werewolf/cloud";
 const empty_dir = "/var/empty";
 /// fetcher_id is the _cloud account in forms/prod/form.yaml.
 const fetcher_id: u32 = 68;
+const manager_id: u32 = 74;
+const max_tar = max_config + max_file + (max_entries + 2) * 512;
 const metadata_ip = [4]u8{ 169, 254, 169, 254 };
 
 const max_response = 128 << 10;
@@ -22,6 +24,7 @@ const max_config = 48 << 10;
 const max_file = 32 << 10;
 const max_entries = 32;
 var metadata_users = false;
+var lifetime_fd: i32 = -1;
 
 /// Provider is a cloud werewolf knows: how its firmware names it, and where
 /// it keeps an instance's user data.
@@ -108,147 +111,328 @@ pub fn main(init: std.process.Init) !void {
 
 /// poll_every is how often the service asks the metadata server again.
 const poll_every: u32 = 60;
+const fetch_seconds = 120;
+const peer_seconds = poll_every + fetch_seconds + 30;
 
-/// poll is the cloud-metadata service: on a machine whose config came from
-/// the cloud at boot, every poll_every seconds it fetches the user data
-/// again, as `once` does, in a child confined as that is, and when the
-/// config has changed writes it and makes its people's accounts anew
-/// (lib/people.zig): the account files, each person's keys and home, an
-/// admin's keys in root's, the gone removed. Elsewhere it stays down. It
-/// holds CAP_CHOWN, for the homes, and what its children spend becoming
-/// _cloud in /var/empty; Landlock lets it write only
-/// the cloud's directory, the account and keys files and /data/home, and
-/// read root's keys from the config; no seccomp filter, since its children
-/// must install their own and a filter only ever narrows.
+/// poll forks the fetcher and parser before dropping the publisher's setup
+/// privileges. Neither worker can write accounts or regain root.
 fn poll(log: *Log) noreturn {
+    pollStart(log) catch |err| {
+        log.event("error", .{ .step = "poll", .@"error" = @errorName(err) });
+        linux.exit_group(1);
+    };
+    linux.exit_group(1);
+}
+
+fn pollStart(log: *Log) !void {
     const gpa = std.heap.page_allocator;
     if (linux.faccessat(linux.AT.FDCWD, out_dir ++ "/config.tar", linux.F_OK, 0) != 0)
         park(log, "no config came from the cloud at boot, staying down");
+    const provider = cloudProvider() orelse return error.UnknownCloud;
+    const initial_dir = try openDir(out_dir);
+    const last = try readFrom(gpa, initial_dir, "config.tar");
+    _ = linux.close(initial_dir);
     _ = linux.mkdirat(linux.AT.FDCWD, "/data/home", 0o755);
-    const cloud = openDir(out_dir) catch park(log, "cannot open " ++ out_dir);
-    const run_dir = openDir("/run/werewolf") catch park(log, "cannot open /run/werewolf");
-    const keys_dir = openDir("/run/werewolf/keys") catch park(
-        log,
-        "cannot open /run/werewolf/keys",
-    );
-    const home_dir = openDir("/data/home") catch park(log, "cannot open /data/home");
-    const config_dir = openDir("/run/config") catch park(log, "cannot open /run/config");
-    // /sys/class/dmi/id is a link to this directory, which Landlock rules on.
-    const dmi_dir = openDir("/sys/devices/virtual/dmi/id") catch park(
-        log,
-        "cannot open the DMI directory",
-    );
-    // CAP_CHOWN for the homes, and what each round's child spends on its
-    // fetcher: CAP_SETGID and CAP_SETUID to become _cloud, CAP_SYS_CHROOT
-    // for /var/empty (lib/sandbox.zig dropTo). The child keeps none after.
-    // CAP_SETPCAP too, which the child spends dropping its own (keepOnly).
-    const chown: u32 = 1 << 0;
-    const setgid: u32 = 1 << 6;
-    const setuid: u32 = 1 << 7;
-    const setpcap: u32 = 1 << 8;
-    const sys_chroot: u32 = 1 << 18;
-    sandbox.keepOnly(chown | setgid | setuid | setpcap | sys_chroot) catch
-        park(log, "cannot drop capabilities");
-    // What the children inherit: once's child identifies the cloud by DMI
-    // and writes the cloud's directory, and its fetcher connects to port 80.
-    sandbox.landlock(&.{
-        .{ .fd = cloud, .access = sandbox.own_files },
-        .{ .fd = run_dir, .access = sandbox.own_files },
-        .{ .fd = keys_dir, .access = sandbox.own_files },
-        .{ .fd = home_dir, .access = sandbox.make_dir | sandbox.read_dir },
-        .{ .fd = config_dir, .access = sandbox.read_file },
-        .{ .fd = dmi_dir, .access = sandbox.read_file },
-    }, &.{80}) catch park(log, "cannot confine the service");
-    var last = readFrom(gpa, cloud, "config.tar") catch "";
-    log.event(
-        "poll",
-        .{ .every = poll_every, .people = countLines(readFrom(gpa, run_dir, "people") catch "") },
-    );
-    while (true) {
-        var ts: linux.timespec = .{ .sec = poll_every, .nsec = 0 };
-        _ = linux.nanosleep(&ts, null);
-        const pid = linux.fork();
-        if (pid == 0) {
-            run(log) catch |err| {
-                log.event("error", .{ .step = step, .@"error" = @errorName(err) });
-                linux.exit_group(1);
-            };
-            linux.exit_group(0);
-        }
-        var status: i32 = 0;
-        _ = linux.wait4(@intCast(pid), &status, 0, null);
-        const now = readFrom(gpa, cloud, "config.tar") catch continue;
-        if (std.mem.eql(u8, now, last)) {
-            gpa.free(now);
-            continue;
-        }
-        if (last.len > 0) gpa.free(last);
-        last = now;
-        apply(gpa, log, now, run_dir, keys_dir, home_dir);
-    }
-}
-
-/// apply makes the people of a changed config their accounts, as init did
-/// at boot, and logs what changed.
-fn apply(
-    gpa: std.mem.Allocator,
-    log: *Log,
-    tar: []const u8,
-    run_dir: i32,
-    keys_dir: i32,
-    home_dir: i32,
-) void {
-    var files: [max_entries]Entry = undefined;
-    const n = checkTar(
-        tar,
-        &files,
-    ) catch |err| return log.event("refused", .{ .reason = @errorName(err) });
-    var text: []const u8 = "";
-    for (files[0..n]) |*f| if (std.mem.eql(u8, f.name(), "users")) {
-        text = f.data;
-    };
+    const cloud: i32 = @intCast(try sys(linux.open(out_dir, .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0), "open cloud directory"));
+    const run_dir = try openDir("/run/werewolf");
+    const keys_dir = try openDir("/run/werewolf/keys");
+    const home_dir = try openDir("/data/home");
     const shell: []const u8 = if (linux.faccessat(linux.AT.FDCWD, "/bin/ash", linux.X_OK, 0) == 0)
         "/bin/ash"
     else
         "/sbin/nologin";
-    const c = people.apply(gpa, .{
-        .passwd = readFrom(gpa, run_dir, "passwd") catch "",
-        .group = readFrom(gpa, run_dir, "group") catch "",
-        .shadow = readFrom(gpa, run_dir, "shadow") catch "",
-        .made = readFrom(gpa, run_dir, "people") catch "",
-    }, text, shell) catch return log.event(
-        "error",
-        .{ .step = "people", .@"error" = "OutOfMemory" },
+    var network: [2]i32 = undefined;
+    var publish: [2]i32 = undefined;
+    var lifetime: [2]i32 = undefined;
+    _ = try sys(linux.pipe2(&lifetime, .{ .CLOEXEC = true }), "lifetime pipe");
+    _ = try sys(
+        linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &network),
+        "network socketpair",
     );
-    putFile(
+    _ = try sys(
+        linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &publish),
+        "publisher socketpair",
+    );
+    // A peer that stops reading acknowledgements must not block root.
+    _ = try sys(
+        linux.fcntl(publish[0], linux.F.SETFL, linux.SOCK.NONBLOCK),
+        "nonblocking publisher",
+    );
+    // Only the parser's private scratch directory changes owner.
+    _ = try sys(linux.fchown(cloud, manager_id, manager_id), "own cloud scratch");
+    const parent = linux.getpid();
+    const net_pid = try sys(linux.fork(), "fork fetcher");
+    if (net_pid == 0) {
+        closeWorkerFiles(&.{
+            network[0],
+            cloud,
+            run_dir,
+            keys_dir,
+            home_dir,
+            publish[0],
+            publish[1],
+            lifetime[1],
+        });
+        lifetime_fd = lifetime[0];
+        sandbox.tieTo(parent);
+        networkLoop(provider, network[1]) catch linux.exit_group(1);
+        linux.exit_group(0);
+    }
+    _ = linux.close(network[1]);
+    const parser_pid = try sys(linux.fork(), "fork parser");
+    if (parser_pid == 0) {
+        closeWorkerFiles(&.{ run_dir, keys_dir, home_dir, publish[0], lifetime[1] });
+        lifetime_fd = lifetime[0];
+        sandbox.tieTo(parent);
+        parserLoop(log, provider, cloud, network[0], publish[1], last) catch linux.exit_group(1);
+        linux.exit_group(0);
+    }
+    closeWorkerFiles(&.{ cloud, network[0], publish[1], lifetime[0] });
+    try sandbox.keepOnly(1 << linux.CAP.CHOWN);
+    try sandbox.landlock(&.{
+        .{ .fd = run_dir, .access = sandbox.own_files },
+        .{ .fd = keys_dir, .access = sandbox.own_files },
+        .{ .fd = home_dir, .access = sandbox.make_dir | sandbox.read_dir },
+    }, &.{});
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "write",      "openat", "close",  "renameat", "unlinkat",        "mkdirat",
+        "fchown",     "fchmod", "statx",  "poll",     "ppoll",           "clock_gettime",
+        "mmap",       "munmap", "mremap", "madvise",  "restart_syscall", "exit",
+        "exit_group",
+    }) |call| f.allow(call);
+    f.allowTwo("fchownat", 0, @intCast(keys_dir), 4, linux.AT.SYMLINK_NOFOLLOW);
+    // readFrom uses read on account files opened after confinement.
+    f.allow("read");
+    try f.install();
+    log.event("poll", .{ .every = poll_every });
+    var packet: [8 + 2 * max_file]u8 = undefined;
+    while (true) {
+        const message = try receiveFrame(publish[0], &packet, peer_seconds);
+        if (message.len == 0) continue;
+        const records = try accountRecords(message);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        applyUsers(
+            arena.allocator(),
+            log,
+            records.users,
+            records.keys,
+            run_dir,
+            keys_dir,
+            home_dir,
+            shell,
+        ) catch |err| {
+            arena.deinit();
+            log.event("error", .{ .step = "publish", .@"error" = @errorName(err) });
+            writeAll(publish[0], "N");
+            continue;
+        };
+        arena.deinit();
+        writeAll(publish[0], "Y");
+    }
+}
+
+fn closeWorkerFiles(fds: []const i32) void {
+    for (fds) |fd| _ = linux.close(fd);
+}
+
+fn networkLoop(provider: Provider, fd: i32) !void {
+    try sandbox.dropTo(fetcher_id, empty_dir);
+    try sandbox.landlock(&.{}, &.{80});
+    var f: sandbox.Filter = .{};
+    f.allowArg("socket", 1, socket_type);
+    inline for (.{
+        "connect",    "getsockopt",      "write",           "read",
+        "poll",       "ppoll",           "close",           "clock_gettime",
+        "nanosleep",  "clock_nanosleep", "restart_syscall", "exit",
+        "exit_group",
+    }) |call| f.allow(call);
+    try f.install();
+    var tick: [1]u8 = undefined;
+    while (true) {
+        try readExact(fd, &tick, peer_seconds);
+        if (tick[0] != 'F') return error.BadRequest;
+        fetchReply(provider, fd, true);
+    }
+}
+
+fn parserLoop(
+    log: *Log,
+    provider: Provider,
+    cloud: i32,
+    network: i32,
+    publish: i32,
+    initial: []const u8,
+) !void {
+    try sandbox.dropKeeping(manager_id, 0);
+    try sandbox.landlock(&.{.{ .fd = cloud, .access = sandbox.own_files }}, &.{});
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "read",          "write",      "openat",          "close",
+        "renameat",      "renameat2",  "poll",            "ppoll",
+        "clock_gettime", "nanosleep",  "clock_nanosleep", "restart_syscall",
+        "exit",          "exit_group",
+    }) |call| f.allow(call);
+    try f.install();
+    var previous: [max_tar]u8 = undefined;
+    if (initial.len > previous.len) return error.TooLong;
+    @memcpy(previous[0..initial.len], initial);
+    var previous_len = initial.len;
+    var response: [max_response * 3 + 16]u8 = undefined;
+    var tar_buffer: [max_tar]u8 = undefined;
+    var packet: [8 + 2 * max_file]u8 = undefined;
+    while (true) {
+        _ = waitFor(-1, 0, nowMs() + poll_every * 1000);
+        writeAll(network, "F");
+        const raw = try receiveFrame(network, &response, fetch_seconds);
+        const tar = (checkedConfig(log, provider, raw, &tar_buffer) catch |err| {
+            log.event("error", .{ .step = "check", .@"error" = @errorName(err) });
+            // A heartbeat keeps the publisher's deadline bounded on failed fetches.
+            sendFrame(publish, &.{});
+            continue;
+        }) orelse {
+            sendFrame(publish, &.{});
+            continue;
+        };
+        if (std.mem.eql(u8, tar, previous[0..previous_len])) {
+            sendFrame(publish, &.{});
+            continue;
+        }
+        var files: [max_entries]Entry = undefined;
+        const n = try checkTar(tar, &files);
+        var users: []const u8 = "";
+        var keys: []const u8 = "";
+        for (files[0..n]) |*file| {
+            if (std.mem.eql(u8, file.name(), "users")) users = file.data;
+            if (std.mem.eql(u8, file.name(), "authorized_keys")) keys = file.data;
+        }
+        const size = 8 + users.len + keys.len;
+        std.mem.writeInt(u32, packet[0..4], @intCast(users.len), .big);
+        std.mem.writeInt(u32, packet[4..8], @intCast(keys.len), .big);
+        @memcpy(packet[8..][0..users.len], users);
+        @memcpy(packet[8 + users.len ..][0..keys.len], keys);
+        sendFrame(publish, packet[0..size]);
+        var ack: [1]u8 = undefined;
+        try readExact(publish, &ack, 30);
+        if (ack[0] == 'N') continue;
+        if (ack[0] != 'Y') return error.BadReply;
+        try writeFile(cloud, "config.tar", tar);
+        @memcpy(previous[0..tar.len], tar);
+        previous_len = tar.len;
+    }
+}
+
+const AccountRecords = struct { users: []const u8, keys: []const u8 };
+
+fn accountRecords(message: []const u8) !AccountRecords {
+    if (message.len < 8) return error.BadRequest;
+    const users_len = std.mem.readInt(u32, message[0..4], .big);
+    const keys_len = std.mem.readInt(u32, message[4..8], .big);
+    if (users_len > max_file or keys_len > max_file or message.len != 8 + users_len + keys_len)
+        return error.BadRequest;
+    return .{ .users = message[8..][0..users_len], .keys = message[8 + users_len ..] };
+}
+
+test "account publication rejects truncated, oversized and trailing records" {
+    var message: [16]u8 = @splat(0);
+    std.mem.writeInt(u32, message[0..4], 4, .big);
+    std.mem.writeInt(u32, message[4..8], 4, .big);
+    @memcpy(message[8..], "userkeys");
+    const records = try accountRecords(&message);
+    try std.testing.expectEqualStrings("user", records.users);
+    try std.testing.expectEqualStrings("keys", records.keys);
+    for (0..message.len) |n| try std.testing.expectError(
+        error.BadRequest,
+        accountRecords(message[0..n]),
+    );
+    std.mem.writeInt(u32, message[0..4], std.math.maxInt(u32), .big);
+    try std.testing.expectError(error.BadRequest, accountRecords(&message));
+    std.mem.writeInt(u32, message[0..4], 0, .big);
+    try std.testing.expectError(error.BadRequest, accountRecords(&message));
+}
+
+fn sendFrame(fd: i32, message: []const u8) void {
+    var size: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size, @intCast(message.len), .big);
+    writeAll(fd, &size);
+    writeAll(fd, message);
+}
+
+fn receiveFrame(fd: i32, buffer: []u8, seconds: i64) ![]const u8 {
+    var size: [4]u8 = undefined;
+    try readExact(fd, &size, seconds);
+    const len = std.mem.readInt(u32, &size, .big);
+    if (len > buffer.len) return error.TooLong;
+    try readExact(fd, buffer[0..len], seconds);
+    return buffer[0..len];
+}
+
+fn readExact(fd: i32, buffer: []u8, seconds: i64) !void {
+    const deadline = nowMs() + seconds * 1000;
+    var got: usize = 0;
+    while (got < buffer.len) {
+        if (!waitFor(fd, linux.POLL.IN, deadline)) return error.Timeout;
+        const n = linux.read(fd, buffer[got..].ptr, buffer.len - got);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.PeerGone;
+        got += n;
+    }
+}
+
+/// applyUsers derives all paths and IDs locally, preserving system accounts.
+fn applyUsers(
+    gpa: std.mem.Allocator,
+    log: *Log,
+    text: []const u8,
+    base: []const u8,
+    run_dir: i32,
+    keys_dir: i32,
+    home_dir: i32,
+    shell: []const u8,
+) !void {
+    const c = try people.apply(gpa, .{
+        .passwd = try readFrom(gpa, run_dir, "passwd"),
+        .group = try readFrom(gpa, run_dir, "group"),
+        .shadow = try readFrom(gpa, run_dir, "shadow"),
+        .made = readFrom(gpa, run_dir, "people") catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        },
+    }, text, shell);
+    try putFile(
         run_dir,
         "passwd",
         c.passwd,
         0o644,
-    ) catch return log.event("error", .{ .step = "passwd" });
-    putFile(run_dir, "group", c.group, 0o644) catch return log.event("error", .{ .step = "group" });
-    putFile(
+    );
+    try putFile(run_dir, "group", c.group, 0o644);
+    try putFile(
         run_dir,
         "shadow",
         c.shadow,
         0o600,
-    ) catch return log.event("error", .{ .step = "shadow" });
-    putFile(
+    );
+    try putFile(
         run_dir,
         "people",
         c.made,
         0o600,
-    ) catch return log.event("error", .{ .step = "people" });
+    );
     for (c.removed) |name| _ = linux.unlinkat(keys_dir, nameZ(name), 0);
     for (c.keys) |k| {
         const name = nameZ(k.name);
-        putFile(keys_dir, name, k.text, 0o600) catch continue;
+        try putFile(keys_dir, name, k.text, 0o600);
         const id = people.userId(k.name);
         if (linux.errno(
             linux.fchownat(keys_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
         ) != .SUCCESS) {
             _ = linux.unlinkat(keys_dir, name, 0);
-            continue;
+            return error.KeyOwnershipFailed;
         }
         _ = linux.mkdirat(home_dir, name, 0o700);
         const hrc = linux.openat(
@@ -263,16 +447,13 @@ fn apply(
         if (linux.errno(linux.fchown(hfd, id, id)) != .SUCCESS) continue;
         _ = linux.fchmod(hfd, 0o700);
     }
-    const base = for (files[0..n]) |*f| {
-        if (std.mem.eql(u8, f.name(), "authorized_keys")) break f.data;
-    } else "";
-    const root_keys = std.mem.concat(gpa, u8, &.{ base, c.root_keys }) catch return;
-    putFile(
+    const root_keys = try std.mem.concat(gpa, u8, &.{ base, c.root_keys });
+    try putFile(
         keys_dir,
         "root",
         root_keys,
         0o600,
-    ) catch return log.event("error", .{ .step = "root keys" });
+    );
     log.event("people", .{
         .made = countLines(c.made),
         .removed = c.removed.len,
@@ -301,20 +482,21 @@ fn openDir(path: [*:0]const u8) !i32 {
 
 /// readFrom reads the file name under dir, at most max_file bytes.
 fn readFrom(gpa: std.mem.Allocator, dir: i32, name: [*:0]const u8) ![]u8 {
-    const fd: i32 = @intCast(try sys(
-        linux.openat(dir, name, .{ .CLOEXEC = true, .NOFOLLOW = true }, 0),
-        "open",
-    ));
+    const opened = linux.openat(dir, name, .{ .CLOEXEC = true, .NOFOLLOW = true }, 0);
+    if (linux.errno(opened) == .NOENT) return error.FileNotFound;
+    const fd: i32 = @intCast(try sys(opened, "open"));
     defer _ = linux.close(fd);
     const buf = try gpa.alloc(u8, max_response);
     errdefer gpa.free(buf);
     var n: usize = 0;
     while (n < buf.len) {
-        const got = try sys(linux.read(fd, buf[n..].ptr, buf.len - n), "read");
-        if (got == 0) break;
+        const rc = linux.read(fd, buf[n..].ptr, buf.len - n);
+        if (linux.errno(rc) == .INTR) continue;
+        const got = try sys(rc, "read");
+        if (got == 0) return buf[0..n];
         n += got;
     }
-    return buf[0..n];
+    return error.TooLong;
 }
 
 /// putFile writes data to name.new under dir, mode as given, and renames it
@@ -333,9 +515,9 @@ fn putFile(dir: i32, name: [*:0]const u8, data: []const u8, mode: u32) !void {
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true },
         mode,
     ), "create"));
+    defer _ = linux.close(fd);
     writeAll(fd, data);
-    _ = linux.fchmod(fd, mode);
-    _ = linux.close(fd);
+    _ = try sys(linux.fchmod(fd, mode), "set published mode");
     _ = try sys(linux.renameat(dir, tmp, dir, name), "rename");
 }
 
@@ -387,22 +569,19 @@ fn failureText(buf: []u8, msg: []const u8) []const u8 {
 
 /// run identifies the cloud as root, then forks the fetcher and checks
 /// what it returns.
-fn run(log: *Log) !void {
+fn cloudProvider() ?Provider {
     var vendor_buf: [128]u8 = undefined;
     var product_buf: [128]u8 = undefined;
     var asset_buf: [128]u8 = undefined;
     const vendor = dmi("/sys/class/dmi/id/sys_vendor", &vendor_buf);
     const product = dmi("/sys/class/dmi/id/product_name", &product_buf);
     const asset = dmi("/sys/class/dmi/id/chassis_asset_tag", &asset_buf);
-    const p = identify(vendor, product, asset) orelse {
-        log.event(
-            "skip",
-            .{
-                .reason = "not a cloud werewolf knows",
-                .vendor = printable(vendor),
-                .product = printable(product),
-            },
-        );
+    return identify(vendor, product, asset);
+}
+
+fn run(log: *Log) !void {
+    const p = cloudProvider() orelse {
+        log.event("skip", .{ .reason = "not a cloud werewolf knows" });
         return;
     };
 
@@ -449,7 +628,27 @@ fn run(log: *Log) !void {
         },
     }
 
-    step = "check";
+    var out: [max_tar]u8 = undefined;
+    const checked = (try checkedConfig(log, p, msg, &out)) orelse return;
+    try writeFile(dir, "config.tar", checked);
+}
+
+fn absent(log: *Log, name: []const u8, fields: anytype) ?[]const u8 {
+    log.event(name, fields);
+    return null;
+}
+
+fn checkedConfig(log: *Log, p: Provider, msg: []const u8, out: []u8) !?[]const u8 {
+    if (msg.len < 1) return error.FetcherFailed;
+    switch (msg[0]) {
+        result_body, result_bundle => {},
+        result_none => return absent(
+            log,
+            "none",
+            .{ .provider = p.name, .reason = "no user data" },
+        ),
+        else => return error.FetcherFailed,
+    }
     const bundle = if (msg[0] == result_bundle)
         try readBundle(msg[1..])
     else
@@ -460,7 +659,8 @@ fn run(log: *Log) !void {
         raw[0..1024]
     else
         decodeBase64(bundle.config, &raw)) orelse
-        return log.event(
+        return absent(
+            log,
             "none",
             .{
                 .provider = p.name,
@@ -469,7 +669,7 @@ fn run(log: *Log) !void {
         );
     var files: [max_entries]Entry = undefined;
     var n = checkTar(tar, &files) catch |err|
-        return log.event("refused", .{ .provider = p.name, .reason = @errorName(err) });
+        return absent(log, "refused", .{ .provider = p.name, .reason = @errorName(err) });
     var users_buf: [max_file]u8 = undefined;
     if (msg[0] == result_bundle) {
         const at = for (files[0..n], 0..) |*file, i| {
@@ -502,12 +702,11 @@ fn run(log: *Log) !void {
         if (total > max_config) return error.TooLong;
     }
 
-    step = "write";
-    var out: [max_config + max_file + (max_entries + 2) * 512]u8 = undefined;
-    try writeFile(dir, "config.tar", writeTar(&out, files[0..n]));
+    const tar_out = writeTar(out, files[0..n]);
     var names: [max_entries][]const u8 = undefined;
     for (files[0..n], 0..) |*f, i| names[i] = f.name();
     log.event("config", .{ .provider = p.name, .files = names[0..n] });
+    return tar_out;
 }
 
 fn identify(vendor: []const u8, product: []const u8, asset: []const u8) ?Provider {
@@ -591,6 +790,17 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
     }) |call| f.allow(call);
     f.install() catch linux.exit_group(1);
 
+    fetchReply(p, out, false);
+    linux.exit_group(0);
+}
+
+fn frameSize(fd: i32, size: usize) void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &bytes, @intCast(size), .big);
+    writeAll(fd, &bytes);
+}
+
+fn fetchReply(p: Provider, out: i32, framed: bool) void {
     var buf: [max_response]u8 = undefined;
     const r = fetch(p, &buf);
     if (p.flavor and metadata_users and r != .failed) {
@@ -600,15 +810,18 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
         var query = p;
         query.path = "/computeMetadata/v1/instance/attributes/block-project-ssh-keys";
         const block = fetch(query, &block_buf);
-        if (block == .failed) sendFailure(out);
+        if (block == .failed) return sendFailure(out, framed);
         query.path = "/computeMetadata/v1/instance/attributes/ssh-keys";
         const instance = fetch(query, &ibuf);
-        if (instance == .failed) sendFailure(out);
+        if (instance == .failed) return sendFailure(out, framed);
         const blocked = block == .body and
             std.ascii.eqlIgnoreCase(std.mem.trim(u8, block.body, " \r\n"), "true");
         query.path = "/computeMetadata/v1/project/attributes/ssh-keys";
         const project = if (blocked) Fetched.none else fetch(query, &pbuf);
-        if (project == .failed) sendFailure(out);
+        if (project == .failed) return sendFailure(out, framed);
+        if (framed) frameSize(out, 1 + 12 + (if (r == .body) r.body.len else @as(usize, 0)) +
+            (if (instance == .body) instance.body.len else @as(usize, 0)) +
+            (if (project == .body) project.body.len else @as(usize, 0)));
         writeAll(out, &.{result_bundle});
         for ([_]Fetched{ r, instance, project }) |part| {
             const body = if (part == .body) part.body else "";
@@ -617,8 +830,13 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
             writeAll(out, &len);
             writeAll(out, body);
         }
-        linux.exit_group(0);
+        return;
     }
+    if (framed) frameSize(out, switch (r) {
+        .body => |body| 1 + body.len,
+        .none => 1,
+        .failed => 4,
+    });
     switch (r) {
         .body => |body| {
             writeAll(out, &.{result_body});
@@ -631,14 +849,13 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
             writeAll(out, &said);
         },
     }
-    linux.exit_group(0);
 }
 
-fn sendFailure(out: i32) noreturn {
+fn sendFailure(out: i32, framed: bool) void {
+    if (framed) frameSize(out, 4);
     var said: [4]u8 = .{ result_failed, @backingInt(failure), 0, 0 };
     std.mem.writeInt(u16, said[2..4], failure_n, .big);
     writeAll(out, &said);
-    linux.exit_group(1);
 }
 
 const Bundle = struct { config: []const u8, instance: []const u8 = "", project: []const u8 = "" };
@@ -860,8 +1077,14 @@ fn waitFor(fd: i32, events: i16, deadline: i64) bool {
     while (true) {
         const left = deadline - nowMs();
         if (left <= 0) return false;
-        var fds = [1]linux.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
-        const n = linux.poll(&fds, 1, @intCast(left));
+        var fds = [2]linux.pollfd{
+            .{ .fd = fd, .events = events, .revents = 0 },
+            .{ .fd = lifetime_fd, .events = linux.POLL.IN, .revents = 0 },
+        };
+        const n = linux.poll(&fds, fds.len, @intCast(left));
+        // The publisher alone holds the pipe's write end. Signals may be
+        // unavailable across separately confined domains or identities.
+        if (fds[1].revents != 0) linux.exit_group(0);
         if (linux.errno(n) == .INTR) continue;
         if (linux.errno(n) != .SUCCESS or n == 0) return false;
         return true;
@@ -1180,7 +1403,8 @@ fn writeAll(fd: i32, data: []const u8) void {
     var off: usize = 0;
     while (off < data.len) {
         const n = linux.write(fd, data[off..].ptr, data.len - off);
-        if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) linux.exit_group(1);
         off += n;
     }
 }

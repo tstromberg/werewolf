@@ -1,0 +1,6 @@
+ok  solr-demo-admin wget -q -T 10 -O - http://127.0.0.1:8983/solr/ | grep -q -i solr
+ok  solr-demo-version wget -q -T 10 -O - 'http://127.0.0.1:8983/solr/admin/info/system?wt=json' | grep -q '8.11.0'
+ok  solr-demo-cores wget -q -T 10 -O - 'http://127.0.0.1:8983/solr/admin/cores?action=STATUS&wt=json' | grep -q 'status'
+ok  solr-demo-log4j test -f /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar
+ok  solr-demo-home test -s /data/svc/solr/home/solr.xml
+ok  solr-demo-direct-java test ! -e /usr/lib/solr/bin/solr && grep -q '^exec /usr/bin/java ' /etc/sv/solr/service

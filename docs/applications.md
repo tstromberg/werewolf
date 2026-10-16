@@ -108,8 +108,8 @@ and nothing else. The kernel enforces each limit:
 | to leave a process running after it is stopped | killed with the service | nothing: each service is a cgroup, and its `finish` writes `cgroup.kill` on stop, restart and shutdown, a detached backdoor included |
 
 Every service file states a `pledge`; a service with none is parked at
-boot. `stdio rpath wpath proc inet listen` covers a server; `memfd`, `ipc`
-and `watch` are off unless asked for, so an application that does not name
+boot. `stdio rpath wpath proc inet listen` covers a server; `memfd`, `shm`,
+`sem`, `msg` and `watch` are off unless asked for, so an application that does not name
 them cannot make an anonymous executable file, squat another service's IPC
 key, or watch the machine's files; `memfd` also needs the form to allow
 `jit`, since a memory file written and then mapped runs as code wherever IPE
@@ -138,7 +138,7 @@ A Node, Ruby or Java application works the same way, with a service file of
 its own: `jre-app`'s runs `java -jar /usr/lib/app/app.jar` with
 `java.io.tmpdir` in its `/run`, and a wider pledge (`wpath` for those files,
 `proc` for the JVM's threads, `unix` for its startup socket), still with no
-`exec`, `memfd`, `ipc` or `watch`.
+`exec`, `memfd`, `shm`, `sem`, `msg` or `watch`.
 
 ## Forms from the command line
 

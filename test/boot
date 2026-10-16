@@ -75,6 +75,17 @@ proc say {status what {detail ""}} {
 	}
 }
 
+proc check_shutdown {} {
+	global log failed
+	set f [open $log]
+	set text [read $f]
+	close $f
+	if {[regexp {werewolf: filesystems not put down: [^\r\n]*} $text failure]} {
+		say FAIL shutdown $failure
+		incr failed
+	}
+}
+
 # diagnosis says what the machine was doing when it failed: the last line of
 # werewolf's progress, and the first kernel message of each known kind of
 # error. It adds the host's description, so a failure on one host but not
@@ -495,6 +506,7 @@ if {!$shell} {
 	}
 	expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not exit after powering off" }
 	wait
+	check_shutdown
 	if {$failed} { exit 1 }
 	say pass "all checks"
 	exit 0
@@ -513,21 +525,24 @@ for {set i 0} {$i < 60 && !$ready} {incr i} {
 }
 if {!$ready} { give_up "console: no root shell; is werewolf.debug=1 set?" 1 }
 
-# The kernel's own records (audits of the refusals the checks provoke) can
-# land inside a check's "@@NAME=N" line on the serial console, and the match
-# below then waits out its timeout. From here only emergencies, a panic
-# among them, reach the console; dmesg still holds every record.
-send "dmesg -n 1\r"
-
 set f [open $checks]
 while {[gets $f line] >= 0} {
 	if {![regexp {^(ok|gap)\s+(\S+)\s+(.+)$} $line -> kind check cmd]} { continue }
-	send "( $cmd ) 2>&1; printf '\\n@@%s=%d\\n' $check \$?\r"
-	expect {
-		-timeout 180
-		-re "@@$check=(\[0-9]+)" { set rc $expect_out(1,string); set out $expect_out(buffer) }
-		timeout { set rc timeout; set out "no answer in 180 s" }
-		eof { give_up "$check: QEMU exited" }
+	send "( $cmd ) 2>&1; ww_check_rc=\$?; printf '\\n@@%s=%d\\n' $check \$ww_check_rc\r"
+	set deadline [expr {[clock seconds] + 180}]
+	while {1} {
+		set remaining [expr {$deadline - [clock seconds]}]
+		if {$remaining <= 0} { set rc timeout; set out "no answer in 180 s"; break }
+		expect {
+			-timeout [expr {min(5, $remaining)}]
+			-re "@@$check=(\[0-9]+)" { set rc $expect_out(1,string); set out $expect_out(buffer); break }
+			timeout {
+				# Audit or service output can split a result on the console.
+				# Query its saved status; never run the assertion a second time.
+				send "printf '\\n@@%s=%d\\n' $check \$ww_check_rc\r"
+			}
+			eof { give_up "$check: QEMU exited" }
+		}
 	}
 	if {$kind eq "ok" && $rc eq "0"} {
 		say ok $check
@@ -561,6 +576,7 @@ if {[info exists env(POWER_CUT)] && $env(POWER_CUT) ne ""} {
 	}
 	lassign [wait] pid spawn_id os_error status
 	if {$status != 0} { give_up "shutdown: QEMU exited $status" }
+	check_shutdown
 }
 
 if {$failed} { exit 1 }

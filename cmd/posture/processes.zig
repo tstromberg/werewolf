@@ -59,7 +59,8 @@ pub fn check(p: *Posture) !void {
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
         const console = try consoleShell(p) orelse
-            if (askedShell(p.read("/proc/cmdline"), p.dev)) |w|
+            if (askedShell(p.read("/proc/cmdline"), p.dev and
+                std.mem.eql(u8, p.read("/usr/share/werewolf/dev"), "dev\n"))) |w|
                 try p.gpa.print("{s} asks for one", .{w})
             else
                 null;
@@ -301,9 +302,13 @@ fn servicesLeashed(p: *Posture) !void {
             parsed.caps
         else |_|
             0;
-        const login = named & service.cap.login != 0 and std.mem.eql(u8, name, "sshd");
+        const login = named & service.cap.login != 0 and
+            (std.mem.eql(u8, name, "sshd") or (p.dev and std.mem.eql(u8, name, "sshd-dev")));
         const allowed: u64 = if (login)
-            service.cap.login_set
+            if (p.dev and std.mem.eql(u8, name, "sshd-dev"))
+                service.cap.developer_login_set
+            else
+                service.cap.login_set
         else
             (1 << linux.CAP.NET_BIND_SERVICE) | @as(u64, named & ~service.cap.login);
         if (whyNotLeashed(
@@ -655,6 +660,13 @@ test whyNotLeashed {
     const sshd = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t4254404ff\nCapEff:\t4254404ff\n" ++
         "CapBnd:\t4254404ff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
     try testing.expectEqual(null, whyNotLeashed(sshd, service.cap.login_set, true));
+    const developer = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t100\nCapEff:\t100\n" ++
+        "CapBnd:\t100\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    try testing.expectEqual(null, whyNotLeashed(developer, service.cap.developer_login_set, true));
+    try testing.expectEqualStrings(
+        "has capabilities",
+        whyNotLeashed(developer, service.cap.login_set, true).?,
+    );
     try testing.expectEqualStrings(
         "runs as root",
         whyNotLeashed(sshd, service.cap.login_set, false).?,

@@ -100,6 +100,7 @@ pub fn createQemu(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .dev_shell = o.dev_shell,
             .disabled = disabled,
             .published = !o.local,
             .app = ab.root,
@@ -140,7 +141,7 @@ pub fn createQemu(
     // The machine's port this host's web port reaches: its last but ssh's,
     // or 80.
     var guest_web: u16 = 80;
-    for (ports) |port| if (port != 22) {
+    for (ports) |port| if (port != 22 and !(tell.dev and port == howl.dev_ssh_port)) {
         guest_web = port;
     };
     try steps.enter(.{ .name = "Starting the VM under QEMU", .short = "launch" });
@@ -154,6 +155,7 @@ pub fn createQemu(
         .dir = at,
         .firmware = fw,
         .ssh_port = ssh_port,
+        .guest_ssh = if (tell.dev) howl.dev_ssh_port else 22,
         .web_port = web_port,
         .guest_web = guest_web,
         .import_disk = try attachImport(io, gpa, if (kept) null else o.import_dir, at, why),
@@ -188,8 +190,8 @@ pub fn createQemu(
         var out = Io.File.stdout().writerStreaming(io, &.{});
         try out.interface.print("{s}\t127.0.0.1:{d}\t{s}\n", .{ name, ssh_port, o.form });
     }
-    const ssh = std.mem.findScalar(u16, ports, 22) != null;
-    const late = sshReady(io, ports, "127.0.0.1", ssh_port);
+    const ssh = tell.dev or std.mem.findScalar(u16, ports, 22) != null;
+    const late = sshReady(io, ports, "127.0.0.1", ssh_port, tell.dev);
     return sayUp(io, gpa, tell.began, try gpa.print("{s} is up here, under QEMU{s}{s}", .{
         name,
         if (kept)
@@ -202,7 +204,7 @@ pub fn createQemu(
     }), built, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
         if (ssh) try sshCommand(gpa, name) else "",
         if (ssh) " · " else "",
-        try reach(gpa, ports, web_port),
+        try reach(gpa, ports, web_port, tell.dev),
         try consoleCommand(gpa, name),
         try stopCommand(gpa, name),
     }), tell.note);
@@ -273,10 +275,10 @@ pub fn protectedReady(
 /// reach says how this host reaches a machine under QEMU: web_port
 /// reaches its last port other than ssh, shown as a URL if that port
 /// speaks the web. A non-empty result ends in " · ".
-fn reach(gpa: Allocator, ports: []const u16, web_port: u16) ![]const u8 {
+fn reach(gpa: Allocator, ports: []const u16, web_port: u16, dev: bool) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var web: ?u16 = null;
-    for (ports) |p| if (p != 22) {
+    for (ports) |p| if (p != 22 and !(dev and p == howl.dev_ssh_port)) {
         web = p;
     };
     if (web) |p| {
@@ -339,6 +341,7 @@ pub fn createLima(
             .{ name, name },
         );
         managed = try reconfigure(io, gpa, name, o.form, dir, tar, why);
+        if (tell.dev) managed = false;
     } else {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
         const tar_path = try gpa.print("{s}/config.tar", .{dir});
@@ -349,6 +352,7 @@ pub fn createLima(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,
@@ -508,16 +512,17 @@ pub fn createLima(
             "{s} has no address after 3 minutes: howl console {s}",
             .{ name, name },
         );
+    if (tell.dev) try writePrivate(io, gpa, try gpa.print("{s}/dev-address", .{dir}), addr, why);
     if (!tty) try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
     const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
-    const late = sshReady(io, ports, addr, 22);
+    const late = sshReady(io, ports, addr, if (tell.dev) howl.dev_ssh_port else 22, tell.dev);
     try sayUp(io, gpa, began, try gpa.print(
         "{s} is up on Lima, at {s}{s}",
         .{ name, addr, late },
     ), built, boot, try gpa.print(
         "{s}{s} · {s}",
         .{
-            try reachAt(gpa, addr, ports, name),
+            try reachAt(gpa, addr, ports, name, tell.dev),
             try consoleCommand(gpa, name),
             try stopCommand(gpa, name),
         },
@@ -527,8 +532,8 @@ pub fn createLima(
 /// sshReady waits for sshd at host:port if ports holds 22, so that "up"
 /// means reachable. It returns what to add to the up line if ssh never
 /// answered.
-fn sshReady(io: Io, ports: []const u16, host: []const u8, port: u16) []const u8 {
-    if (std.mem.findScalar(u16, ports, 22) == null) return "";
+fn sshReady(io: Io, ports: []const u16, host: []const u8, port: u16, dev: bool) []const u8 {
+    if (!dev and std.mem.findScalar(u16, ports, 22) == null) return "";
     var spin: progress.Spinner = .init(io);
     defer spin.clear();
     return if (booting.awaitSsh(io, host, port, &spin)) "" else ", but its ssh does not answer yet";
@@ -601,11 +606,17 @@ const Tenths = struct {
 /// reachAt says how this host reaches a machine at addr: ssh if it serves
 /// ssh, and its last other port, as a URL if it speaks the web. Each part
 /// ends in " · ".
-fn reachAt(gpa: Allocator, addr: []const u8, ports: []const u16, name: []const u8) ![]const u8 {
+fn reachAt(
+    gpa: Allocator,
+    addr: []const u8,
+    ports: []const u16,
+    name: []const u8,
+    dev: bool,
+) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var web: ?u16 = null;
     var ssh = false;
-    for (ports) |p| if (p == 22) {
+    for (ports) |p| if (p == 22 or (dev and p == howl.dev_ssh_port)) {
         ssh = true;
     } else {
         web = p;
@@ -708,6 +719,7 @@ pub fn createBhyve(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,
@@ -825,6 +837,7 @@ pub fn createFirecracker(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,
@@ -877,14 +890,14 @@ pub fn createFirecracker(
         try out.interface.print("{s}\t{s}\t{s}\n", .{ name, n.guest, o.form });
     }
     const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
-    const late = sshReady(io, ports, n.guest, 22);
+    const late = sshReady(io, ports, n.guest, if (tell.dev) howl.dev_ssh_port else 22, tell.dev);
     return sayUp(io, gpa, tell.began, try gpa.print(
         "{s} is up here, under Firecracker, at {s}{s}",
         .{ name, n.guest, late },
     ), built, boot, try gpa.print(
         "{s}{s} · {s}",
         .{
-            try reachAt(gpa, n.guest, ports, name),
+            try reachAt(gpa, n.guest, ports, name, tell.dev),
             try consoleCommand(gpa, name),
             try stopCommand(gpa, name),
         },
@@ -960,8 +973,9 @@ pub fn createProxmox(
 /// its chain's apko configs install (lib/form.zig). Any other form starts
 /// on vzNAT, unmanaged, and is stopped hard.
 pub fn limaManages(io: Io, gpa: Allocator, form: []const u8, dev: bool, why: *Why) !bool {
+    if (dev) return false;
     if (@import("boot-config.zig").forForm(form)) |definition| return definition.lima_managed;
-    const c = if (dev) try howl.devChain(io, gpa, form, why) else try chain(io, gpa, form, why);
+    const c = try chain(io, gpa, form, why);
     const config = try forms.apko(gpa, c, &.{});
     var sshd = false;
     var bash = false;

@@ -69,7 +69,7 @@ services:
     image: registry.community.greenbone.net/community/gvmd:stable
     exec: /usr/bin/bash /usr/lib/werewolf/greenbone-run
     # gvmd coordinates its database work with SysV semaphores.
-    pledge: stdio rpath wpath inet unix netlink connect listen proc exec ipc
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec sem
     connect: [tcp/5432, /run/ospd/ospd.sock]
     write: [/var/lib/gvm, /var/log/gvm]
     # The feed owns these. gvmd is in that group and may only read
@@ -168,7 +168,7 @@ services:
       hba_file=/usr/share/werewolf-greenbone/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    pledge: stdio rpath wpath inet proc shm unix listen connect
     listen: [tcp/5432 loopback]
     run:
       - /usr/bin/initdb

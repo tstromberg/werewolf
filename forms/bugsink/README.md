@@ -1,7 +1,8 @@
 # Bugsink - Hardened VM
 
 Error tracking that takes the events Sentry's SDKs send:
-[Bugsink](https://www.bugsink.com) 2, from its own image, with Caddy in front. The
+[Bugsink](https://www.bugsink.com) 2.6.1, packaged with its hashed application
+dependencies and using the system's hardened Python, with Caddy in front. The
 form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
@@ -11,11 +12,15 @@ instructions](https://dist.werewolf-linux.org/boot/v1/bugsink/index.html).
 
 - The service runs as its own user, held to the files and ports its manifest names. The
   root is read-only. `/data` is what survives.
+- Leash assigns the service's UID and groups before Python starts. Gunicorn's
+  workers inherit that identity; the service cannot change UIDs or groups.
+- Snappea watches its queue through compiled inotify bindings. No JIT or Python
+  runtime allowance is needed.
 
 ### Weaknesses
 
-- Python runs Bugsink once the config is present. The machine without a config never
-  starts it. Named in `form.yaml`.
+- The image contains Python. It runs Bugsink once the config is present; a missing
+  config keeps the service from starting. Named in `form.yaml`.
 
 ## Getting Started
 
@@ -32,8 +37,8 @@ howl create bugsink --with bugsink --config config \
 
 Open `https://errors.home.arpa` and sign in as `you@example.com`. The password is the
 text after the colon in `config/bugsink/admin`. The domain is given twice, as Caddy's
-site and as Bugsink's `base-url`, because an image service takes files rather than
-settings. Projects and DSNs are in [Bugsink's
+site and as Bugsink's `base-url`, because Bugsink reads its own URL from a separate
+file. Projects and DSNs are in [Bugsink's
 documentation](https://www.bugsink.com/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)

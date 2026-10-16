@@ -73,7 +73,10 @@ fn stop(io: Io, gpa: Allocator) !void {
             fs_ms / 1000,       fs_ms % 1000,
         });
     }
-    try stopServices(io, gpa, try serviceDirs(io, gpa));
+    const dirs = try serviceDirs(io, gpa);
+    // Keep logging through application shutdown, then drain it before /data.
+    try stopServices(io, gpa, dirs, false);
+    try stopServices(io, gpa, dirs, true);
     services_ms = bootMs() -| start;
 
     linux.sync();
@@ -115,10 +118,14 @@ const look_every_ms = 10;
 /// once: it sends `d` (TERM, then CONT), sends `k` (KILL) to any still up
 /// after 30 s, waits up to 6 s more, then tells every runsv to exit (`x`).
 /// It polls every 10 ms, not sv's 420 ms, because a reboot waits on it.
-fn stopServices(io: Io, gpa: Allocator, dirs: []const []const u8) !void {
+fn stopServices(io: Io, gpa: Allocator, dirs: []const []const u8, logger: bool) !void {
     const Service = struct { dir: []const u8, control: [:0]const u8, stat: []const u8, down: bool };
-    const services = try gpa.alloc(Service, dirs.len);
-    for (services, dirs) |*s, d| {
+    const buffer = try gpa.alloc(Service, dirs.len);
+    var count: usize = 0;
+    for (dirs) |d| {
+        if (std.mem.eql(u8, std.fs.path.basename(d), "syslogd") != logger) continue;
+        const s = &buffer[count];
+        count += 1;
         s.* = .{
             .dir = d,
             .control = try gpa.printSentinel("{s}/supervise/control", .{d}, 0),
@@ -127,6 +134,9 @@ fn stopServices(io: Io, gpa: Allocator, dirs: []const []const u8) !void {
         };
         control(s.control, 'd');
     }
+    const services = buffer[0..count];
+    const stop_ms: u64 = if (logger) 5_000 else stop_for_ms;
+    const reap_ms: u64 = if (logger) 1_000 else reap_for_ms;
     const start = bootMs();
     var killed = false;
     while (true) {
@@ -137,13 +147,13 @@ fn stopServices(io: Io, gpa: Allocator, dirs: []const []const u8) !void {
         }
         if (up == 0) break;
         const waited = bootMs() -| start;
-        if (!killed and waited >= stop_for_ms) {
+        if (!killed and waited >= stop_ms) {
             for (services) |s| if (!s.down) {
-                say(io, "{s} not down in 30s; killed", .{s.dir});
+                say(io, "{s} not down in {d}s; killed", .{ s.dir, stop_ms / 1000 });
                 control(s.control, 'k');
             };
             killed = true;
-        } else if (killed and waited >= stop_for_ms + reap_for_ms) {
+        } else if (killed and waited >= stop_ms + reap_ms) {
             for (services) |s| if (!s.down) say(io, "{s} still not down; going on", .{s.dir});
             break;
         }

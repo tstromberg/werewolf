@@ -28,19 +28,16 @@ const configuration =
     \\# writes this file at each start: an edit here does not last. What is
     \\# set up in the UI is kept in .storage. See forms/home-assistant/README.md.
     \\
-    \\# Behind Caddy, on loopback: Caddy says who the client is. An address
-    \\# that fails to log in five times is banned (ip_bans.yaml).
-    \\http:
-    \\  server_host: 127.0.0.1
-    \\  server_port: 8123
-    \\  use_x_forwarded_for: true
-    \\  trusted_proxies: 127.0.0.1
-    \\  ip_ban_enabled: true
-    \\  login_attempts_threshold: 5
+    \\# HTTP's fixed loopback/proxy policy is in .storage/http, written by
+    \\# home-assistant-setup. YAML HTTP settings would start a five-minute
+    \\# trial and revert without an operator's confirmation in the UI.
     \\
-    \\# default_config, but for discovery (dhcp, ssdp, zeroconf), which needs
-    \\# multicast; bluetooth and usb, which need devices; and go2rtc, which
-    \\# would start a program of its own.
+    \\# default_config, but for dhcp, which needs raw packet access;
+    \\# bluetooth and usb, which need devices; and go2rtc, which would start
+    \\# a program of its own. Network discovery uses unprivileged UDP.
+    \\network:
+    \\zeroconf:
+    \\ssdp:
     \\assist_pipeline:
     \\backup:
     \\cloud:
@@ -108,6 +105,7 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         if (!try exists(io, p)) try replace(io, p, f[1], 0o600);
     }
     try Dir.cwd().createDirPath(io, storage);
+    try replace(io, storage ++ "/http", http_config, 0o600);
     if (try exists(io, storage ++ "/auth"))
         try keepPassword(io, gpa, s.owner, password)
     else
@@ -288,6 +286,36 @@ fn coreConfig(gpa: Allocator, s: Settings) ![]const u8 {
         },
     }, .{ .whitespace = .indent_2 });
 }
+
+/// HTTP is image policy, like configuration.yaml. Seed the stable store
+/// each start: a YAML migration would trial these settings, then revert
+/// to a wildcard listener without proxy trust after five minutes.
+const http_config =
+    \\{
+    \\  "version": 2,
+    \\  "minor_version": 2,
+    \\  "key": "http",
+    \\  "data": {
+    \\    "stable": {
+    \\      "server_host": ["127.0.0.1"],
+    \\      "server_port": 8123,
+    \\      "cors_allowed_origins": [],
+    \\      "use_x_forwarded_for": true,
+    \\      "trusted_proxies": ["127.0.0.1/32"],
+    \\      "login_attempts_threshold": 5,
+    \\      "ip_ban_enabled": true,
+    \\      "ssl_profile": "modern",
+    \\      "use_x_frame_options": true,
+    \\      "created_at": "1970-01-01T00:00:00+00:00",
+    \\      "error": null,
+    \\      "error_message": null
+    \\    },
+    \\    "pending": null,
+    \\    "yaml_migration_done": true
+    \\  }
+    \\}
+    \\
+;
 
 /// onboarding says every step is done: the owner, the location, the
 /// analytics choice (none: analytics stay off) and the integrations.

@@ -42,6 +42,8 @@ fn check(io: std.Io, gpa: std.mem.Allocator) !void {
 }
 
 fn poweroff() noreturn {
+    // Power-off logs must not overtake the result queued on the serial TTY.
+    while (linux.errno(linux.tcdrain(linux.STDERR_FILENO)) == .INTR) {}
     linux.sync();
     _ = linux.reboot(.MAGIC1, .MAGIC2, .POWER_OFF, null);
     while (true) _ = linux.pause();

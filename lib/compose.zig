@@ -25,6 +25,8 @@ pub const Build = struct {
     arch: Arch,
     /// dev marks a DEV=1 build, with busybox-full and the debug shell.
     dev: bool = false,
+    /// SSH iteration has developer access without BusyBox or a console shell.
+    dev_shell: bool = true,
     /// ipe makes the image require IPE: stage0 activates its signed release policy.
     ipe: bool = false,
     /// posture_known is test/posture-known: the posture checks every form
@@ -64,7 +66,7 @@ pub fn compose(
     f: *Failure,
 ) !void {
     const allowed = try allowances(gpa, forms, f);
-    try privileges(io, gpa, root, forms, allowed, f);
+    try privileges(io, gpa, root, forms, allowed, b.dev, f);
     const accts = try withAccounts(io, gpa, root, forms, image, f);
     const passwd = accts.passwd;
     const group = accts.group;
@@ -112,15 +114,22 @@ pub fn compose(
         try gpa.print("{d}\n", .{every}),
     );
     if (upd.off) try ro.deleteTree(io, "etc/sv/autoupdate");
-    // One empty file per allowance, for init, fence and posture; a runtime's
-    // (RUNTIME:NAME) in its runtime's directory, for that runtime's build.
+    // One empty file per general allowance, for init, fence and posture. A
+    // runtime allowance goes in the portable tree the hardened interpreters
+    // read (lib/allow.zig), blanket under the `all` namespace: a form's allow
+    // list is image-wide, so every service shares it.
     try ro.createDirPath(io, "etc/werewolf/allow");
     for (allowed) |a| {
-        const path = if (allow.RuntimeAllowance.parse(a)) |r| path: {
-            try ro.createDirPath(io, try gpa.print("etc/werewolf/allow/{t}", .{r.runtime}));
-            break :path try gpa.print("etc/werewolf/allow/{t}/{s}", .{ r.runtime, r.name });
-        } else try gpa.print("etc/werewolf/allow/{s}", .{a});
-        try put(io, ro, path, "");
+        if (allow.RuntimeAllowance.parse(a)) |r| {
+            const d = try gpa.print(
+                "etc/runtime-hardening/allow/{s}/{t}",
+                .{ allow.runtime_blanket, r.runtime },
+            );
+            try ro.createDirPath(io, d);
+            try put(io, ro, try gpa.print("{s}/{s}", .{ d, r.name }), "");
+        } else {
+            try put(io, ro, try gpa.print("etc/werewolf/allow/{s}", .{a}), "");
+        }
     }
     const sshd_config = try form.sshdConfig(gpa, forms, f);
     if (sshd_config.len > 0) {
@@ -141,13 +150,17 @@ pub fn compose(
     try ro.createDirPath(io, "usr/share/werewolf/etc");
     const normalized = try accounts(gpa, passwd, f);
     // A shell is a login form's policy, never the base filesystem's.
+    const login_shell = if (b.dev and !b.dev_shell)
+        "root:x:0:0:root:/root:/usr/lib/werewolf/sh-shim\n"
+    else
+        "root:x:0:0:root:/root:/bin/ash\n";
     const users = if (b.dev or hasForm(forms, "sshd"))
         try mem.replaceOwned(
             u8,
             gpa,
             normalized,
             "root:x:0:0:root:/root:/sbin/nologin\n",
-            "root:x:0:0:root:/root:/bin/ash\n",
+            login_shell,
         )
     else
         normalized;
@@ -202,7 +215,7 @@ pub fn compose(
     try put(io, rec, "pledge", try pledge(io, gpa, root, forms, f));
     const images = try oci(io, gpa, root, forms, f);
     if (images.len > 0) try put(io, rec, "oci", images);
-    if (b.dev) try put(io, rec, "dev", "dev\n");
+    if (b.dev) try put(io, rec, "dev", if (b.dev_shell) "dev\n" else "ssh\n");
     try put(io, rec, "cmdline", try gpa.print("{s}\n", .{try cmdline(gpa, allowed, b.arch)}));
     try put(io, rec, "net", try net(gpa, forms, passwd, f));
 }
@@ -318,7 +331,7 @@ pub fn apko(
     extra: []const []const u8,
     f: *Failure,
 ) !form.Node {
-    // werewolf's key, which signs minimal's glibc repository and, published,
+    // werewolf's key, which signs minimal's hardened feed and, published,
     // werewolf's own.
     const key = try gpa.dupe(
         form.Node,
@@ -380,8 +393,13 @@ pub fn apko(
     for (services) |s| {
         const parsed = try parseService(gpa, s, f);
         const user = parsed.user;
+        // Login listeners deliberately start as root to create sessions;
+        // they cannot be isolated from one another by account ownership.
+        // privileges() restricts caps login to the permitted SSH listeners.
+        const shared = parsed.shared_user or
+            (mem.eql(u8, user, "root") and parsed.caps & service.cap.login != 0);
         if (runs_as.get(user)) |other| {
-            if (!other.shared or !parsed.shared_user) return f.fail(
+            if (!other.shared or !shared) return f.fail(
                 gpa,
                 "services {s} and {s} both run as {s}: each needs its own user, or every " ++
                     "component must declare shared-user: true",
@@ -389,7 +407,7 @@ pub fn apko(
             );
             continue;
         }
-        try runs_as.put(gpa, user, .{ .name = s.name, .shared = parsed.shared_user });
+        try runs_as.put(gpa, user, .{ .name = s.name, .shared = shared });
         if (declared.contains(user) or mem.eql(u8, user, "root")) continue;
         const id = try defaultAccountId(gpa, s.path, user, &ids, f);
         const n = try gpa.print("{d}", .{id});
@@ -469,7 +487,9 @@ fn replaceField(
 /// 4: init passes inherited socketpairs to mount-broker and the slot services.
 /// 5: shared-user service declarations and keyless UNIX people require
 /// matching builders, launchers and metadata account reconciliation.
-pub const format = 5;
+/// 6: local syslog readiness, service socket access and shutdown require
+/// matching init, leash, runit-stage and minimal-form packages.
+pub const format = 6;
 
 /// format_package is format's package, a name per format, so a world names
 /// it with no version to compare. It holds /usr/lib/werewolf/format: apk
@@ -481,7 +501,7 @@ pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format}
 pub const image_programs = [_][]const u8{
     "init",         "stage0",      "iface-up",     "fence",       "mount",      "mount-broker",
     "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",     "slot-keep",
-    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap",
+    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap", "syslogd",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -767,7 +787,7 @@ fn allows(allowed: []const []const u8, name: []const u8) bool {
 /// layout is harder to predict. None costs anything. init_on_free is left off
 /// for its cost (docs/security.md). KVM is built in and starts whenever the
 /// host offers virtualization, so it is off unless allowed (kvm-arm.mode on
-/// aarch64, its two initcalls on x86_64), and nested only if allowed.
+/// aarch64, clearing VMX/SVM CPU features on x86_64), and nested only if allowed.
 ///
 /// loglevel=5 limits the console to warnings and worse; dmesg keeps all.
 /// A cloud serial port takes about a millisecond a line: on GCP, notices
@@ -778,6 +798,9 @@ pub fn cmdline(gpa: Allocator, allowed: []const []const u8, arch: Arch) Allocato
     try out.appendSlice(gpa, "proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1");
     const kvm = allows(allowed, "kvm");
     const nested = allows(allowed, "nested-kvm");
+    // LTO wraps initcalls in generated stubs, so blacklisting vt_init and
+    // svm_init by name misses them. Remove their CPU features before probing.
+    // Linux records the intentional feature mask as CPU-out-of-spec taint.
     try out.appendSlice(gpa, switch (arch) {
         .aarch64 => if (nested) " kvm-arm.mode=nested" else if (!kvm) " kvm-arm.mode=none" else "",
         .x86_64 => if (nested)
@@ -785,7 +808,7 @@ pub fn cmdline(gpa: Allocator, allowed: []const []const u8, arch: Arch) Allocato
         else if (kvm)
             " kvm_intel.nested=0 kvm_amd.nested=0"
         else
-            " initcall_blacklist=vt_init,svm_init",
+            " clearcpuid=vmx,svm",
     });
     try out.appendSlice(gpa, " loglevel=5");
     return out.items;
@@ -838,8 +861,13 @@ fn cleanPath(p: []const u8) bool {
 pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (top.weaknesses()) |e| try out.print(gpa, "{s} {s}\n", .{ e.key, e.value.scalar.text });
-    const kind = if (b.dev) "dev" else "*";
-    const excuse = if (b.dev)
+    if (b.dev and
+        !b.dev_shell) try out.appendSlice(gpa, "network-no-login authenticated SSH for local " ++
+        "test iteration\n" ++
+        "network-ssh-dev-security-keys the managed local developer key\n" ++
+        "files-noexec-everywhere executable RAM for authenticated test uploads\n");
+    const kind = if (b.dev and b.dev_shell) "dev" else "*";
+    const excuse = if (b.dev and b.dev_shell)
         "a DEV=1 build: busybox-full and the debug shell"
     else
         try gpa.print("every form on {t} (test/posture-known)", .{b.arch});
@@ -916,7 +944,8 @@ pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failur
                     "(`listen tcp/{d} loopback` for the machine alone)",
                 .{ s.path, p, p },
             );
-        for (ps.listen_udp) |p| if (mem.findScalar(u16, declared_udp.items, p) == null)
+        for (ps.listen_udp) |p| if (mem.findScalar(u16, declared_udp.items, p) == null and
+            mem.findScalar(u16, s.loopback_udp, p) == null)
             return f.fail(
                 gpa,
                 "{s}: listen udp/{d}, which no net line declares: fence drops what arrives",
@@ -972,6 +1001,7 @@ fn privileges(
     root: Dir,
     forms: []const Form,
     allowed: []const []const u8,
+    dev: bool,
     f: *Failure,
 ) !void {
     const services = try form.services(io, gpa, root, forms, f);
@@ -995,7 +1025,8 @@ fn privileges(
                 .{s.path},
             );
         if (parsed.caps & service.cap.login != 0 and
-            (!mem.eql(u8, s.name, "sshd") or !allows(allowed, "pty")))
+            (!(mem.eql(u8, s.name, "sshd") or (dev and mem.eql(u8, s.name, "sshd-dev"))) or
+                !allows(allowed, "pty")))
             return f.fail(
                 gpa,
                 "{s}: caps login is for sshd when the chain allows pty",
@@ -1183,9 +1214,14 @@ fn netLine(
     // send from it (docs/design/listen-udp.md).
     if (mem.eql(u8, w[0], "listen") and w.len > 2 and !mem.startsWith(u8, w[1], "tcp/")) {
         const uid = uids.get(w[1]) orelse return false;
-        for (w[2..]) |p| try out.append(
+        const lan = mem.eql(u8, w[w.len - 1], "lan");
+        const ports = w[2 .. w.len - @intFromBool(lan)];
+        if (ports.len == 0) return false;
+        for (ports) |p| try out.append(
             gpa,
-            try gpa.print("listen {s} udp {d}", .{ uid, port(p, "udp/") orelse return false }),
+            try gpa.print("listen {s} udp {d}{s}", .{
+                uid, port(p, "udp/") orelse return false, if (lan) " lan" else "",
+            }),
         );
         return true;
     }
@@ -1193,10 +1229,15 @@ fn netLine(
         const lo = mem.eql(u8, w[w.len - 1], "loopback");
         const ports = w[1 .. w.len - @intFromBool(lo)];
         if (ports.len == 0) return false;
-        for (ports) |p| try out.append(gpa, try gpa.print(
-            "listen tcp {d}{s}",
-            .{ port(p, "tcp/") orelse return false, if (lo) " loopback" else "" },
-        ));
+        for (ports) |p| {
+            // Fence already allows bind(0), but no external traffic to an
+            // undeclared port. Only the service's leash gets this grant.
+            if (lo and mem.eql(u8, p, "tcp/0")) continue;
+            try out.append(gpa, try gpa.print(
+                "listen tcp {d}{s}",
+                .{ port(p, "tcp/") orelse return false, if (lo) " loopback" else "" },
+            ));
+        }
         return true;
     }
     if (mem.eql(u8, w[0], "dns") and w.len > 1) {
@@ -1212,26 +1253,29 @@ fn netLine(
     if (mem.eql(u8, w[0], "connect") and w.len > 2) {
         const who = if (mem.eql(u8, w[1], "all")) "all" else uids.get(w[1]) orelse return false;
         const public = mem.eql(u8, w[w.len - 1], "public");
-        const targets = w[2 .. w.len - @intFromBool(public)];
+        const lan = mem.eql(u8, w[w.len - 1], "lan");
+        if (lan and mem.eql(u8, who, "all")) return false;
+        const targets = w[2 .. w.len - @intFromBool(public or lan)];
         if (targets.len == 0) return false;
         for (targets) |t| {
             if (mem.eql(u8, t, "icmp")) {
-                if (public) return false;
+                if (public or lan) return false;
                 try out.append(gpa, try gpa.print("connect {s} icmp", .{who}));
                 continue;
             }
             // any is every TCP port, for one user. public would refuse the
             // private networks a scan is for, and `all` would be every user.
             if (mem.eql(u8, t, "any")) {
-                if (public or mem.eql(u8, who, "all")) return false;
+                if (public or lan or mem.eql(u8, who, "all")) return false;
                 try out.append(gpa, try gpa.print("connect {s} tcp any", .{who}));
                 continue;
             }
             const proto = if (mem.startsWith(u8, t, "udp/")) "udp" else "tcp";
+            if (lan and !mem.eql(u8, proto, "udp")) return false;
             const p = port(t, if (proto[0] == 'u') "udp/" else "tcp/") orelse return false;
             try out.append(gpa, try gpa.print(
                 "connect {s} {s} {d}{s}",
-                .{ who, proto, p, if (public) " public" else "" },
+                .{ who, proto, p, if (public) " public" else if (lan) " lan" else "" },
             ));
         }
         return true;
@@ -1265,7 +1309,7 @@ test "cmdline: what each allowance takes back, by arch" {
         .{ &.{}, .aarch64, base ++ " kvm-arm.mode=none loglevel=5" },
         .{ &.{"kvm"}, .aarch64, base ++ " loglevel=5" },
         .{ &.{ "kvm", "nested-kvm" }, .aarch64, base ++ " kvm-arm.mode=nested loglevel=5" },
-        .{ &.{}, .x86_64, base ++ " initcall_blacklist=vt_init,svm_init loglevel=5" },
+        .{ &.{}, .x86_64, base ++ " clearcpuid=vmx,svm loglevel=5" },
         .{ &.{"kvm"}, .x86_64, base ++ " kvm_intel.nested=0 kvm_amd.nested=0 loglevel=5" },
         .{
             &.{ "kvm", "nested-kvm" },
@@ -1411,6 +1455,46 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
             "metadata 300\n",
         got,
     );
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ephemeral = try testForm(
+        gpa,
+        "worker",
+        "services:\n  worker:\n    user: web\n    exec: /worker\n" ++
+            "    pledge: stdio inet listen\n    listen: [tcp/0 loopback, tcp/8080 loopback, " ++
+            "udp/5353 loopback]\n",
+    );
+    // The service may request a temporary port, but no port zero or range
+    // is published or forwarded.
+    try testing.expectEqualStrings(
+        "listen tcp 8080 loopback\n",
+        try net(gpa, &.{ephemeral}, passwd, &f),
+    );
+    try testing.expectEqualSlices(u16, &.{}, try form.listens(gpa, &.{ephemeral}, &f));
+    const rendered = try form.services(testing.io, gpa, tmp.dir, &.{ephemeral}, &f);
+    var bad: service.Bad = .{};
+    const worker = try service.parse(gpa, rendered[0].text, &bad);
+    try testing.expectEqualSlices(u16, &.{ 0, 8080 }, worker.listen);
+    try testing.expectEqualSlices(u16, &.{5353}, worker.listen_udp);
+    try testing.expectEqualSlices(u16, &.{5353}, rendered[0].loopback_udp);
+    _ = try pledge(testing.io, gpa, tmp.dir, &.{ephemeral}, &f);
+    const discovery = try testForm(
+        gpa,
+        "discovery",
+        "services:\n  discovery:\n    user: web\n    exec: /discovery\n" ++
+            "    pledge: stdio inet listen connect\n" ++
+            "    listen: [udp/5353 udp/1900 lan]\n    connect: [udp/5353 udp/1900 lan]\n",
+    );
+    try testing.expectEqualStrings(
+        "connect 300 udp 1900 lan\nconnect 300 udp 5353 lan\n" ++
+            "listen 300 udp 1900 lan\nlisten 300 udp 5353 lan\n",
+        try net(gpa, &.{discovery}, passwd, &f),
+    );
+    // UDP scopes belong to fence, not leash or host TCP forwards.
+    const ds = try form.services(testing.io, gpa, tmp.dir, &.{discovery}, &f);
+    try testing.expect(mem.find(u8, ds[0].text, "lan") == null);
+    try testing.expectEqualSlices(u16, &.{}, try form.listens(gpa, &.{discovery}, &f));
+    _ = try pledge(testing.io, gpa, tmp.dir, &.{discovery}, &f);
     for ([_][]const u8{
         "listen udp/53",          "listen tcp/0",
         "listen tcp/65536",       "listen loopback",
@@ -1422,6 +1506,9 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         "listen root tcp/53",     "listen root udp/53 loopback",
         "dns",                    "dns all",
         "dns nobody",             "dns root udp/53",
+        "listen root lan",        "listen tcp/80 lan",
+        "connect web tcp/80 lan", "connect all udp/5353 lan",
+        "connect web icmp lan",   "connect web udp/5353 public lan",
     }) |line| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("net:\n  - {s}\n", .{line}))};
         try testing.expectError(error.Form, net(gpa, &forms, passwd, &f));
@@ -1489,6 +1576,44 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
     );
 }
 
+test "SSH-only developer access preserves shell-free posture and uses sh-shim" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = "" });
+    var f: Failure = .{};
+    const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
+    var ro = try tmp.dir.createDirPathOpen(io, "ro", .{});
+    defer ro.close(io);
+    var meta = try tmp.dir.createDirPathOpen(io, "meta", .{});
+    defer meta.close(io);
+    try compose(io, gpa, tmp.dir, forms, .{
+        .passwd = baselayout.passwd,
+        .group = baselayout.group,
+        .shadow = baselayout.shadow,
+    }, ro, meta, .{
+        .arch = .aarch64,
+        .dev = true,
+        .dev_shell = false,
+        .posture_known = "dev programs-no-shell programs-no-interpreters\n* boot-ipe-enforced\n",
+    }, &f);
+    const passwd = try ro.readFileAlloc(io, "usr/share/werewolf/etc/passwd", gpa, .limited(4096));
+    try testing.expect(mem.find(u8, passwd, "/root:/usr/lib/werewolf/sh-shim\n") != null);
+    try testing.expectEqualStrings(
+        "ssh\n",
+        try meta.readFileAlloc(io, "usr/share/werewolf/dev", gpa, .limited(32)),
+    );
+    const known = try meta.readFileAlloc(io, "usr/share/werewolf/weaknesses", gpa, .limited(4096));
+    try testing.expect(mem.find(u8, known, "network-no-login ") != null);
+    try testing.expect(mem.find(u8, known, "files-noexec-everywhere ") != null);
+    try testing.expect(mem.find(u8, known, "programs-no-shell ") == null);
+    try testing.expect(mem.find(u8, known, "programs-no-interpreters ") == null);
+}
+
 test "IPE builds retain unrelated weaknesses and remove closed kernel gaps" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1553,9 +1678,32 @@ test "privileges: a memfd promise needs the jit allowance" {
     });
     var f: Failure = .{};
     const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
-    try testing.expectError(error.Form, privileges(io, gpa, tmp.dir, forms, &.{}, &f));
+    try testing.expectError(error.Form, privileges(io, gpa, tmp.dir, forms, &.{}, false, &f));
     try testing.expect(mem.find(u8, f.text, "pledge memfd") != null);
-    try privileges(io, gpa, tmp.dir, forms, &.{"jit"}, &f);
+    try privileges(io, gpa, tmp.dir, forms, &.{"jit"}, false, &f);
+}
+
+test "privileges: the developer SSH listener needs an explicit development build" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/sshd-dev");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = "" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/x/rootfs/etc/sv/sshd-dev/service",
+        .data = "exec /usr/bin/sshd\nuser root\ncaps login\npledge stdio\n",
+    });
+    var failure: Failure = .{};
+    const chain = try form.chain(io, gpa, tmp.dir, "x", &failure);
+    try testing.expectError(
+        error.Form,
+        privileges(io, gpa, tmp.dir, chain, &.{"pty"}, false, &failure),
+    );
+    try testing.expectError(error.Form, privileges(io, gpa, tmp.dir, chain, &.{}, true, &failure));
+    try privileges(io, gpa, tmp.dir, chain, &.{"pty"}, true, &failure);
 }
 
 test "apko: a service user apko.yaml does not name gets an account, its id its name's hash" {
@@ -1842,7 +1990,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     ;
     const web_form =
         \\base: minimal
-        \\allow: [jit, php:proc_open]
+        \\allow: [jit, php:exec]
         \\net:
         \\  - listen tcp/80
         \\  - connect web tcp/443
@@ -1884,8 +2032,8 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         .{ "etc/sv/minimal/run", "minimal's\n" },
         .{ "etc/sv/web/service", web_service },
         .{ "etc/werewolf/allow/jit", "" },
-        // A runtime's allowance, in its runtime's directory.
-        .{ "etc/werewolf/allow/php/proc_open", "" },
+        // A runtime's allowance, in the portable tree, blanket (namespace all).
+        .{ "etc/runtime-hardening/allow/all/php/exec", "" },
         // The chain's accounts are added as apko adds them; only root is in group 0.
         .{ "usr/share/werewolf/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n" ++
             "sync:x:5:65533:sync:/sbin:/bin/sync\n" ++ added },

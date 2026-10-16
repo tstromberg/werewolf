@@ -1,0 +1,62 @@
+# Application and hashed dependencies only. Python comes from hardened-packages;
+# the venv's interpreter remains a link to the system package, never a copied binary.
+package:
+  name: bugsink
+  version: 2.6.1
+  epoch: 0
+  description: Error tracking compatible with Sentry SDKs
+  copyright:
+    - license: PolyForm-Shield-1.0.0
+  dependencies:
+    runtime:
+      - python-3.15>=3.15.0_git20261010-r2000
+      - tzdata
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - python-3.15
+      - python-3.15-dev
+      - libffi-dev
+      - uv
+  environment:
+    UV_PYTHON_DOWNLOADS: never
+    UV_NO_CACHE: "1"
+    UV_LINK_MODE: copy
+
+pipeline:
+  - runs: |
+      uv venv --python /usr/bin/python3.15 /usr/lib/bugsink
+      uv pip install --python /usr/lib/bugsink/bin/python --require-hashes -r build-requirements.txt
+      uv pip install --python /usr/lib/bugsink/bin/python --require-hashes \
+        --no-build-isolation --compile-bytecode -r requirements.txt
+      site=/usr/lib/bugsink/lib/python3.15/site-packages
+      # ctypes initializes libffi callbacks on import. Compile the queue's three
+      # inotify calls instead, so the service needs neither JIT nor python:native.
+      /usr/lib/bugsink/bin/python inotify-build.py "$site"
+      uv pip uninstall --python /usr/lib/bugsink/bin/python setuptools wheel
+      cp "$site/bugsink/conf_templates/docker.py.template" "$site/bugsink_conf.py"
+      # Keep the existing persistent database and ephemeral queue locations.
+      sed -i "s|'/tmp/snappea.sqlite3'|'/run/svc/bugsink/snappea.sqlite3'|; \
+        s|'/data/db.sqlite3'|'/data/svc/bugsink/db.sqlite3'|" "$site/bugsink_conf.py"
+      echo "SNAPPEA['WAKEUP_CALLS_DIR'] = '/run/svc/bugsink/snappea.wakeup'" >> "$site/bugsink_conf.py"
+      echo "BUGSINK['INGEST_STORE_BASE_DIR'] = '/run/svc/bugsink/ingestion'" >> "$site/bugsink_conf.py"
+      cp "$site/bugsink/gunicorn.docker.conf.py" /usr/lib/bugsink/gunicorn.conf.py
+      rm -f /usr/lib/bugsink/bin/activate* /usr/lib/bugsink/.gitignore \
+        /usr/lib/bugsink/.lock
+      mkdir -p ${{targets.destdir}}/usr/lib
+      cp -a /usr/lib/bugsink ${{targets.destdir}}/usr/lib/bugsink
+      # uv must not have silently copied or downloaded an interpreter.
+      test -L "${{targets.destdir}}/usr/lib/bugsink/bin/python"
+
+update:
+  enabled: true
+  github:
+    identifier: bugsink/bugsink

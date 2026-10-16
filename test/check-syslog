@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Boot the shipped logger and its attack probes without building a whole form."""
+import argparse
+import pathlib
+import stat
+import subprocess
+import sys
+
+
+def cpio_entry(name, mode, data=b"", ino=1, rdevmajor=0, rdevminor=0):
+    name = name.encode() + b"\0"
+    fields = (ino, mode, 0, 0, 1, 0, len(data), 0, 0, rdevmajor, rdevminor, len(name), 0)
+    header = b"070701" + b"".join(f"{value:08x}".encode() for value in fields)
+    prefix = header + name
+    return prefix + bytes(-len(prefix) % 4) + data + bytes(-len(data) % 4)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arch", choices=("aarch64", "x86_64"), required=True)
+    parser.add_argument("--kernel", type=pathlib.Path, required=True)
+    parser.add_argument("--daemon", type=pathlib.Path, required=True)
+    parser.add_argument("--probe", type=pathlib.Path, required=True)
+    parser.add_argument("--leash", type=pathlib.Path, required=True)
+    parser.add_argument("--work", type=pathlib.Path, required=True)
+    args = parser.parse_args()
+    args.work.mkdir(parents=True, exist_ok=True)
+    root = bytearray()
+    for name in ("dev", "proc", "run", "run/syslog", "run/config", "data", "var", "var/empty",
+                 "etc", "usr", "usr/lib", "usr/lib/werewolf"):
+        root += cpio_entry(name, stat.S_IFDIR | (0o700 if name == "run/config" else 0o755))
+    root += cpio_entry("dev/console", stat.S_IFCHR | 0o600, rdevmajor=5, rdevminor=1)
+    root += cpio_entry("init", stat.S_IFREG | 0o755, args.probe.read_bytes())
+    root += cpio_entry("client", stat.S_IFREG | 0o755, args.probe.read_bytes())
+    root += cpio_entry("syslogd", stat.S_IFREG | 0o755, args.daemon.read_bytes())
+    root += cpio_entry("leash", stat.S_IFREG | 0o755, args.leash.read_bytes())
+    root += cpio_entry("usr/lib/werewolf/syslogd", stat.S_IFLNK | 0o777, b"/syslogd")
+    root += cpio_entry("TRAILER!!!", 0)
+    initrd = args.work / "initramfs.cpio"
+    initrd.write_bytes(root)
+    disk = args.work / "data.ext4"
+    with disk.open("wb") as output:
+        output.truncate(128 << 20)
+    subprocess.run(["mke2fs", "-q", "-F", "-t", "ext4", str(disk)], check=True)
+    command = [f"qemu-system-{args.arch}", "-m", "256", "-smp", "1", "-nographic", "-no-reboot",
+               "-net", "none", "-kernel", str(args.kernel), "-initrd", str(initrd),
+               "-drive", f"file={disk},format=raw,if=virtio"]
+    if args.arch == "aarch64":
+        command += ["-M", "virt", "-cpu", "cortex-a72", "-append", "console=ttyAMA0 panic=1 audit=1"]
+    else:
+        command += ["-append", "console=ttyS0 panic=1 audit=1"]
+    if sys.platform == "darwin" and args.arch == "aarch64":
+        command += ["-accel", "hvf", "-cpu", "host"]
+    elif sys.platform == "linux" and pathlib.Path("/dev/kvm").exists():
+        command += ["-accel", "kvm", "-cpu", "host"]
+    log = args.work / "console.log"
+    with log.open("wb") as output:
+        try:
+            result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=90)
+        except subprocess.TimeoutExpired:
+            result = None
+    text = log.read_bytes()
+    if result is None or result.returncode or b"syslog-check: PASS" not in text or b"syslog-check: FAIL" in text:
+        print(text[-10000:].decode(errors="replace"), file=sys.stderr)
+        sys.exit(f"syslog-check: failed; see {log}")
+    for line in text.decode(errors="replace").splitlines():
+        if line.startswith("syslog-check:"):
+            print(line)
+
+
+if __name__ == "__main__":
+    main()

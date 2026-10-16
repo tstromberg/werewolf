@@ -279,7 +279,7 @@ services:
     exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres -c jit=off
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath proc ipc unix listen connect
+    pledge: stdio rpath wpath proc shm unix listen connect
     run:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim

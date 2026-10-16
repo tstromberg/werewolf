@@ -18,6 +18,7 @@ const lease_path = state_dir ++ "/lease.json";
 const empty_dir = "/var/empty";
 /// engine_id is the uid of _dhcp, defined in forms/prod/form.yaml.
 const engine_id: u32 = 67;
+const parent_id: u32 = 73;
 
 const client_port = 68;
 const server_port = 67;
@@ -127,7 +128,7 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         linux.openat(
             linux.AT.FDCWD,
             state_dir,
-            .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true },
+            .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true },
             0,
         ),
         "open " ++ state_dir,
@@ -492,7 +493,8 @@ const Parent = struct {
     /// /run/werewolf/network, and installs a seccomp filter that kills the
     /// parent for any call but the four ioctls and the file calls it needs.
     fn confine(p: *Parent) !void {
-        try sandbox.keepOnly(1 << linux.CAP.NET_ADMIN);
+        _ = try sys(linux.fchown(p.dir, parent_id, parent_id), "own network directory");
+        try sandbox.dropKeeping(parent_id, 1 << linux.CAP.NET_ADMIN);
         try sandbox.landlock(&.{.{ .fd = p.dir, .access = sandbox.own_files }}, &.{});
 
         var f: sandbox.Filter = .{};

@@ -33,7 +33,7 @@ jobs:
         run: sudo test/ci-setup
       - name: Unit tests
         run: make -j"$(nproc)" test
-      - name: DNS permissions, DHCP renewal and HTTPS by hostname
+      - name: DNS permissions, DHCP renewal, HTTPS and LAN discovery
         run: make check-dns DNS_TEST_RUNNER=sudo
 
   check:

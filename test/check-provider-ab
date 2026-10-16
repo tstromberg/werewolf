@@ -153,8 +153,13 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-', dir='/tmp') as temporary:
         if mode == 'secure' and text.count('Secure Boot enforced outside setup mode') < 2:
             raise AssertionError('provider console did not independently confirm enforced boots')
         machine.ssh('/usr/lib/werewolf/slot-update outcome')
+        before = machine.console()
         retry = machine.ssh('/usr/lib/werewolf/slot-update check', check=False, timeout=600)
-        if retry.returncode == 0 or 'ImageRolledBack' not in retry.stderr + retry.stdout:
+        until = time.monotonic() + 5
+        while ('ImageRolledBack' not in machine.console()[len(before):] and
+               time.monotonic() < until):
+            time.sleep(0.1)
+        if retry.returncode == 0 or 'ImageRolledBack' not in machine.console()[len(before):]:
             raise AssertionError('updater did not refuse the failed signed candidate')
         report('failed candidate is refused on retry', recovered)
     except Exception as error:

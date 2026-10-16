@@ -486,7 +486,7 @@ pub fn probe(granted: u16, sockets: bool) u8 {
     if (!creates("/run/svc/" ++ probe_name ++ "/x")) bits |= 1 << 4;
     if (creates("/tmp/." ++ probe_name)) bits |= 1 << 5;
     if (runs("/usr/bin/sv")) bits |= 1 << 6;
-    // Its pledge omits memfd, watch and ipc, so its seccomp filter must
+    // Its pledge omits memfd, watch and shm, so its seccomp filter must
     // refuse these with ENOSYS; a success is a hole in the pledge.
     if (made(.memfd_create)) bits |= 1 << 7;
     if (made(.inotify_init1)) bits |= 1 << 8;

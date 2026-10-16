@@ -162,3 +162,9 @@ uploads, interruption recovery, immutable collisions, release floors), and the
 [machine-transport](design/machine-transport.md) tests, which reject foreign machines,
 endpoints, signers and every single-byte mutation. Candidate CI has no publication
 permission ([design/protected-downloads.md](design/protected-downloads.md)).
+
+To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make`
+with a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
+checks its configuration, and requires IPE explicitly disabled. For strict IPE testing,
+use `IPE=1` and its three signing inputs instead. JIT forms can thus exercise the same
+candidate kernel through their normal profile without changing strict IPE policy.

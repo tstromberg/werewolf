@@ -1,9 +1,8 @@
 # bugsink: prod, with Bugsink, error tracking that takes the events of
 # Sentry's SDKs, behind Caddy, which serves it over HTTPS for the
 # machine's domain with a certificate from Let's Encrypt. Bugsink runs
-# from its project's OCI image, its 2.x release pinned by digest at each
-# build, in a tree of its own (docs/design/oci.md). Its secret key, its
-# administrator and its URL come from the config before it serves;
+# from its pinned application package, on werewolf's hardened Python.
+# Its secret key, administrator and URL come from the config before it serves;
 # nobody signs up, strangers see only the login page, and it phones
 # nothing home. Its SQLite database is in /data/svc/bugsink. See
 # forms/bugsink/README.md.
@@ -11,10 +10,17 @@ base: prod
 
 with: [caddy]
 
+packages:
+  # Revision 2 introduced the capability-group policy used by these forms.
+  - python-3.15>=3.15.0_git20261010-r2000
+  - tzdata
+  - libgcc
+  - libstdc++
+
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  ?programs-no-interpreters: Bugsink is a Python application, and its image's python3.12 runs it once the config gives it a secret key
+  programs-no-interpreters: Bugsink runs on hardened Python, with the application and its dependencies on the verified root
 
 # The checks sign in and make a project with curl, which keeps cookies.
 dev:
@@ -26,24 +32,26 @@ check:
   memory: 2048
 
 services:
-  # Bugsink, as _oci-bugsink, inside its image: gunicorn serves on
+  # Keep the existing UID and data ownership. Gunicorn serves on
   # loopback, behind Caddy, and snappea, its task runner, works through
-  # what gunicorn queues in their shared /tmp. monofy, the image's own
+  # what gunicorn queues in their shared runtime directory. monofy
   # supervisor, starts both and stops both if either dies, so its pledge
-  # has exec and its one program is the image's python. Its checks,
+  # has exec and its one program is hardened Python. Its checks,
   # migrations and administrator run first, as the image's command does;
   # a missing secret key, administrator or URL parks it, naming the file.
   # It reaches public addresses on 443 alone, for alert webhooks.
   bugsink:
-    image: docker.io/bugsink/bugsink:2
-    exec: /usr/local/bin/python3.12 /usr/local/bin/monofy /usr/local/bin/python3.12 /usr/local/bin/gunicorn --config /app/gunicorn.docker.conf.py
-      --bind=127.0.0.1:8000 --access-logfile - bugsink.wsgi ||| /usr/local/bin/python3.12 /usr/local/bin/bugsink-runsnappea
+    exec: /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/monofy /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/gunicorn
+      --config /usr/lib/bugsink/gunicorn.conf.py --bind=127.0.0.1:8000 --access-logfile - bugsink.wsgi |||
+      /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/bugsink-runsnappea
+    user: _oci-bugsink
     before:
-      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage check --deploy --fail-level WARNING
-      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage migrate snappea --database=snappea
-      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage migrate
-      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage prestart
-    run: /usr/local/bin/python3.12
+      - /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/bugsink-manage check --deploy --fail-level WARNING
+      - /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/bugsink-manage migrate snappea --database=snappea
+      - /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/bugsink-manage migrate
+      - /usr/lib/bugsink/bin/python3 -B -u /usr/lib/bugsink/bin/bugsink-manage prestart
+    run: /usr/lib/bugsink/bin/python3
+    # Leash sets the final UID and groups; Gunicorn's workers inherit them.
     # netlink: glibc's resolver lists the host's addresses before a
     # lookup. watch: snappea waits on inotify for gunicorn's wake-ups.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
@@ -56,7 +64,7 @@ services:
     memory: 1024
     nofile: 16384
     env:
-      - PYTHONDONTWRITEBYTECODE=1
+      - TMPDIR=/run/svc/bugsink
       # Behind Caddy's TLS: secure cookies, the scheme from Caddy's
       # X-Forwarded-Proto, the client's address from the X-Real-IP Caddy
       # sets, never one a client sent.

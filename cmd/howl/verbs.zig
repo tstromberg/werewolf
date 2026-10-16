@@ -31,7 +31,7 @@ const testing = std.testing;
 /// sshTo is howl ssh [NAME] [-- COMMAND...]. It execs ssh as root into a
 /// machine here, run's without a name: under QEMU on its forwarded port,
 /// under Firecracker at its tap address, and on Lima at the lease or forwarded
-/// port. Dev Lima runs use the forwarded port so a stale lease cannot misroute.
+/// port. Dev Lima runs use the address recorded for their current boot.
 pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     var rest: []const []const u8 = args;
     var command: []const []const u8 = &.{};
@@ -63,11 +63,14 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         "-o", try gpa.print("HostKeyAlias={s}", .{name}),
         "-o", "LogLevel=ERROR",
     });
-    const dev_access = if (Dir.cwd().access(io, try gpa.print("{s}/dev", .{dir}), .{})) |_|
-        true
-    else |_|
-        false;
-    if (dev_access) {
+    const dev_marker = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/dev", .{dir}),
+        gpa,
+        .limited(32),
+    ) catch null;
+    const dev_access = dev_marker != null;
+    if (dev_marker != null and !std.mem.eql(u8, dev_marker.?, "custom\n")) {
         try pinned.appendSlice(gpa, &.{
             "-i", try @import("keys.zig").devPrivatePath(io, gpa),
             "-o", "IdentitiesOnly=yes",
@@ -91,6 +94,7 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         try argv.append(gpa, "root@127.0.0.1");
     } else if (on == .firecracker) {
         try argv.append(gpa, "ssh");
+        if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
         try argv.appendSlice(gpa, pinned.items);
         try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
     } else if (on == .lima) {
@@ -104,9 +108,18 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             .limited(64 << 10),
         ) catch "";
         const managed = lima.isManaged(yaml);
-        // Dev VMs use Lima's forwarded port: their lease can outlive a
-        // recreated VM and point ssh at a stale, unreachable guest address.
-        const addr = limaAddress(managed, dev_access, lima.addressOf(io, gpa, name));
+        // Developer SSH has its own listener. Use the address the current
+        // boot reported, rather than a lease left by an earlier instance.
+        const current = if (dev_access) Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/dev-address", .{dir}),
+            gpa,
+            .limited(64),
+        ) catch null else null;
+        const addr = if (dev_access)
+            try devAddress(current, why)
+        else
+            limaAddress(managed, lima.addressOf(io, gpa, name));
         // Root, by Lima's forwarded port, when its config tar gave root keys.
         const secured = std.mem.find(u8, yaml, "# werewolf lima: secure\n") != null;
         const port = if (dev_access or ((managed or secured) and try rootKeyed(io, gpa, dir)))
@@ -115,6 +128,7 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             null;
         if (addr) |a| {
             try argv.append(gpa, "ssh");
+            if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
             try argv.appendSlice(gpa, pinned.items);
             try argv.append(gpa, try gpa.print("root@{s}", .{a}));
         } else if (port) |p| {
@@ -141,18 +155,31 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
 }
 
-/// limaAddress suppresses DHCP leases for managed and dev VMs: managed VMs
-/// have no vzNAT lease, and a dev VM's cached lease can belong to an older
-/// instance. Both use Lima's forwarded SSH port.
-fn limaAddress(managed: bool, dev_access: bool, address: ?[]const u8) ?[]const u8 {
-    return if (managed or dev_access) null else address;
+/// A developer VM's address comes from its current boot, not an older
+/// instance's DHCP lease. Host keys remain pinned in the machine directory.
+fn devAddress(current: ?[]const u8, why: *Why) ![]const u8 {
+    const addr = current orelse return why.refuse(
+        "no developer VM address; run howl run again",
+        .{},
+    );
+    _ = std.Io.net.Ip4Address.parse(addr, 0) catch
+        return why.refuse("invalid developer VM address", .{});
+    return addr;
 }
 
-test "dev Lima SSH ignores a stale lease and uses the forwarded port" {
+/// Managed Lima VMs use their forwarded SSH port rather than a vzNAT lease.
+fn limaAddress(managed: bool, address: ?[]const u8) ?[]const u8 {
+    return if (managed) null else address;
+}
+
+test "Lima SSH uses a current developer address and ignores managed leases" {
     const stale = "192.168.64.36";
-    try testing.expectEqual(@as(?[]const u8, null), limaAddress(false, true, stale));
-    try testing.expectEqual(@as(?[]const u8, null), limaAddress(true, false, stale));
-    try testing.expectEqualStrings(stale, limaAddress(false, false, stale).?);
+    try testing.expectEqual(@as(?[]const u8, null), limaAddress(true, stale));
+    try testing.expectEqualStrings(stale, limaAddress(false, stale).?);
+    var why: Why = .{};
+    try testing.expectEqualStrings("192.168.64.40", try devAddress("192.168.64.40", &why));
+    try testing.expectError(error.Refused, devAddress(null, &why));
+    try testing.expectError(error.Refused, devAddress("-oProxyCommand=bad", &why));
 }
 
 /// rootKeyed reports whether the config tar in dir gives root keys.
@@ -176,25 +203,49 @@ fn rootKeyed(io: Io, gpa: Allocator, dir: []const u8) !bool {
     return false;
 }
 
-/// Stop keeps protected local disks and authority; legacy machines are removed.
+/// Stop keeps a named QEMU disk and every protected machine's authority. The
+/// unnamed legacy `howl run` machine retains its historical remove-on-stop.
 pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    if (args.len > 0) return why.refuse(
-        "stop takes nothing: it ends howl run's machine; delete NAME ends another",
-        .{},
-    );
-    const on = madeOn(
-        io,
-        gpa,
-        run_name,
-    ) orelse return why.refuse("no machine from howl run", .{});
-    if (!try @import("local-secure.zig").stop(io, gpa, run_name, on, why))
-        try remove(io, gpa, run_name, on, why);
+    var named = false;
+    var option_value = false;
+    for (args) |arg| {
+        if (option_value) {
+            option_value = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--on")) {
+            option_value = true;
+            continue;
+        }
+        if (arg.len > 0 and arg[0] != '-') named = true;
+    }
+    const name, const on = if (args.len == 0)
+        .{
+            run_name,
+            madeOn(io, gpa, run_name) orelse return why.refuse("no machine from howl run", .{}),
+        }
+    else
+        try machineArgs(io, gpa, args, why);
+    const secured = try @import("local-secure.zig").stop(io, gpa, name, on, why);
+    if (named) {
+        if (!secured) {
+            if (on != .qemu) return why.refuse(
+                "stop NAME currently supports a local QEMU machine",
+                .{},
+            );
+            if (!try qemu.stop(io, gpa, try machineDir(gpa, name)))
+                return why.refuse("no machine {s} running under QEMU", .{name});
+        }
+        say(io, "{s}: stopped; its disk stays", .{name});
+        return;
+    }
+    if (!secured) try remove(io, gpa, name, on, why);
     const look: progress.Look = .of(io, Io.File.stderr());
     try Io.File.stderr().writeStreamingAll(
         io,
         try gpa.print(
             "{s} Stopped {s}, the machine howl run kept\n",
-            .{ look.check(), run_name },
+            .{ look.check(), name },
         ),
     );
 }

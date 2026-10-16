@@ -771,6 +771,7 @@ pub fn prepare(
         .{ "stdout", "/proc/self/fd/1" },
         .{ "stderr", "/proc/self/fd/2" },
         .{ "fd", "/proc/self/fd" },
+        .{ "log", "/run/syslog/dev-log" },
     }) |l| {
         const at = try gpa.print("dev/{s}", .{l[0]});
         root.deleteTree(io, at) catch {};

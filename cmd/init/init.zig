@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     // The config on disk comes first, since it may set the network; the
     // cloud's metadata needs the network.
     m.config();
+    m.developerUploads();
     phases.add("config", bootMs());
     // The import disk is not /data. Mount it before services, and always
     // leave the directory, so a service's read of it does not spin.
@@ -243,6 +244,31 @@ pub const Machine = struct {
     pub const data = phase_data.data;
     pub const importDisk = phase_data.importDisk;
     pub const oci = phase_oci.oci;
+
+    /// developerUploads makes the one writable executable directory a local
+    /// --dev machine needs for SCP test iteration.  Both the checked debug
+    /// command line and Howl's --dev config marker are required, so
+    /// a production image, a plain DEV=1 check image, or a forged config disk
+    /// alone cannot gain it.  The mount is RAM-only and disappears at reboot.
+    pub fn developerUploads(m: *Machine) void {
+        if (!m.cmd.debug or !exists("/run/config/dev")) return;
+        const path: [:0]const u8 = "/run/howl-dev";
+        mkdir(path, 0o755);
+        const options: [:0]const u8 = "size=64m,mode=0755";
+        const nosymfollow: u32 = 256; // Linux MS_NOSYMFOLLOW, absent from std.
+        const rc = linux.mount(
+            "howl-dev",
+            path,
+            "tmpfs",
+            linux.MS.NOSUID | linux.MS.NODEV | nosymfollow,
+            @intFromPtr(options.ptr),
+        );
+        if (linux.errno(rc) != .SUCCESS) {
+            say("developer uploads unavailable: {t}", .{linux.errno(rc)});
+            return;
+        }
+        say("developer uploads: {s} is executable RAM for SSH iteration", .{path});
+    }
 
     /// mount runs werewolf's mount with args. mount reports its own errors,
     /// and the boot goes on.

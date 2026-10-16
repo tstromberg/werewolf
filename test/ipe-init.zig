@@ -35,6 +35,7 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
     try verifiedMount(io, gpa, "/dev/vdb", "/other-verity", "other", "/other");
     // Executable tmpfs, deliberately. noexec must not explain a refusal.
     try mount("tmpfs", "/untrusted", "tmpfs", 0);
+    try mount("/untrusted", "/trusted/tmp", "none", linux.MS.BIND);
     try std.Io.Dir.cwd().copyFile(
         "/trusted/usr/lib/werewolf/ipe-probe",
         .cwd(),
@@ -63,25 +64,30 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
         "/trusted/usr/lib/werewolf/ipe-probe",
         &.{ "/trusted/usr/lib/werewolf/ipe-probe", "noop" },
         false,
+        null,
     );
-    try execResult("/untrusted/probe", &.{ "/untrusted/probe", "noop" }, true);
-    try execResult("/other/probe", &.{ "/other/probe", "noop" }, true);
+    try execResult("/untrusted/probe", &.{ "/untrusted/probe", "noop" }, true, null);
+    try execResult("/other/probe", &.{ "/other/probe", "noop" }, true, null);
     // The trusted loader must not map an ELF from the executable tmpfs.
+    // Use its normal library paths inside the trusted root: our glibc
+    // deliberately rejects --library-path, even for a trusted executable.
     const loader_path: [:0]const u8 = switch (@import("builtin").cpu.arch) {
-        .aarch64 => "/trusted/usr/lib/ld-linux-aarch64.so.1",
-        .x86_64 => "/trusted/usr/lib/ld-linux-x86-64.so.2",
+        .aarch64 => "/usr/lib/ld-linux-aarch64.so.1",
+        .x86_64 => "/usr/lib/ld-linux-x86-64.so.2",
         else => unreachable,
     };
     try execResult(
         loader_path,
-        &.{ loader_path, "--library-path", "/trusted/usr/lib", "/untrusted/busybox", "true" },
+        &.{ loader_path, "/tmp/busybox", "true" },
         true,
+        "/trusted",
     );
     // Also prove this loader works for the trusted copy with the same libs.
     try execResult(
         loader_path,
-        &.{ loader_path, "--library-path", "/trusted/usr/lib", "/trusted/usr/bin/busybox", "true" },
+        &.{ loader_path, "/usr/bin/busybox", "true" },
         false,
+        "/trusted",
     );
     try mapping(io, "/trusted/usr/lib/werewolf/ipe-probe", false);
     try mapping(io, "/untrusted/probe", true);
@@ -96,9 +102,10 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
         "/trusted/usr/lib/werewolf/ipe-probe",
         &.{ "/trusted/usr/lib/werewolf/ipe-probe", "admin" },
         false,
+        null,
     );
     // The restriction must survive fork and exec as well as the current PID.
-    try execResult("/untrusted/probe", &.{ "/untrusted/probe", "noop" }, true);
+    try execResult("/untrusted/probe", &.{ "/untrusted/probe", "noop" }, true, null);
     // kauditd emits asynchronously; give its queue time before poweroff.
     try io.sleep(.fromSeconds(1), .awake);
 }
@@ -131,13 +138,22 @@ fn verifiedMount(
     try mount(node, at, "erofs", linux.MS.RDONLY);
 }
 
-fn execResult(path: [:0]const u8, args: []const [:0]const u8, refused: bool) !void {
+fn execResult(
+    path: [:0]const u8,
+    args: []const [:0]const u8,
+    refused: bool,
+    root: ?[:0]const u8,
+) !void {
     var argv: [9:null]?[*:0]const u8 = @splat(null);
     for (args, 0..) |arg, i| argv[i] = arg;
     const env = [_:null]?[*:0]const u8{};
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) return error.Fork;
     if (pid == 0) {
+        if (root) |at| {
+            if (linux.errno(linux.chroot(at)) != .SUCCESS or
+                linux.errno(linux.chdir("/")) != .SUCCESS) linux.exit_group(98);
+        }
         const e = linux.errno(linux.execve(path, &argv, &env));
         linux.exit_group(if (refused and e == .ACCES) 42 else 99);
     }

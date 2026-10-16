@@ -25,5 +25,5 @@
 # release policy (boot-ipe-enforced), and no TPM counter guards the slot
 # serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-ipe-enforced
+dev network-no-login network-ssh-dev-security-keys programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-ipe-enforced
 * ?boot-secure-boot boot-rollback-protected boot-ipe-enforced

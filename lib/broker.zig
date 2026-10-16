@@ -139,7 +139,7 @@ pub fn espStatus() !EspStatus {
     return error.BadAnswer;
 }
 
-/// espCommit renames this boot's counting entry to its good name.
+/// espCommit keeps this boot's loader entry and publishes the committed marker.
 pub fn espCommit() !void {
     try callOk(.keeper, "esp-commit");
 }

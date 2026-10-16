@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and run declared shell-free integration clients; never alter production services."""
 import hashlib
+from importlib.machinery import SourceFileLoader
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,9 @@ import tarfile
 
 IDENT = re.compile(r'[a-z][a-z0-9-]*\Z')
 ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]*\Z')
+# Wait for the whole record before Expect prints its own result on this console.
+COMPLETION = r'werewolf-test: [^\r\n]*"event":"complete"[^\r\n]*\}\r*\n'
+console_clean = SourceFileLoader('werewolf_console', str(Path(__file__).with_name('cloud-console'))).load_module().clean
 
 
 def call(*args, **kw):
@@ -159,7 +163,7 @@ def validate(text, plan, context, only_driver=None):
         raise ValueError('unknown test driver: ' + str(only_driver))
     expected = {(d['name'], name) for d in selected for name in d['cases'][context['phase']]}
     expected_drivers = {d['name'] for d in selected}
-    for line in text.splitlines():
+    for line in console_clean(text.encode()).decode().splitlines():
         if 'werewolf-test: ' not in line:
             continue
         raw = line.split('werewolf-test: ', 1)[1]
@@ -199,7 +203,8 @@ def validate(text, plan, context, only_driver=None):
 def compare(form, arch):
     """Test dependencies may add files, but must not replace the runtime payload."""
     base = Path(os.environ.get('BUILD', 'build/' + arch))
-    before, after = base / form, base / ('native-test-' + form)
+    before = Path(os.environ.get('PRODUCTION_OUT', base / form))
+    after = Path(os.environ.get('TEST_OUT', base / ('native-test-' + form)))
     # Generated records legitimately identify a different form/root. Service
     # policies, binaries, account identities and machine-wide policy do not.
     for directory in ('etc/sv', 'etc/werewolf/allow'):
@@ -258,8 +263,8 @@ def compare(form, arch):
 def run(form, arch, qemu):
     plan = read_plan(form)
     output = Path(os.environ['OUT'])
-    inputs = dict(image=output / 'initramfs.zst',
-                  production_image=output.parent / form / 'initramfs.zst',
+    inputs = dict(kernel=Path(os.environ['KERNEL']), image=output / 'initramfs.zst',
+                  production_image=Path(os.environ.get('PRODUCTION_OUT', output.parent / form)) / 'initramfs.zst',
                   plan=Path('forms') / form / 'test/native.json')
     identity = {name: digest(path) for name, path in inputs.items()}
     check = Path(os.environ['CHECK'])
@@ -286,7 +291,7 @@ def run(form, arch, qemu):
             call(os.environ['HOWL'], 'pack', '--build', '--with', form, '--config', config, '-o', packed,
                  stdout=output, stderr=subprocess.STDOUT)
         console = work / 'console'
-        write(console, 'seen native-completed werewolf-test: .*"event":"complete"\n'
+        write(console, 'seen native-completed ' + COMPLETION + '\n'
                        'unseen native-failures werewolf-test: .*"status":"fail"\n')
         log = work / (phase + '.log')
         call('test/boot', form + '-native-' + phase, console, log, *qemu,

@@ -7,12 +7,16 @@
 base: prod
 
 packages:
-  - velociraptor
   - caddy
+
+# The pinned Melange recipe supplies Velociraptor; Wolfi does not ship it.
 
 # make check's (forms/README.md): the server's own beside Caddy.
 check:
   memory: 2048
+  # The public frontend speaks TLS, not the generic check's plaintext HTTP.
+  # vr-anon/vr-admin exercise the GUI; vr-frontend checks plaintext refusal.
+  skip: [http-answering]
 
 services:
   # Velociraptor, as its own user. velociraptor-setup generates the server

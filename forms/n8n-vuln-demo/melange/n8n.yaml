@@ -1,0 +1,41 @@
+package:
+  name: n8n
+  version: 1.120.0
+  epoch: 0
+  description: n8n workflow automation on hardened Node.js
+  copyright:
+    - license: LicenseRef-Sustainable-Use
+  dependencies:
+    runtime:
+      - nodejs-hardened
+      - libstdc++
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - build-base
+      - nodejs-26
+      - npm
+      - node-gyp
+      - python-3.15
+
+pipeline:
+  - runs: |
+      # Build native addons for the same Node major as the hardened runtime.
+      npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      (cd node_modules/sqlite3 && node-gyp rebuild --nodedir=/usr)
+      test -s node_modules/sqlite3/build/Release/node_sqlite3.node
+      node port-node.cjs
+      dest=${{targets.destdir}}/usr/lib/n8n
+      mkdir -p "$dest"
+      cp -a node_modules "$dest/"
+      cp package.json package-lock.json "$dest/"
+
+update:
+  enabled: false

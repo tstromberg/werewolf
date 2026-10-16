@@ -20,7 +20,7 @@ timeout, possibly mid-write.
   button (x86, and arm64 with ACPI), and a GPIO line (arm64 with a device
   tree: QEMU's `virt`, Apple's VZ), which werewolf's kernel turns into a
   key with its built-in `gpio-keys` driver.
-- Hold no privilege while waiting.
+- Parse input as an unprivileged user; confine the shutdown monitor.
 
 ## Non-Goals
 
@@ -35,15 +35,19 @@ runsv starts it as `/etc/sv/power-button/run`, with no arguments.
    the kernel queues events between reads.
 2. **Nothing to watch**: it logs why and runs `sv down .`, so runsv does not
    restart it.
-3. **Drop**: it logs what it watches, then calls `sandbox.keepOnly(0)`: no
-   capabilities, an empty bounding set, securebits locked. Powering off
-   needs only root's uid.
-4. **Wait**: it `poll`s every descriptor. An input event is 24 bytes; a
-   press is EV_KEY, KEY_POWER, value 1.
-5. **Press**: it logs where the press came from and execs
-   `/usr/bin/poweroff`, which tells runit to run stage 3 and power off.
-6. **Vanished device** (hang-up or error): it logs it, closes it, and leaves
-   it out of `poll`. If none is left, it parks as in step 2.
+3. **Separate**: fork `_power` (uid 71), chroot it to `/var/empty`, clear
+   capabilities, and install a syscall allowlist. Only this child reads events.
+4. **Wait**: the child polls the preopened descriptors. A press is EV_KEY,
+   KEY_POWER, value 1. It sends `P` on its private pipe, then exits. A closed
+   monitor end also wakes the reader, so it cannot outlive the monitor.
+5. **Poweroff**: the root parent has no capabilities and cannot open files,
+   execute programs or reboot directly. Its filter permits setting the two
+   preopened runit flags to their fixed modes and sending SIGCONT to PID 1.
+   Runit stops services and runs stage 3 before powering off.
+6. **Vanished devices**: the child closes each after draining it. When none
+   remains it sends `D`; the parent parks only its own service through the
+   control pipe opened before confinement. A broken or malformed pipe exits
+   with failure so runsv restarts both roles.
 
 ## Drawbacks
 
@@ -69,7 +73,8 @@ and keyboards report one anyway.
 
 | Risk | Mitigation |
 | --- | --- |
-| A long-lived root daemon | No capabilities after setup, empty bounding set, securebits locked; sealed and in fence's domain. |
+| A compromised event reader | Its own user, empty chroot, no capabilities and a syscall allowlist; only a fixed shutdown request reaches the monitor. |
+| A compromised monitor | No capabilities, opens or execs; its filter pins the flag descriptors, modes, PID and signal. |
 | Parsed input | Fixed-size kernel events. |
 | A forged press | Creating an input device (uinput) needs root and device ioctls, which fence refuses; root could power off anyway. |
 

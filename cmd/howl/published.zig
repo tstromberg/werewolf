@@ -31,6 +31,13 @@ var warned: std.array_hash_map.String(void) = .empty;
 const max_index = 64 << 20;
 const max_package = 16 << 20;
 
+/// hardenedIndex must be fetched even when other repositories resolved: a
+/// successful fallback to Wolfi does not make a hardened image valid.
+pub fn hardenedIndex(io: Io, gpa: Allocator, a: howl.Arch, why: *Why) ![]const u8 {
+    const url = try gpa.print("{s}/{t}/APKINDEX.tar.gz", .{ package.hardened_repository, a });
+    return get(io, gpa, url, max_index, why);
+}
+
 /// choose sets arch from a run's arguments: published unless --build is
 /// given, or, for make's _build, unless --published is not.
 pub fn choose(verb: []const u8, args: []const []const u8) void {

@@ -11,6 +11,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/immich/index.html).
 
 - The service runs as its own user, held to the files and ports its manifest names. The
   root is read-only. `/data` is what survives.
+- Its worker binds a kernel-assigned temporary port on loopback. It is not published
+  or forwarded; other services gain no permission to connect to it.
 
 ### Weaknesses
 

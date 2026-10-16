@@ -75,6 +75,8 @@ endif
 IPE ?=
 BUILD = build/$(ARCH)$(if $(IPE),/ipe)
 IPE_KERNEL ?= build/ipe-kernel/$(ARCH)/rootfs.tar
+# Test an unpublished kernel without enabling IPE (notably JIT forms).
+KERNEL_ROOTFS ?=
 WEREWOLF_IPE_CRT ?=
 WEREWOLF_IPE_KEY ?=
 # What a make-built image is made without, named as howl's --disable takes it
@@ -94,7 +96,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
-	check-lease check-dns check-static check-verity check-deadman check-metadata check-persist \
+	check-lease check-dns check-lan check-static check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
 
 all: image
@@ -110,6 +112,7 @@ install-precommit hooks:
 HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) --disable=$(DISABLE) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
+	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
 	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL))
 image slot: $(HOWL)
 	$(HOWL_BUILD) $@
@@ -266,7 +269,7 @@ $(TEST_SK): tools/test-sk.zig
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = test/native/iterate.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
@@ -275,7 +278,9 @@ test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/form-coverage: ; python3 test/form-coverage
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
-_test/release-signing: ; python3 test/release-signing; python3 test/native-firmware
+_test/release-signing:
+	python3 test/release-signing
+	python3 test/native-firmware
 _test/azure-security: ; python3 test/azure-security --test
 _test/provider-ab:
 	python3 test/ab_checks.py
@@ -323,7 +328,7 @@ check-tpm-bootstrap-guest: build/host/tpm-bootstrap build/host/tpm-policy build/
 		--unmeasured-stub out/tools/stubs/$(ARCH)/linux.efi.stub --recovery-cuts
 
 check-tpm-guest: $(HOWL) build/host/tpm-policy build/host/uki
-	python3 test/check-tpm-qemu $(HOWL) $(ARCH) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(BUILD)/check/tpm-guest
+	DEBUGFS=$(DEBUGFS) python3 test/check-tpm-qemu $(HOWL) $(ARCH) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(BUILD)/check/tpm-guest
 
 check-secure-lima: $(HOWL)
 	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-lima
@@ -347,6 +352,18 @@ _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
 _test/%.zig: ; zig test $*.zig
+
+SYSLOG_PROBE = $(BUILD)/syslog-init
+$(SYSLOG_PROBE): test/syslog-init.zig cmd/syslogd/policy.zig lib/seal.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep seal --dep log-policy \
+		-Mroot=$< -Mseal=lib/seal.zig -Mlog-policy=cmd/syslogd/policy.zig -femit-bin=$@
+.PHONY: check-syslog
+check-syslog: $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE) $(BUILD)/vmlinuz
+	python3 test/check-syslog --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
+		--daemon $(call program_bin,syslogd) --probe $(SYSLOG_PROBE) \
+		--leash $(call program_bin,leash) --work $(BUILD)/check/syslog
+
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
 	@python3 test/howl-test $(HOWL)
@@ -470,7 +487,8 @@ EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M 
 QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
-NATIVE_TEST_FORMS := $(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json))
+FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
+NATIVE_TEST_FORMS := $(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json)))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
@@ -513,8 +531,8 @@ APP_CHECK_FORMS := $(shell awk '!/^\043/ && NF { print $$1 }' test/app-fixtures)
 .PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
 check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
 $(foreach f,$(APP_CHECK_FORMS),$(eval check-$(f): check-app-$(f)))
-check-forms:     $(addprefix check-,$(call shard,$(FORMS))) _test/form-coverage
-check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
+check-forms:     $(addprefix check-,$(call shard,$(FORMS_FOR_ARCH))) _test/form-coverage
+check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS_FOR_ARCH)))
 # check-secureboot runs where firmware boots fast enough: an arm64 host
 # with its own accelerator. Emulated arm64 skips it, as it skips the UEFI
 # boots below.
@@ -552,16 +570,15 @@ check-image-updater: $(HOWL)
 IPE_UPDATE_SECUREBOOT ?= 1
 check-image-updater-uki: $(HOWL)
 	@[ "$(IPE)" = 1 ] || { echo "check-image-updater-uki: set IPE=1 and its kernel/key/certificate" >&2; exit 1; }
-	$(MAKE) --no-print-directory IPE= FORM=minimal slot
-	@$(CHECK_ENV) ARCH=$(ARCH) IPE_UPDATE_BOOT=efi IPE_UPDATE_SECUREBOOT=$(IPE_UPDATE_SECUREBOOT) BOOT_ROOTFS=build/$(ARCH)/boot/rootfs.tar \
+	@$(CHECK_ENV) ARCH=$(ARCH) IPE_UPDATE_BOOT=efi IPE_UPDATE_SECUREBOOT=$(IPE_UPDATE_SECUREBOOT) \
 		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
 		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
-check: check-forms check-shellfree check-integrity check-cloud check-persist
+check: check-forms check-shellfree check-integrity check-cloud check-persist check-syslog
 	@echo "check: every form, and a slot, passed"
 
-NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS))
+NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS_FOR_ARCH))
 .PHONY: $(addprefix check-native-,$(NATIVE_FORMS))
 check-native: $(addprefix check-native-,$(call shard,$(NATIVE_FORMS)))
 $(addprefix check-native-,$(NATIVE_FORMS)): check-native-%: | _check-shared
@@ -595,10 +612,12 @@ $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(H
 	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	python3 test/native-tests prepare $* $(ARCH)
 	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= image)
-	BUILD=$(BUILD) python3 test/native-tests compare $* $(ARCH)
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$*$(if $(IPE),-ipe) python3 test/native-tests compare $* $(ARCH)
 	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= NATIVE_FORM=$* _check-native-tests
 _check-native-tests:
-	@$(CHECK_ENV) python3 test/native-tests run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
+	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(NATIVE_FORM)$(if $(IPE),-ipe) \
+		python3 test/native-tests run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
 # Keep legacy checks until all their security assertions have native equivalents.
 $(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
@@ -659,6 +678,10 @@ $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $
 		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm -Mposture=cmd/posture/posture.zig -femit-bin=$@
 check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress
 	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
+	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
+
+check-lan: $(call program_bin,fence)
+	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
 
 # These boot what a form's check built; prod supplies DHCP, metadata and /data.
 check-lease check-nodata check-metadata: | _check-shared check-prod
@@ -714,9 +737,12 @@ UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
 	/opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd \
 	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd, \
 	/opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/local/share/qemu/edk2-x86_64-code.fd \
-	/usr/share/qemu/edk2-x86_64-code.fd /usr/share/ovmf/OVMF.fd)))
+	/usr/share/qemu/edk2-x86_64-code.fd /usr/share/ovmf/OVMF.fd \
+	/usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+	/usr/share/edk2/x64/OVMF_CODE.4m.fd)))
 UEFI_VARS = $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-i386-vars.fd /usr/local/share/qemu/edk2-i386-vars.fd \
-	/usr/share/qemu/edk2-i386-vars.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd))
+	/usr/share/qemu/edk2-i386-vars.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+	/usr/share/edk2/x64/OVMF_VARS.4m.fd))
 UEFI_VARS_COPY = $(CHECK)/ovmf-vars.fd
 UEFI_FLAGS = -boot menu=on,splash-time=0 $(if $(filter aarch64,$(ARCH)),-bios $(UEFI_FIRMWARE),\
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(UEFI_FIRMWARE) \

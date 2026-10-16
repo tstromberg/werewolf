@@ -6,6 +6,7 @@ import importlib.machinery
 import io
 import json
 import os
+import re
 from pathlib import Path
 import tarfile
 import tempfile
@@ -13,9 +14,69 @@ import unittest
 from unittest.mock import patch
 
 native = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests').load_module()
+iteration = importlib.machinery.SourceFileLoader('native_iteration', 'test/native-iterate').load_module()
+
+
+class IterationInputs(unittest.TestCase):
+    def test_reuses_driver_edits_but_refreshes_image_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generated = root / 'generated'
+            plan = root / 'forms/example/test/native.json'
+            driver = plan.with_name('driver.zig')
+            library = root / 'lib/sandbox.zig'
+            kernel = root / 'build/lock/kernel.lock.json'
+            for path in (plan, driver, library, kernel, generated / 'form.yaml'):
+                native.write(path, 'original')
+            with patch.object(iteration, 'ROOT', root), \
+                    patch.object(iteration, 'call', return_value=type('Dirs', (), {'stdout': 'forms/example\n'})()):
+                fingerprint = lambda: iteration.fingerprint('example', plan, generated)
+                original = fingerprint()
+                driver.write_text('updated test client')
+                self.assertEqual(original, fingerprint())
+                for path in (library, kernel, plan):
+                    path.write_text('updated image input')
+                    self.assertNotEqual(original, fingerprint(), str(path))
+                    path.write_text('original')
+                mode = library.stat().st_mode & 0o7777
+                library.chmod(mode ^ 0o100)
+                self.assertNotEqual(original, fingerprint())
+
+    def test_first_build_records_resolved_locks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / 'work'
+            machine = root / 'machine'
+            generated = root / 'generated'
+            lock = root / 'build/lock/kernel.lock.json'
+
+            def build(argv, **kwargs):
+                if argv[0] == 'howl':
+                    native.write(lock, 'resolved kernel')
+                return type('Dirs', (), {'stdout': ''})()
+
+            with patch.object(iteration, 'ROOT', root), \
+                    patch.object(iteration, 'call', side_effect=build), \
+                    patch.object(iteration, 'running', return_value=False), \
+                    patch.object(iteration, 'config_for', return_value=work / 'config'):
+                plan = root / 'forms/example/test/native.json'
+                before = iteration.fingerprint('example', plan, generated)
+                state = iteration.ensure('howl', 'example', 'aarch64', work,
+                                         generated, machine, before, False)
+                after = iteration.fingerprint('example', plan, generated)
+                self.assertNotEqual(before, after)
+                self.assertEqual(after, state['fingerprint'])
 
 
 class Protocol(unittest.TestCase):
+    def test_console_completion_waits_for_the_whole_record(self):
+        record = 'werewolf-test: {"event":"complete","run":"abc","phase":"seed","status":"pass"}'
+        for ending in ('\n', '\r\n', '\r\r\n'):
+            line = record + ending
+            for end in range(len(line)):
+                self.assertIsNone(re.search(native.COMPLETION, line[:end]))
+            self.assertIsNotNone(re.search(native.COMPLETION, line))
+
     def setUp(self):
         self.plan = native.read_plan('postgresql')
         self.context = dict(run='a' * 32, phase='seed')
@@ -32,6 +93,22 @@ class Protocol(unittest.TestCase):
 
     def test_complete(self):
         self.assertEqual(self.validate(self.records), 12)
+
+    def test_kernel_interleaving_inside_and_after_json(self):
+        lines = ['werewolf-test: ' + json.dumps(r) + '\r\n' for r in self.records]
+        for index in (0, len(lines) - 1):
+            for offset in (25, len(lines[index]) - 2):
+                with self.subTest(index=index, offset=offset):
+                    interrupted = list(lines)
+                    line = interrupted[index]
+                    interrupted[index] = line[:offset] + '[ 16.429304] audit: type=1302 denied\r\n' + line[offset:]
+                    self.assertEqual(native.validate(''.join(interrupted), self.plan, self.context), 12)
+
+    def test_non_kernel_trailing_data_still_fails(self):
+        lines = ['werewolf-test: ' + json.dumps(r) for r in self.records]
+        lines[0] += 'unexpected output'
+        with self.assertRaises(ValueError):
+            native.validate('\n'.join(lines), self.plan, self.context)
 
     def test_one_driver_iteration(self):
         name = 'test-postgres'
@@ -162,15 +239,24 @@ class Payload(unittest.TestCase):
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
 
-    def compare(self):
+    def compare(self, **env):
         plan = native.read_plan('postgresql')
-        with patch.dict(os.environ, BUILD=str(self.root)), contextlib.redirect_stdout(io.StringIO()), \
+        with patch.dict(os.environ, BUILD=str(self.root), **env), contextlib.redirect_stdout(io.StringIO()), \
                 patch.object(native, 'read_plan', return_value=plan):
             native.compare('base', 'aarch64')
 
     def test_client_addition(self):
         self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database', 'usr/bin/psql': b'client'})
         self.compare()
+
+    def test_explicit_ipe_variant_paths(self):
+        before, after = self.root / 'base-ipe', self.root / 'native-test-base-ipe'
+        self.base.rename(before)
+        self.test.rename(after)
+        self.compare(PRODUCTION_OUT=str(before), TEST_OUT=str(after))
+        (after / 'ro/etc/sv/postgres/service').write_text('weakened')
+        with self.assertRaisesRegex(ValueError, 'production etc/sv'):
+            self.compare(PRODUCTION_OUT=str(before), TEST_OUT=str(after))
 
     def test_replaced_runtime_or_overlay_refused(self):
         for archive, files in [('rootfs.tar', {'usr/bin/postgres': b'changed server'}),
@@ -228,14 +314,15 @@ class Payload(unittest.TestCase):
 
 
 class RunIdentity(unittest.TestCase):
-    def test_concurrent_image_or_plan_change_cannot_write_success_report(self):
+    def test_concurrent_input_change_cannot_write_success_report(self):
         plan = native.read_plan('postgresql')
-        for changed in ('image', 'production_image', 'plan'):
+        for changed in ('kernel', 'image', 'production_image', 'plan'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 images = root / 'build'
-                paths = dict(image=images / 'native-test-postgresql/initramfs.zst',
-                             production_image=images / 'postgresql/initramfs.zst',
+                paths = dict(kernel=images / 'vmlinuz',
+                             image=images / 'native-test-postgresql/initramfs.zst',
+                             production_image=images / 'postgresql-ipe/initramfs.zst',
                              plan=root / 'forms/postgresql/test/native.json')
                 for path in paths.values():
                     native.write(path, 'original')
@@ -250,8 +337,9 @@ class RunIdentity(unittest.TestCase):
                     with patch.object(native, 'read_plan', return_value=plan), \
                             patch.object(native, 'call', side_effect=boot), \
                             patch.dict(os.environ, OUT=str(paths['image'].parent),
+                                       PRODUCTION_OUT=str(paths['production_image'].parent),
                                        CHECK=str(root / 'check'), HOWL='howl',
-                                       KERNEL='kernel', CMDLINE='test'):
+                                       KERNEL=str(paths['kernel']), CMDLINE='test'):
                         with self.assertRaisesRegex(ValueError, 'inputs changed'):
                             native.run('postgresql', 'aarch64', [])
                     self.assertFalse((root / 'check/postgresql-native/results.json').exists())

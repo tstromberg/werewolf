@@ -2,11 +2,11 @@
 # low port's, from the configuration its first start wrote. Gravity may
 # still be fetching the list: the name checks wait.
 ok  ph-user          i=0; until p=$(head -n 1 /run/cgroup/svc/pi-hole/cgroup.procs 2>/dev/null) && [ -n "$p" ]; do i=$((i + 1)); [ $i -le 120 ] || { echo "pihole-FTL did not start"; exit 1; }; sleep 1; done; u=$(grep '^_oci-pi-hole:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  ph-resolves      i=0; until timeout 15 nslookup example.org 127.0.0.1 2>/dev/null | grep -A1 '^Name:' | grep -q 'Address: [1-9]'; do i=$((i + 1)); [ $i -le 4 ] || { echo "example.org unresolved"; echo "ftl:"; tail -20 /data/svc/pi-hole/var/log/pihole/FTL.log; exit 1; }; sleep 2; done
+ok  ph-resolves      i=0; until timeout 15 /usr/bin/nslookup example.org 127.0.0.1 2>/dev/null | grep -A1 '^Name:' | grep -q 'Address: [1-9]'; do i=$((i + 1)); [ $i -le 4 ] || { echo "example.org unresolved"; echo "ftl:"; tail -20 /data/svc/pi-hole/var/log/pihole/FTL.log; exit 1; }; sleep 2; done
 # Local networks only, and no DHCP server: both are forced, and the web
 # interface cannot change them.
 ok  ph-local         f=/data/svc/pi-hole/etc/pihole/pihole.toml; grep -q 'listeningMode = "LOCAL"' $f && grep -q 'active = false' $f || { echo "toml:"; ls -l /data/svc/pi-hole/etc/pihole 2>&1 | head; grep -n listeningMode $f 2>&1 | head; exit 1; }
-ok  ph-blocks        i=0; until timeout 15 nslookup ad.doubleclick.net 127.0.0.1 2>/dev/null | grep -q 'Address: 0\.0\.0\.0'; do i=$((i + 1)); [ $i -le 6 ] || { echo "ad.doubleclick.net not blocked"; timeout 15 nslookup ad.doubleclick.net 127.0.0.1; exit 1; }; sleep 1; done
+ok  ph-blocks        i=0; until timeout 15 /usr/bin/nslookup ad.doubleclick.net 127.0.0.1 2>/dev/null | grep -q 'Address: 0\.0\.0\.0'; do i=$((i + 1)); [ $i -le 6 ] || { echo "ad.doubleclick.net not blocked"; timeout 15 /usr/bin/nslookup ad.doubleclick.net 127.0.0.1; exit 1; }; sleep 1; done
 # The web interface is Caddy's to show, over HTTPS. The API takes the
 # config's password.
 ok  ph-login         i=0; until wget -q -T 5 --no-check-certificate -O /tmp/ph.auth --header 'Content-Type: application/json' --post-data '{"password":"werewolf-check-pihole"}' https://localhost/api/auth 2>/dev/null && grep -q '"valid":true' /tmp/ph.auth; do i=$((i + 1)); [ $i -le 15 ] || { echo "no login"; cat /tmp/ph.auth 2>/dev/null; exit 1; }; sleep 1; done

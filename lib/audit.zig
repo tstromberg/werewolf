@@ -83,6 +83,25 @@ pub const Error = error{
 /// enable turns audit on with one rule, which logs every refused exec, and
 /// locks the configuration until reboot. The kernel keeps its queue defaults.
 pub fn enable() Error!void {
+    try configure(false);
+}
+
+/// enableAllExec also records successful executions and their arguments.
+/// Only an image that explicitly requests this noisier policy uses it.
+pub fn enableAllExec() Error!void {
+    try configure(true);
+}
+
+fn execRule(all: bool) Rule {
+    var rule: Rule = .{ .flags = filter_exit };
+    rule.syscall(.execve);
+    rule.syscall(.execveat);
+    rule.field(field_arch, seal.native_arch);
+    if (!all) rule.field(field_success, 0);
+    return rule;
+}
+
+fn configure(all: bool) Error!void {
     const sock = try open();
     defer _ = linux.close(sock);
     const on: Status = .{
@@ -90,14 +109,10 @@ pub fn enable() Error!void {
         .enabled = 1,
     };
     try send(sock, msg_set, std.mem.asBytes(&on));
-    var refused_exec: Rule = .{ .flags = filter_exit };
-    refused_exec.syscall(.execve);
-    refused_exec.syscall(.execveat);
-    // Match native calls only; the seal kills 32-bit ones anyway.
-    refused_exec.field(field_arch, seal.native_arch);
-    refused_exec.field(field_success, 0);
+    const refused_exec = execRule(all);
     try send(sock, msg_add_rule, std.mem.asBytes(&refused_exec));
     for (left_out) |t| {
+        if (all and (t == 1309 or t == 1327)) continue;
         var out: Rule = .{ .flags = filter_exclude };
         out.field(field_msgtype, t);
         try send(sock, msg_add_rule, std.mem.asBytes(&out));
@@ -211,6 +226,16 @@ fn send(sock: i32, msg_type: u16, payload: []const u8) Error!void {
 }
 
 const testing = std.testing;
+
+test "demo audit includes successful execs and arguments" {
+    const refused = execRule(false);
+    const all = execRule(true);
+    try testing.expectEqual(2, refused.field_count);
+    try testing.expectEqual(field_success, refused.fields[1]);
+    try testing.expectEqual(1, all.field_count);
+    try testing.expectEqual(field_arch, all.fields[0]);
+    try testing.expectEqualSlices(u32, &refused.mask, &all.mask);
+}
 
 test Rule {
     try testing.expectEqual(1040, @sizeOf(Rule));

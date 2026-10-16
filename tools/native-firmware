@@ -90,6 +90,15 @@ def provision(arch, requirements, cache):
 
 
 if __name__ == '__main__':
+    # Xcode still supplies Python 3.9. The pinned enrollment dependencies
+    # need 3.10+, even when an older python3 appears first on PATH.
+    if sys.version_info < (3, 10):
+        for minor in range(14, 9, -1):
+            python = shutil.which('python3.' + str(minor))
+            if python:
+                os.execv(python, [python, *sys.argv])
+        print('howl: native firmware tools need Python 3.10+; run make install-deps', file=sys.stderr)
+        sys.exit(1)
     try:
         arch, requirements, report = sys.argv[1:]
         cache = os.environ.get('WEREWOLF_FIRMWARE_CACHE', 'build/secure-cache/firmware')

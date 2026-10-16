@@ -7,18 +7,16 @@ process descends from it; root cannot loosen the policy before a reboot.
 
 ## Background
 
-A machine should send only what its form declares and receive only what it
-serves or asked for, with no firewall to configure. init's last step is
-`exec fence runit`. Before that, init installs the seal and starts the
-programs that stay outside fence's domain: the mount broker, DHCP's renewal
-(which keeps its CAP_NET_ADMIN and packet socket) and stage0's deadman.
+init installs the seal, starts the mount broker, DHCP renewal and stage0's
+deadman outside fence's domain, then execs `fence runit`. DHCP keeps its
+CAP_NET_ADMIN and packet socket; services inherit fence's restrictions.
 fence reads `/usr/share/werewolf/net`, compiled from form.yaml's `net`, and
 the detected resolvers: one entry per line, numbers only, `all` for every user.
     listen tcp 22
     listen tcp 5432 loopback
-    connect 0 tcp 443
-    dns 69
     connect 207 tcp 443 public
+    listen 207 udp 5353 lan
+    connect 207 udp 5353 lan
     metadata 68
 
 ## Goals
@@ -34,25 +32,25 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
 
 ## Detailed design
 
-1. **Policy-routing rules** for IPv4, and for IPv6 if the kernel has it
-   (werewolf's kernel is built without it). Sent
-   traffic passes only if its user declared the protocol and port
-   (`connect`), as a reply from a served port (`listen`), as ICMPv6, or to
-   the metadata server's TCP 80 for a user named in `metadata`. Anything
-   else fails with EACCES. `dns UID` permits UDP and TCP 53 only to the
-   detected IPv4 resolvers, including GCP's metadata address; replies must
-   come from those addresses to ephemeral ports. DHCP renewals revoke old
-   DNS rules before granting new ones ([dns.md](../../docs/design/dns.md)).
-   A `public` connect refuses private, loopback, link-local, shared,
-   multicast and reserved addresses, blocking the local network and
-   metadata server from URL fetchers. Azure's wire server is closed to all.
-   Arrivals pass to served ports, from connected ports, or as ICMP. Denied
-   TCP, UDP, other transports, tunnels and IPsec get no reply; other
-   protocols get "unreachable". Local and loopback traffic always pass.
-   Private TCP ports drop arrivals before reply allowances, even if a
-   daemon binds all interfaces; local traffic reaches them first.
-   Allowed traffic with no route fails as "network unreachable", not
-   EACCES, so clients try the next address.
+1. **Policy-routing rules** for IPv4, and for IPv6 if the kernel has it (werewolf's
+   kernel is built without it). Sent traffic passes only if its user declared the
+   protocol and port (`connect`), as a reply from a served port (`listen`), as ICMPv6,
+   or to the metadata server's TCP 80 for a user named in `metadata`. Anything else
+   fails with EACCES. `dns UID` permits UDP and TCP 53 only to the detected IPv4
+   resolvers, including GCP's metadata address; replies must come from those addresses
+   to ephemeral ports. DHCP renewals revoke old DNS rules before granting new ones
+   ([dns.md](../../docs/design/dns.md)). A `public` connect refuses private, loopback,
+   link-local, shared, multicast and reserved addresses, blocking the local network and
+   metadata server from URL fetchers. Azure's wire server is closed to all. Arrivals
+   pass to served ports, from connected ports, or as ICMP. Denied TCP, UDP, other
+   transports, tunnels and IPsec get no reply; other protocols get "unreachable". Local
+   and loopback traffic always pass. Private TCP ports drop arrivals before reply
+   allowances, even if a daemon binds all interfaces; local traffic reaches them first.
+   Allowed traffic with no route fails as "network unreachable", not EACCES, so clients
+   try the next address. UDP `lan` restricts unicast to connected subnets detected at
+   boot, plus mDNS/SSDP groups on 5353/1900 and SSDP limited broadcast. Off-subnet
+   unicast drops before reply allowances. Changing the address plan needs a reboot; no
+   subnet means no incoming unicast grant. See [fence.md](../../docs/design/fence.md).
 2. **Landlock**, for every process: TCP binds only to the policy's ports
    or 0, and connects only to declared, served, loopback and metadata
    ports. Files are readable anywhere but `/dev`; programs run only from
@@ -60,10 +58,8 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    `/dev/shm`, `/data` and binds under image roots; sockets and FIFOs only
    in `/run`, those roots' `/run` and `/tmp`, and declared writable shared
    directories on both sides of their binds. Read-only shares get no write
-   grant. `/dev` is closed, even to
-   reads, but for null, zero, full, random, urandom, kmsg, terminals, input
-   devices and ptys if allowed. No process may mount.
-   Every refusal is audited, after exec too.
+   grant. `/dev` allows only null, zero, full, random, urandom, kmsg, terminals,
+   input devices and permitted ptys. No process may mount. Refusals are audited.
 3. **The bounding set** loses CAP_NET_ADMIN and CAP_NET_RAW, unless a form
    allows them (`lib/allow.zig`: `netadmin`, `packet`; none does), and
    always CAP_SYS_ADMIN, which only Landlock needed. Root then cannot

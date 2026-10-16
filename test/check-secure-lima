@@ -238,9 +238,11 @@ try:
             raise
     ssh('/usr/lib/werewolf/slot-update try', 'rollback-B', check=False, timeout=30)
     b2 = wait_boot('B', c['boot_id'], c['tpm_anchor'])
-    # A rerun of create restarts QEMU but leaves a running Lima VM alone.
+    # An unchanged create keeps a running machine. Request the restart explicitly.
     if provider == 'lima':
         run(['limactl', 'stop', '--force', name], 'stop')
+    else:
+        ssh('/usr/bin/reboot', 'restart-request', check=False, timeout=30)
     run(create, 'restart')
     b3 = wait_boot('B', b2['boot_id'], b2['tpm_anchor'])
     d = update('D', b3)

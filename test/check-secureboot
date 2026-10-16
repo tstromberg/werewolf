@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Verify the released signed disk, its enrollment, and firmware rejection."""
+"""Verify a native signed disk, its enrollment, and firmware rejection."""
 import hashlib
 import errno
-import json
 import os
 import pathlib
 import pty
@@ -14,6 +13,7 @@ import sys
 import time
 
 from ab_checks import console_posture_failures, require_native_initrd
+import ab_build
 
 env = os.environ
 arch = env['ARCH']
@@ -30,13 +30,16 @@ def command(args, label):
 
 
 release = work / 'release'
-command([howl, 'build', '--build', '--with', 'prod', '--arch', arch, '-o', str(release),
-         '--boot-key', key, '--boot-cert', cert, '--boot-native'], 'build')
-manifest = json.loads((release / f'prod-{arch}.json').read_text())
+build = work / 'build'
+build_args = [howl, '_build', '--with', 'prod', '--arch', arch, '--build', str(build),
+              '--disable=ipe,tpm', '--boot-key', key, '--boot-cert', cert, '--boot-native']
+if env.get('KERNEL_ROOTFS'):
+    build_args += ['--kernel-rootfs', env['KERNEL_ROOTFS']]
+command(build_args + ['qcow2'], 'build')
+ab_build.export(build / 'prod', 'prod', arch, release)
 uki = release / f'prod-{arch}-uki'
 require_native_initrd(uki.read_bytes(), (release / f'prod-{arch}-stage0.zst').read_bytes())
-assert manifest['files']['uki']['sha256'] == hashlib.sha256(uki.read_bytes()).hexdigest()
-assert manifest['files']['boot.crt']['sha256'] == hashlib.sha256(pathlib.Path(cert).read_bytes()).hexdigest()
+uki_hash = hashlib.sha256(uki.read_bytes()).digest()
 disk = release / f'prod-{arch}-disk.qcow2'
 command(['sh', 'tools/verify-boot-disk', arch, str(disk), cert, str(work)], 'verify-disk')
 enrolled = work / 'enrolled'
@@ -46,7 +49,7 @@ command(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw', str(disk), str(raw)]
 installed = work / 'installed.efi'
 installed.unlink(missing_ok=True)
 command(['mcopy', '-i', str(raw) + '@@1048576', '::/werewolf/a/uki.efi', str(installed)], 'extract')
-assert hashlib.sha256(installed.read_bytes()).hexdigest() == manifest['files']['uki']['sha256']
+assert hashlib.sha256(installed.read_bytes()).digest() == uki_hash
 
 qemu = sys.argv[1:]
 qemu[qemu.index('-M') + 1] = 'virt' if arch == 'aarch64' else 'q35,smm=on'
@@ -97,8 +100,9 @@ def boot(label, refused=False):
                 else:
                     failures = console_posture_failures(seen)
                     if failures is not None:
-                        expected = {x.lstrip('?') for x in env['POSTURE_KNOWN'].split()}
-                        required = {x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')}
+                        # This fixture explicitly tests Secure Boot without IPE or TPM.
+                        expected = {'boot-ipe-enforced', 'boot-rollback-protected'}
+                        required = expected
                         assert failures <= expected and required <= failures, failures
                         assert b'Secure Boot enforced outside setup mode' in seen
                         assert b'native UKI selected slot a' in seen
@@ -124,4 +128,4 @@ changed = work / 'tampered.efi'
 changed.write_bytes(data)
 command(['mcopy', '-o', '-i', str(raw) + '@@1048576', str(changed), '::/werewolf/a/uki.efi'], 'tamper')
 boot('refused', True)
-print('pass   secureboot: released disk and manifest agree; enrolled native boot passes posture; tampered UKI refused')
+print('pass   secureboot: native disk contains the signed UKI; enrolled boot passes posture; tampered UKI refused')

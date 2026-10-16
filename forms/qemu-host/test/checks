@@ -5,5 +5,6 @@ ok  qemu-snapshot qemu-img snapshot -c integration /data/qemu-check/copied.qcow2
 ok  qemu-resize qemu-img resize /data/qemu-check/copied.qcow2 2M && qemu-img info --output=json /data/qemu-check/copied.qcow2 | grep -q '"virtual-size": 2097152' && qemu-img compare /data/qemu-check/source.raw /data/qemu-check/copied.qcow2
 ok  qemu-corrupt printf 'not-a-qcow2' >/data/qemu-check/corrupt.qcow2; e=$(qemu-img check -f qcow2 /data/qemu-check/corrupt.qcow2 2>&1); r=$?; [ $r -ne 0 ] && echo "$e" | grep -qi 'not in qcow2 format'
 # KVM permission does not relax Memory-Deny-Write-Execute. The TCG JIT
-# must fail at its executable buffer, rather than silently enabling JIT.
-ok  qemu-no-jit case $(uname -m) in aarch64) q=qemu-system-aarch64; m=virt; c=cortex-a57 ;; x86_64) q=qemu-system-x86_64; m=q35; c=qemu64 ;; *) exit 1 ;; esac; e=$(timeout 15 $q -machine $m -cpu $c -accel tcg -m 64 -nodefaults -no-user-config -display none -monitor none -S 2>&1); r=$?; [ $r -ne 0 ] && [ $r -ne 124 ] && echo "$e" | grep -q 'mprotect of jit buffer: Permission denied'
+# must fail at its executable buffer when a CPU starts, rather than
+# silently enabling JIT. A paused CPU (-S) need not allocate that buffer.
+ok  qemu-no-jit case $(uname -m) in aarch64) q=/usr/bin/qemu-system-aarch64; m=virt; c=cortex-a57 ;; x86_64) q=/usr/bin/qemu-system-x86_64; m=q35; c=qemu64 ;; *) exit 1 ;; esac; e=$(timeout 15 $q -machine $m -cpu $c -accel tcg -m 64 -nodefaults -no-user-config -display none -monitor none 2>&1); r=$?; { [ $r -ne 0 ] && [ $r -ne 124 ] && echo "$e" | grep -Eq 'mprotect of jit buffer: Permission denied|qemu_mprotect__osdep: mprotect failed: Permission denied'; } || { printf 'QEMU exit %s: %s\n' "$r" "$e"; exit 1; }

@@ -55,6 +55,7 @@ const pref = struct {
     const metadata_allow: u32 = 100;
     const metadata_refuse: u32 = 101;
     const out_allow: u32 = 200;
+    const out_lan_refuse: u32 = 280;
     const in_private: u32 = 290;
     const out_refuse: u32 = 299;
     const in_allow: u32 = 300;
@@ -69,7 +70,8 @@ pub fn main(init: std.process.Init) !void {
         log.event("error", .{ .@"error" = "usage: fence PROGRAM [ARG...]" });
         linux.exit_group(2);
     }
-    const p = apply() catch |err| fail(&log, err);
+    var lan: Lan = .{};
+    const p = apply(&lan) catch |err| fail(&log, err);
     step = "capabilities";
     var kept_buf: [caps.len][]const u8 = undefined;
     const kept = dropCaps(&kept_buf) catch |err| fail(&log, err);
@@ -81,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
             .listen = p.listen[0..p.nlisten],
             .loopback = p.loopback[0..p.nloopback],
             .udp = p.udp[0..p.nudp],
+            .lan_subnets = p.lan.len,
             .connect = p.connectText(&out, &text),
             .dns = p.dns.ids[0..p.dns.len],
             .metadata = p.metadata[0..p.nmetadata],
@@ -154,10 +157,19 @@ fn dropCaps(kept: *[caps.len][]const u8) ![]const []const u8 {
     return kept[0..n];
 }
 
-fn apply() !Policy {
+fn apply(lan: *Lan) !Policy {
     step = "policy";
     var buf: [4096]u8 = undefined;
-    const p = try parsePolicy(try readPolicy(&buf));
+    var p = try parsePolicy(try readPolicy(&buf));
+    // The address plan is fixed for this boot. DHCP rejects a changed plan;
+    // a missing lease leaves LAN grants closed until the next boot.
+    if (p.needsLan()) {
+        step = "LAN subnets";
+        var routes: [32768]u8 = undefined;
+        try lan.routes4(try readOptional("/proc/net/route", &routes));
+        try lan.addresses6(try readOptional("/proc/net/if_inet6", &routes));
+        p.lan = lan.prefixes[0..lan.len];
+    }
     step = "dns";
     var resolv: [1024]u8 = undefined;
     var socket = try dns.Socket.open();
@@ -185,7 +197,7 @@ const Proto = net_rule.Proto;
 /// dropped lists the protocols whose arriving packets are dropped unanswered.
 const dropped = [_]Proto{ .tcp, .udp, .udplite, .sctp, .dccp, .ipip, .ipv6, .gre, .esp, .ah };
 
-const Udp = struct { port: u16, uid: u32 };
+const Udp = struct { port: u16, uid: u32, lan: bool = false };
 
 const Connect = struct {
     /// uid is null for every user.
@@ -202,10 +214,84 @@ const Connect = struct {
     /// strangers name (a fediverse server's previews), so a forged request
     /// cannot reach the local network or the cloud's metadata server.
     public: bool = false,
+    lan: bool = false,
 };
 
 /// Prefix is an address and its prefix length, for the ranges `public` refuses.
 const Prefix = struct { addr: []const u8, len: u8 };
+
+const max_lan = 16;
+/// LAN means directly connected subnets, including public-address LANs;
+/// never the default route or all of RFC 1918. Storage outlives plan's rules.
+const Lan = struct {
+    addresses: [max_lan][16]u8 = undefined,
+    prefixes: [max_lan]Prefix = undefined,
+    len: usize = 0,
+
+    fn add(l: *Lan, addr: []const u8, bits: u8) !void {
+        if (bits == 0 or bits > addr.len * 8) return error.BadLan;
+        var normalized: [16]u8 = @splat(0);
+        for (addr, 0..) |byte, i| {
+            const left = @min(8, bits -| (i * 8));
+            normalized[i] = if (left == 0) 0 else byte & (@as(u8, 255) << @intCast(8 - left));
+        }
+        for (l.prefixes[0..l.len]) |p| if (p.len == bits and
+            std.mem.eql(u8, p.addr, normalized[0..addr.len])) return;
+        if (l.len == max_lan) return error.TooManyLanSubnets;
+        l.addresses[l.len] = normalized;
+        l.prefixes[l.len] = .{ .addr = l.addresses[l.len][0..addr.len], .len = bits };
+        l.len += 1;
+    }
+
+    fn routes4(l: *Lan, text: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeAny(u8, line, " \t");
+            const nic = words.next() orelse continue;
+            if (std.mem.eql(u8, nic, "Iface") or std.mem.eql(u8, nic, "lo")) continue;
+            const dest = try std.fmt.parseInt(u32, words.next() orelse return error.BadLan, 16);
+            const gateway = try std.fmt.parseInt(u32, words.next() orelse return error.BadLan, 16);
+            const flags = try std.fmt.parseInt(u32, words.next() orelse return error.BadLan, 16);
+            for (0..3) |_| _ = words.next() orelse return error.BadLan;
+            const mask = try std.fmt.parseInt(u32, words.next() orelse return error.BadLan, 16);
+            if (gateway != 0 or flags & 3 != 1 or mask == 0) continue;
+            var addr: [4]u8 = undefined;
+            std.mem.writeInt(u32, &addr, dest, .little);
+            if (addr[0] == 0 or addr[0] == 127 or addr[0] >= 224) continue;
+            try l.add(&addr, @intCast(@popCount(mask)));
+        }
+    }
+
+    fn addresses6(l: *Lan, text: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeAny(u8, line, " \t");
+            const hex = words.next() orelse continue;
+            _ = words.next() orelse return error.BadLan; // interface index
+            const bits = try std.fmt.parseInt(u8, words.next() orelse return error.BadLan, 16);
+            _ = words.next() orelse return error.BadLan; // scope
+            const flags = try std.fmt.parseInt(u32, words.next() orelse return error.BadLan, 16);
+            const nic = words.next() orelse return error.BadLan;
+            if (std.mem.eql(u8, nic, "lo") or flags & 0x48 != 0) continue; // tentative/DAD failed
+            var addr: [16]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&addr, hex);
+            if (hex.len != 32 or addr[0] == 255) return error.BadLan;
+            try l.add(&addr, bits);
+        }
+    }
+};
+
+/// Discovery's standard groups are the only multicast destinations a LAN
+/// port adds. Unicast queries/replies stay within the connected subnets.
+const mdns6 = v6(&.{ 0xff, 0x02 }, 0xfb);
+const ssdp6 = v6(&.{ 0xff, 0x02 }, 0x0c);
+fn discoveryGroup(family: u8, port_number: u16) ?[]const u8 {
+    return switch (port_number) {
+        5353 => if (family == linux.AF.INET) &.{ 224, 0, 0, 251 } else &mdns6,
+        1900 => if (family == linux.AF.INET) &.{ 239, 255, 255, 250 } else &ssdp6,
+        else => null,
+    };
+}
 const non_public4 = [_]Prefix{
     .{ .addr = &.{ 0, 0, 0, 0 }, .len = 8 }, // "this" network
     .{ .addr = &.{ 10, 0, 0, 0 }, .len = 8 }, // private
@@ -258,6 +344,13 @@ const Policy = struct {
     metadata: [max_entries]u32 = undefined,
     nmetadata: usize = 0,
     dns: dns.Users = .{},
+    lan: []const Prefix = &.{},
+
+    fn needsLan(p: Policy) bool {
+        for (p.udp[0..p.nudp]) |u| if (u.lan) return true;
+        for (p.connect[0..p.nconnect]) |c| if (c.lan) return true;
+        return false;
+    }
 
     /// connectText formats the connect entries for the log: "0 tcp 443".
     fn connectText(p: *const Policy, out: *[max_entries][]const u8, buf: []u8) []const []const u8 {
@@ -274,15 +367,16 @@ const Policy = struct {
             else if (c.proto != .icmp)
                 w.print(" {d}", .{c.port}) catch return out[0..i];
             if (c.public) w.writeAll(" public") catch return out[0..i];
+            if (c.lan) w.writeAll(" lan") catch return out[0..i];
             out[i] = buf[start..w.end];
         }
         return out[0..p.nconnect];
     }
 };
 
-/// parsePolicy parses `listen tcp PORT [loopback]`, `listen UID udp PORT`,
-/// `connect UID|all PROTO [PORT] [public]` and `metadata UID` lines. The build wrote the file, so
-/// anything else is BadPolicy rather than a guess.
+/// parsePolicy parses `listen tcp PORT [loopback]`, `listen UID udp PORT [lan]`,
+/// `connect UID|all PROTO [PORT] [public|lan]` and `metadata UID` lines.
+/// Only a named user's UDP accepts lan. Anything else is BadPolicy.
 fn parsePolicy(text: []const u8) !Policy {
     var p: Policy = .{};
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -297,6 +391,10 @@ fn parsePolicy(text: []const u8) !Policy {
                 if (!std.mem.eql(u8, words.next() orelse "", "udp")) return error.BadPolicy;
                 if (p.nudp == max_entries) return error.BadPolicy;
                 p.udp[p.nudp] = .{ .port = try port(words.next()), .uid = uid };
+                if (std.mem.eql(u8, words.peek() orelse "", "lan")) {
+                    _ = words.next();
+                    p.udp[p.nudp].lan = true;
+                }
                 p.nudp += 1;
                 if (words.next() != null) return error.BadPolicy;
                 continue;
@@ -343,6 +441,12 @@ fn parsePolicy(text: []const u8) !Policy {
                 p.connect[p.nconnect].public = true;
                 _ = words.next();
             }
+            if (std.mem.eql(u8, words.peek() orelse "", "lan")) {
+                if (proto != .udp or uid == null or p.connect[p.nconnect].public)
+                    return error.BadPolicy;
+                p.connect[p.nconnect].lan = true;
+                _ = words.next();
+            }
             p.nconnect += 1;
         } else if (std.mem.eql(u8, key, "dns")) {
             try p.dns.add(try user(words.next() orelse ""));
@@ -382,7 +486,7 @@ const Rule = net_rule.Rule;
 /// connect, metadata and private ports make at most 3 + 3 + 3 + 2 + 1
 /// rules, and a public connect one more per non-public prefix; the rest are fixed.
 const max_rules = 16 + wire_server_ports.len + dropped.len +
-    (15 + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
+    (32 + 6 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
 ///
@@ -432,6 +536,34 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
                 list.out[list.n] = x;
                 list.n += 1;
             }
+        }
+
+        fn onLan(list: *@This(), r: Rule, prefixes: []const Prefix, port_number: u16) void {
+            for (prefixes) |prefix| {
+                if (prefix.addr.len != (if (list.family == linux.AF.INET) @as(usize, 4) else 16))
+                    continue;
+                var x = r;
+                if (r.from_here) {
+                    x.dst = prefix.addr;
+                    x.dst_len = prefix.len;
+                } else {
+                    x.src = prefix.addr;
+                    x.src_len = prefix.len;
+                }
+                list.add(x);
+            }
+            if (r.from_here) if (discoveryGroup(list.family, port_number)) |group| {
+                var x = r;
+                x.dst = group;
+                x.dport = port_number;
+                list.add(x);
+                // SSDP's Sonos fallback sends the same search by limited
+                // broadcast. It stays on the attached network too.
+                if (list.family == linux.AF.INET and port_number == 1900) {
+                    x.dst = &.{ 255, 255, 255, 255 };
+                    list.add(x);
+                }
+            };
         }
     } = .{ .out = out, .family = family };
     const non_public: []const Prefix = if (family == linux.AF.INET6) &non_public6 else &non_public4;
@@ -515,15 +647,18 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .dport = port_number,
     });
-    for (p.connect[0..p.nconnect]) |c| rules.add(.{
-        .priority = pref.out_allow,
-        .action = FR_ACT_TO_TBL,
-        .table = RT_TABLE_MAIN,
-        .from_here = true,
-        .proto = c.proto,
-        .dport = if (c.proto == .icmp or c.any) null else c.port,
-        .uid = c.uid,
-    });
+    for (p.connect[0..p.nconnect]) |c| {
+        const r: Rule = .{
+            .priority = pref.out_allow,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_MAIN,
+            .from_here = true,
+            .proto = c.proto,
+            .dport = if (c.proto == .icmp or c.any) null else c.port,
+            .uid = c.uid,
+        };
+        if (c.lan) rules.onLan(r, p.lan, c.port) else rules.add(r);
+    }
     for (p.listen[0..p.nlisten]) |l| rules.add(.{
         .priority = pref.out_allow,
         .action = FR_ACT_TO_TBL,
@@ -534,21 +669,33 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     });
     // Landlock holds a TCP port's bind; nothing holds a UDP one's, so only
     // its user's datagrams leave from it, and a squatter cannot answer.
-    for (p.udp[0..p.nudp]) |u| rules.add(.{
-        .priority = pref.out_allow,
-        .action = FR_ACT_TO_TBL,
-        .table = RT_TABLE_MAIN,
-        .from_here = true,
-        .proto = .udp,
-        .sport = u.port,
-        .uid = u.uid,
-    });
+    for (p.udp[0..p.nudp]) |u| {
+        const r: Rule = .{
+            .priority = pref.out_allow,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_MAIN,
+            .from_here = true,
+            .proto = .udp,
+            .sport = u.port,
+            .uid = u.uid,
+        };
+        if (u.lan) rules.onLan(r, p.lan, u.port) else rules.add(r);
+    }
     if (family == linux.AF.INET6) rules.add(.{
         .priority = pref.out_allow,
         .action = FR_ACT_TO_TBL,
         .table = RT_TABLE_MAIN,
         .from_here = true,
         .proto = .icmp,
+    });
+    // Incoming LAN grants below must never act as outgoing grants to an
+    // undeclared user. Refuse those destinations before matching arrivals.
+    for (p.udp[0..p.nudp]) |u| if (u.lan) rules.add(.{
+        .priority = pref.out_lan_refuse,
+        .action = FR_ACT_PROHIBIT,
+        .from_here = true,
+        .proto = .udp,
+        .dport = u.port,
     });
     // A forged reply source port must not expose a private listener that
     // binds all interfaces. Local traffic has already matched local_out.
@@ -558,6 +705,23 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .dport = port_number,
     });
+    // Drop off-LAN traffic before any broad source-port reply allowance.
+    // A forged packet from 53/443 must not expose a discovery listener.
+    for (p.udp[0..p.nudp]) |u| if (u.lan) {
+        rules.onLan(.{
+            .priority = pref.in_private,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_LOCAL,
+            .proto = .udp,
+            .dport = u.port,
+        }, p.lan, u.port);
+        rules.add(.{
+            .priority = pref.in_private,
+            .action = FR_ACT_BLACKHOLE,
+            .proto = .udp,
+            .dport = u.port,
+        });
+    };
     rules.add(.{ .priority = pref.out_refuse, .action = FR_ACT_PROHIBIT, .from_here = true });
 
     for (p.listen[0..p.nlisten]) |l| rules.add(.{
@@ -567,7 +731,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .dport = l,
     });
-    for (p.udp[0..p.nudp]) |u| rules.add(.{
+    for (p.udp[0..p.nudp]) |u| if (!u.lan) rules.add(.{
         .priority = pref.in_allow,
         .action = FR_ACT_TO_TBL,
         .table = RT_TABLE_LOCAL,
@@ -582,9 +746,9 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     for (p.connect[0..p.nconnect], 0..) |c, i| {
         if (c.proto == .icmp or c.any) continue;
         const seen = for (p.connect[0..i]) |d| {
-            if (d.proto == c.proto and d.port == c.port) break true;
+            if (d.proto == c.proto and d.port == c.port and (!d.lan or c.lan)) break true;
         } else false;
-        if (!seen) rules.add(.{
+        const r: Rule = .{
             .priority = pref.in_allow,
             .action = FR_ACT_TO_TBL,
             .table = RT_TABLE_LOCAL,
@@ -592,7 +756,10 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .sport = c.port,
             .dport = if (c.proto == .tcp) ephemeral_lo else 1024,
             .dport_last = if (c.proto == .tcp) ephemeral_hi else 65534,
-        });
+        };
+        if (!seen) {
+            if (c.lan) rules.onLan(r, p.lan, c.port) else rules.add(r);
+        }
     }
     // Replies to a connection opened to an arbitrary port. Matching every
     // source port would deliver new connections to every local port.
@@ -740,6 +907,16 @@ fn restrict(p: Policy) !void {
     if (p.dns.len > 0) try ruleset.port(sandbox.connect_tcp, 53);
     if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
+    // init creates this executable tmpfs only for a checked --dev boot with
+    // Howl's dev marker. The machine-wide domain must admit its programs;
+    // the selected test's nested leash still narrows them to its own policy.
+    if (linux.errno(linux.access("/run/howl-dev", linux.F_OK)) == .SUCCESS)
+        try allowPath(
+            ruleset,
+            linux.AT.FDCWD,
+            "/run/howl-dev",
+            sandbox.execute | sandbox.read_file,
+        );
     // Root's posture/updater use the resource manager on TPM-gated boots.
     // Service domains still narrow their device access independently.
     if (linux.errno(linux.access("/run/werewolf/rollback-checked", linux.F_OK)) == .SUCCESS and
@@ -1086,9 +1263,166 @@ test "policies" {
         "connect 0 tcp 443 private\n",
         "connect 0 tcp 443 public public\n",
         "connect 0 icmp public\n",
+        "listen tcp 5353 lan\n",
+        "connect all udp 5353 lan\n",
+        "connect 0 tcp 5353 lan\n",
+        "connect 0 udp 5353 public lan\n",
     }) |bad| {
         try std.testing.expectError(error.BadPolicy, parsePolicy(bad));
     }
+}
+
+test "LAN subnets exclude default routes, gateways and loopback" {
+    var lan: Lan = .{};
+    try lan.routes4(
+        "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n" ++
+            "eth0 00000000 01014D0A 0003 0 0 0 00000000 0 0 0\n" ++
+            "eth0 00014D0A 00000000 0001 0 0 0 00FFFFFF 0 0 0\n" ++
+            "eth0 00000A0A 01014D0A 0003 0 0 0 0000FFFF 0 0 0\n" ++
+            "lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0\n",
+    );
+    try lan.addresses6(
+        "20010db8007700000000000000000001 02 40 00 80 eth0\n" ++
+            "fe800000000000000000000000000001 02 40 20 80 eth0\n" ++
+            "00000000000000000000000000000001 01 80 10 80 lo\n" ++
+            "fd000000000000000000000000000001 02 40 00 40 eth0\n",
+    );
+    try std.testing.expectEqual(3, lan.len);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 77, 1, 0 }, lan.prefixes[0].addr);
+    try std.testing.expectEqual(24, lan.prefixes[0].len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &v6(&.{ 0x20, 1, 0x0d, 0xb8, 0, 0x77 }, 0),
+        lan.prefixes[1].addr,
+    );
+    try std.testing.expectEqual(64, lan.prefixes[1].len);
+}
+
+test "LAN discovery allows on-link peers and groups, refusing other addresses and users" {
+    var p = try parsePolicy(
+        "listen 207 udp 5353 lan\nlisten 207 udp 1900 lan\n" ++
+            "connect 207 udp 5353 lan\nconnect 207 udp 1900 lan\nconnect 207 udp 53\n",
+    );
+    var lan: Lan = .{};
+    try lan.add(&.{ 10, 77, 0, 1 }, 24);
+    try lan.add(&.{ 203, 0, 113, 1 }, 24); // a public-address LAN is still a LAN
+    try lan.add(&v6(&.{ 0xfd, 0x77 }, 1), 64);
+    try lan.add(&v6(&.{ 0xfe, 0x80 }, 1), 64);
+    p.lan = lan.prefixes[0..lan.len];
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        const planned = plan(p, family, &rules);
+        const peer: []const u8 = if (family == linux.AF.INET)
+            &.{ 10, 77, 0, 2 }
+        else
+            &v6(&.{ 0xfd, 0x77 }, 2);
+        const off_link: []const u8 = if (family == linux.AF.INET)
+            &.{ 10, 78, 0, 2 }
+        else
+            &v6(&.{ 0xfd, 0x78 }, 2);
+        const internet: []const u8 = if (family == linux.AF.INET)
+            &.{ 198, 51, 100, 2 }
+        else
+            &v6(&.{ 0x20, 1, 0x48, 0x60 }, 2);
+        for ([_]u16{ 5353, 1900 }) |port_number| {
+            for ([_]u16{ 53, 5353, 1900, 40000 }) |source| {
+                try std.testing.expectEqual(
+                    FR_ACT_TO_TBL,
+                    udpAction(planned, false, 207, peer, source, port_number),
+                );
+                for ([_][]const u8{ off_link, internet }) |remote|
+                    try std.testing.expectEqual(
+                        FR_ACT_BLACKHOLE,
+                        udpAction(planned, false, 207, remote, source, port_number),
+                    );
+            }
+            for ([_][]const u8{ peer, discoveryGroup(family, port_number).? }) |dest| {
+                try std.testing.expectEqual(
+                    FR_ACT_TO_TBL,
+                    udpAction(planned, true, 207, dest, 40000, port_number),
+                );
+                try std.testing.expectEqual(
+                    FR_ACT_PROHIBIT,
+                    udpAction(planned, true, 208, dest, port_number, port_number),
+                );
+            }
+            for ([_][]const u8{ off_link, internet }) |dest| {
+                try std.testing.expectEqual(
+                    FR_ACT_PROHIBIT,
+                    udpAction(planned, true, 207, dest, 40000, port_number),
+                );
+                try std.testing.expectEqual(
+                    FR_ACT_PROHIBIT,
+                    udpAction(planned, true, 207, dest, port_number, 40000),
+                );
+            }
+            try std.testing.expectEqual(
+                FR_ACT_TO_TBL,
+                udpAction(planned, false, 207, peer, port_number, 40000),
+            );
+            try std.testing.expectEqual(
+                FR_ACT_BLACKHOLE,
+                udpAction(planned, false, 207, internet, port_number, 40000),
+            );
+        }
+        if (family == linux.AF.INET) try std.testing.expectEqual(
+            FR_ACT_TO_TBL,
+            udpAction(planned, false, 207, &.{ 203, 0, 113, 2 }, 5353, 5353),
+        );
+        // Without any detected subnets, incoming discovery fails closed.
+        var offline = p;
+        offline.lan = &.{};
+        try std.testing.expectEqual(
+            FR_ACT_BLACKHOLE,
+            udpAction(plan(offline, family, &rules), false, 207, peer, 5353, 5353),
+        );
+    }
+    var encoded: [256]u8 = undefined;
+    _ = ruleMessage(&encoded, 1, RTM_NEWRULE, .{
+        .family = linux.AF.INET,
+        .priority = 290,
+        .action = FR_ACT_TO_TBL,
+        .src = &.{ 10, 77, 0, 0 },
+        .src_len = 24,
+    });
+    try std.testing.expectEqual(24, encoded[18]); // fib_rule_hdr.src_len
+}
+
+fn prefixMatches(address: []const u8, prefix: []const u8, bits: u8) bool {
+    if (address.len != prefix.len) return false;
+    for (address, prefix, 0..) |a, b, i| {
+        const left = @min(8, bits -| (i * 8));
+        const mask: u8 = if (left == 0) 0 else @as(u8, 255) << @intCast(8 - left);
+        if (a & mask != b & mask) return false;
+    }
+    return true;
+}
+
+/// First matching UDP rule; outgoing local-table lookups miss this remote.
+fn udpAction(
+    rules: []const Rule,
+    outgoing: bool,
+    uid: u32,
+    remote: []const u8,
+    source: u16,
+    destination: u16,
+) u8 {
+    for (rules) |r| {
+        if (r.from_here and !outgoing) continue;
+        if (outgoing and r.table == RT_TABLE_LOCAL) continue;
+        if (r.proto != null and r.proto != .udp) continue;
+        if (r.uid != null and r.uid != uid) continue;
+        if (r.sport != null and r.sport != source) continue;
+        if (r.dport) |first| if (destination < first or destination >
+            (r.dport_last orelse first)) continue;
+        if (if (outgoing) r.dst else r.src) |prefix| {
+            const bits = (if (outgoing) r.dst_len else r.src_len) orelse
+                @as(u8, @intCast(prefix.len * 8));
+            if (!prefixMatches(remote, prefix, bits)) continue;
+        }
+        return r.action;
+    }
+    return 0;
 }
 
 test "the plan, in the order the kernel tries it" {
