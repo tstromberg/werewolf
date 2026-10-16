@@ -6,7 +6,8 @@
 ## Summary
 
 Keep one disposable form VM running while a developer edits a native test driver.
-Recompile, `scp`, and run only that driver; keep `howl test --with FORM` as the release gate.
+Recompile, `scp`, and run only that driver; keep `howl test --with FORM` as the release
+gate.
 
 ## Background
 

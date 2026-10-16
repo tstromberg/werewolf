@@ -852,10 +852,10 @@ pub fn loadIn(
             for (e.value.list) |a| if (std.meta.stringToEnum(
                 allow.Allowance,
                 a.scalar.text,
-            ) == null)
+            ) == null and allow.RuntimeAllowance.parse(a.scalar.text) == null)
                 return f.fail(
                     gpa,
-                    "{s}: allow {s}: no such allowance (lib/allow.zig lists them)",
+                    "{s}: allow {s}: no such allowance, or RUNTIME:NAME (lib/allow.zig lists them)",
                     .{ path, a.scalar.text },
                 );
         } else if (mem.eql(u8, e.key, "weaknesses")) {
@@ -1903,8 +1903,11 @@ test "load: allow names allowances; app is an absolute path" {
     const io = testing.io;
     for ([_][2][]const u8{
         .{ "node", "allow: [jit]\napp: /usr/lib/app\n" },
+        .{ "php", "allow: [jit, php:proc_open]\n" },
         .{ "root", "allow: [root]\n" },
         .{ "scalar", "allow: jit\n" },
+        .{ "runtime", "allow: [php:fpassthru]\n" },
+        .{ "language", "allow: [perl:exec]\n" },
         .{ "relative", "app: usr/lib/app\n" },
         .{ "up", "app: /usr/../etc\n" },
     }) |form| {
@@ -1917,7 +1920,9 @@ test "load: allow names allowances; app is an absolute path" {
     var f: Failure = .{};
     const node = try load(io, gpa, tmp.dir, "node", &f);
     try testing.expectEqualStrings("jit", (try node.items(gpa, "allow"))[0]);
-    for ([_][]const u8{ "root", "scalar", "relative", "up" }) |name|
+    const php = try load(io, gpa, tmp.dir, "php", &f);
+    try testing.expectEqualStrings("php:proc_open", (try php.items(gpa, "allow"))[1]);
+    for ([_][]const u8{ "root", "scalar", "runtime", "language", "relative", "up" }) |name|
         try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
 }
 

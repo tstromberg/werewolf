@@ -257,13 +257,14 @@ pub const Interface = struct {
 };
 
 /// own_files are the tar files werewolf's programs read, each set by a howl
-/// flag. init reads hostname, network, data.key and root's authorized_keys;
+/// flag. init reads hostname, network, data.key, dev and root's authorized_keys;
 /// slot-update reads update-policy.json.
 const own_files = [_][]const u8{
     "hostname",
     "network",
     "data.key",
     "authorized_keys",
+    "dev",
     "users",
     "update-policy.json",
 };
@@ -277,6 +278,7 @@ const reserved = [_][]const u8{
     "dns",
     "data-key",
     "root-keys",
+    "dev",
     "update-policy",
     "on",
     "arch",
@@ -308,7 +310,12 @@ pub fn devChain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const fo
 }
 
 /// addDevSsh layers local developer SSH into an already-resolved form chain.
-pub fn addDevSsh(io: Io, gpa: Allocator, original: []const forms.Form, why: *Why) ![]const forms.Form {
+pub fn addDevSsh(
+    io: Io,
+    gpa: Allocator,
+    original: []const forms.Form,
+    why: *Why,
+) ![]const forms.Form {
     var failure: forms.Failure = .{};
     const access = forms.chain(io, gpa, Dir.cwd(), "sshd", &failure) catch |err| switch (err) {
         error.Form => return why.refuse("{s}", .{failure.text}),
@@ -327,10 +334,21 @@ pub fn addDevSsh(io: Io, gpa: Allocator, original: []const forms.Form, why: *Why
         if (!seen) try out.append(gpa, f);
     }
     const algorithm: forms.Node = .{ .scalar = .{ .raw = "ssh-ed25519", .text = "ssh-ed25519" } };
-    const dev_settings: forms.Node = .{ .map = &.{.{ .key = "pubkey-accepted-algorithms", .value = algorithm }} };
-    const override = try forms.merge(gpa, .{ .map = &.{} }, .{ .map = &.{.{ .key = "sshd", .value = dev_settings }} });
+    const no_touch: forms.Node = .{ .scalar = .{ .raw = "none", .text = "none" } };
+    const dev_settings: forms.Node = .{ .map = &.{
+        .{ .key = "pubkey-accepted-algorithms", .value = algorithm },
+        .{ .key = "pubkey-auth-options", .value = no_touch },
+    } };
+    const override = try forms.merge(
+        gpa,
+        .{ .map = &.{} },
+        .{ .map = &.{.{ .key = "sshd", .value = dev_settings }} },
+    );
     const top_spec = try forms.merge(gpa, top.spec, override);
-    try out.append(gpa, .{ .name = top.name, .dir = top.dir, .spec = top_spec, .images = top.images });
+    try out.append(
+        gpa,
+        .{ .name = top.name, .dir = top.dir, .spec = top_spec, .images = top.images },
+    );
     return out.items;
 }
 
@@ -516,6 +534,9 @@ pub const Options = struct {
     /// built is the build of boot_image when howl made it here (--build).
     built: ?@import("local-secure.zig").Built = null,
     production_download: bool = false,
+    /// dev is the local --dev launch path; init uses its config marker only
+    /// to admit key-only root SSH for this machine.
+    dev: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -708,6 +729,11 @@ pub fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) !
         .path = "authorized_keys",
         .data = k,
         .from = "~/.ssh",
+    }, why);
+    if (o.dev and o.own_keys != null and o.root_keys == null) try add(gpa, &entries, .{
+        .path = "dev",
+        .data = "yes\n",
+        .from = "--dev",
     }, why);
     if (o.update_policy) |f| try add(gpa, &entries, .{
         .path = "update-policy.json",
@@ -1662,6 +1688,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     const yes = launch.yes;
     var o = try options(gpa, args, why);
     o.local = launch.local;
+    o.dev = dev;
     o.disabled = launch.disabled;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
