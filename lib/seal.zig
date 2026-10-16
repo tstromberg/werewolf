@@ -5,7 +5,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-pub const Promise = enum(u5) {
+pub const Promise = enum(u6) {
     stdio,
     rpath,
     watch,
@@ -31,7 +31,9 @@ pub const Promise = enum(u5) {
     /// memfd needs the form's jit allowance: a memory file, written and then
     /// mapped as code, runs wherever IPE is off (lib/compose.zig).
     memfd,
-    ipc,
+    shm,
+    sem,
+    msg,
     sendfile,
     splice,
     mlock,
@@ -155,11 +157,11 @@ const table = [_]struct { p: Promise, names: []const []const u8 }{
         .names = &.{ "landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self" },
     },
     .{ .p = .memfd, .names = &.{"memfd_create"} },
-    .{ .p = .ipc, .names = &.{
-        "shmget", "shmat",  "shmdt",      "shmctl",
-        "semget", "semop",  "semtimedop", "semctl",
-        "msgget", "msgsnd", "msgrcv",     "msgctl",
-    } },
+    // SysV IPC families stand alone: a semaphore user must not gain shared
+    // memory or message queues. POSIX IPC uses other calls and promises.
+    .{ .p = .shm, .names = &.{ "shmget", "shmat", "shmdt", "shmctl" } },
+    .{ .p = .sem, .names = &.{ "semget", "semop", "semtimedop", "semctl" } },
+    .{ .p = .msg, .names = &.{ "msgget", "msgsnd", "msgrcv", "msgctl" } },
     // These calls move page-cache pages rather than copies. Into a socket,
     // sendfile and splice reach the code of three bugs exploited in 2026
     // (CVE-2026-31431, CVE-2026-53266, CVE-2026-53362); into a pipe, splice
@@ -672,7 +674,7 @@ test buildFilter {
     // A filter with every promise fits.
     _ = buildFilter(&buf, .full, true);
     _ = buildFilter(&buf, .full, false);
-    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp, .ipc }), false);
+    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp, .shm }), false);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(machine, native_arch, number(.read), 0),
@@ -905,6 +907,39 @@ test "syslog cannot change console settings or clear the log" {
     );
 }
 
+test "SysV IPC families are independent in machine and service filters" {
+    const families_ipc = [_]struct { promise: Promise, syscalls: [4]linux.SYS }{
+        .{ .promise = .shm, .syscalls = .{ .shmget, .shmat, .shmdt, .shmctl } },
+        .{ .promise = .sem, .syscalls = .{ .semget, .semop, .semtimedop, .semctl } },
+        .{ .promise = .msg, .syscalls = .{ .msgget, .msgsnd, .msgrcv, .msgctl } },
+    };
+    // Exercise every combination, including no IPC and the union needed by
+    // a machine with both PostgreSQL and gvmd. Check all calls, not just
+    // creation: an inherited or guessed id must not bypass the boundary.
+    for (0..8) |mask| {
+        var promises = base;
+        for (families_ipc, 0..) |family, i| {
+            if (mask & (@as(usize, 1) << @intCast(i)) != 0)
+                promises.insert(family.promise);
+        }
+        for ([_]bool{ false, true }) |service| {
+            var buf: [max_filter]Filter = undefined;
+            const filter = buildFilter(&buf, promises, service);
+            for (families_ipc, 0..) |family, i| {
+                const allowed = mask & (@as(usize, 1) << @intCast(i)) != 0;
+                const want: u32 = if (allowed)
+                    linux.SECCOMP.RET.ALLOW
+                else if (service)
+                    RET_ENOSYS
+                else
+                    linux.SECCOMP.RET.USER_NOTIF;
+                for (family.syscalls) |sys|
+                    try testing.expectEqual(want, action(filter, native_arch, number(sys), 0));
+            }
+        }
+    }
+}
+
 test calls {
     // No promise brings a never call.
     for (std.enums.values(Promise)) |p| {
@@ -944,7 +979,9 @@ test "no promise grants a risky call" {
         .{ .sys = .umount2, .want = .umount },
         .{ .sys = .unshare, .want = .namespace },
         .{ .sys = .setns, .want = .namespace },
-        .{ .sys = .shmget, .want = .ipc },
+        .{ .sys = .shmget, .want = .shm },
+        .{ .sys = .semget, .want = .sem },
+        .{ .sys = .msgget, .want = .msg },
         .{ .sys = .settimeofday, .want = .settime },
         .{ .sys = .sethostname, .want = .hostname },
         .{ .sys = .inotify_add_watch, .want = .watch },
@@ -978,4 +1015,9 @@ test parse {
     try testing.expect(set.contains(.inet) and !set.contains(.exec));
     try testing.expectError(error.UnknownPromise, parse("stdio ptrace", &bad));
     try testing.expectEqualStrings("ptrace", bad);
+    // The old umbrella must fail closed, not silently retain broad access.
+    try testing.expectError(error.UnknownPromise, parse("stdio ipc", &bad));
+    try testing.expectEqualStrings("ipc", bad);
+    const ipc = try parse("shm sem msg", &bad);
+    try testing.expectEqual(Set.initMany(&.{ .shm, .sem, .msg }), ipc);
 }

@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix='howl-test-') as temporary:
     record = root / 'invocation.json'
     for tool in ('make', 'gmake'):
         executable = root / 'bin' / tool
-        executable.write_text('''#!/usr/bin/env python3
+        executable.write_text(f'''#!{sys.executable}
 import json, os, pathlib, sys
 pathlib.Path(os.environ['HOWL_TEST_RECORD']).write_text(json.dumps(dict(
     args=sys.argv[1:], inherited=[k for k in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL') if k in os.environ])))
@@ -22,6 +22,16 @@ print('form checks ran', flush=True)
 sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
 ''')
         executable.chmod(0o755)
+    python = root / 'bin/python3'
+    python.write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+pathlib.Path(os.environ['HOWL_TEST_RECORD']).write_text(json.dumps(dict(
+    tool='python3', args=sys.argv[1:],
+    inherited=[k for k in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL') if k in os.environ])))
+print('iteration dispatched', flush=True)
+sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
+''')
+    python.chmod(0o755)
     env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
                HOWL_TEST_RECORD=str(record), MAKEFLAGS='n', MFLAGS='-n', MAKELEVEL='1')
 
@@ -34,7 +44,8 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     assert 'usage: howl test' in run('--help').stderr
     assert not record.exists()
     assert 'checkout root' in run('--with', 'caddy', status=1).stderr
-    for path in ('Makefile', 'test/check-form', 'test/check-shellfree', 'forms/caddy/form.yaml'):
+    for path in ('Makefile', 'test/check-form', 'test/check-shellfree', 'test/native-iterate',
+                 'forms/caddy/form.yaml'):
         destination = root / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.touch()
@@ -56,6 +67,20 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     native.write_text('{"legacy":true}')
     assert 'native clients plus legacy DEV checks' in run('--with', 'caddy').stderr
     assert json.loads(record.read_text())['args'][-2:] == ['check-caddy', 'check-shellfree-caddy']
+    result = run('--with', 'caddy', '--arch', 'arm64', '--iterate')
+    invocation = json.loads(record.read_text())
+    assert invocation['tool'] == 'python3', invocation
+    assert invocation['args'] == ['test/native-iterate', howl, 'caddy', 'aarch64',
+                                  'ensure', 'seed'], invocation
+    assert invocation['inherited'] == [], invocation
+    assert result.stdout == 'iteration dispatched\n'
+    run('--with=caddy', '--arch=arm64', '--iterate', '--driver=test-driver',
+        '--phase=verify')
+    assert json.loads(record.read_text())['args'][-3:] == ['run', 'verify', 'test-driver']
+    run('--with', 'caddy', '--arch', 'arm64', '--iterate', '--reset')
+    assert json.loads(record.read_text())['args'][-2:] == ['reset', 'seed']
+    run('--with', 'caddy', '--arch', 'arm64', '--iterate', '--stop')
+    assert json.loads(record.read_text())['args'][-2:] == ['stop', 'seed']
     native.unlink()
     record.unlink()
     for args in [[], ['--with'], ['caddy'], ['--with', 'missing'],
@@ -63,7 +88,11 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
                  ['--with', 'caddy', '--with', 'caddy'],
                  ['--with', 'caddy', '--arch', 'riscv64'],
                  ['--with', 'caddy', '--arch', 'arm64', '--arch', 'amd64'],
-                 ['--with', 'caddy', '--on', 'qemu']]:
+                 ['--with', 'caddy', '--on', 'qemu'],
+                 ['--with', 'caddy', '--iterate'],
+                 ['--with', 'caddy', '--driver', 'test-driver'],
+                 ['--with', 'caddy', '--reset'],
+                 ['--with', 'caddy', '--iterate', '--reset', '--stop']]:
         run(*args, status=1)
         assert not record.exists(), args
-print('howl-test: both form suites, architecture, checkout validation and failure status')
+print('howl-test: release suites and reusable SSH iteration dispatch')

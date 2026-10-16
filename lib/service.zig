@@ -6,6 +6,9 @@ const seal = @import("seal");
 const settings = @import("settings");
 const Allocator = std.mem.Allocator;
 
+/// System identities are reserved for the machine's own programs.
+pub const system_id_max: u32 = 76;
+
 pub const Service = struct {
     exec: []const []const u8 = &.{},
     before: []const []const []const u8 = &.{},
@@ -113,6 +116,9 @@ pub const cap = struct {
         (1 << 26) | // SYS_TTY_CONFIG
         (1 << 29) | // AUDIT_WRITE
         (@as(u64, 1) << 34); // SYSLOG
+    /// A developer SSH session may start a nested leash, which drops the
+    /// capability bounding set again before running a test driver.
+    pub const developer_login_set: u64 = login_set | (1 << 8); // SETPCAP
 };
 
 /// Mount is a `data` line: a directory under /data/share/NAME, bound
@@ -225,7 +231,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             for (args) |a| if (std.mem.startsWith(u8, a, "udp/"))
                 try listen_udp.append(gpa, try portNumber(a[4..], bad))
             else
-                try listen.append(gpa, try tcpPort(a, bad));
+                try listen.append(gpa, if (std.mem.eql(u8, a, "tcp/0")) 0 else try tcpPort(a, bad));
         } else if (std.mem.eql(u8, key, "connect")) {
             if (args.len == 0) return invalid(bad, "no ports or sockets");
             for (args) |a| if (a.len > 0 and a[0] == '/') {
@@ -752,6 +758,12 @@ test parse {
     try testing.expectEqualSlices(u16, &.{ 80, 443 }, s.listen);
     try testing.expectEqualSlices(u16, &.{443}, s.listen_udp);
     try testing.expectEqualSlices(u16, &.{443}, s.connect);
+    const ephemeral = try parse(
+        arena.allocator(),
+        "exec /a\nuser x\npledge stdio inet listen\nlisten tcp/0\n",
+        &bad,
+    );
+    try testing.expectEqualSlices(u16, &.{0}, ephemeral.listen);
     try testing.expectEqualStrings("/run/svc/php-fpm/php.sock", s.sockets[0]);
     try testing.expectEqual(2, s.read.len);
     try testing.expectEqualStrings("/var/lib/nginx", s.write[0]);
@@ -829,7 +841,7 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\ngroup Valkey", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten udp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nconnect udp/53", .line = 3 },
-        .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconnect tcp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten /run/x.sock", .line = 3 },
         .{ .text = "exec /a\nuser x\nconnect /run/../x.sock", .line = 3 },
         .{ .text = "exec /a\nuser x\nconnect /x.sock", .line = 3 },
@@ -860,6 +872,7 @@ test "parse refuses" {
         .{ .text = "exec /a\x07\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser x", .line = 0 }, // no pledge
         .{ .text = "exec /a\nuser x\npledge stdio ptrace", .line = 3 },
+        .{ .text = "exec /a\nuser x\npledge stdio ipc", .line = 3 },
         .{ .text = "exec /a\nuser x\npledge", .line = 3 },
         .{ .text = "exec /a\nuser x\npledge stdio\npledge rpath", .line = 4 },
         .{ .text = "exec /a\nuser x\npledge stdio\nroot /data/x", .line = 4 },

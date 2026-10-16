@@ -1,97 +1,113 @@
 # Fast local test iteration
 
-**Status:** Proposal  
-**Date:** 2026-10-15
+**Status:** Implemented · **Date:** 2026-10-16
 
 ## Summary
 
-Keep one disposable form VM running while a developer edits a native test driver.
-Recompile, `scp`, and run only that driver; keep `howl test --with FORM` as the release
-gate.
+Keep one disposable form VM running, then compile, copy, and run one native test
+driver in seconds. The driver still runs as its declared user under its normal `leash`
+policy; the clean `howl test --with FORM` remains the release gate.
 
 ## Background
 
-Native tests boot a generated test image and run shell-free clients under each driver's
-declared `leash` policy. This covers private protocols such as PostgreSQL peer
-authentication and Greenbone's Unix sockets, but repeats slow service startup after a
-client-only edit.
+Native tests exercise private TCP and Unix-socket interfaces from inside the guest.
+Their clean suite rebuilds and reboots by design, which is valuable release evidence but
+slow while editing only a test client. Published forms must not gain SSH, a shell, or
+general test tools to make that edit loop faster.
 
 ## Goals
 
 - Reuse one local QEMU boot across driver edits.
-- Run the selected driver under its existing identity and `leash` policy.
-- Show test records, output, and exit status; reset the VM when desired.
+- Upload and execute a selected driver under its declared identity and policy.
+- Preserve output, exit status, run context, and expected-case validation.
+- Rebuild when image inputs change; reset state and stop the VM explicitly.
 
 ## Non-Goals
 
-- Replace the native release gate or create release evidence.
-- Add SSH, a shell, or test tools to published forms.
-- Support remote VMs, interactive sessions, or source watching.
+- Replace the clean native suite or provide release evidence.
+- Add SSH, BusyBox, or test binaries to a published form.
+- Support remote machines, cross-architecture emulation, or file watching.
 
 ## Detailed design
 
-`howl test --with FORM --iterate [--driver NAME]` builds and starts a disposable test
-image once. Without `--driver`, it leaves the VM ready. With a driver, it compiles that
-driver for the guest architecture, uploads it with `scp`, and runs it. Repeating the
-command reuses the running VM, so edits rebuild only the selected client. `--reset`
-recreates the VM's data disk and reboots; `--stop` ends the VM.
+`howl test --with FORM --iterate` creates a deterministic, disposable QEMU machine for
+the host architecture. It generates a form over the production form containing only
+immutable driver paths and service descriptors from `test/native.json`, then uses the
+existing developer SSH listener and managed key, with `--dev=ssh` instead of `--dev`.
+This profile adds no BusyBox or form-specific developer tools. Root's command adapter
+is `sh-shim`; it accepts one executable and arguments, without shell syntax or scripts.
 
-The iteration image adds OpenSSH, `sh-shim`, and one root account. These exist only in
-this test image. SSH and SFTP use one loopback forward. Use one Howl-managed developer
-key at `$XDG_DATA_HOME/howl/keys/dev/ssh-ed25519`; install its public half as root's
-authorized key. Never accept unauthenticated or arbitrary keys. `sh-shim` dispatches
-only the fixed `test-control` executable; it rejects shell syntax, PTYs, and forwarding
-are disabled. `scp` uploads to `/tmp/test-upload`. This is a trusted, local developer
-VM: root SFTP can modify the guest. Discard it after iteration; never publish it or
-treat its results as release proof.
+```sh
+howl test --with postgresql --iterate
+howl test --with postgresql --iterate --driver test-postgres
+howl test --with postgresql --iterate --driver test-postgres --phase verify
+howl test --with postgresql --iterate --reset
+howl test --with postgresql --iterate --stop
+```
 
-`--dev` automatically adds SSH for local development VMs, using the same managed key
-and `howl ssh` path. It permits root command execution by design. The native test image
-remains separate: it has no BusyBox, and its proposed SSH command path only dispatches
-`test-control` before running drivers through `leash`.
+The VM fingerprint includes the production form, native plan, generated instrumentation,
+boot inputs, guest and builder sources, package locks, and the form's config fixture.
+A changed image input deletes and rebuilds the VM. Driver source is deliberately
+excluded: every selected run cross-compiles only that Zig driver, so an edit does not
+rebuild or reboot the guest.
 
-`test-control run DRIVER` accepts only a name in `test/native.json`. It atomically
-promotes that driver's uploaded binary, then invokes its existing fixed service entry
-through `leash`. The plan supplies the identity, groups, paths, programs, and expected
-cases; host input cannot supply policy or an executable path. The helper returns the
-driver's case records and exit status. The host validates only that driver's cases.
+The host copies the new binary to a temporary name with SCP, copies the run/phase
+context to `/run/config`. A small compiled utility promotes the uploads, checks service
+paths, and enters the selected immutable descriptor directory before invoking leash.
+It has no daemon, command language, or arbitrary descriptor upload. The immutable
+`/usr/lib/werewolf/test-NAME` symlink chooses the executable; the host validates exactly
+the cases declared for the selected phase.
 
-The VM and data disk persist between runs, so a driver may see state from prior runs.
-Reset is explicit. Native seed, reboot, and verify tests remain unchanged and must pass
-before publication. Begin with Greenbone's GMP driver and PostgreSQL's `psql` driver.
+Normal writable filesystems remain `noexec`. For a checked `werewolf.debug=1` boot with
+Howl's `/run/config/dev` marker, init adds one `nosuid,nodev,nosymfollow` executable
+tmpfs at `/run/howl-dev`. Fence admits execution there only when that mount exists.
+`sshd-dev` alone retains `CAP_SETPCAP`, allowing a root SSH session to start a nested
+leash; that leash drops the bounding set, identity, Landlock rights, seccomp calls, and
+cgroup limits before the uploaded driver runs. Ordinary SSH keeps its existing
+capability set.
+
+PostgreSQL iteration uploads the `psql`-driving client, then runs it as `postgres` with
+only the database socket and `/usr/bin/psql`. Greenbone uses the same mechanism for each
+GMP, OSP, PostgreSQL, and Valkey client, preserving their distinct users, groups,
+sockets, ports, config files, and programs. Private services need no host relay.
+
+The VM and encrypted data disk persist between runs. `--reset` deletes both and creates
+a new run ID; `--stop` stops QEMU. The final change still runs the clean command,
+including seed, reboot, verify, production comparison, and shell-free boot, before
+publication.
 
 ## Drawbacks
 
-This adds a test-only SSH path and allows the local operator to modify the disposable
-guest through SFTP. The VM is stateful and must be reset when a clean data disk is
-needed. Developers need Zig, QEMU, `ssh`, and `scp`.
+The iteration VM adds root SSH, its privilege-separation dependencies, the command
+adapter, and executable upload RAM. Its seal stays enforced; it adds no interactive
+console shell or blanket DEV posture exceptions. State persists, so a seed test may
+require `--reset`. Developers need Zig, QEMU, SSH, and SCP.
 
 ## Alternatives Considered
 
 ### Reboot for every edit
 
-Simpler control flow, but repeats expensive service startup, especially for Greenbone.
+This is the clean release path, but repeats image construction and slow service startup.
 
-### Add an interactive shell
+### Run `leash` directly from ordinary SSH
 
-BusyBox broadens the image and command surface. The fixed `sh-shim` command is enough;
-serial output remains available for logs.
+Ordinary SSH has already discarded `CAP_SETPCAP`, so a nested leash cannot safely reduce
+the capability bounding set. Granting it only to `sshd-dev` keeps that exception local.
 
-### Relay private sockets to the host
+### Add test services or a control daemon
 
-This avoids SSH but adds a relay and host-side protocol clients. Running the driver in
-the guest preserves Unix peer credentials.
+Runit services collide with production identity-sharing checks; a new privileged daemon
+adds a protocol and lifecycle. The existing authenticated command channel is sufficient.
 
 ## Security Considerations
 
-Only the disposable local test image gains SSH from this design. Its forwarded port
-binds to loopback and requires Howl's managed developer key. This design trusts the
-local operator and makes no claim that root SFTP is confined. The command path is
-limited by `sh-shim`; driver execution still uses the plan's `leash` policy. Native
-tests remain the release gate.
+Only a local developer VM gets the key, listener, executable mount, fence rule, and
+extra capability. Its port binds to loopback and host keys are pinned per machine.
+Uploaded code runs only after the local key authenticates, and test policy still comes
+from the immutable image. Iteration output is never accepted as release evidence.
 
 ## Reliability Considerations
 
-Reusing a VM preserves service startup but also preserves test state; provide reset and
-stop operations. Report the VM's serial log on a failed driver run. Driver-only edits
-must not rebuild the form image; changes to the form, plan, or helper require a rebuild.
+Uploads use temporary names and atomic rename, and the host rejects missing, duplicate,
+stale, foreign, or failed case records. Fingerprints prevent reuse after image changes.
+Reset recovers contaminated state; the clean suite remains the reproducible final check.

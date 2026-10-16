@@ -5,7 +5,16 @@ packages:
   - openssh-server
   - coreutils             # /usr/bin/false is the account's login shell
 accounts:
+  groups:
+    - groupname: sshd
+      gid: 22
   users:
+    # sshd -T checks this account even when the server runs as bastion.
+    - username: sshd
+      uid: 22
+      gid: 22
+      homedir: /var/empty
+      shell: /sbin/nologin
     - username: bastion
       shell: /usr/bin/false
 paths:

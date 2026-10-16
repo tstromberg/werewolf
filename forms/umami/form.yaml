@@ -71,7 +71,7 @@ services:
       hba_file=/etc/postgresql/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath proc ipc inet unix listen connect
+    pledge: stdio rpath wpath proc shm inet unix listen connect
     run:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim

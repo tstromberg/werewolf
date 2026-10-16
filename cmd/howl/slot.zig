@@ -24,7 +24,7 @@ const tiers_url = "https://raw.githubusercontent.com/werewolf-linux/cve-feed/mai
 
 /// meta writes OUT/meta, what the image needs to rebuild itself, and
 /// OUT/ro, what compose lays over the packages: compose's records, then
-/// the kernel, Alpine's repositories, the overlay's files, apk's world,
+/// the kernel, its package repositories, the overlay's files, apk's world,
 /// the tiers feed and its key, and werewolf's advisories where no package
 /// brings them. Nothing says when or where it
 /// was built, so a rebuild matches.
@@ -45,7 +45,13 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
-    const fixed = [_][]const u8{ rootfs, kernel_rootfs, b.self, enrollment };
+    const fixed = [_][]const u8{
+        rootfs,
+        kernel_rootfs,
+        "build/lock/kernel.lock.json",
+        b.self,
+        enrollment,
+    };
     const signer: []const []const u8 = if (b.spec.ipe_cert) |cert| &.{cert} else &.{};
     const boot_signer: []const []const u8 = if (b.spec.boot_cert) |cert| &.{cert} else &.{};
     const tpm_signer: []const []const u8 = if (b.spec.tpm_pub) |pubkey| &.{pubkey} else &.{};
@@ -90,6 +96,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         const kind: compose.Build = .{
             .arch = b.arch,
             .dev = b.spec.dev,
+            .dev_shell = b.spec.dev_shell,
             .ipe = b.spec.ipe_kernel != null,
             .posture_known = embedded.posture_known,
         };
@@ -180,9 +187,12 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "\n",
     );
     try b.put(d, "kernel", try b.path("{s}\n", .{kernel_pkg}));
-    try b.put(d, "kernel-repository", try b.capture(stamp, &.{
-        "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
-    }));
+    const kernel_lock = try b.read("build/lock/kernel.lock.json", 64 << 20);
+    try b.put(d, "kernel-repository", try packages.repositories(
+        b.gpa,
+        kernel_lock,
+        @tagName(b.spec.arch),
+    ));
     try b.put(d, "overlay", try overlayList(b));
     // apk's world as the packages leave it, without the build-only lock pins.
     // Published, it names the format's package, so the updater takes only
@@ -689,7 +699,7 @@ fn initramfs(b: *B, root: []const u8) !void {
     const target = try b.path("{s}/initramfs.zst", .{out});
     const stage0_zst = try b.path("{s}/slot/stage0.zst", .{out});
     const began = try b.begin(target, &.{ stage0_zst, root }) orelse return;
-    // Anywhere in the chain: a dev build lays sshd's forms first (howl.addDevSsh).
+    // A developer build's networking base can precede the top minimal form.
     for (b.chain) |c| {
         if (mem.eql(u8, c.name, "minimal")) break;
     } else return b.fail("form {s} does not include minimal, which carries /init", .{b.name});

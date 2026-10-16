@@ -18,6 +18,9 @@ set -eu
 name=$1 provider=$2 payload=$3 checks=$4 log=$5 firmware=$6
 shift 6
 
+metadata_relay=$(command -v nc || command -v ncat || true)
+[ -n "$metadata_relay" ] || { echo "cloud-boot: install nc or ncat" >&2; exit 2; }
+
 dir=$(dirname "$log")
 port_file=$dir/$name.port
 server_log=$dir/$name.server.log
@@ -48,9 +51,9 @@ none) smbios= ;;
 esac
 
 # Make QEMU's user network look like a cloud's: the guest gets 169.254.0.15
-# by DHCP, and 169.254.169.254:80 reaches the server through one nc per
+# by DHCP, and 169.254.169.254:80 reaches the server through one TCP relay per
 # connection.
-net="user,id=n0,net=169.254.0.0/16,host=169.254.0.2,dhcpstart=169.254.0.15,dns=169.254.0.3,guestfwd=tcp:169.254.169.254:80-cmd:nc 127.0.0.1 $port"
+net="user,id=n0,net=169.254.0.0/16,host=169.254.0.2,dhcpstart=169.254.0.15,dns=169.254.0.3,guestfwd=tcp:169.254.169.254:80-cmd:$metadata_relay 127.0.0.1 $port"
 test/boot "$name" "$checks" "$log" "$@" \
 	${firmware:+-bios "$firmware" -boot menu=on,splash-time=0} ${smbios:+-smbios "$smbios"} ${chassis:+-smbios "$chassis"} \
 	-netdev "$net" -device virtio-net-pci,netdev=n0,romfile=

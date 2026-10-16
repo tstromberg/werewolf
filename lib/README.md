@@ -24,6 +24,11 @@ within a byte limit and a deadline. Used by most programs in `cmd/`.
   ports (before ABI 4) and scoping (before ABI 6) unrestricted;
   werewolf's kernel has both.
 
+`dropKeeping` changes all UID/GID slots, clears supplementary groups, locks
+securebits and retains only a named capability mask. SETUID is refused; these
+capabilities do not survive exec. `Filter.allowTwo` pins two syscall arguments,
+including their high words, for fixed monitor operations.
+
 ## seal
 
 Maps pledge-style promises (`stdio`, `inet`, `exec`, ...) to the system

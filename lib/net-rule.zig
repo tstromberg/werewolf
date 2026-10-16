@@ -29,6 +29,8 @@ pub const Rule = struct {
     from_here: bool = false,
     /// src and dst are 4 or 16 bytes, by the rule's family.
     src: ?[]const u8 = null,
+    /// src_len is src's prefix length; null means the whole address.
+    src_len: ?u8 = null,
     dst: ?[]const u8 = null,
     /// dst_len is dst's prefix length; null means the whole address.
     dst_len: ?u8 = null,
@@ -64,7 +66,7 @@ pub fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
     // struct fib_rule_hdr: family, dst_len, src_len, tos, table, res1,
     // res2, action, flags.
     const dst_len: u8 = if (r.dst) |a| r.dst_len orelse @intCast(a.len * 8) else 0;
-    const src_len: u8 = if (r.src) |a| @intCast(a.len * 8) else 0;
+    const src_len: u8 = if (r.src) |a| r.src_len orelse @intCast(a.len * 8) else 0;
     b.bytes(&.{ r.family, dst_len, src_len, 0, r.table, 0, 0, r.action, 0, 0, 0, 0 });
     b.attr(FRA_PRIORITY, std.mem.asBytes(&r.priority));
     if (r.table != 0) {

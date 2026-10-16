@@ -18,6 +18,12 @@ fixture = json.loads(fixture_file.read_text())
 info = json.loads((fixture_file.parent / 'tpm/machine.json').read_text())
 work.mkdir(mode=0o700)
 os.umask(0o077)
+debugfs = Path(os.environ.get('DEBUGFS') or shutil.which('debugfs') or '')
+if not debugfs.is_file():
+    raise RuntimeError('debugfs is required (set DEBUGFS to its path)')
+e2fsck = debugfs.with_name('e2fsck')
+if not e2fsck.is_file():
+    raise RuntimeError('e2fsck is required beside ' + str(debugfs))
 state = work / 'nv'
 state.mkdir()
 socket = work / 'tpm.sock'
@@ -156,19 +162,19 @@ def replay_retired(unmeasured=False):
             filesystem.write(chunk)
             remaining -= len(chunk)
     # Replay the stopped guest's journal before editing filesystem metadata.
-    result = machine.run(['e2fsck', '-fy', str(partition)], check=False)
+    result = machine.run([e2fsck, '-fy', str(partition)], check=False)
     if result.returncode not in [0, 1]:
         raise RuntimeError('test filesystem recovery failed: ' + result.stderr)
     source = fixture_file.parent / 'release-A'
     root = next(source.glob('*-root.erofs'))
     filesystem = str(partition)
-    machine.run(['debugfs', '-w', '-R', 'rm /werewolf/a/root.erofs', filesystem])
-    machine.run(['debugfs', '-w', '-R', 'write ' + json.dumps(str(root)) + ' /werewolf/a/root.erofs', filesystem])
-    result = machine.run(['e2fsck', '-fy', filesystem], check=False)
+    machine.run([debugfs, '-w', '-R', 'rm /slot/a/root.erofs', filesystem])
+    machine.run([debugfs, '-w', '-R', 'write ' + json.dumps(str(root)) + ' /slot/a/root.erofs', filesystem])
+    result = machine.run([e2fsck, '-fy', filesystem], check=False)
     if result.returncode not in [0, 1]:
         raise RuntimeError('test filesystem edit failed: ' + result.stderr)
     readback = work / 'replayed.erofs'
-    machine.run(['debugfs', '-R', 'dump /werewolf/a/root.erofs ' + json.dumps(str(readback)), filesystem])
+    machine.run([debugfs, '-R', 'dump /slot/a/root.erofs ' + json.dumps(str(readback)), filesystem])
     expected = fixture['releases']['A']['files']['root.erofs']['sha256']
     if hashlib.sha256(readback.read_bytes()).hexdigest() != expected:
         raise RuntimeError('retired root differs from the signed release')
@@ -218,17 +224,23 @@ try:
                  str(fixture_file.parent / 'tpm/permits'), 'root@127.0.0.1:/data/svc/ab-https/image/' + fixture['arch'] + '/'])
     machine.ssh('chmod -R a+rX /data/svc/ab-https/image; chown -R ab-https:ab-https /data/svc/ab-https/image')
     select('B')
-    # An EOF-delimited response exceeding the permit cap must fail without
+    # A response exceeding the permit cap must fail without
     # changing the protected pair, then allow the correctly signed retry.
     public = '/data/svc/ab-https/image/' + fixture['arch'] + '/permits/' + info['machine'] + '/' + info['ids']['B'] + '.permit'
     machine.ssh('cp ' + public + ' ' + public + '.original; head -c 689 /dev/zero > ' + public)
+    offset = machine.log.stat().st_size
     refused = machine.ssh('/usr/lib/werewolf/slot-update check', check=False, timeout=600)
-    if 'TooBig' not in refused.stdout + refused.stderr:
+    # The operator socket reports failure; the supervised updater logs its cause.
+    until = time.monotonic() + 5
+    while (b'"detail":"TooBig"' not in machine.log.read_bytes()[offset:] and
+           time.monotonic() < until):
+        time.sleep(0.1)
+    if refused.returncode == 0 or b'"detail":"TooBig"' not in machine.log.read_bytes()[offset:]:
         raise RuntimeError('oversized permit did not report the bounded refusal')
     if status()['tpm_anchor'] != a['tpm_anchor']:
         raise RuntimeError('oversized permit changed protected authorization')
     machine.ssh('mv ' + public + '.original ' + public)
-    print('pass   tpm-guest: oversized EOF-delimited permit refused before retirement', flush=True)
+    print('pass   tpm-guest: oversized permit refused before retirement', flush=True)
     machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
     machine.reboot('/usr/lib/werewolf/slot-update try')
     b = wait_boot('B', a['boot_id'])

@@ -8,6 +8,7 @@ const compose = @import("compose");
 const image = @import("image");
 const ipe = @import("ipe");
 const package = @import("package");
+const trusted_apk = @import("apk");
 const files = @import("files");
 const progress = @import("progress.zig");
 const build = @import("build.zig");
@@ -25,7 +26,7 @@ const B = build.B;
 /// is asked for rebuilds no root.
 pub fn apkoConfig(b: *B, target: []const u8) !void {
     var extra: std.ArrayList([]const u8) = .empty;
-    if (b.spec.dev) {
+    if (b.spec.dev and b.spec.dev_shell) {
         try extra.append(b.gpa, "busybox-full");
         for (b.chain) |c| for (try c.items(b.gpa, "dev")) |item| {
             var it = mem.tokenizeAny(u8, item, " \t");
@@ -174,6 +175,26 @@ pub fn apkoBuild(
     try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
     const t = try b.tmp(target);
     try apko(b, config, args.items, &.{try b.absolute(t)});
+    if (mem.find(u8, try b.read(config, 1 << 20), package.hardened_repository) != null) {
+        var why: @import("howl.zig").Why = .{};
+        const index = @import("published.zig").hardenedIndex(
+            b.io,
+            b.gpa,
+            b.spec.arch,
+            &why,
+        ) catch |err|
+            return b.fail(
+                "hardened feed: {s}",
+                .{if (why.text.len > 0) why.text else @errorName(err)},
+            );
+        const trust = [_]trusted_apk.Trusted{.{
+            .name = package.repository_key,
+            .key = try trusted_apk.parseKey(b.gpa, package.repository_pem),
+        }};
+        const installed = try b.capture(t, &.{ "bsdtar", "-xOf", t, "usr/lib/apk/db/installed" });
+        if (try trusted_apk.hardenedFallback(b.gpa, &trust, index, installed)) |name|
+            return b.fail("{s}: resolved outside the signed hardened feed", .{name});
+    }
     try b.rename(t, target);
     try b.done(target, began);
 }
@@ -237,6 +258,35 @@ pub fn pins(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const []const
     return out.items;
 }
 
+/// repositories returns the configured package repositories for arch from
+/// apko's lock. The lock records an architecture-specific APKINDEX URL for
+/// each repository; images need the repository base URL for future updates.
+pub fn repositories(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const u8 {
+    const Locked = struct {
+        contents: struct {
+            repositories: []const struct {
+                url: []const u8,
+                architecture: []const u8,
+            },
+        },
+    };
+    const parsed = try std.json.parseFromSliceLeaky(Locked, gpa, lock, .{
+        .ignore_unknown_fields = true,
+    });
+    const suffix = try gpa.print("/{s}/APKINDEX.tar.gz", .{arch});
+    var out: Io.Writer.Allocating = .init(gpa);
+    var found = false;
+    for (parsed.contents.repositories) |repo| {
+        if (!mem.eql(u8, repo.architecture, arch)) continue;
+        if (!mem.endsWith(u8, repo.url, suffix) or repo.url.len == suffix.len)
+            return error.BadRepository;
+        try out.writer.print("{s}\n", .{repo.url[0 .. repo.url.len - suffix.len]});
+        found = true;
+    }
+    if (!found) return error.NoRepository;
+    return out.written();
+}
+
 fn digits(s: []const u8) bool {
     for (s) |c| if (!std.ascii.isDigit(c)) return false;
     return true;
@@ -272,20 +322,42 @@ pub fn kernel(b: *B) !void {
     );
     const lock = "build/lock/kernel.lock.json";
     const rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
+    const source = try b.path("{s}/kernel/source", .{b.p.build});
     try relock(b, lock, yaml);
-    if (b.spec.ipe_kernel) |custom| {
-        // A test kernel, built by werewolf-linux/kernel-build for a disposable
-        // IPE certificate (IPE_CRT): the same layout, trusting --ipe-cert.
-        const began = try b.begin(rootfs, &.{custom});
-        if (began != null) {
+    if (b.spec.ipe_kernel orelse b.spec.kernel_rootfs) |custom| {
+        // An unpublished kernel has the normal package layout and passes the
+        // same config checks. IPE builds also bind its certificate to the signer.
+        // Switching archives must work even when the candidate is older than
+        // the cached package. File times do not identify a kernel input.
+        try keep(b, source, "custom\n");
+        const wanted = try @import("prebuilt").hashFile(b.io, b.gpa, custom);
+        const held = @import("prebuilt").hashFile(b.io, b.gpa, rootfs) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (held == null or wanted.size != held.?.size or
+            !mem.eql(u8, wanted.sha256, held.?.sha256))
+        {
+            const began = Io.Clock.awake.now(b.io);
+            if (progress.phaseOf(rootfs)) |phase| try b.steps.enter(phase);
             try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(rootfs).?);
-            try b.copy(custom, rootfs);
-            try b.done(rootfs, began.?);
+            const temporary = try b.tmp(rootfs);
+            try b.copy(custom, temporary);
+            try b.rename(temporary, rootfs);
+            try b.done(rootfs, began);
         }
-        const embedded_cert = try b.capture(rootfs, &.{ "bsdtar", "-xOf", rootfs, "boot/ipe.crt" });
-        if (!mem.eql(u8, embedded_cert, try b.read(b.spec.ipe_cert.?, 64 << 10)))
-            return b.fail("IPE kernel certificate differs from --ipe-cert", .{});
-    } else try apkoBuild(b, rootfs, yaml, lock, &.{lock});
+        if (b.spec.ipe_cert) |cert| {
+            const embedded_cert = try b.capture(
+                rootfs,
+                &.{ "bsdtar", "-xOf", rootfs, "boot/ipe.crt" },
+            );
+            if (!mem.eql(u8, embedded_cert, try b.read(cert, 64 << 10)))
+                return b.fail("IPE kernel certificate differs from --ipe-cert", .{});
+        }
+    } else {
+        try keep(b, source, "repository\n");
+        try apkoBuild(b, rootfs, yaml, lock, &.{ lock, source });
+    }
     const target = try b.path("{s}/vmlinuz", .{b.p.build});
     // The step's own stamp says when it last ran; vmlinuz is rewritten only
     // when its bytes change, so a new howl that unpacks the same kernel
@@ -358,6 +430,21 @@ test pins {
     try testing.expectEqualStrings("py3.13-pip=25.2-r1", p[1]);
     try testing.expectEqualStrings("linux-werewolf=7.2.11-r1", p[2]);
     try testing.expectEqualStrings("zlib=1.3.1-r0", (try pins(a, lock, "x86_64"))[0]);
+}
+
+test repositories {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const lock =
+        \\{"contents":{"repositories":[
+        \\  {"name":"dist.example/apk/kernel/aarch64","url":"https://dist.example/apk/kernel/aarch64/APKINDEX.tar.gz","architecture":"aarch64"},
+        \\  {"name":"dist.example/apk/kernel/x86_64","url":"https://dist.example/apk/kernel/x86_64/APKINDEX.tar.gz","architecture":"x86_64"}
+        \\]}}
+    ;
+    try testing.expectEqualStrings(
+        "https://dist.example/apk/kernel\n",
+        try repositories(arena.allocator(), lock, "aarch64"),
+    );
 }
 
 test unreachableServer {

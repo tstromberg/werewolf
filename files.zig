@@ -19,6 +19,8 @@ pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");
 pub const protected_image_certificate = @embedFile("release/protected/image.crt");
 pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
 pub const forms_catalog = @embedFile("docs/forms-catalog.md");
+pub const dev_ssh_form = @embedFile("boot/dev-ssh/form.yaml");
+pub const dev_ssh_config = @embedFile("boot/dev-ssh/sshd_config");
 
 /// posture_known are the posture checks every form of a kind fails.
 pub const posture_known = @embedFile("test/posture-known");

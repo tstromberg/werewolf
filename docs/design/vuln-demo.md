@@ -1,0 +1,77 @@
+# Vulnerable application forms
+
+## Summary
+
+Package current Solr, n8n and Langflow as usable shell-free services on hardened
+interpreters, then compose pinned vulnerable counterparts into `vuln-demo`.
+
+## Background
+
+`webshell-example` demonstrates containment with a Flask command runner and `sh-shim`.
+Real applications at their normal URLs make a more useful target for existing scanners.
+
+## Goals
+
+- Current application forms and separate, explicitly named `-vuln-demo` forms.
+- Hardened OpenJDK 27, Node.js and Python; no OCI interpreter or shell fallback.
+- Separate service UIDs; normal public ports and paths; no app outbound network.
+- A read-only Go dashboard for requests, exec audit records and containment violations.
+- An exec-only SSH daemon accepting any password for `demo`, without a shell.
+
+## Non-Goals
+
+Shipping an attacker workstation, shell interpreter, container daemon or LDAP server.
+Syslog ingestion will use the machine's collector when available; kernel log capture
+and seal-watch's refusal table provide the initial event sources.
+
+## Detailed design
+
+`solr`, `n8n` and `langflow` package application code separately from their runtimes.
+Their current releases listen on loopback until deliberately exposed. Each vulnerable
+counterpart pins application code and keeps the same runtime, paths and confinement.
+Dependency ports retain vulnerable endpoint implementations and have their own locks.
+
+`vuln-demo` composes those vulnerable forms. Each app listens on a private loopback
+port; the Go console proxies its expected public port without path prefixing. It logs
+method, URL, headers, source and up to 8 KiB of body, preserving the forwarded request.
+Only a headerless, bodyless `GET / HTTP/1.0` probe is omitted. The dashboard uses SSE,
+so live updates do not generate a polling request for every event.
+
+The image's `/etc/werewolf/audit-exec-all` marker requests successful and refused
+exec auditing, retaining EXECVE and PROCTITLE. Other forms keep refused-exec auditing.
+Init starts `vuln-kmsg` before dropping privileges: it opens `/dev/kmsg` and a bounded
+RAM log, forks, drops to a dedicated UID with no capabilities, then installs a filter
+allowing only reads and writes on those descriptors. The dashboard cannot open the
+kernel device or change audit policy. It deduplicates records by kernel sequence.
+
+SSH runs as a distinct unprivileged service. Only the username `demo` accepts password
+authentication. Exec sessions parse argv quoting and run the requested program
+directly under the service's leash; shell, PTY, forwarding and subsystem requests are
+refused. Commands, authentication results and exit statuses enter the event journal.
+
+## Drawbacks
+
+Langflow's native dependencies require Python 3.15 ports. Full products make the
+combined image substantially larger than the original command-runner demonstration.
+
+## Alternatives Considered
+
+Upstream images simplify old application dependencies but bypass hardened interpreters
+and bring shells. Small framework examples avoid dependency ports but do not provide
+the full products requested. Changing production audit globally adds unnecessary noise.
+
+## Security Considerations
+
+Vulnerable forms are explicitly named and never inherited by production forms.
+Runtime allowances needed by an application must be declared, including native addons;
+shell launchers and upstream interpreters are not packaged. Application compromise
+retains the UID's filesystem, execution, network and cgroup restrictions.
+
+The dashboard renders attacker text as text, bounds history and request capture, and
+has no command submission endpoint. SSH passwords are accepted but never recorded.
+
+## Reliability Considerations
+
+Buffers are bounded; kernel overruns are reported. Kmsg is finite evidence, not a
+lossless audit archive. A missing reader is visible in the dashboard. Services restart
+through runit; persistent data remains in their own directories.

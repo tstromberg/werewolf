@@ -116,6 +116,30 @@ pub fn dropWith(id: u32, root: ?[*:0]const u8, groups: []const linux.gid_t) !voi
     tie.keep();
 }
 
+/// dropKeeping changes identity without granting any capability beyond keep.
+/// Unlike an ambient capability, these bits do not survive exec.
+pub fn dropKeeping(id: u32, keep: u32) !void {
+    if (id == 0 or keep & (1 << linux.CAP.SETUID) != 0) return error.StillRoot;
+    const tie: Tie = .note();
+    // Lock NO_SETUID_FIXUP before the uid change; capset below removes the
+    // setup capabilities that were needed to change identity.
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_SECUREBITS), 0xef, 0, 0, 0), "securebits");
+    try bound(keep);
+    var unused: linux.gid_t = 0;
+    _ = try sys(linux.setgroups(0, @ptrCast(&unused)), "setgroups");
+    _ = try sys(linux.setresgid(id, id, id), "setresgid");
+    _ = try sys(linux.setresuid(id, id, id), "setresuid");
+    var hdr: CapHeader = .{};
+    const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
+    _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+    refuseExecGain();
+    if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
+    // Changing uid resets dumpability, including for inherited role sockets.
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
+    tie.keep();
+}
+
 /// keepOnly keeps only the capabilities in keep, a mask of CAP_ numbers
 /// below 32. It locks NOROOT, NO_SETUID_FIXUP and NO_CAP_AMBIENT_RAISE on
 /// and KEEP_CAPS off, so uid 0 can never bring back the others.
@@ -242,12 +266,17 @@ pub const Ruleset = struct {
     pub fn init(o: Options) !Ruleset {
         // LANDLOCK_CREATE_RULESET_VERSION
         const abi = try sys(linux.syscall3(.landlock_create_ruleset, 0, 0, 1), "landlock version");
-        const fs = if (o.only_exec)
+        // REFER is implicitly denied by every Landlock layer, even one that
+        // handles no file rights. Supplemental exec/bind layers must pass it
+        // through; the parent domain still confines renames and hard links.
+        const passthrough = (o.only_exec or o.only_bind) and abi >= 2;
+        const fs = (if (o.only_exec)
             execute
         else if (o.only_bind)
-            if (abi >= 4) 0 else execute
+            @as(u64, if (abi >= 4) 0 else execute)
         else
-            fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0;
+            fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0) |
+            if (passthrough) refer else @as(u64, 0);
         // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
         // scoped (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and _SIGNAL).
         const attr: [3]u64 = .{
@@ -265,7 +294,17 @@ pub const Ruleset = struct {
             linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
             "landlock ruleset",
         );
-        return .{ .fd = @intCast(fd), .abi = abi, .fs = fs };
+        const ruleset: Ruleset = .{ .fd = @intCast(fd), .abi = abi, .fs = fs };
+        errdefer _ = linux.close(ruleset.fd);
+        if (passthrough) {
+            const root: i32 = @intCast(try sys(
+                linux.openat(linux.AT.FDCWD, "/", .{ .PATH = true, .CLOEXEC = true }, 0),
+                "open root for Landlock refer",
+            ));
+            defer _ = linux.close(root);
+            try ruleset.add(root, refer);
+        }
+        return ruleset;
     }
 
     /// add grants access beneath fd, masked to the rights the ruleset
@@ -357,6 +396,29 @@ pub const Filter = struct {
         f.prog[f.n + 4] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = value };
         f.prog[f.n + 5] = .{ .code = seal.LD_W_ABS, .k = 0 };
         f.n += 6;
+    }
+
+    /// allowTwo checks both arguments, including their high words.
+    pub fn allowTwo(
+        f: *Filter,
+        comptime name: []const u8,
+        comptime a: u3,
+        av: u32,
+        comptime b: u3,
+        bv: u32,
+    ) void {
+        const n = nr(name) orelse return;
+        f.prog[f.n] = .{ .code = seal.JEQ_K, .jf = 8, .k = n };
+        f.prog[f.n + 1] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, a) + 4 };
+        f.prog[f.n + 2] = .{ .code = seal.JEQ_K, .jf = 6, .k = 0 };
+        f.prog[f.n + 3] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, a) };
+        f.prog[f.n + 4] = .{ .code = seal.JEQ_K, .jf = 4, .k = av };
+        f.prog[f.n + 5] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, b) + 4 };
+        f.prog[f.n + 6] = .{ .code = seal.JEQ_K, .jf = 2, .k = 0 };
+        f.prog[f.n + 7] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, b) };
+        f.prog[f.n + 8] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = bv };
+        f.prog[f.n + 9] = .{ .code = seal.LD_W_ABS, .k = 0 };
+        f.n += 10;
     }
 
     fn finish(f: *Filter) []const seal.Filter {
@@ -504,4 +566,93 @@ test Filter {
     try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, p[11].k);
     try std.testing.expectEqual(linux.SECCOMP.RET.ALLOW, p[12].k);
     try std.testing.expectEqual(linux.SECCOMP.RET.ERRNO | 1, p[13].k);
+}
+
+test "two argument filters reject wrong values, high bits and architectures" {
+    var f: Filter = .{};
+    f.allowTwo("fchmod", 0, 7, 1, 0o100);
+    const code = f.finish();
+    const Eval = struct {
+        fn run(prog: []const seal.Filter, arch: u32, args: [2]u64) u32 {
+            var data: [64]u8 = @splat(0);
+            std.mem.writeInt(u32, data[0..4], @backingInt(linux.SYS.fchmod), .little);
+            std.mem.writeInt(u32, data[4..8], arch, .little);
+            std.mem.writeInt(u64, data[16..24], args[0], .little);
+            std.mem.writeInt(u64, data[24..32], args[1], .little);
+            var a: u32 = 0;
+            var pc: usize = 0;
+            while (pc < prog.len) {
+                const insn = prog[pc];
+                switch (insn.code) {
+                    seal.LD_W_ABS => a = std.mem.readInt(u32, data[insn.k..][0..4], .little),
+                    seal.JEQ_K => pc += if (a == insn.k) insn.jt else insn.jf,
+                    seal.RET_K => return insn.k,
+                    else => unreachable,
+                }
+                pc += 1;
+            }
+            unreachable;
+        }
+    };
+    try std.testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        Eval.run(code, seal.native_arch, .{ 7, 0o100 }),
+    );
+    for ([_][2]u64{
+        .{ 8, 0o100 },
+        .{ 7, 0 },
+        .{ (1 << 32) | 7, 0o100 },
+        .{ 7, (1 << 32) | 0o100 },
+    }) |args|
+        try std.testing.expectEqual(
+            linux.SECCOMP.RET.KILL_PROCESS,
+            Eval.run(code, seal.native_arch, args),
+        );
+    try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, Eval.run(code, 0, .{ 7, 0o100 }));
+}
+
+test "supplemental exec and bind layers preserve confined renames" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const probe = Ruleset.init(.{}) catch |err| {
+        if (failed_errno == .NOSYS or failed_errno == .OPNOTSUPP) return error.SkipZigTest;
+        return err;
+    };
+    _ = linux.close(probe.fd);
+    if (probe.abi < 4) return error.SkipZigTest;
+    for ([_]Ruleset.Options{ .{ .only_exec = true }, .{ .only_bind = true } }) |options| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const io = std.testing.io;
+        try tmp.dir.createDirPath(io, "own/left");
+        try tmp.dir.createDirPath(io, "own/right");
+        try tmp.dir.createDirPath(io, "other");
+        try tmp.dir.writeFile(io, .{ .sub_path = "own/left/file", .data = "kept" });
+        const own = try tmp.dir.openDir(io, "own", .{});
+        defer own.close(io);
+        const pid = try sys(linux.fork(), "fork Landlock test");
+        if (pid == 0) {
+            confinedRename(tmp.dir.handle, own.handle, options) catch linux.exit_group(1);
+            linux.exit_group(0);
+        }
+        var status: i32 = 0;
+        while (true) {
+            const waited = linux.wait4(@intCast(pid), &status, 0, null);
+            if (linux.errno(waited) == .INTR) continue;
+            _ = try sys(waited, "wait for Landlock test");
+            break;
+        }
+        try std.testing.expectEqual(@as(i32, 0), status);
+    }
+}
+
+fn confinedRename(dir: i32, own: i32, options: Ruleset.Options) !void {
+    const parent = try Ruleset.init(.{});
+    try parent.add(own, own_dir | refer);
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+    try parent.restrict();
+    const extra = try Ruleset.init(options);
+    try extra.restrict();
+    _ = try sys(linux.renameat(dir, "own/left/file", dir, "own/right/file"), "confined rename");
+    const refused = linux.errno(linux.renameat(dir, "own/right/file", dir, "other/file"));
+    if (refused != .ACCES and refused != .XDEV) return error.EscapedParentDomain;
 }

@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Exercise fence's LAN UDP rules in private Linux mount/network namespaces.
+
+Usage: python3 test/check-lan FENCE
+No host interfaces, routes, files or credentials are changed.
+"""
+import errno
+import json
+import os
+from pathlib import Path
+import select
+import socket
+import subprocess
+import sys
+import tempfile
+
+PEER = '10.77.0.2'
+WAN = '198.51.100.2'
+CLIENT = '10.77.0.1'
+GROUPS = {5353: '224.0.0.251', 1900: '239.255.255.250'}
+PAYLOAD = b'werewolf-lan-fixture'
+
+
+def run(*args, **kw):
+    return subprocess.run(list(map(str, args)), check=True, **kw)
+
+
+def peer():
+    sockets = []
+    for port, group in GROUPS.items():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('', port))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                        socket.inet_aton(group) + socket.inet_aton(PEER))
+        sockets.append(sock)
+    print('ready', flush=True)
+    while True:
+        for sock in select.select(sockets, [], [])[0]:
+            data, source = sock.recvfrom(2048)
+            sock.sendto(data, source)
+
+
+def probe():
+    print('ready', flush=True)
+    for line in sys.stdin:
+        request = json.loads(line)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.setgroups([])
+                os.setgid(request['uid'])
+                os.setuid(request['uid'])
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(0.6)
+                sock.bind(('', request.get('source', 0)))
+                if request['kind'] == 'out':
+                    if request['address'] == '255.255.255.255':
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    sock.sendto(PAYLOAD, (request['address'], request['port']))
+                else:
+                    print('listening', flush=True)
+                result = {'received': sock.recvfrom(2048)[0] == PAYLOAD}
+            except OSError as error:
+                result = {'received': False, 'errno': error.errno}
+            print(json.dumps(result), flush=True)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        if status:
+            raise RuntimeError('probe child failed')
+
+
+def read_line(process):
+    pending = getattr(process, '_lan_pending', b'')
+    while b'\n' not in pending:
+        assert select.select([process.stdout], [], [], 10)[0], 'fixture timed out'
+        data = os.read(process.stdout.fileno(), 4096)
+        assert data, 'fixture exited early'
+        pending += data
+    line, process._lan_pending = pending.split(b'\n', 1)
+    line = line.decode().strip()
+    assert line, 'fixture exited early'
+    return line
+
+
+def inside(fence, parent_net, parent_mount):
+    assert os.readlink('/proc/self/ns/net') != parent_net
+    assert os.readlink('/proc/self/ns/mnt') != parent_mount
+    run('mount', '--make-rprivate', '/')
+    with tempfile.TemporaryDirectory(prefix='werewolf-lan-') as directory:
+        work = Path(directory)
+        work.chmod(0o755)
+        for path in ['/run', '/etc', '/usr/share', '/var']:
+            run('mount', '-t', 'tmpfs', 'tmpfs', path)
+        Path('/var/empty').mkdir()
+        Path('/var/run').symlink_to('/run')
+        policy = Path('/usr/share/werewolf/net')
+        policy.parent.mkdir()
+        policy.write_text(''.join(
+            f'listen 207 udp {port} lan\nconnect 207 udp {port} lan\n'
+            for port in GROUPS) + 'connect 207 udp 53\n')
+        run('ip', 'link', 'set', 'lo', 'up')
+        run('ip', 'netns', 'add', 'lan-peer')
+        run('ip', 'link', 'add', 'client', 'type', 'veth', 'peer', 'name', 'peer')
+        run('ip', 'link', 'set', 'peer', 'netns', 'lan-peer')
+        run('ip', 'addr', 'add', CLIENT + '/24', 'dev', 'client')
+        run('ip', 'link', 'set', 'client', 'up')
+        for scope in ['all', 'default', 'client']:
+            Path('/proc/sys/net/ipv4/conf/' + scope + '/rp_filter').write_text('0\n')
+        run('ip', 'route', 'add', 'default', 'via', PEER)
+        for address in [PEER + '/24', WAN + '/32']:
+            run('ip', '-n', 'lan-peer', 'addr', 'add', address, 'dev', 'peer')
+        run('ip', '-n', 'lan-peer', 'link', 'set', 'peer', 'up')
+        run('ip', '-n', 'lan-peer', 'link', 'set', 'lo', 'up')
+        run('ip', '-n', 'lan-peer', 'route', 'add', 'default', 'dev', 'peer')
+        script = str(Path(__file__).resolve())
+        server = subprocess.Popen(['ip', 'netns', 'exec', 'lan-peer', sys.executable,
+                                   script, '--peer'], stdout=subprocess.PIPE, text=True)
+        client = None
+        try:
+            assert read_line(server) == 'ready'
+            client = subprocess.Popen([fence, sys.executable, script, '--probe'],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            while read_line(client) != 'ready':
+                pass  # fence's structured startup log precedes the probe.
+            count = 0
+            for port, group in GROUPS.items():
+                outgoing = [
+                        (207, PEER, 0, True), (207, group, 0, True),
+                        (207, PEER, port, True), (207, WAN, 0, False),
+                        (207, WAN, port, False), (208, PEER, port, False),
+                        (208, group, port, False), (207, '224.0.0.252', 0, False)]
+                if port == 1900:
+                    outgoing += [(207, '255.255.255.255', 0, True),
+                                 (208, '255.255.255.255', port, False)]
+                for uid, address, source, allowed in outgoing:
+                    client.stdin.write(json.dumps(dict(kind='out', uid=uid, address=address,
+                                                       port=port, source=source)) + '\n')
+                    client.stdin.flush()
+                    result = json.loads(read_line(client))
+                    assert result['received'] == allowed, (port, uid, address, source, result)
+                    if not allowed:
+                        assert result['errno'] in (errno.EACCES, errno.EPERM), result
+                    count += 1
+                for address, source, allowed in [
+                        (PEER, port, True), (PEER, 53, True),
+                        (WAN, port, False), (WAN, 53, False), (WAN, 443, False)]:
+                    client.stdin.write(json.dumps(dict(kind='in', uid=207, source=port)) + '\n')
+                    client.stdin.flush()
+                    assert read_line(client) == 'listening'
+                    run('ip', 'netns', 'exec', 'lan-peer', sys.executable, script,
+                        '--send', address, source, CLIENT, port)
+                    result = json.loads(read_line(client))
+                    assert result['received'] == allowed, (port, address, source, result)
+                    count += 1
+            print(f'pass: {count} real-kernel LAN discovery allow/deny checks')
+        finally:
+            if client:
+                client.stdin.close()
+                try:
+                    client.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    client.wait()
+            server.terminate()
+            server.wait(timeout=5)
+            run('ip', 'netns', 'delete', 'lan-peer')
+
+
+if __name__ == '__main__':
+    if sys.argv[1:] == ['--peer']:
+        peer()
+    elif sys.argv[1:] == ['--probe']:
+        probe()
+    elif len(sys.argv) == 6 and sys.argv[1] == '--send':
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((sys.argv[2], int(sys.argv[3])))
+            sock.sendto(PAYLOAD, (sys.argv[4], int(sys.argv[5])))
+    elif len(sys.argv) == 5 and sys.argv[1] == '--inside':
+        inside(*sys.argv[2:])
+    elif len(sys.argv) == 2 and sys.platform == 'linux':
+        user_namespace = ['--user', '--map-auto', '--map-root-user'] if os.geteuid() else []
+        run('unshare', *user_namespace, '--net', '--mount', '--fork', sys.executable,
+            str(Path(__file__).resolve()), '--inside', str(Path(sys.argv[1]).resolve()),
+            os.readlink('/proc/self/ns/net'), os.readlink('/proc/self/ns/mnt'))
+    else:
+        sys.exit(__doc__)

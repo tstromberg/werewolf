@@ -3,13 +3,13 @@
 # on the list or off it. 26.3's hello is the name and an id; the
 # encryption request is the answer, before the whitelist is consulted.
 # The whitelist file is what an authenticated player is held to.
-ok  mc-up            i=0; until (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x01\x01\x00'; sleep 1) | timeout 5 nc 127.0.0.1 25565 | grep -aq werewolf; do i=$((i + 1)); [ $i -le 150 ] || { echo "no server list in 150 s"; exit 1; }; sleep 1; done
-ok  mc-stranger      (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x02\x1a\x00\x08stranger\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'; sleep 1) | timeout 5 nc 127.0.0.1 25565 > /tmp/mc-stranger || true; [ "$(od -An -tu1 -v /tmp/mc-stranger | tr -s ' \n' '\n' | awk 'NF{b[n++]=$1} END{i=0; while(b[i]>=128)i++; print b[i+1]}')" = 1 ]
+ok  mc-up            i=0; until (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x01\x01\x00'; sleep 1) | timeout 5 /usr/bin/nc 127.0.0.1 25565 | grep -aq werewolf; do i=$((i + 1)); [ $i -le 150 ] || { echo "no server list in 150 s"; exit 1; }; sleep 1; done
+ok  mc-stranger      (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x02\x1a\x00\x08stranger\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'; sleep 1) | timeout 5 /usr/bin/nc 127.0.0.1 25565 > /tmp/mc-stranger || true; [ "$(od -An -tu1 -v /tmp/mc-stranger | tr -s ' \n' '\n' | awk 'NF{b[n++]=$1} END{i=0; while(b[i]>=128)i++; print b[i+1]}')" = 1 ]
 # The files are the locked-down ones, steve's account is the whitelist,
 # and the directory is minecraft's.
 ok  mc-files         grep -q '^white-list=true' /data/svc/minecraft/server.properties && grep -q '^online-mode=true' /data/svc/minecraft/server.properties && grep -q '^enable-rcon=false' /data/svc/minecraft/server.properties && grep -q '^enable-query=false' /data/svc/minecraft/server.properties && grep -q '^eula=true' /data/svc/minecraft/eula.txt && grep -qi '"name":"steve"' /data/svc/minecraft/whitelist.json && u=$(grep '^minecraft:' /etc/passwd | cut -d: -f3) && [ "$(stat -c %u /data/svc/minecraft)" = "$u" ]
 
 # The status protocol echoes a ping payload, not merely a banner.
-ok  mc-ping (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x01\x01\x00\x09\x01\x00\x00\x00\x00\x00\x00\x00\x2a'; sleep 1) | timeout 5 nc 127.0.0.1 25565 >/tmp/mc-ping; [ "$(tail -c 10 /tmp/mc-ping | od -An -tx1 | tr -d ' \n')" = 0901000000000000002a ]
+ok  mc-ping (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x01\x01\x00\x09\x01\x00\x00\x00\x00\x00\x00\x00\x2a'; sleep 1) | timeout 5 /usr/bin/nc 127.0.0.1 25565 >/tmp/mc-ping; [ "$(tail -c 10 /tmp/mc-ping | od -An -tx1 | tr -d ' \n')" = 0901000000000000002a ]
 # The normal game port answers above, but no RCON management service does.
-ok  mc-no-rcon ! netstat -ltn | grep -q ':25575 ' && ! timeout 5 nc -w 2 127.0.0.1 25575 </dev/null
+ok  mc-no-rcon ! netstat -ltn | grep -q ':25575 ' && ! timeout 5 /usr/bin/nc -w 2 127.0.0.1 25575 </dev/null

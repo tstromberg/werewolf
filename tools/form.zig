@@ -13,7 +13,7 @@ const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
     "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
-    "stage FORM DIR, depends FORM, archs FORM";
+    "stage FORM DIR, depends FORM, archs FORM, for-arch ARCH";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -97,6 +97,17 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         for (try compose.formDepends(gpa, fm)) |d| try w.print("{s}\n", .{d});
         return;
     }
+    if (is(verb, "for-arch") and args.len == 2) {
+        const want = try arch(args[1]);
+        for (try all(io, gpa)) |name| {
+            const chain = try form.chain(io, gpa, root, name, f);
+            for (try architectures(gpa, chain)) |a| if (is(a, @tagName(want))) {
+                try w.print("{s}\n", .{name});
+                break;
+            };
+        }
+        return;
+    }
     if (is(verb, "released") and args.len == 1) {
         for (compose.release_forms) |name| try w.print("{s}\n", .{name});
         return;
@@ -121,11 +132,7 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     if (args.len < 2) return error.Usage;
     const forms = try form.chain(io, gpa, root, args[1], f);
     if (is(verb, "archs") and args.len == 2) {
-        var supported: []const []const u8 = &.{};
-        for (forms) |c| if (c.spec.get("archs") != null) {
-            supported = try c.items(gpa, "archs");
-        };
-        for (supported) |a| try w.print("{s}\n", .{a});
+        for (try architectures(gpa, forms)) |a| try w.print("{s}\n", .{a});
     } else if (is(verb, "names") and args.len == 2) {
         for (forms) |c| try w.print("{s}\n", .{c.name});
     } else if (is(verb, "dirs") and args.len == 2) {
@@ -181,6 +188,14 @@ fn is(a: []const u8, b: []const u8) bool {
 
 fn arch(name: []const u8) error{Usage}!compose.Arch {
     return std.meta.stringToEnum(compose.Arch, name) orelse error.Usage;
+}
+
+fn architectures(gpa: Allocator, chain: []const form.Form) ![]const []const u8 {
+    var supported: []const []const u8 = &.{ "aarch64", "x86_64" };
+    for (chain) |c| if (c.spec.get("archs") != null) {
+        supported = try c.items(gpa, "archs");
+    };
+    return supported;
 }
 
 /// all returns the sorted names of the directories in forms/ that hold a form.yaml.

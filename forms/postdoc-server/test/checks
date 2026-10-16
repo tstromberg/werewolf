@@ -17,5 +17,5 @@ ok  postdoc-private  [ "$(stat -c '%u:%a' /run/config/postdoc/api-token)" = 0:60
 
 # Operators come in by security key on port 22; the tunnel's metrics
 # answer on loopback alone.
-ok  sshd-listens     awk '$4 == "0A" && $2 ~ /:0016$/ { f = 1 } END { exit !f }' /proc/net/tcp /proc/net/tcp6
+ok  sshd-listens     awk '$4 == "0A" && $2 ~ /:0016$/ { f = 1 } END { exit !f }' /proc/net/tcp $(test ! -e /proc/net/tcp6 || echo /proc/net/tcp6)
 ok  cloudflared-metrics i=0; until wget -q -T 5 -O - http://127.0.0.1:2000/metrics 2>/dev/null | grep -q cloudflared; do i=$((i + 1)); [ $i -le 60 ] || { echo "no metrics on loopback"; exit 1; }; sleep 1; done

@@ -16,7 +16,8 @@ to init ([design/verified-boot.md](design/verified-boot.md)). `DEV=1` adds
 busybox and a console shell to any form. Howl's `--dev` also layers in root
 SSH using a local Ed25519 key managed under `$XDG_DATA_HOME/howl/keys/dev/`;
 `howl ssh` selects that key for the VM. These are local debugging conveniences,
-and what ships is built without them.
+and what ships is built without them. Native test authors can reuse that channel
+with [`howl test --iterate`](design/local-test-iteration.md).
 
 ## The runtime forms
 

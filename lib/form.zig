@@ -1010,6 +1010,11 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
     }
     const ports = try gpa.alloc(u16, named.len);
     for (named, ports) |word, *port| {
+        // Zero is a kernel-assigned port, never a published listener.
+        if (loopback and mem.eql(u8, word, "tcp/0")) {
+            port.* = 0;
+            continue;
+        }
         port.* = if (mem.startsWith(u8, word, "tcp/") and isDigits(word[4..]))
             std.fmt.parseInt(u16, word[4..], 10) catch 0
         else
@@ -1070,13 +1075,20 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                         );
                         const lo = tcp.items.len > 0 and
                             mem.eql(u8, tcp.items[tcp.items.len - 1], "loopback");
-                        if (tcp.items.len > @intFromBool(lo)) try out.append(
+                        const lan = tcp.items.len > 0 and
+                            mem.eql(u8, tcp.items[tcp.items.len - 1], "lan");
+                        if (lan and tcp.items.len != 1) return f.fail(
+                            gpa,
+                            "{s}/form.yaml: services: {s}: lan is for UDP ports alone",
+                            .{ form.dir, s.key },
+                        );
+                        if (tcp.items.len > @intFromBool(lo or lan)) try out.append(
                             gpa,
                             try gpa.print("listen {s}", .{try mem.join(gpa, " ", tcp.items)}),
                         );
                         if (!lo) try out.append(gpa, try gpa.print(
-                            "listen {s} {s}",
-                            .{ user, try mem.join(gpa, " ", udp.items) },
+                            "listen {s} {s}{s}",
+                            .{ user, try mem.join(gpa, " ", udp.items), if (lan) " lan" else "" },
                         ));
                     }
                 } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
@@ -1334,14 +1346,21 @@ fn connects(gpa: Allocator, forms: []const Form, user: []const u8, f: *Failure) 
 
 /// Service is a service file, /etc/sv/NAME/service, as the image will hold
 /// it: from a form's rootfs, or rendered from its form.yaml's services.
-pub const Service = struct { name: []const u8, path: []const u8, text: []const u8 };
+pub const Service = struct {
+    name: []const u8,
+    path: []const u8,
+    text: []const u8,
+    /// Private UDP declarations do not produce public fence rules. Preserve
+    /// their scope for composition; leash itself does not mediate UDP ports.
+    loopback_udp: []const u16 = &.{},
+};
 
 /// fenceOnly reports whether a listen or connect word is fence's alone
-/// (udp/PORT, icmp, public, loopback): leash, which holds TCP by port,
+/// (udp/PORT, icmp, public, loopback, lan): leash, which holds TCP by port,
 /// takes the rest of the line, and a listen's udp/PORT, to grant a low one.
 fn fenceOnly(word: []const u8) bool {
     return mem.startsWith(u8, word, "udp/") or mem.eql(u8, word, "icmp") or
-        mem.eql(u8, word, "public") or mem.eql(u8, word, "loopback");
+        mem.eql(u8, word, "public") or mem.eql(u8, word, "loopback") or mem.eql(u8, word, "lan");
 }
 
 /// An image service's defaults: its pledge and memory unless the service
@@ -1384,7 +1403,27 @@ fn listenPorts(gpa: Allocator, spec: Node) Allocator.Error![]const []const u8 {
     const values: []const Node = if (l == .scalar) &.{l} else l.list;
     for (values) |v| {
         var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
-        while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/")) try out.append(gpa, w);
+        while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/") and !mem.eql(u8, w, "tcp/0"))
+            try out.append(gpa, w);
+    }
+    return out.items;
+}
+
+fn loopbackUdp(gpa: Allocator, spec: Node) Allocator.Error![]const u16 {
+    var out: std.ArrayList(u16) = .empty;
+    const listen_node = spec.get("listen") orelse return &.{};
+    const values: []const Node = if (listen_node == .scalar) &.{listen_node} else listen_node.list;
+    for (values) |v| {
+        var words = mem.tokenizeAny(u8, v.scalar.text, " \t");
+        var last: []const u8 = "";
+        while (words.next()) |word| last = word;
+        if (!mem.eql(u8, last, "loopback")) continue;
+        words.reset();
+        while (words.next()) |word| {
+            if (!mem.startsWith(u8, word, "udp/")) continue;
+            const p = std.fmt.parseInt(u16, word[4..], 10) catch continue;
+            try out.append(gpa, p);
+        }
     }
     return out.items;
 }
@@ -1595,6 +1634,7 @@ pub fn services(
                 .name = s.key,
                 .path = try gpa.print("{s}/form.yaml: services.{s}", .{ form.dir, s.key }),
                 .text = try render(io, gpa, root, forms, form, s.key, s.value, f),
+                .loopback_udp = try loopbackUdp(gpa, s.value),
             });
         }
     }
@@ -1903,7 +1943,7 @@ test "load: allow names allowances; app is an absolute path" {
     const io = testing.io;
     for ([_][2][]const u8{
         .{ "node", "allow: [jit]\napp: /usr/lib/app\n" },
-        .{ "php", "allow: [jit, php:proc_open]\n" },
+        .{ "php", "allow: [jit, php:exec]\n" },
         .{ "root", "allow: [root]\n" },
         .{ "scalar", "allow: jit\n" },
         .{ "runtime", "allow: [php:fpassthru]\n" },
@@ -1921,7 +1961,7 @@ test "load: allow names allowances; app is an absolute path" {
     const node = try load(io, gpa, tmp.dir, "node", &f);
     try testing.expectEqualStrings("jit", (try node.items(gpa, "allow"))[0]);
     const php = try load(io, gpa, tmp.dir, "php", &f);
-    try testing.expectEqualStrings("php:proc_open", (try php.items(gpa, "allow"))[1]);
+    try testing.expectEqualStrings("php:exec", (try php.items(gpa, "allow"))[1]);
     for ([_][]const u8{ "root", "scalar", "runtime", "language", "relative", "up" }) |name|
         try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
 }
@@ -1935,7 +1975,7 @@ test "services: of each name, the last form's file" {
     const io = testing.io;
     for ([_][3][]const u8{
         .{ "prod", "web", "pledge stdio\n" },
-        .{ "prod", "db", "pledge ipc\n" },
+        .{ "prod", "db", "pledge shm\n" },
         .{ "site", "web", "pledge inet\n" },
     }) |s| {
         try tmp.dir.createDirPath(
@@ -2241,6 +2281,15 @@ test listen {
     try testing.expect(!(try listen(gpa, "listen tcp/80", &why)).?.loopback);
     try testing.expectEqual(null, try listen(gpa, "connect caddy tcp/443", &why));
     try testing.expectError(error.Invalid, listen(gpa, "listen loopback", &why));
+    try testing.expectEqualSlices(
+        u16,
+        &.{0},
+        (try listen(gpa, "listen tcp/0 loopback", &why)).?.ports,
+    );
+    try testing.expectError(error.Invalid, listen(gpa, "listen tcp/0", &why));
+    const worker = try testParse(gpa, "listen: [tcp/0 loopback, tcp/8080 loopback]\n");
+    try testing.expectEqualStrings("tcp/8080", (try listenPorts(gpa, worker))[0]);
+    try testing.expectEqual(1, (try listenPorts(gpa, worker)).len);
 }
 
 test listens {
@@ -2253,6 +2302,7 @@ test listens {
         \\  - listen tcp/80 tcp/443
         \\  - connect caddy tcp/443
         \\  - listen tcp/9000 loopback
+        \\  - listen tcp/0 loopback
         \\  - listen tcp/22 tcp/80
         \\
     );

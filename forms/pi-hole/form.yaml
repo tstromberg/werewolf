@@ -33,7 +33,9 @@ services:
     before: /bin/bash /usr/lib/pi-hole-setup
     # exec: gravity is a bash script, which runs curl, Pi-hole's FTL as
     # SQLite's shell, and busybox's and coreutils' tools.
-    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    # watch: FTL/dnsmasq watches its generated DNS configuration with
+    # inotify. Landlock does not mediate watches, so keep this explicit.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
     listen: [tcp/53 udp/53, tcp/8080 loopback]
     connect: [udp/53 tcp/53, tcp/443 tcp/80 public]
     write: [/etc/pihole, /var/log/pihole, /dev/shm]
@@ -41,9 +43,11 @@ services:
       - /bin/bash
       - /bin/busybox
       - /bin/coreutils
+      - /bin/grep
       - /usr/bin/env
       - /usr/bin/getent
       - /usr/bin/curl
+      - /usr/bin/tput
     secret: FTLCONF_webserver_api_password /run/config/pi-hole/password
     memory: 512
     nofile: 4096

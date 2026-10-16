@@ -1,0 +1,24 @@
+# Solr's JVM is the hardened package; the application package has no shell or JVM.
+base: jre
+
+weaknesses:
+  programs-no-interpreters: hardened OpenJDK 27 runs Solr
+  kernel-write-xor-execute: the JVM compiles Solr as it runs
+
+check:
+  memory: 2048
+
+services:
+  solr:
+    exec: /usr/bin/java -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Xms256m -Xmx768m
+      -Djava.io.tmpdir=/run/svc/solr -Djetty.home=/usr/lib/solr/server -Djetty.base=/usr/lib/solr/server
+      -Dsolr.install.dir=/usr/lib/solr -Dsolr.solr.home=/data/svc/solr/home -Dsolr.logs.dir=/run/svc/solr
+      -Dlog4j.configurationFile=/usr/lib/solr/log4j2.xml -Dsolr.host.bind=127.0.0.1 -Dsolr.port.listen=8983
+      -Dsolr.jetty.threads.max=128 -jar /usr/lib/solr/server/start.jar --module=http
+    before: /usr/lib/solr/setup
+    user: solr
+    pledge: stdio rpath wpath inet unix netlink listen proc
+    listen: tcp/8983 loopback
+    memory: 1536
+    nofile: 8192
+    env: [HOME=/data/svc/solr, LANG=C.UTF-8]

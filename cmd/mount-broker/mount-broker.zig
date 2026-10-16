@@ -105,8 +105,15 @@ fn heard(log: *Log, fd: i32, role: broker.Role) void {
     }
     const request = std.mem.trimEnd(u8, in_buf[0..rc], "\n");
     var out_buf: [1024]u8 = undefined;
-    const text = handleRequest(log, role, request, &out_buf) catch |err|
-        std.mem.print(&out_buf, "no {s}\n", .{@errorName(err)}) catch "no\n";
+    const text = handleRequest(log, role, request, &out_buf) catch |err| failed: {
+        log.event("refused", .{
+            .role = @tagName(role),
+            .@"error" = @errorName(err),
+            .call = if (err == error.SystemCall) sandbox.failed else null,
+            .errno = if (err == error.SystemCall) sandbox.errnoName(sandbox.failed_errno) else null,
+        });
+        break :failed std.mem.print(&out_buf, "no {s}\n", .{@errorName(err)}) catch "no\n";
+    };
     reply(fd, text);
 }
 
@@ -305,6 +312,7 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
         return "ok\n";
     }
     if (std.mem.eql(u8, op, "esp-status")) {
+        if (!std.mem.eql(u8, request, "esp-status")) return error.BadRequest;
         return switch ((try espScan()).status) {
             .already => "ok already\n",
             .tried => "ok tried\n",
@@ -312,7 +320,24 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
         };
     }
     if (std.mem.eql(u8, op, "esp-commit")) {
+        if (!std.mem.eql(u8, request, "esp-commit")) return error.BadRequest;
         try espCommitNow();
+        const marker = try openAt(linux.AT.FDCWD, "/run/werewolf/committed", .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .NOFOLLOW = true,
+            .NONBLOCK = true,
+            .CLOEXEC = true,
+        }, 0o644);
+        defer _ = linux.close(marker);
+        var st: linux.Statx = undefined;
+        _ = try sandbox.sys(linux.statx(marker, "", linux.AT.EMPTY_PATH, .{
+            .TYPE = true,
+            .MODE = true,
+            .UID = true,
+        }, &st), "stat committed marker");
+        if (st.uid != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or st.mode & 0o022 != 0)
+            return error.UnsafeCommittedMarker;
         return "ok\n";
     }
     if (std.mem.eql(u8, op, "esp-disarm")) {
@@ -1051,7 +1076,7 @@ fn isMounted(mounts: []const u8, dir: []const u8) bool {
 
 /// exists reports whether path can be opened.
 fn exists(path: [*:0]const u8) bool {
-    const fd = linux.open(path, .{ .PATH = true, .CLOEXEC = true }, 0);
+    const fd = linux.openat(linux.AT.FDCWD, path, .{ .PATH = true, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
     _ = linux.close(@intCast(fd));
     return true;

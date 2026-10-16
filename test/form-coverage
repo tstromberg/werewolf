@@ -35,7 +35,7 @@ def records(path):
 def cases(path):
     result = set()
     for number, fields in records(path):
-        if len(fields) != 3 or fields[0] not in {"ok", "gap"}:
+        if len(fields) != 3 or fields[0] not in {"ok", "gap", "seen", "unseen"}:
             raise ValueError(f"{path}:{number}: expected KIND NAME COMMAND")
         name = fields[1]
         if name in result:

@@ -50,6 +50,9 @@ pub const Spec = struct {
     arch: howl.Arch,
     /// dev adds a shell, as DEV=1 does.
     dev: bool = false,
+    /// dev_shell adds BusyBox and form-specific debug tools. SSH iteration
+    /// keeps developer access but uses sh-shim and the native clients only.
+    dev_shell: bool = true,
     /// disabled is what --disable gave up of werewolf's protections. An
     /// image may lack only these (unnamed), and its command line says which.
     disabled: cmdline.Protections = .empty,
@@ -72,6 +75,9 @@ pub const Spec = struct {
     /// file times alone, so a path reused with other arguments would not be.
     disk_path: ?[]const u8 = null,
     qcow2_path: ?[]const u8 = null,
+    /// kernel_rootfs tests an unpublished kernel without enabling IPE.
+    /// The caller must explicitly disable IPE; signed builds use ipe_kernel.
+    kernel_rootfs: ?[]const u8 = null,
     /// IPE builds use an external kernel archive and a host-only policy signer.
     ipe_kernel: ?[]const u8 = null,
     ipe_key: ?[]const u8 = null,
@@ -101,6 +107,10 @@ pub const Spec = struct {
         if (s.ipe_kernel == null) d.insert(.ipe);
         return d;
     }
+
+    pub fn devSuffix(s: Spec) []const u8 {
+        return if (!s.dev) "" else if (s.dev_shell) "-dev" else "-dev-ssh";
+    }
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -124,13 +134,25 @@ pub fn paths(gpa: Allocator, s: Spec) !Paths {
         .out = try gpa.print("{s}/{s}{s}{s}{s}{s}", .{
             dir,
             name,
-            if (s.dev) "-dev" else "",
+            s.devSuffix(),
             if (s.app != null) "-app" else "",
             if (s.published) "-published" else "",
             if (s.ipe_kernel != null) "-ipe" else "",
         }),
         .programs = s.programs orelse try gpa.print("build/{t}/programs", .{s.arch}),
     };
+}
+
+test "SSH and shell developer images have separate cache paths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var spec: Spec = .{ .form = "minimal", .arch = .aarch64, .dev = true };
+    const shell = try paths(gpa, spec);
+    spec.dev_shell = false;
+    const ssh = try paths(gpa, spec);
+    try std.testing.expect(!mem.eql(u8, shell.out, ssh.out));
+    try std.testing.expect(mem.endsWith(u8, ssh.out, "-dev-ssh"));
 }
 
 const DiskFormat = enum { qcow2, raw, vhd, vmdk };
@@ -474,10 +496,11 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
 /// DISK_MIB and DISK_ARGS; the qcow2 goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--disable=LIST] [--published] " ++
+    const syntax = "_build --with FORM [--arch ARCH] [--dev[=ssh]] [--disable=LIST] " ++
+        "[--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
-        "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
+        "[--kernel-rootfs TAR | --ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
         "[--ipe-updates URL --image-serial UTC] [--verbose] image|slot|disk|qcow2|prebuilt...";
     var spec: Spec = .{ .form = "", .arch = undefined };
     var form: ?[]const u8 = null;
@@ -489,6 +512,9 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
             spec.dev = true;
+        } else if (std.mem.eql(u8, args[i], "--dev=ssh")) {
+            spec.dev = true;
+            spec.dev_shell = false;
         } else if (std.mem.eql(u8, args[i], "--boot-native")) {
             spec.boot_native = true;
         } else if (std.mem.eql(u8, args[i], "--tpm-firmware")) {
@@ -511,6 +537,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 spec.build = v;
             } else if (std.mem.eql(u8, flag, "--programs")) {
                 spec.programs = v;
+            } else if (std.mem.eql(u8, flag, "--kernel-rootfs")) {
+                spec.kernel_rootfs = v;
             } else if (std.mem.eql(u8, flag, "--ipe-kernel")) {
                 spec.ipe_kernel = v;
             } else if (std.mem.eql(u8, flag, "--ipe-key")) {
@@ -817,7 +845,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     // A lock needs image digests, but no downloaded or unpacked layers.
     try oci.lay(&b, goals.lock and !image_goals);
     const suffix = try gpa.print("{s}{s}", .{
-        if (s.dev) "-dev" else "",
+        s.devSuffix(),
         if (s.published) "-published" else "",
     });
     const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
@@ -920,6 +948,10 @@ test unnamed {
 }
 
 fn validateIpe(s: Spec) !void {
+    if (s.kernel_rootfs) |kernel| {
+        if (kernel.len == 0 or !s.disabled.contains(.ipe) or s.ipe_kernel != null)
+            return error.TestKernelNeedsIpeDisabled;
+    }
     if (s.disabled.contains(.ipe) and (s.ipe_kernel != null or s.ipe_key != null or
         s.ipe_cert != null or s.ipe_updates != null or s.image_serial != null))
         return error.DisabledIpeGiven;
@@ -952,6 +984,20 @@ fn validateIpe(s: Spec) !void {
             "update-policy",
         ).parseSerial(s.image_serial.?) catch return error.BadImageSerial;
     }
+}
+
+test "unpublished kernels cannot silently replace the signed IPE profile" {
+    const t = std.testing;
+    var s: Spec = .{ .form = "minimal", .arch = .aarch64, .kernel_rootfs = "kernel.tar" };
+    try t.expectError(error.TestKernelNeedsIpeDisabled, validateIpe(s));
+    s.disabled.insert(.ipe);
+    try validateIpe(s);
+    try t.expect(s.lacks().contains(.ipe));
+    s.ipe_kernel = "signed-kernel.tar";
+    try t.expectError(error.TestKernelNeedsIpeDisabled, validateIpe(s));
+    s.ipe_kernel = null;
+    s.kernel_rootfs = "";
+    try t.expectError(error.TestKernelNeedsIpeDisabled, validateIpe(s));
 }
 
 test "portable firmware authority requires the complete protected profile" {
@@ -1024,7 +1070,7 @@ pub const every_program = [_][]const u8{
     "stage0",     "iface-up",     "fence",       "mount",        "mount-broker",
     "posture",    "seal-watch",   "seal",        "runit-stage",  "reboot",
     "slot-keep",  "power-button", "debug-shell", "ssh-host-key", "leash",
-    "leash-reap",
+    "leash-reap", "syslogd",
 };
 
 /// plan reads the form's chain and works out everything the steps need.

@@ -451,33 +451,47 @@ pub const Posture = struct {
         );
     }
 
-    /// allowances returns the names in /etc/werewolf/allow (lib/allow.zig), a
-    /// runtime's as RUNTIME:NAME, sorted.
+    /// allowances returns the machine's granted allowances, sorted. General
+    /// ones are file names under /etc/werewolf/allow; runtime ones come from
+    /// /etc/runtime-hardening/allow/<ns>/RUNTIME/NAME, listed as RUNTIME:NAME
+    /// when blanket, or NS/RUNTIME:NAME per service (lib/allow.zig).
     pub fn allowances(p: *Posture) ![]const []const u8 {
         if (!p.werewolf) return &.{};
         var names: std.ArrayList([]const u8) = .empty;
-        var d = Dir.cwd().openDir(
-            p.io,
-            allow.dir,
-            .{ .iterate = true },
-        ) catch return names.items;
-        defer d.close(p.io);
-        var it = d.iterate();
-        while (it.next(p.io) catch null) |e| {
-            // A runtime's directory holds its allowances, listed as RUNTIME:NAME.
-            const runtime = std.meta.stringToEnum(allow.Runtime, e.name) orelse {
-                try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
-                continue;
-            };
-            if (e.kind != .directory) continue;
-            var sub = d.openDir(p.io, e.name, .{ .iterate = true }) catch continue;
-            defer sub.close(p.io);
-            var names_in = sub.iterate();
-            while (names_in.next(p.io) catch null) |n| try names.append(
-                p.gpa,
-                try p.gpa.print("{t}:{s}", .{ runtime, n.name }),
-            );
-        }
+        if (Dir.cwd().openDir(p.io, allow.dir, .{ .iterate = true })) |general| {
+            var d = general;
+            defer d.close(p.io);
+            var it = d.iterate();
+            while (it.next(p.io) catch null) |e|
+                if (e.kind == .file)
+                    try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+        } else |_| {}
+        if (Dir.cwd().openDir(p.io, allow.runtime_dir, .{ .iterate = true })) |root| {
+            var spaces = root;
+            defer spaces.close(p.io);
+            var ns_it = spaces.iterate();
+            while (ns_it.next(p.io) catch null) |ns| {
+                if (ns.kind != .directory) continue;
+                const blanket = std.mem.eql(u8, ns.name, allow.runtime_blanket);
+                var langs = spaces.openDir(p.io, ns.name, .{ .iterate = true }) catch continue;
+                defer langs.close(p.io);
+                var lang_it = langs.iterate();
+                while (lang_it.next(p.io) catch null) |lang| {
+                    if (lang.kind != .directory) continue;
+                    if (std.meta.stringToEnum(allow.Runtime, lang.name) == null) continue;
+                    var feats = langs.openDir(p.io, lang.name, .{ .iterate = true }) catch continue;
+                    defer feats.close(p.io);
+                    var feat_it = feats.iterate();
+                    while (feat_it.next(p.io) catch null) |feat| {
+                        if (feat.kind != .file) continue;
+                        try names.append(p.gpa, if (blanket)
+                            try p.gpa.print("{s}:{s}", .{ lang.name, feat.name })
+                        else
+                            try p.gpa.print("{s}/{s}:{s}", .{ ns.name, lang.name, feat.name }));
+                    }
+                }
+            }
+        } else |_| {}
         std.mem.sort([]const u8, names.items, {}, lessString);
         return names.items;
     }

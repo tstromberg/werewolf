@@ -21,11 +21,25 @@ packages:
 # _dhcp reads it for the DHCP client, and _cloud asks the metadata server.
 accounts:
   groups:
+    - groupname: _usrmgr
+      gid: 74
+    - groupname: _netcfg
+      gid: 73
     - groupname: _dhcp
       gid: 67
     - groupname: _cloud
       gid: 68
   users:
+    - username: _usrmgr
+      uid: 74
+      gid: 74
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _netcfg
+      uid: 73
+      gid: 73
+      homedir: /var/empty
+      shell: /sbin/nologin
     - username: _dhcp
       uid: 67
       gid: 67

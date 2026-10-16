@@ -36,11 +36,12 @@ pub const usage =
     \\usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--published] [--json]   browse forms; an exact name shows setup and commands
     \\       howl versions [--with FORM] [--on qemu|lima] [--arch ARCH] [--json]   available base image releases
     \\       howl build --with FORM,... [--build] [--disable=secureboot,tpm,ipe] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-    \\       howl test --with FORM [--arch ARCH]   run integration and production-variant boot checks from this checkout
+    \\       howl test --with FORM [--arch ARCH] [--iterate [--driver NAME] [--phase seed|verify]]   run the release gate or reuse a local test VM
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
     \\       howl run [--with FORM,...] [--on TARGET] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
-    \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
+    \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME
+    \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
     "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] " ++
@@ -316,11 +317,42 @@ pub fn addDevSsh(
     original: []const forms.Form,
     why: *Why,
 ) ![]const forms.Form {
-    var failure: forms.Failure = .{};
-    const access = forms.chain(io, gpa, Dir.cwd(), "sshd", &failure) catch |err| switch (err) {
-        error.Form => return why.refuse("{s}", .{failure.text}),
-        error.OutOfMemory => return error.OutOfMemory,
-    };
+    var policy: forms.Failure = .{};
+    const ports = try forms.listens(gpa, original, &policy);
+    if (std.mem.findScalar(u16, ports, dev_ssh_port) != null)
+        return why.refuse("--dev reserves TCP port {d} for developer SSH", .{dev_ssh_port});
+    const access = try gpa.dupe(forms.Form, try devSshForm(io, gpa, why));
+    const existing = try forms.apko(gpa, original, &.{});
+    // Reuse a form's privilege-separation accounts. apko concatenates account
+    // lists, so declaring one twice would produce duplicate passwd entries.
+    for (access) |*fm| {
+        if (!std.mem.eql(u8, fm.name, "howl-dev")) continue;
+        const spec = try gpa.dupe(forms.Entry, fm.spec.map);
+        fm.spec.map = spec;
+        for (spec) |*entry| {
+            if (!std.mem.eql(u8, entry.key, "accounts")) continue;
+            const kinds = try gpa.dupe(forms.Entry, entry.value.map);
+            entry.value.map = kinds;
+            for (kinds) |*kind| {
+                const accounts = (existing.get(
+                    "accounts",
+                ) orelse continue).get(kind.key) orelse continue;
+                if (accounts != .list) continue;
+                const field = if (std.mem.eql(u8, kind.key, "users")) "username" else "groupname";
+                var needed: std.ArrayList(forms.Node) = .empty;
+                for (kind.value.list) |candidate| {
+                    const name = candidate.get(field).?.scalar.text;
+                    const found = for (accounts.list) |account| {
+                        const have = account.get(field) orelse continue;
+                        if (have == .scalar and std.mem.eql(u8, have.scalar.text, name))
+                            break true;
+                    } else false;
+                    if (!found) try needed.append(gpa, candidate);
+                }
+                kind.value = .{ .list = needed.items };
+            }
+        }
+    }
     var out: std.ArrayList(forms.Form) = .empty;
     const top = original[original.len - 1];
     for (original[0 .. original.len - 1]) |f| try out.append(gpa, f);
@@ -333,23 +365,91 @@ pub fn addDevSsh(
         };
         if (!seen) try out.append(gpa, f);
     }
-    const algorithm: forms.Node = .{ .scalar = .{ .raw = "ssh-ed25519", .text = "ssh-ed25519" } };
-    const no_touch: forms.Node = .{ .scalar = .{ .raw = "none", .text = "none" } };
-    const dev_settings: forms.Node = .{ .map = &.{
-        .{ .key = "pubkey-accepted-algorithms", .value = algorithm },
-        .{ .key = "pubkey-auth-options", .value = no_touch },
-    } };
-    const override = try forms.merge(
-        gpa,
-        .{ .map = &.{} },
-        .{ .map = &.{.{ .key = "sshd", .value = dev_settings }} },
-    );
-    const top_spec = try forms.merge(gpa, top.spec, override);
-    try out.append(
-        gpa,
-        .{ .name = top.name, .dir = top.dir, .spec = top_spec, .images = top.images },
-    );
+    try out.append(gpa, top);
     return out.items;
+}
+
+pub const dev_ssh_port: u16 = 2222;
+
+/// devSshForm stages the embedded developer listener without altering a
+/// form's own SSH service or requiring a checkout beside the howl binary.
+pub fn devSshForm(io: Io, gpa: Allocator, why: *Why) ![]const forms.Form {
+    const embedded = @import("files");
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(embedded.dev_ssh_form);
+    hash.update(embedded.dev_ssh_config);
+    const dir = try gpa.print("build/dev-ssh/{x}/howl-dev", .{hash.finalResult()});
+    const guard_path = try gpa.print("{s}.lock", .{dir});
+    try Dir.cwd().createDirPath(io, std.fs.path.dirname(dir).?);
+    const guard = try Dir.cwd().createFile(io, guard_path, .{ .truncate = false });
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "form.yaml", embedded.dev_ssh_form },
+        .{ "rootfs/etc/ssh/howl-dev.conf", embedded.dev_ssh_config },
+    }) |file| {
+        const path = try gpa.print("{s}/{s}", .{ dir, file[0] });
+        const previous = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 10)) catch "";
+        if (std.mem.eql(u8, previous, file[1])) continue;
+        try Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+        try writePrivate(io, gpa, path, file[1], why);
+    }
+    var failure: forms.Failure = .{};
+    return forms.chain(io, gpa, Dir.cwd(), dir, &failure) catch |err| switch (err) {
+        error.Form => why.refuse("{s}", .{failure.text}),
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+test "developer SSH preserves the form's SSH service and settings" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var failure: forms.Failure = .{};
+    var why: Why = .{};
+    const original = try forms.chain(io, gpa, Dir.cwd(), "bastion", &failure);
+    const dev = try addDevSsh(io, gpa, original, &why);
+    const before = try forms.services(io, gpa, Dir.cwd(), original, &failure);
+    const after = try forms.services(io, gpa, Dir.cwd(), dev, &failure);
+    for (before) |old| {
+        const found = for (after) |current| {
+            if (std.mem.eql(u8, old.name, current.name)) break current.text;
+        } else return error.MissingProductionService;
+        try testing.expectEqualStrings(old.text, found);
+    }
+    try testing.expectEqualStrings("bastion", dev[dev.len - 1].name);
+    try testing.expectEqualStrings(
+        try forms.sshdConfig(gpa, original, &failure),
+        try forms.sshdConfig(gpa, dev, &failure),
+    );
+    const ports = try forms.listens(gpa, dev, &failure);
+    try testing.expect(std.mem.findScalar(u16, ports, 22) != null);
+    try testing.expect(std.mem.findScalar(u16, ports, dev_ssh_port) != null);
+    const config = try @import("compose").apko(io, gpa, Dir.cwd(), dev, &.{}, &failure);
+    for ([_][]const u8{ "sshd", "_dhcp" }) |name| {
+        var count: usize = 0;
+        for (config.get("accounts").?.get("users").?.list) |user| {
+            if (std.mem.eql(u8, user.get("username").?.scalar.text, name)) count += 1;
+        }
+        try testing.expectEqual(1, count);
+    }
+}
+
+test "developer access leaves minimal storage unchanged" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var failure: forms.Failure = .{};
+    var why: Why = .{};
+    const original = try forms.chain(testing.io, gpa, Dir.cwd(), "minimal", &failure);
+    const dev = try addDevSsh(testing.io, gpa, original, &why);
+    const config = try @import("compose").apko(testing.io, gpa, Dir.cwd(), dev, &.{}, &failure);
+    for (config.get("contents").?.get("packages").?.list) |pkg| {
+        try testing.expect(!std.mem.eql(u8, pkg.scalar.text, "cryptsetup"));
+        try testing.expect(!std.mem.eql(u8, pkg.scalar.text, "e2fsprogs"));
+    }
 }
 
 /// interface returns the flags svcs declare in their `config`, `setting`
@@ -537,6 +637,7 @@ pub const Options = struct {
     /// dev is the local --dev launch path; init uses its config marker only
     /// to admit key-only root SSH for this machine.
     dev: bool = false,
+    dev_shell: bool = true,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -1506,6 +1607,7 @@ fn engineFor(io: Io, gpa: Allocator, given: ?Platform, secure: bool) Engine {
 const Launch = struct {
     disabled: cmdline.Protections,
     dev: bool,
+    dev_shell: bool = true,
     local: bool,
     yes: bool,
     version: ?[]const u8 = null,
@@ -1518,7 +1620,10 @@ const Launch = struct {
 
 pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
     _, const plain = try verboseFlag(gpa, line);
-    const dev, const rest = try takeFlag(gpa, plain, &.{"--dev"});
+    const ssh_only, const without_ssh = try takeFlag(gpa, plain, &.{"--dev=ssh"});
+    const shell, const rest = try takeFlag(gpa, without_ssh, &.{"--dev"});
+    if (ssh_only and shell) return why.refuse("choose --dev or --dev=ssh", .{});
+    const dev = shell or ssh_only;
     const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
     const yes, const before_disable = try takeFlag(gpa, more, &.{"--yes"});
     var args: std.ArrayList([]const u8) = .empty;
@@ -1558,11 +1663,24 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
     return .{
         .disabled = disabled,
         .dev = dev,
+        .dev_shell = !ssh_only,
         .local = from_tree,
         .yes = yes,
         .version = version,
         .args = args.items,
     };
+}
+
+test "SSH iteration selects developer access without the developer shell" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: Why = .{};
+    const ssh = try launchFlags(arena.allocator(), &.{"--dev=ssh"}, &why);
+    try testing.expect(ssh.dev and !ssh.dev_shell);
+    try testing.expectError(
+        error.Refused,
+        launchFlags(arena.allocator(), &.{ "--dev", "--dev=ssh" }, &why),
+    );
 }
 
 /// every_protection is the one --disable run and create take for now: one
@@ -1586,9 +1704,9 @@ pub fn disableValue(v: []const u8, why: *Why) !cmdline.Protections {
 fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
     if (!launch.protected()) return;
     if (launch.dev) return why.refuse(
-        "--dev gives root a console without a password, which a protected machine never " ++
-            "has: --dev --disable=" ++ every_protection,
-        .{},
+        "developer access requires an unprotected local machine: " ++
+            "{s} --disable=" ++ every_protection,
+        .{if (launch.dev_shell) "--dev" else "--dev=ssh"},
     );
     if (on != .lima and on != .qemu) return why.refuse(
         "{t}: protected deployment is not ready; use Lima on macOS or QEMU on Linux, or give " ++
@@ -1689,6 +1807,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     var o = try options(gpa, args, why);
     o.local = launch.local;
     o.dev = dev;
+    o.dev_shell = launch.dev_shell;
     o.disabled = launch.disabled;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
@@ -1794,7 +1913,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         fc_dns = o.dns;
         o.dns = null;
     }
-    const dhcp = !(on_lima or on == .bhyve) or try hasDhcp(io, gpa, o.form, why);
+    const dhcp = dev or !(on_lima or on == .bhyve) or try hasDhcp(io, gpa, o.form, why);
     if (!dhcp and o.ip == null and o.gw == null and o.dns == null) {
         const given = if (o.config) |d|
             if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "network" }), .{}))
@@ -1887,8 +2006,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     try Dir.cwd().createDirPath(io, dir);
     try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), @tagName(on), why);
     const dev_key_marker = try gpa.print("{s}/dev", .{dir});
-    if (dev and !given_keys) {
-        try writePrivate(io, gpa, dev_key_marker, "yes\n", why);
+    if (dev) {
+        try writePrivate(io, gpa, dev_key_marker, if (given_keys) "custom\n" else "managed\n", why);
     } else Dir.cwd().deleteFile(io, dev_key_marker) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return why.refuse("{s}: {s}", .{ dev_key_marker, @errorName(err) }),

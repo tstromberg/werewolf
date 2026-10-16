@@ -1,0 +1,8 @@
+{
+  "name": "werewolf-n8n-vuln-demo",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "n8n": "1.120.0"
+  }
+}

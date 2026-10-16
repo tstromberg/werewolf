@@ -29,10 +29,15 @@ esac
 	exit 1
 }
 
-mkdir -p /data /data/gnupg /run/bin /var/www/MISP/app/Config /var/www/MISP/app/files /var/www/MISP/app/tmp/logs
+mkdir -p /data /data/gnupg /run/bin /var/www/MISP/app/Config /var/www/MISP/app/files \
+    /var/www/MISP/app/tmp/sessions /var/www/MISP/app/tmp/logs /var/www/MISP/app/tmp/cache/persistent \
+	/var/www/MISP/app/tmp/cache/models /var/www/MISP/app/tmp/cache/views
 ln -sfn /usr/bin/php8.4 /run/bin/php
 export PATH="/run/bin:/usr/local/bin:/usr/bin"
 export GNUPGHOME=/data/gnupg
+# Agent sockets belong on /run; the keyring remains on persistent /data.
+mkdir -p "/run/user/$UID"
+/usr/bin/gpgconf --create-socketdir
 
 if [ ! -s /data/gpg-pass ]; then
 	/usr/bin/php8.4 -r 'file_put_contents("/data/gpg-pass", rtrim(strtr(base64_encode(random_bytes(18)), "+/", "AB"), "="));'

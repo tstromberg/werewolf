@@ -84,6 +84,14 @@ pub fn main(init: std.process.Init) !void {
     );
     l.name = name;
 
+    // System helpers still have the console. Start applications once the
+    // local receiver and its file worker have both finished confinement.
+    if (exists("/usr/lib/werewolf/syslogd")) {
+        var ready: [2]u8 = undefined;
+        const value = Dir.cwd().readFile(io, "/run/syslog/ready", &ready) catch "";
+        if (!std.mem.eql(u8, value, "1")) l.fail(.retry, "waiting for syslogd", .{});
+    }
+
     const text = Dir.cwd().readFileAlloc(io, "service", gpa, .limited(max_file)) catch |err|
         l.fail(.park, "./service: {s}", .{@errorName(err)});
     var bad: service.Bad = .{};
@@ -114,9 +122,11 @@ pub fn main(init: std.process.Init) !void {
     }
     const login = s.caps & service.cap.login != 0;
     if (login) {
-        if (user.uid != 0 or user.gid != 0 or !std.mem.eql(u8, name, "sshd") or
+        const listener = std.mem.eql(u8, name, "sshd") or
+            (std.mem.eql(u8, name, "sshd-dev") and exists("/usr/share/werewolf/dev"));
+        if (user.uid != 0 or user.gid != 0 or !listener or
             !allowances.has(.pty))
-            l.fail(.park, "caps login is for sshd when this machine allows pty", .{});
+            l.fail(.park, "caps login needs an SSH listener and the pty allowance", .{});
         // Disable Speculative Store Bypass for ssh-keygen, sshd and every
         // session (docs/security.md).
         _ = linux.prctl(
@@ -128,7 +138,8 @@ pub fn main(init: std.process.Init) !void {
         );
     } else {
         if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
-        if (user.uid <= 70 or user.gid <= 70) l.fail(.park, "{s} is a system's", .{s.user});
+        if (user.uid <= service.system_id_max or user.gid <= service.system_id_max)
+            l.fail(.park, "{s} is a system's", .{s.user});
     }
     // The build could not tell this service's directories from another's.
     // Each narrowed program's link ships in the image, as ./run does.
@@ -271,6 +282,11 @@ pub fn main(init: std.process.Init) !void {
     } else {
         const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
         for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
+        // Resolve this socket across daemon restarts without granting file
+        // writes to its directory. UNIX syscalls still need a pledge.
+        if (rules.fs & sandbox.resolve_unix != 0)
+            allow(rules, "/run/syslog", sandbox.resolve_unix, .optional) catch |err|
+                l.fail(.park, "syslog socket: {s}", .{sandbox.whyNot(gpa, err)});
         for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd|
             allow(rules, fd, sandbox.write_file, .optional) catch {};
         allow(rules, own_run, write_tree, .own) catch |err|
@@ -339,12 +355,12 @@ pub fn main(init: std.process.Init) !void {
     // A port below 1024, TCP or UDP, takes CAP_NET_BIND_SERVICE.
     var low_port = false;
     for ([_][]const u16{ s.listen, s.listen_udp }) |ports| {
-        for (ports) |p| low_port = low_port or p < 1024;
+        for (ports) |p| low_port = low_port or (p != 0 and p < 1024);
     }
     // A packet capability is kept only when this machine allowed it.
     // A file that names one the machine did not allow parks, so editing
     // the file cannot widen the bounding set.
-    var keep: u64 = if (login) service.cap.login_set else s.caps;
+    var keep: u64 = if (login) loginCapabilities(name) else s.caps;
     if (low_port) keep |= 1 << linux.CAP.NET_BIND_SERVICE;
     if (s.caps & service.cap.net_raw != 0 and !allow_packet)
         l.fail(.park, "caps net_raw: this machine does not allow packet", .{});
@@ -419,6 +435,22 @@ pub fn main(init: std.process.Init) !void {
     while (env_it.next()) |e| : (i += 1)
         envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
     pledgeAndExec(l, prog_rc, s.exec[0], s.pledge, learn, argv.ptr, envp.ptr);
+}
+
+/// Developer SSH is the local, disposable arbitrary-execution boundary. It
+/// keeps SETPCAP so a root session can start another leash, which immediately
+/// drops the bounding set again for an iterated test driver. Production SSH
+/// never keeps it.
+fn loginCapabilities(name: []const u8) u64 {
+    return if (std.mem.eql(u8, name, "sshd-dev"))
+        service.cap.developer_login_set
+    else
+        service.cap.login_set;
+}
+
+test "only developer SSH can launch a nested leash" {
+    try std.testing.expect(loginCapabilities("sshd-dev") & (@as(u64, 1) << linux.CAP.SETPCAP) != 0);
+    try std.testing.expect(loginCapabilities("sshd") & (@as(u64, 1) << linux.CAP.SETPCAP) == 0);
 }
 
 /// pledgeAndExec installs a pledge of promises and becomes the program
@@ -502,7 +534,8 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     ) catch Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
     const user = lookupUser(passwd, s.user) orelse
         l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
-    if (user.uid <= 70 or user.gid <= 70 or linux.getuid() != user.uid or
+    if (user.uid <= service.system_id_max or user.gid <= service.system_id_max or
+        linux.getuid() != user.uid or
         linux.getgid() != user.gid)
         l.fail(.park, "{s}: run as {s}, never as another user", .{ link.name, s.user });
     const n = for (s.narrow) |n| {
@@ -519,7 +552,7 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         allow(rules, fd, sandbox.write_file, .optional) catch {};
     for (n.read) |p| allowPath(l, rules, gpa, p, read_tree, false);
     for (n.write) |p| allowPath(l, rules, gpa, p, write_tree, false);
-    allowProgram(l, rules, gpa, n.program);
+    allowProgram(l, rules, gpa, n.program, false);
     const learn = learning();
     rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     record(io, .stderr(), .{
@@ -586,7 +619,16 @@ fn learning() bool {
     if (linux.errno(n) != .SUCCESS) return false;
     var refused: cmdline.Failure = .{};
     const c = cmdline.parse(buf[0..n], &refused) orelse return false;
-    return c.seal == .learn and exists("/usr/share/werewolf/dev");
+    if (c.seal != .learn) return false;
+    const profile = linux.open(
+        "/usr/share/werewolf/dev",
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(profile) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(profile));
+    const size = linux.read(@intCast(profile), &buf, buf.len);
+    return linux.errno(size) == .SUCCESS and std.mem.eql(u8, buf[0..size], "dev\n");
 }
 
 // --- as root ---------------------------------------------------------------------
@@ -787,7 +829,7 @@ fn allowExecSet(
     s: service.Service,
     with_setup: bool,
 ) void {
-    allowProgram(l, rules, gpa, s.exec[0]);
+    allowProgram(l, rules, gpa, s.exec[0], false);
     if (s.pledge.contains(.exec) or with_setup) {
         for (s.run) |p| if (p[p.len - 1] == '/') {
             // Every program beneath an image's directory, as Grafana runs one
@@ -796,21 +838,22 @@ fn allowExecSet(
                 l.fail(.park, "out of memory", .{});
             allow(rules, z, run_file, .follow) catch |err|
                 l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
-        } else allowProgram(l, rules, gpa, p);
+        } else allowProgram(l, rules, gpa, p, true);
         // The image's sh shim, which a service in an image of its own lacks.
         if (allowances.has(.sh) and s.root == null and
             (s.pledge.contains(.exec) or s.before.len > 0))
-            allowProgram(l, rules, gpa, sh_shim);
-        if (s.narrow.len > 0) allowProgram(l, rules, gpa, leash_bin);
+            allowProgram(l, rules, gpa, sh_shim, false);
+        if (s.narrow.len > 0) allowProgram(l, rules, gpa, leash_bin, false);
     }
     if (with_setup) {
-        for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
-        if (s.render != null) allowProgram(l, rules, gpa, service_config);
+        for (s.before) |b| allowProgram(l, rules, gpa, b[0], false);
+        if (s.render != null) allowProgram(l, rules, gpa, service_config, false);
     }
 }
 
 /// usesJit reports whether s runs a JIT compiler (PostgreSQL's LLVM, PHP's
-/// PCRE2/OPcache, the JVM, .NET, BEAM, or Node without --jitless), or an
+/// PCRE2/OPcache, Ruby's FFI callbacks, the JVM, .NET, BEAM, Wasmtime, or Node
+/// without --jitless), or an
 /// OCI image on a machine that allowed jit. Every other service sets
 /// Memory-Deny-Write-Execute on itself even when the machine allowed jit.
 fn usesJit(s: service.Service) bool {
@@ -828,7 +871,8 @@ fn usesJit(s: service.Service) bool {
 fn isJitProgram(path: []const u8) bool {
     const base = std.fs.path.basename(path);
     for ([_][]const u8{
-        "postgres", "php", "php-fpm", "java", "dotnet", "beam.smp", "erl", "node", "nodejs",
+        "postgres", "php",      "php-fpm", "java", "dotnet", "beam.smp", "erl", "node", "nodejs",
+        "ruby",     "jellyfin", "postdoc",
     }) |jit| {
         if (std.mem.eql(u8, base, jit)) return true;
     }
@@ -836,8 +880,16 @@ fn isJitProgram(path: []const u8) bool {
 }
 
 /// allowProgram lets the service run path and its ELF interpreter, which the
-/// kernel also opens for execution. It parks the service on any error.
-fn allowProgram(l: Leash, rules: sandbox.Ruleset, gpa: Allocator, path: []const u8) void {
+/// kernel also opens for execution. An explicit run entry may instead be a
+/// script: its interpreter must have its own execution grant. Main and setup
+/// commands remain ELF programs. It parks the service on any error.
+fn allowProgram(
+    l: Leash,
+    rules: sandbox.Ruleset,
+    gpa: Allocator,
+    path: []const u8,
+    allow_script: bool,
+) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch l.fail(.park, "out of memory", .{});
     allow(rules, z, run_file, .follow) catch |err|
         l.fail(.park, "{s}: {s}", .{ path, sandbox.whyNot(gpa, err) });
@@ -847,6 +899,9 @@ fn allowProgram(l: Leash, rules: sandbox.Ruleset, gpa: Allocator, path: []const 
     defer _ = linux.close(@intCast(fd));
     const n = linux.pread(@intCast(fd), &head, head.len, 0);
     if (linux.errno(n) != .SUCCESS) l.fail(.park, "{s}: cannot read it", .{path});
+    // Grant this named file only. The kernel separately checks the shebang's
+    // interpreter; do not infer or grant a shell (or env) from its contents.
+    if (allow_script and std.mem.startsWith(u8, head[0..n], "#!")) return;
     const interp = interpreter(head[0..n]) catch
         l.fail(.park, "{s}: not an ELF program leash can read", .{path});
     if (interp) |i| {
@@ -1287,4 +1342,13 @@ test usesJit {
     s.exec = &.{ "/usr/bin/supercronic", "/etc/cron/crontab" };
     s.run = &.{"/usr/bin/php"};
     try testing.expect(usesJit(s));
+    s.run = &.{};
+    for ([_][]const u8{
+        "/usr/bin/ruby",
+        "/usr/lib/jellyfin/jellyfin",
+        "/usr/bin/postdoc",
+    }) |program| {
+        s.exec = &.{program};
+        try testing.expect(usesJit(s));
+    }
 }

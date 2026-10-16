@@ -39,6 +39,8 @@ process inherits it all. A lookup from `lo` marks sent traffic:
 | 100 | sent to the metadata server's TCP 80 (IPv6: AWS's fd00:ec2::254) by a user named: route |
 | 101 | sent there by anyone else, or to Azure's wire server: refuse |
 | 200 | sent as declared (user, protocol, port), from a served port, or ICMPv6: route |
+| 280 | sent to a LAN UDP port without a matching grant: refuse |
+| 290 | at a LAN UDP listener, deliver on-link sources and drop others; drop private TCP arrivals |
 | 299 | anything else sent: refuse (EACCES) |
 | 300 | arriving at a served port, from a connected-to port or the metadata server's 80, or ICMP: deliver |
 | 399 | anything else arriving by TCP, UDP, UDP-Lite, SCTP, DCCP, tunnel or IPsec: drop |
@@ -53,6 +55,12 @@ them, broke the updater on dual-stack names.
 Landlock lets a process bind only the policy's ports (and 0), and connect
 only to declared, served, DNS, loopback and metadata ports: rule 200 lets a
 served port answer anyone, so a listener could otherwise reach anywhere.
+
+UDP `lan` lines restrict requests and replies to connected subnets detected at
+boot, plus the standard mDNS or SSDP multicast destination for ports 5353 or
+1900, and SSDP limited broadcast. They add no general multicast or Internet
+access. A changed address plan requires a reboot. Devices on the LAN still need
+authentication.
 
 ### Files
 

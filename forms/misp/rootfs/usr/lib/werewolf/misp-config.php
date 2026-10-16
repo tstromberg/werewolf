@@ -8,6 +8,7 @@ $core = $cfg . "/core.php";
 $boot = $cfg . "/bootstrap.php";
 
 $c = file_get_contents($core);
+$previous = $c;
 $published = "Rooraenietu8Eeyo<Qu2eeNfterd-dd+";
 $publishedSeed = "395786739573056621429506834955";
 if (str_contains($c, $published)) {
@@ -18,6 +19,13 @@ if (str_contains($c, $published)) {
     }
     $c = str_replace($published, $salt, $c);
     $c = str_replace($publishedSeed, $seed, $c);
+}
+// Cake's session directory is inside the service's existing writable tmp.
+$sessions = "Configure::write('Session.defaults', 'cake');";
+if (!str_contains($c, $sessions)) {
+    $c .= "\n" . $sessions . "\n";
+}
+if ($c !== $previous) {
     file_put_contents($core, $c);
 }
 

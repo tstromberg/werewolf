@@ -12,7 +12,9 @@ instructions](https://dist.werewolf-linux.org/boot/v1/iris/index.html).
 - The administrator is `administrator`. The password is the config's, not a published
   one.
 - The secret key is generated on the machine, into `/data`, the first time it starts.
-- PostgreSQL takes one role, over loopback, and only this service may connect.
+- PostgreSQL takes one role over loopback, for `postgres` and `iris_tasks` only.
+  IRIS creates its task database at startup, so that role has `CREATEDB`, without
+  superuser or role-creation rights. Only this service may connect.
 - The image's bash runs one script, then gunicorn. The host has no shell.
 
 ## Getting Started

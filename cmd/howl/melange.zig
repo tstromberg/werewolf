@@ -147,6 +147,8 @@ pub fn build(b: *B, recipe: []const u8) !void {
         "--runner",
         @tagName(r),
         recipe,
+        "--source-dir",
+        try b.absolute(std.fs.path.dirname(recipe) orelse "."),
         "--arch",
         @tagName(b.spec.arch),
         "--cpu",

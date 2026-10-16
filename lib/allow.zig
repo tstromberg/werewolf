@@ -32,34 +32,61 @@ pub const Allowance = enum {
     sh,
 };
 
-/// dir holds one empty file per allowance the form grants, and a directory per
-/// runtime holding one empty file per runtime allowance (Runtime).
+/// dir holds one empty file per general allowance the form grants, read at
+/// runtime by werewolf itself (has, below). Runtime allowances live apart, in
+/// runtime_dir.
 pub const dir = "/etc/werewolf/allow";
+
+/// runtime_dir is the portable tree the hardened interpreters read, the same
+/// on werewolf and on any distro shipping the packages. A runtime allowance is
+/// an empty file at runtime_dir/<ns>/RUNTIME/NAME: NS the service it is for, or
+/// runtime_blanket for every service. The interpreter reads it off the
+/// read-only root, never from argv or the environment, which a process that
+/// re-runs its runtime controls; NS is the service's cgroup leaf, which the
+/// supervisor sets and the process cannot change. See
+/// docs/design/hardened-interpreters.md.
+pub const runtime_dir = "/etc/runtime-hardening/allow";
+
+/// runtime_blanket names the namespace an image-wide runtime allowance uses.
+/// werewolf writes here, since a form's allow list is image-wide; per-service
+/// namespaces are a later revision.
+pub const runtime_blanket = "all";
 
 /// Runtime is a language runtime werewolf rebuilds with its protections
 /// compiled in (docs/design/hardened-interpreters.md). A form takes one back
-/// as RUNTIME:NAME, and the image holds it as dir/RUNTIME/NAME, an empty file
-/// on the read-only root: the runtime reads it there, never from argv or the
-/// environment, which a process that re-runs its runtime controls.
+/// as RUNTIME:NAME, and the image holds it under runtime_dir.
 pub const Runtime = enum {
     java,
     python,
     php,
+    node,
 
-    /// names lists what a form may take back from the runtime's build.
+    /// names lists what a form may take back from the runtime's build. Every
+    /// runtime also takes back `inline` (code given inline or on stdin, not
+    /// read from a file on the root) and `writable-source` (a script whose
+    /// file is on a writable mount). Both are denied by default, so only code
+    /// already on the read-only root runs.
     pub fn names(r: Runtime) []const []const u8 {
+        // Capability groups, in the manner of pledge promises: a form grants
+        // the class, not each function, so moving within a class (popen to
+        // system) needs no new grant. Shared names mean one vocabulary.
+        //   deserialize  rebuild objects from untrusted bytes
+        //   native       leave the managed runtime for native code or memory
+        //   exec         spawn external programs
+        //   phar         the phar:// archive wrapper
         return switch (r) {
-            // Deserializing objects (jdk.serialFilter is `!*`); sun.misc.Unsafe
-            // memory access; native access a jar's manifest does not grant.
-            .java => &.{ "deserialize", "native-access", "unsafe" },
-            // ctypes, with which Python code writes its own memory.
-            .python => &.{"ctypes"},
-            // The functions of the disable_functions floor; unserialize making
-            // objects; the phar:// stream wrapper.
-            .php => &.{
-                "dl",    "exec",      "passthru",   "pcntl_exec", "phar",
-                "popen", "proc_open", "shell_exec", "system",     "unserialize",
-            },
+            // deserialize: ObjectInputStream. native: sun.misc.Unsafe, the
+            // Foreign Function and Memory API, and JNI native access.
+            .java => &.{ "deserialize", "inline", "native", "writable-source" },
+            // deserialize: pickle (and what builds on it). native: ctypes,
+            // with which Python code writes its own memory.
+            .python => &.{ "deserialize", "inline", "native", "writable-source" },
+            // exec: the disable_functions floor. native: dl loading an
+            // extension. deserialize: unserialize making objects.
+            .php => &.{ "deserialize", "exec", "inline", "native", "phar", "writable-source" },
+            // exec: child processes and package scripts. native: addons, FFI,
+            // WASI and SQLite extensions. inline also covers worker eval.
+            .node => &.{ "exec", "inline", "native", "writable-source" },
         };
     }
 };
@@ -140,13 +167,24 @@ fn upper(comptime s: []const u8) []const u8 {
 
 test "RuntimeAllowance.parse" {
     const t = std.testing;
-    const a = RuntimeAllowance.parse("php:proc_open").?;
+    const a = RuntimeAllowance.parse("php:exec").?;
     try t.expectEqual(Runtime.php, a.runtime);
-    try t.expectEqualStrings("proc_open", a.name);
+    try t.expectEqualStrings("exec", a.name);
     try t.expectEqual(Runtime.java, RuntimeAllowance.parse("java:deserialize").?.runtime);
+    for ([_][]const u8{ "exec", "native", "inline", "writable-source" }) |name| {
+        const word = try t.allocator.print("node:{s}", .{name});
+        defer t.allocator.free(word);
+        try t.expectEqual(Runtime.node, RuntimeAllowance.parse(word).?.runtime);
+    }
+    try t.expectEqual(null, RuntimeAllowance.parse("node:environment"));
+    try t.expectEqual(null, RuntimeAllowance.parse("node:root"));
+    try t.expectEqual(null, RuntimeAllowance.parse("node:deserialize"));
     for ([_][]const u8{
-        "php",         "php:",     ":exec", "php:fpassthru", "perl:exec", "jit", "php:exec:x",
-        "php:../exec", "PHP:exec",
+        "php",        "php:",        ":exec",              "php:fpassthru", "perl:exec",
+        "jit",        "php:exec:x",  "php:../exec",        "PHP:exec",
+        // The old per-function names, now folded into capability groups.
+             "php:proc_open",
+        "php:system", "java:unsafe", "java:native-access", "python:ctypes",
     }) |w| try t.expectEqual(null, RuntimeAllowance.parse(w));
 }
 

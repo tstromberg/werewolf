@@ -51,16 +51,17 @@ before fence sets the network policy, when no config tar was found on a disk or 
   all, numbers of digits alone. It then writes a new tar: every entry owned
   by root, 0600 or 0700, pax headers ignored.
 - **Logging**: the parent writes every event as one JSON line on stdout.
-- **The service** forks `once` whole each minute and compares what it wrote with the
-  last config. On a change it applies the `users` file (lib/people.zig): the account
-  files and `/run/werewolf/people` rewritten, each person's keys and home, an admin's
-  keys after root's, the gone unlinked, a `people` event. It keeps CAP_CHOWN alone;
-  Landlock lets it write the cloud's directory, the account and keys files and
-  `/data/home` and read root's keys; its child alone reaches the server, as `_cloud`, by
-  fence's `metadata _cloud` rule. No seccomp: a filter only narrows, and its children
-  need their own. Other changed entries wait in the checked tar for the next boot. GCP
-  `machine.metadata-users: true` merges instance and project keys with expiry and
-  declared-user precedence; no admin or root
+- **The service** forks a persistent `_cloud` fetcher and `_usrmgr` parser before
+  dropping setup privileges. `_usrmgr` (uid 74) has no capabilities or network,
+  checks the metadata, and writes only its private cloud scratch directory.
+  Once a minute it requests a fetch; unchanged or refused input sends a heartbeat.
+  The root publisher receives bounded users/key records, derives IDs and paths
+  through `people.apply`, and keeps CHOWN alone under Landlock and seccomp.
+  Neither worker can write accounts or keys. Publication is acknowledged before
+  advancing the last-applied config; failures are retried on the next poll.
+  Both workers watch a publisher-only lifetime pipe, including during HTTP waits.
+  GCP `machine.metadata-users: true` retains expiry, declared-user precedence
+  and the prohibition on admin/root from provider keys
   ([manifest.md](../../docs/design/manifest.md)).
 
 ## Drawbacks

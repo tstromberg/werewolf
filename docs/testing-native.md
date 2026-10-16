@@ -24,3 +24,12 @@ boot; add only declared test packages, clients and metadata. Retire each old
 shell assertion only after its protocol-level replacement passes on both
 phases and the retained checks still pass.
 
+Results record hashes of the kernel, both images and the plan. Changing any
+of these during a run invalidates its result; rebuild and rerun the suite.
+
+Console records share a TTY with kernel output. Use the shared emitter to
+format each record before writing it, and wait for its complete line on the
+host. A rootless probe must drain the TTY before powering off, so shutdown
+messages cannot overtake its result. Keep kernel logging and service
+confinement intact.
+

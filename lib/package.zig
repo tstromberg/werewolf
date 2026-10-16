@@ -11,6 +11,9 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// repository is werewolf's own: apk adds `/ARCH/APKINDEX.tar.gz`.
 pub const repository = "https://dist.werewolf-linux.org/apk";
+/// hardened_repository combines every hardened Wolfi replacement, signed by
+/// repository_key. Package-specific release snapshots remain separate.
+pub const hardened_repository = repository ++ "/hardened";
 
 /// repository_key is the file name apk knows release/packages.pub by, in
 /// /etc/apk/keys: the index's signature names it, so it must match.

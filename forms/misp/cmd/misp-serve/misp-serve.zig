@@ -8,20 +8,21 @@ const Io = std.Io;
 const linux = std.os.linux;
 
 const php = "/usr/bin/php8.4";
-const cake = "/var/www/MISP/app/Console/cake";
+const cake = "/var/www/MISP/app/Console/cake.php";
 const webroot = "/var/www/MISP/app/webroot";
 const router = "/usr/lib/werewolf/misp-router.php";
 const dir = "/var/www/MISP";
 const listen = "127.0.0.1:8080";
+const worker = [_][]const u8{ php, "-q", cake, "-working", "/var/www/MISP/app" };
 
 const jobs = [_][]const []const u8{
     &.{ php, "-S", listen, "-t", webroot, router },
-    &.{ cake, "start_worker", "default" },
-    &.{ cake, "start_worker", "prio" },
-    &.{ cake, "start_worker", "email" },
-    &.{ cake, "start_worker", "cache" },
-    &.{ cake, "start_worker", "update" },
-    &.{ cake, "scheduler_worker" },
+    &(worker ++ .{ "start_worker", "default" }),
+    &(worker ++ .{ "start_worker", "prio" }),
+    &(worker ++ .{ "start_worker", "email" }),
+    &(worker ++ .{ "start_worker", "cache" }),
+    &(worker ++ .{ "start_worker", "update" }),
+    &(worker ++ .{"scheduler_worker"}),
 };
 
 var stopping: std.atomic.Value(bool) = .init(false);
@@ -34,6 +35,9 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn run(io: Io, environ: std.process.Environ) !void {
+    // Inspect our own inherited environment. A separate sandbox cannot
+    // read it through procfs, even under this service's UID.
+    if (!passwordsPrivate(environ)) return error.PasswordInEnvironment;
     const act: linux.Sigaction = .{
         .handler = .{ .handler = onTerm },
         .mask = linux.sigemptyset(),
@@ -47,7 +51,14 @@ fn run(io: Io, environ: std.process.Environ) !void {
             return err;
         };
     }
-    say(io, "{{\"event\":\"start\",\"listen\":\"{s}\"}}", .{listen});
+    const local = std.mem.eql(u8, environ.getPosix("MYSQL_PASSWORD") orelse "", "misp") and
+        std.mem.eql(u8, environ.getPosix("ENABLE_REDIS_EMPTY_PASSWORD") orelse "", "true");
+    say(
+        io,
+        "{{\"event\":\"start\",\"listen\":\"{s}\",\"local-credentials\":{},\"passwords-private\"" ++
+            ":true}}",
+        .{ listen, local },
+    );
     var status: i32 = 0;
     const gone = while (!stopping.load(.acquire)) {
         const pid = linux.waitpid(-1, &status, 0);
@@ -64,6 +75,13 @@ fn run(io: Io, environ: std.process.Environ) !void {
     const code: u8 = if (linux.W.IFEXITED(s)) linux.W.EXITSTATUS(s) else 1;
     say(io, "{{\"event\":\"down\",\"pid\":{d},\"code\":{d}}}", .{ gone, code });
     std.process.exit(code);
+}
+
+fn passwordsPrivate(environ: std.process.Environ) bool {
+    for ([_][]const u8{ "ADMIN_PASSWORD", "GPG_PASSPHRASE", "SUPERVISOR_PASSWORD" }) |key| {
+        if (environ.getPosix(key) != null) return false;
+    }
+    return true;
 }
 
 fn spawn(argv: []const []const u8, environ: std.process.Environ) !i32 {
@@ -115,5 +133,17 @@ test "php listens on loopback and the list has no python or shell" {
         try std.testing.expect(!std.mem.eql(u8, argv[0], "/bin/sh"));
         try std.testing.expect(!std.mem.eql(u8, argv[0], "/usr/bin/bash"));
     }
-    try std.testing.expectEqualStrings("scheduler_worker", jobs[6][1]);
+    try std.testing.expectEqualStrings("scheduler_worker", jobs[6][worker.len]);
+}
+
+test "the launcher refuses password variables before spawning PHP" {
+    try std.testing.expect(passwordsPrivate(.empty));
+    for ([_][*:0]const u8{
+        "ADMIN_PASSWORD=private",
+        "GPG_PASSPHRASE=passphrase",
+        "SUPERVISOR_PASSWORD=supervisor",
+    }) |entry| {
+        const block: [:null]const ?[*:0]const u8 = &.{entry};
+        try std.testing.expect(!passwordsPrivate(.{ .block = .{ .slice = block } }));
+    }
 }

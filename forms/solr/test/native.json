@@ -1,0 +1,18 @@
+{
+  "format": "werewolf-native-tests/1",
+  "packages": [],
+  "drivers": [{
+    "name": "test-solr",
+    "source": "driver.zig",
+    "mode": "http",
+    "user": "solr",
+    "pledge": "stdio rpath wpath inet connect",
+    "read": ["/etc/sv/solr/service", "/usr/lib/apk/db/installed"],
+    "connect": ["tcp/8983"],
+    "run": [],
+    "cases": {
+      "seed": ["ready", "version", "private-listener", "create-core", "index-document", "persisted-document", "home-confined", "no-shell-launcher", "hardened-java"],
+      "verify": ["ready", "version", "private-listener", "persisted-document", "home-confined", "no-shell-launcher", "hardened-java"]
+    }
+  }]
+}

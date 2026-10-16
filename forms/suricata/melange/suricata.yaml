@@ -7,7 +7,7 @@
 package:
   name: suricata
   version: 8.0.4
-  epoch: 0
+  epoch: 1
   description: Network IDS, IPS and security monitoring engine
   copyright:
     - license: GPL-2.0-only
@@ -40,13 +40,17 @@ pipeline:
       expected-sha256: 81cee7bae69848a9751b2ce0867620eefa52b192e79c20b5eac897600b28b191
 
   # The release tarball vendors the Rust crates, so the build fetches
-  # nothing. -march=armv8-a and target-cpu=generic keep SVE out even
-      # when the builder has it. nfqueue, eBPF and the Python tools stay
-      # off: this form captures with AF_PACKET and does not run them.
+  # nothing. Baseline CPU targets keep host-only instructions out.
+  # nfqueue, eBPF and Python stay off: this form uses AF_PACKET.
   - runs: |
-      export CFLAGS="-O2 -march=armv8-a"
-      export CXXFLAGS="-O2 -march=armv8-a"
-      export RUSTFLAGS="-C target-cpu=generic"
+      case ${{build.arch}} in
+        aarch64) march=armv8-a; cpu=generic ;;
+        x86_64) march=x86-64; cpu=x86-64 ;;
+        *) exit 1 ;;
+      esac
+      export CFLAGS="-O2 -march=$march"
+      export CXXFLAGS="$CFLAGS"
+      export RUSTFLAGS="-C target-cpu=$cpu"
       ./configure \
         --prefix=/usr \
         --sysconfdir=/etc \

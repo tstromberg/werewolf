@@ -10,8 +10,10 @@ const Allocator = std.mem.Allocator;
 const broker = @import("broker");
 const cmdline = @import("cmdline");
 const sandbox = @import("sandbox");
+const linux = std.os.linux;
+const keeper_id = 72;
+var control_fd: i32 = -1;
 
-const committed = "/run/werewolf/committed";
 const updater_ready = "/run/werewolf/updater-ready";
 const posture_report = "/run/werewolf/posture.json";
 const nodata = "/run/werewolf/nodata";
@@ -19,7 +21,30 @@ const wait = 15;
 
 pub fn main(init: std.process.Init) !void {
     broker.keepOnlyClient(.keeper);
-    try sandbox.keepOnly(0);
+    control_fd = @intCast(try sandbox.sys(linux.open(
+        "supervise/control",
+        .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true },
+        0,
+    ), "open keeper control"));
+    try sandbox.dropKeeping(keeper_id, 0);
+    var rules: [4]sandbox.Rule = undefined;
+    for ([_][:0]const u8{
+        "/etc/sv",
+        "/run/runit",
+        "/run/werewolf",
+        "/proc/cmdline",
+    }, &rules) |path, *rule| {
+        rule.* = .{
+            .fd = @intCast(try sandbox.sys(
+                linux.open(path, .{ .PATH = true, .CLOEXEC = true }, 0),
+                "open keeper read path",
+            )),
+            .access = sandbox.read_file |
+                if (std.mem.eql(u8, path, "/proc/cmdline")) @as(u64, 0) else sandbox.read_dir,
+        };
+    }
+    try sandbox.landlock(&rules, &.{});
+    for (rules) |rule| _ = linux.close(rule.fd);
     const io = init.io;
     const gpa = init.arena.allocator();
     // Parse as stage0 does (lib/cmdline.zig).
@@ -98,7 +123,7 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
     switch (status) {
         .already => {
             say(io, "{s} is already good", .{entry});
-            return markCommitted(io);
+            return broker.espCommit();
         },
         .none => return say(io, "no entry for {s} on the EFI partition; not committing", .{entry}),
         .tried => {},
@@ -110,7 +135,6 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
             "cannot commit {s}: {s} {s}; not committing",
             .{ entry, @errorName(err), broker.refusal },
         );
-    try markCommitted(io);
     say(io, "healthy for a minute; {s} is good", .{entry});
 }
 
@@ -204,23 +228,11 @@ fn verdict(gpa: Allocator, text: []const u8) Verdict {
     };
 }
 
-/// markCommitted creates the file that tells stage0's deadman not to reboot.
-fn markCommitted(io: Io) !void {
-    // Retirement belongs to inactive-slot replacement; commit keeps both releases.
-    Dir.cwd().writeFile(
-        io,
-        .{ .sub_path = committed, .data = "" },
-    ) catch |err| {
-        say(io, "{s}: {s}", .{ committed, @errorName(err) });
-        return err;
-    };
-}
-
-/// park marks the service down so runsv does not restart it.
+/// park marks only this service down through the pipe opened before the drop.
 fn park(io: Io) noreturn {
-    const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
-    say(io, "sv down: {s}", .{@errorName(err)});
-    std.process.exit(1);
+    _ = io;
+    const rc = linux.write(control_fd, "d", 1);
+    linux.exit_group(if (rc == 1) 0 else 1);
 }
 
 /// readAll returns path's contents, or "" on error. It reads to the end

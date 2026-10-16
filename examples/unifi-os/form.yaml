@@ -46,7 +46,7 @@ services:
     exec: /usr/bin/postgres -D /data/svc/postgres/data -c config_file=/usr/share/werewolf-unifi/postgresql.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
-    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    pledge: stdio rpath wpath inet proc shm unix listen connect
     listen: tcp/5432 loopback
     run: [/usr/bin/initdb, /usr/lib/werewolf/sh-shim, /usr/bin/locale]
     read: /run/werewolf/import

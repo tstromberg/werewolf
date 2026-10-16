@@ -19,6 +19,7 @@ pub const Machine = struct {
     dir: []const u8,
     firmware: Firmware,
     ssh_port: u16,
+    guest_ssh: u16 = 22,
     /// web_port is this host's port that reaches the machine's guest_web.
     web_port: u16,
     guest_web: u16,
@@ -164,8 +165,8 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
     }, boot, protected, &.{
         "-netdev",
         try gpa.print(
-            "user,id=n0,hostfwd=tcp:127.0.0.1:{d}-:22,hostfwd=tcp:127.0.0.1:{d}-:{d}",
-            .{ m.ssh_port, m.web_port, m.guest_web },
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{d}-:{d},hostfwd=tcp:127.0.0.1:{d}-:{d}",
+            .{ m.ssh_port, m.guest_ssh, m.web_port, m.guest_web },
         ),
         "-device",
         "virtio-net-pci,netdev=n0",
@@ -417,7 +418,12 @@ test argv {
 test freePort {
     const io = std.testing.io;
     var a: net.IpAddress = .{ .ip4 = .loopback(0) };
-    var held = try a.listen(io, .{});
+    var held = a.listen(io, .{}) catch |err| switch (err) {
+        // Sandboxed builders may forbid even loopback listeners.  They cannot
+        // exercise port selection, but an ordinary host and CI still do.
+        error.AccessDenied, error.Unexpected => return error.SkipZigTest,
+        else => return err,
+    };
     defer held.deinit(io);
     const taken = held.socket.address.getPort();
     const got = try freePort(io, taken);

@@ -56,6 +56,8 @@ code/template hashes, then installs native enrollment tools in a private Python
 environment. [firmware-requirements.txt](../boot/firmware-requirements.txt) pins
 dependency versions and hashes; installation requires binary wheels. The unused Linux
 cloud-password dependency is excluded.
+The pinned tools need Python 3.10 or newer (`make install-deps` installs Python).
+If Xcode's Python 3.9 is first on PATH, enrollment uses an installed newer Python.
 
 Enrollment uses a machine owner certificate in PK/KEK and the caller's code
 certificate in db. Bundled default certificates
@@ -89,7 +91,7 @@ rebuilding or restarting the guest. kernel-build's CI boots each kernel with its
 probe before publishing it.
 
 Stub compilation through Melange QEMU and native firmware enrollment have passed
-on this arm64 Mac; enrollment was exercised with Python 3.9 and 3.14. Complete
+on this arm64 Mac; the current enrollment dependencies require Python 3.10+. Complete
 deployment and A/B validation are separate gates: see [testing](testing.md) and the
 [local deployment design](design/secure-local-deployment.md). Compiler success alone
 does not establish a protected guest lifecycle.

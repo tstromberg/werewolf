@@ -88,7 +88,8 @@ services:
     image: docker.io/sharelatex/sharelatex@sha256:d2c20ae595d64f61dca224864b90a5594fb71df0c20c014c2dcaae595f2de7d8
     exec: /usr/bin/node /werewolf/clsi-start.mjs
     pledge: stdio rpath wpath inet unix connect listen proc exec sendfile
-    listen: [tcp/3013 tcp/8080 loopback]
+    # CLSI's load agents also listen on loopback, at their upstream fixed ports.
+    listen: [tcp/3013 tcp/3048 tcp/3049 tcp/8080 loopback]
     connect: [tcp/3009 tcp/3100]
     write: /var/lib/overleaf
     run:

@@ -99,7 +99,13 @@ class TPM:
                 self.process.kill()
             else:
                 self.process.terminate()
-            self.process.communicate(timeout=10)
+            try:
+                self.process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Reply-loss cases can leave swtpm waiting on a partial client
+                # request. Reap this fixture even when graceful shutdown stalls.
+                self.process.kill()
+                self.process.communicate(timeout=10)
             self.process = None
 
     def boot(self, release):

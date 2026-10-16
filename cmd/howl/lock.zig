@@ -32,7 +32,7 @@ pub const Record = struct {
 pub fn path(gpa: Allocator, s: native.Spec) ![]const u8 {
     return gpa.print("build/lock/{s}{s}{s}.lock.json", .{
         std.fs.path.basename(std.mem.trimEnd(u8, s.form, "/")),
-        if (s.dev) "-dev" else "",
+        s.devSuffix(),
         if (s.published) "-published" else "",
     });
 }
@@ -124,14 +124,15 @@ pub fn inputs(io: Io, gpa: Allocator, s: native.Spec) ![64]u8 {
     var h = Sha256.init(.{});
     frame(&h, std.fmt.comptimePrint("werewolf-lock-1-format{d}", .{compose.format}));
     frame(&h, if (s.dev) "dev" else "prod");
+    if (s.dev) frame(&h, if (s.dev_shell) "shell" else "ssh");
     frame(&h, if (s.published) "published" else "local");
     frame(&h, s.form);
     if (s.published) {
         if (std.mem.findScalar(u8, s.form, '/') != null)
             frame(&h, &try formHash(io, gpa, s.form));
         if (s.dev) {
-            var failure: forms.Failure = .{};
-            const dev_chain = try forms.chain(io, gpa, Dir.cwd(), "sshd", &failure);
+            var why: @import("howl.zig").Why = .{};
+            const dev_chain = try @import("howl.zig").devSshForm(io, gpa, &why);
             for (dev_chain) |fm| {
                 frame(&h, fm.name);
                 frame(&h, &try formHash(io, gpa, fm.dir));

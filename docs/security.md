@@ -51,10 +51,10 @@ does not run on, at the price of a denial of service.
 [lockdown.md](design/lockdown.md) the reasoning, and the
 [survey](cve-mitigation-survey.md) what each stops.
 
-The kernel logs refused execs, file access and service system calls; the
-audit configuration is locked, and init drops the capability that
-controls it. Notices reach the serial console, so the host keeps them
-outside the guest. seal-watch reports what the seal refuses.
+The kernel logs refused execs, file access and service system calls. The
+audit configuration is locked; init drops its controlling capability.
+Shared printk rate limiting is off so startup bursts cannot suppress audit
+evidence. Notices reach the captured serial console. seal-watch reports refusals.
 
 ## The helpers outside fence
 
@@ -143,17 +143,18 @@ machine takes only updates signed with them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-One profile provides all three, so for now they go together. Without
-them a running machine keeps its seal, fence and verified root: root
-still cannot run a program the image lacks, but can choose what boots
-next. `--dev` makes a local development image: busybox-full, root SSH
-through a Howl-managed Ed25519 key, seal learning mode (refused calls
-logged, not blocked) and, with `werewolf.debug=1`, a root shell on the
-console without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/`
-and is passed by `howl ssh`; it is separate from the keys used by playground.
-It needs
-`--disable=secureboot,tpm,ipe`; howl never publishes it, and posture's
-`processes-no-root-console` fails while the shell is offered.
+One profile provides all three, so for now they go together. Without them a running
+machine keeps its seal, fence and verified root: root still cannot run a program the
+image lacks, but can choose what boots next. `--dev` makes a local development image:
+busybox-full, root SSH through a Howl-managed Ed25519 key, optional seal learning
+(refused calls logged, not blocked) and, with `werewolf.debug=1`, a root console shell
+without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/` and is passed by
+`howl ssh`; it is separate from the keys used by playground. With both the checked debug
+command line and Howl's dev config marker, init mounts `/run/howl-dev` as executable RAM
+for developer SSH uploads. [Test iteration](design/local-test-iteration.md) uses SSH and
+`sh-shim`, without BusyBox, a console shell or seal learning, and confines a selected
+driver with its declared leash policy. Dev images require protections off:
+`--disable=secureboot,tpm,ipe`, and are never published. A root console fails posture.
 
 ## Not done, by choice
 

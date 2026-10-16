@@ -1,6 +1,7 @@
 # The login page answers through Caddy. The published password does not
 # sign in. 8000 is 0x1F40.
 ok  iris-login   i=0; until wget -q -T 5 --no-check-certificate -O /tmp/iris-login.html https://localhost/login; do i=$((i + 1)); [ $i -le 300 ] || { echo "no login in 300 s"; exit 1; }; sleep 1; done; grep -qi password /tmp/iris-login.html
+ok  iris-db-policy /usr/bin/psql -X -w -h 127.0.0.1 -U iris -d postgres -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_roles r JOIN pg_database d ON d.datdba=r.oid WHERE r.rolname=current_user AND r.rolcreatedb AND NOT r.rolsuper AND NOT r.rolcreaterole AND d.datname IN ('postgres','iris_tasks')" | grep -qx 2
 ok  iris-user    p=$(head -n 1 /run/cgroup/svc/iris/cgroup.procs); u=$(grep '^_oci-iris:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  iris-bind    grep -qi '0100007F:1F40 ' /proc/net/tcp && ! grep -qi '00000000:1F40 ' /proc/net/tcp
 ok  iris-published  t=$(sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' /tmp/iris-login.html | head -n 1); wget -q -T 10 --no-check-certificate -S -O /tmp/iris-no.html --post-data "username=administrator&password=admin&csrf_token=$t" https://localhost/login 2>&1 | grep -Eq 'HTTP/[^ ]* (200|401|403)' && ! grep -qi '<title>[^<]*[Dd]ashboard' /tmp/iris-no.html

@@ -1007,7 +1007,10 @@ test "unchanged live runs preserve state; changed inputs, config and lost author
         },
     );
     const monitor = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
-    var server = try monitor.listen(io, .{});
+    var server = monitor.listen(io, .{}) catch |err| switch (err) {
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
     defer server.deinit(io);
     const o: howl.Options = .{ .form = form, .on = .qemu, .local = true };
     try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
@@ -1231,7 +1234,8 @@ pub fn create(
     if (!(try steps.exec(&.{.{ .argv = &.{ "python3", script, "start", config } }}, .{})).ok)
         return steps.fail("the host image publisher did not start");
     if (!on_lima) {
-        try startQemu(io, gpa, profile.spec, name, at, &steps, why);
+        if (qemu.running(io, gpa, at) == null)
+            try startQemu(io, gpa, profile, name, at, &steps, why);
         try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
         _ = try steps.finish();
         if (tell.milestones) |m| m.done(.{
@@ -1410,7 +1414,10 @@ test "downloaded live reuse has no vendor keys and retains bootstrap and TPM aut
         },
     );
     const address = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
-    var listener = try address.listen(io, .{});
+    var listener = address.listen(io, .{}) catch |err| switch (err) {
+        error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
     defer listener.deinit(io);
     var o: howl.Options = .{
         .form = "playground",
@@ -1624,17 +1631,42 @@ fn sockets(gpa: Allocator, at: []const u8) ![]const u8 {
 }
 
 fn tpmService(io: Io, gpa: Allocator, at: []const u8, operation: []const u8) !void {
+    const script = try gpa.print("{s}/authority/local-tpm", .{at});
+    const helper = @import("files").local_tpm;
+    const previous = try Dir.cwd().readFileAlloc(io, script, gpa, .limited(128 << 10));
+    if (!std.mem.eql(u8, helper, previous)) {
+        var why: howl.Why = .{};
+        try howl.writePrivate(io, gpa, script, helper, &why);
+    }
     const result = try std.process.run(gpa, io, .{ .argv = &.{
         "python3",
-        try gpa.print(
-            "{s}/authority/local-tpm",
-            .{at},
-        ),
+        script,
         operation,
         try gpa.print("{s}/authority", .{at}),
         try sockets(gpa, at),
     } });
     if (result.term != .exited or result.term.exited != 0) return error.TpmServiceFailed;
+}
+
+test "TPM service upgrades an existing helper without creating enrolled state" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(t.io, "authority", .default_dir);
+    try tmp.dir.writeFile(t.io, .{
+        .sub_path = "authority/local-tpm",
+        .data = "raise RuntimeError('obsolete helper')\n",
+    });
+    const path = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
+    try tpmService(t.io, gpa, path, "stop");
+    try t.expectEqualStrings(
+        @import("files").local_tpm,
+        try tmp.dir.readFileAlloc(t.io, "authority/local-tpm", gpa, .limited(128 << 10)),
+    );
+    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "authority/swtpm", .{}));
 }
 
 pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
@@ -1654,12 +1686,16 @@ pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
 fn startQemu(
     io: Io,
     gpa: Allocator,
-    spec: native.Spec,
+    profile: Profile,
     name: []const u8,
     at: []const u8,
     steps: *progress.Steps,
     why: *howl.Why,
 ) !void {
+    const spec = profile.spec;
+    // A new QEMU must not inherit an old emulator's in-flight connections.
+    // Its enrolled NV state survives the supervisor restart.
+    try tpmService(io, gpa, at, "stop");
     try tpmService(io, gpa, at, "start");
     errdefer tpmService(io, gpa, at, "stop") catch {};
     const ssh = try qemu.freePort(io, 2222);
@@ -1671,10 +1707,7 @@ fn startQemu(
         try gpa.print("form {s}\nssh {d}\nweb {d}\n", .{ spec.form, ssh, web }),
         why,
     );
-    var guest_web: u16 = 80;
-    for (try howl.listens(io, gpa, spec.form, why)) |port| if (port != 22) {
-        guest_web = port;
-    };
+    const guest_web = try qemuWebPort(profile);
     for ([_][]const u8{ "console.log", "console.sock", "monitor.sock" }) |file|
         Dir.cwd().deleteFile(io, try gpa.print("{s}/{s}", .{ at, file })) catch {};
     const args = try qemu.argv(gpa, .{
@@ -1714,6 +1747,45 @@ fn startQemu(
     );
     spin.clear();
     if (!boot.up) return why.refuse("{s}: protected QEMU boot did not finish", .{name});
+    if (std.mem.findScalar(u16, profile.configuration.?.ports, 22) != null) {
+        defer spin.clear();
+        if (!booting.awaitSsh(io, "127.0.0.1", ssh, &spin)) return why.refuse(
+            "{s}: protected QEMU SSH did not become ready; howl console {s}",
+            .{ name, name },
+        );
+    }
+}
+
+/// A downloaded form need not exist in this checkout. Its signed deployment
+/// definition supplies the ports, including for locally built ad-hoc forms.
+fn qemuWebPort(profile: Profile) !u16 {
+    const definition = profile.configuration orelse return error.MissingBootConfiguration;
+    var port: u16 = 80;
+    for (definition.ports) |candidate| if (candidate != 22) {
+        port = candidate;
+    };
+    return port;
+}
+
+test "protected QEMU uses authenticated ports without a local form tree" {
+    const t = std.testing;
+    var profile: Profile = .{
+        .spec = .{ .form = "unavailable-custom-form", .arch = .x86_64 },
+        .managed = false,
+        .configuration = .{
+            .form = "unavailable-custom-form",
+            .interface = .{ .files = &.{}, .settings = &.{} },
+            .ports = &.{ 22, 8081 },
+            .dhcp = true,
+            .ssh = .files,
+            .lima_managed = false,
+        },
+    };
+    try t.expectEqual(8081, try qemuWebPort(profile));
+    profile.configuration.?.ports = &.{22};
+    try t.expectEqual(80, try qemuWebPort(profile));
+    profile.configuration = null;
+    try t.expectError(error.MissingBootConfiguration, qemuWebPort(profile));
 }
 
 pub fn qemuCommand(gpa: Allocator, vars: []const u8) ![]const u8 {

@@ -10,7 +10,6 @@ const testing = std.testing;
 const init = @import("init.zig");
 const Machine = init.Machine;
 const executable = init.executable;
-const exists = init.exists;
 const mkdir = init.mkdir;
 const say = init.say;
 const writeErrno = init.writeErrno;
@@ -98,7 +97,8 @@ pub fn seal(m: *Machine) !void {
     // In learn mode seal-watch allows and records each unpromised call with
     // the promise that would allow it, so an author learns what a pledge
     // lacks. Only DEV=1 builds, which are never released, honor it.
-    const learn = m.cmd.seal == .learn and exists("/usr/share/werewolf/dev");
+    const learn = m.cmd.seal == .learn and
+        std.mem.eql(u8, m.read("/usr/share/werewolf/dev"), "dev\n");
     if (m.cmd.seal == .learn and !learn)
         say("werewolf.seal=learn ignored: only a DEV=1 build learns", .{});
     var bad: []const u8 = "";

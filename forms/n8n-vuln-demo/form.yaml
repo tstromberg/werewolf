@@ -1,0 +1,34 @@
+base: node
+
+updates: off
+
+allow: [node:native]
+
+weaknesses:
+  programs-no-interpreters: hardened Node.js runs n8n
+  kernel-write-xor-execute: V8 compiles n8n as it runs
+
+check:
+  memory: 3072
+
+services:
+  n8n:
+    exec: /usr/bin/node /usr/lib/n8n/node_modules/n8n/bin/n8n start
+    user: n8n
+    pledge: stdio rpath wpath inet unix netlink listen proc
+    listen: tcp/5678
+    memory: 2048
+    nofile: 8192
+    env:
+      - HOME=/data/svc/n8n
+      - N8N_USER_FOLDER=/data/svc/n8n
+      - N8N_LISTEN_ADDRESS=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=false
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=false
+      - N8N_LOG_OUTPUT=console
+      - N8N_SECURE_COOKIE=false

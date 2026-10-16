@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import ab_build
 
 howl, arch, kernel, key, cert, destination = sys.argv[1:]
 howl, kernel, key, cert = [str(Path(p).resolve()) for p in [howl, kernel, key, cert]]
@@ -37,10 +38,11 @@ run(['python3', 'test/tpm-fixture', fixture_dir / 'fixture.json', root / 'permit
      root / 'permit.pub', 'build/host/tpm-policy', 'build/host/uki'], 'permits')
 f = json.loads((fixture_dir / 'fixture.json').read_text())
 env['WEREWOLF_BOOT_STATE'] = str(fixture_dir / 'tpm/aa.permit')
-run([howl, 'build', '--build', '--with', f['form'], '--arch', arch,
-     '-o', fixture_dir / 'release-A', '--ipe-kernel', kernel, '--ipe-key', key,
-     '--ipe-cert', cert, '--ipe-updates', f['channel'], '--image-serial', f['initial_serial'],
-     '--boot-key', root / 'boot.key', '--boot-cert', root / 'boot.crt', '--boot-native'], 'factory', env)
+args, output = ab_build.arguments(
+    howl, f['form'], arch, kernel, key, cert, fixture_dir / 'build', f['channel'],
+    f['initial_serial'], root / 'boot.key', root / 'boot.crt', root / 'permit.pub')
+run(args, 'factory', env)
+ab_build.export(output, f['form'], arch, fixture_dir / 'release-A')
 subprocess.run(['python3', 'test/check-tpm-guest', str(fixture_dir / 'fixture.json'),
                 str(root / 'guest'), str(Path('build/host/tpm-policy').resolve())], check=True)
 print('pass   protected QEMU lifecycle: disposable factory, A/B rollback and retirement cuts')

@@ -25,7 +25,6 @@ fi
 export IRIS_SECRET_KEY="$(cat /data/secret-key)"
 export IRIS_SECURITY_PASSWORD_SALT="$(cat /data/salt)"
 export IRIS_ADM_PASSWORD="$pw"
-export FLASK_APP=app:app
 cd /iriswebapp
 i=0
 until "$py" -c 'import socket; s=socket.create_connection(("127.0.0.1",5432),2); s.close()' 2>/dev/null; do
@@ -36,15 +35,8 @@ until "$py" -c 'import socket; s=socket.create_connection(("127.0.0.1",5432),2);
 	}
 	sleep 1
 done
-i=0
-until "$py" -m flask db upgrade; do
-	i=$((i + 1))
-	[ "$i" -le 30 ] || {
-		echo "iris-run: schema did not migrate" >&2
-		exit 1
-	}
-	sleep 1
-done
+# Importing app runs IRIS's own post-init, including Alembic migrations.
+# This image has no Flask `db` command.
 exec "$py" /opt/venv/bin/gunicorn app:app \
 	--worker-class eventlet --workers 1 --bind 127.0.0.1:8000 \
 	--timeout 180 --worker-connections 100 --log-level info

@@ -112,7 +112,7 @@ Darwin)
 	system="macOS $(sw_vers -productVersion)"
 	pm=brew
 	install="brew install"
-	pkgs="apko melange crane lima qemu swtpm zstd zig mtools e2fsprogs osslsigncode"
+	pkgs="apko melange crane lima qemu swtpm zstd zig mtools e2fsprogs osslsigncode python"
 	apko_pkgs=apko
 	zig_pkgs=zig
 	# Homebrew's erofs-utils has no zstd, so build it into Homebrew's
@@ -192,7 +192,7 @@ Linux)
 		# systemd includes systemd-nspawn.
 		install="pacman -Syu --needed --noconfirm"
 		pkgs="curl make xz zstd libarchive erofs-utils e2fsprogs mtools qemu-img expect openbsd-netcat
-			osslsigncode python-pip bubblewrap $qemu"
+			osslsigncode python-pip bubblewrap libfido2 $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"
 		erofs_deps="base-devel lz4 zstd util-linux-libs zlib"

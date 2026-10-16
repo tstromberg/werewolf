@@ -7,6 +7,7 @@
 //! See README.md and docs/updater.md.
 
 const std = @import("std");
+const apk = @import("apk");
 const ipe = @import("ipe");
 const prebuilt = @import("prebuilt");
 const images = @import("images.zig");
@@ -614,6 +615,36 @@ pub const Update = struct {
             &.{ "--repositories-file", "/etc/apk/repositories" },
             try u.words(try u.read("/etc/apk/world")),
         );
+        if (std.mem.find(
+            u8,
+            try u.read("/etc/apk/repositories"),
+            @import("package").hardened_repository,
+        ) != null) {
+            u.step = "hardened-packages";
+            try u.netRoot();
+            const index_path = work_dir ++ "/hardened-index.tar.gz";
+            const url = try u.gpa.print("{s}/{s}/APKINDEX.tar.gz", .{
+                @import("package").hardened_repository, arch,
+            });
+            const got = try u.downloadLimit(url, index_path, 64 << 20);
+            _ = linux.close(got.fd);
+            const trust = [_]apk.Trusted{.{
+                .name = @import("package").repository_key,
+                .key = try apk.parseKey(u.gpa, @import("package").repository_pem),
+            }};
+            if (try apk.hardenedFallback(
+                u.gpa,
+                &trust,
+                try u.read(index_path),
+                try slot.readIn(u, work_dir ++ "/root", "lib/apk/db/installed"),
+            )) |name| {
+                u.detail = try u.gpa.print(
+                    "{s}: resolved outside the signed hardened feed",
+                    .{name},
+                );
+                return error.HardenedPackageRequired;
+            }
+        }
         u.step = "kernel";
         // linux-werewolf, from the repository the image's kernel came from,
         // trusting werewolf's key alone: Wolfi's never vouches for a kernel.

@@ -41,7 +41,7 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: ruby and node run Mastodon, which is what this form is for
-  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+  kernel-write-xor-execute: Ruby's FFI callbacks and PostgreSQL's LLVM compile native code (allow jit, from postgresql)
 
 services:
   # Caddy, as its own user, for Mastodon: it may bind :80 and :443 and no
