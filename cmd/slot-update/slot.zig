@@ -6,6 +6,8 @@ const apk = @import("apk");
 const package = @import("package");
 const compose = @import("compose");
 const form = @import("form");
+const kernel_image = @import("image");
+const ipe = @import("ipe");
 const m = @import("slot-update.zig");
 const images = @import("images.zig");
 const Io = m.Io;
@@ -436,6 +438,52 @@ pub fn apkAdd(
     // mkfs.erofs reads it.
     _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
     try prune(u, cache, root);
+}
+
+/// checkKernelConfig refuses a kernel package whose config reopens what
+/// werewolf relies on the kernel to close, as the build does
+/// (cmd/howl/packages.zig): IPE's needs (lib/ipe.zig) and lib/image.zig's
+/// rules. A kernel-build revision that drifted would otherwise reach every
+/// machine that composes its own slot.
+pub fn checkKernelConfig(u: *Update, root: []const u8) !void {
+    const r = try Root.open(u, root);
+    defer r.close(u);
+    const name = kernelConfigName(try r.list(u, "boot")) orelse {
+        u.detail = "no boot/config-, or more than one, in the kernel package";
+        return error.KernelConfig;
+    };
+    const text = try r.read(u, try u.gpa.print("boot/{s}", .{name}));
+    ipe.checkConfig(text) catch {
+        u.detail = try u.gpa.print(
+            "{s}: not the IPE, lockdown and module-free kernel lib/ipe.zig requires",
+            .{name},
+        );
+        return error.KernelConfig;
+    };
+    const misses = try kernel_image.configMisses(u.gpa, text);
+    if (misses.len > 0) {
+        u.detail = try u.gpa.print("{s}: {f}", .{ name, misses[0] });
+        return error.KernelConfig;
+    }
+}
+
+/// kernelConfigName returns the one config-* name in names, or null.
+fn kernelConfigName(names: []const []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (names) |n| if (std.mem.startsWith(u8, n, "config-")) {
+        if (found != null) return null;
+        found = n;
+    };
+    return found;
+}
+
+test kernelConfigName {
+    try testing.expectEqualStrings(
+        "config-7.2.11-werewolf",
+        kernelConfigName(&.{ "vmlinuz-werewolf", "config-7.2.11-werewolf", "ipe.crt" }).?,
+    );
+    try testing.expectEqual(null, kernelConfigName(&.{"vmlinuz-werewolf"}));
+    try testing.expectEqual(null, kernelConfigName(&.{ "config-a", "config-b" }));
 }
 
 /// apkFetch runs one apk applet in apkFetcher, as _update, then takes the

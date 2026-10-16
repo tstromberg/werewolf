@@ -215,7 +215,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     // The repository's minimal-form brings werewolf-advisories, and the
     // list updates with it; any other image carries howl's.
     const advised = for (b.from_repo) |n| {
-        if (mem.eql(u8, n, b.chain[0].name)) break true;
+        if (mem.eql(u8, n, "minimal")) break true;
     } else false;
     if (!advised) try b.put(d, "advisories", embedded.advisories);
     try Dir.cwd().writeFile(b.io, .{ .sub_path = stamp, .data = "" });
@@ -689,8 +689,10 @@ fn initramfs(b: *B, root: []const u8) !void {
     const target = try b.path("{s}/initramfs.zst", .{out});
     const stage0_zst = try b.path("{s}/slot/stage0.zst", .{out});
     const began = try b.begin(target, &.{ stage0_zst, root }) orelse return;
-    if (!mem.eql(u8, b.chain[0].name, "minimal"))
-        return b.fail("form {s} does not include minimal, which carries /init", .{b.name});
+    // Anywhere in the chain: a dev build lays sshd's forms first (howl.addDevSsh).
+    for (b.chain) |c| {
+        if (mem.eql(u8, c.name, "minimal")) break;
+    } else return b.fail("form {s} does not include minimal, which carries /init", .{b.name});
     const direct = try b.path("{s}/direct", .{out});
     try Dir.cwd().deleteTree(b.io, direct);
     try Dir.cwd().createDirPath(b.io, direct);

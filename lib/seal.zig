@@ -28,6 +28,8 @@ pub const Promise = enum(u5) {
     namespace,
     seccomp,
     landlock,
+    /// memfd needs the form's jit allowance: a memory file, written and then
+    /// mapped as code, runs wherever IPE is off (lib/compose.zig).
     memfd,
     ipc,
     sendfile,

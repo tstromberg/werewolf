@@ -111,7 +111,9 @@ Every service file states a `pledge`; a service with none is parked at
 boot. `stdio rpath wpath proc inet listen` covers a server; `memfd`, `ipc`
 and `watch` are off unless asked for, so an application that does not name
 them cannot make an anonymous executable file, squat another service's IPC
-key, or watch the machine's files. No promise brings `ptrace`, eBPF, perf,
+key, or watch the machine's files; `memfd` also needs the form to allow
+`jit`, since a memory file written and then mapped runs as code wherever IPE
+is off. No promise brings `ptrace`, eBPF, perf,
 modules, io_uring or another process's memory. [lib/seal.zig](../lib/seal.zig)
 maps each promise to its calls. A service's `listen` and `connect` are its
 network policy for leash and fence alike.
