@@ -3,6 +3,7 @@
 import copy
 import datetime
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-publisher = importlib.machinery.SourceFileLoader('export_transport', 'release/publish-protected').load_module()
-exporter = importlib.machinery.SourceFileLoader('export_under_test', 'release/export-protected').load_module()
-github = importlib.machinery.SourceFileLoader('export_github', 'release/github-protected').load_module()
+loader = importlib.machinery.SourceFileLoader('export_transport', 'release/publish-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
+loader = importlib.machinery.SourceFileLoader('export_under_test', 'release/export-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+exporter = importlib.util.module_from_spec(spec)
+loader.exec_module(exporter)
+loader = importlib.machinery.SourceFileLoader('export_github', 'release/github-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+github = importlib.util.module_from_spec(spec)
+loader.exec_module(github)
 
 
 class ProtectedExport(unittest.TestCase):

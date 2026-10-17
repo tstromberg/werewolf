@@ -24,6 +24,33 @@ class NativeFirmware(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_supported_interpreter_is_kept(self):
+        for version in [(3, 10), (3, 14)]:
+            with self.subTest(version=version), patch.object(module.sys, 'version_info', version), \
+                    patch.object(module.shutil, 'which') as which:
+                self.assertEqual(module.tools_python(), module.sys.executable)
+                which.assert_not_called()
+
+    def test_old_and_new_defaults_select_a_supported_interpreter(self):
+        for version in [(3, 9), (3, 15), (4, 0)]:
+            with self.subTest(version=version), patch.object(module.sys, 'version_info', version), \
+                    patch.object(module.shutil, 'which', return_value='/tools/python3.14') as which:
+                self.assertEqual(module.tools_python(), '/tools/python3.14')
+                which.assert_called_once_with('python3.14')
+
+    def test_missing_preferred_interpreters_try_older_supported_versions(self):
+        with patch.object(module.sys, 'version_info', (3, 15)), \
+                patch.object(module.shutil, 'which', side_effect=lambda name:
+                             '/tools/python3.12' if name == 'python3.12' else None):
+            self.assertEqual(module.tools_python(), '/tools/python3.12')
+
+    def test_unavailable_or_same_unsupported_interpreter_is_refused(self):
+        with patch.object(module.sys, 'version_info', (3, 15)):
+            for candidate in [None, module.sys.executable]:
+                with self.subTest(candidate=candidate), \
+                        patch.object(module.shutil, 'which', return_value=candidate):
+                    self.assertIsNone(module.tools_python())
+
     def test_exact_bytes_and_size_required_and_symlinks_refused(self):
         records = {}
         for name in module.FILES:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create one GitHub draft carrying the exact signed assets exported for R2."""
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,10 @@ def command(args):
 
 def draft(targets, trust='release/protected'):
     """targets lists (assets, bundle, report, provider), one per exported bundle."""
-    exporter = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected').load_module()
+    loader = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected')
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    exporter = importlib.util.module_from_spec(spec)
+    loader.exec_module(exporter)
     manifests, assets = [], []
     for directory, bundle, report, provider in targets:
         directory = Path(directory).resolve()

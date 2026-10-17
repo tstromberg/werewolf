@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Export one gated bundle for GitHub and R2, including an authenticated qcow2."""
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,10 @@ import subprocess
 import sys
 import tempfile
 
-downloads = importlib.machinery.SourceFileLoader('export_downloads', 'tools/boot-download').load_module()
+loader = importlib.machinery.SourceFileLoader('export_downloads', 'tools/boot-download')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+downloads = importlib.util.module_from_spec(spec)
+loader.exec_module(downloads)
 # The form pipeline adds what the bundle was built from and how it changed;
 # the signed manifest covers them like every other asset.
 EXTRAS = {'inputs.tar.gz', 'packages.json', 'tests.json', 'release-notes.json', 'release-notes.html'}
@@ -127,7 +131,10 @@ def verify(directory, bundle, report, provider, trust):
 
 def export(howl, bundle, report, provider, output, trust='release/protected', preparation=None, extras=None):
     if preparation is None:
-        preparation = importlib.machinery.SourceFileLoader('export_preparation', 'release/prepare-protected').load_module()
+        loader = importlib.machinery.SourceFileLoader('export_preparation', 'release/prepare-protected')
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        preparation = importlib.util.module_from_spec(spec)
+        loader.exec_module(preparation)
     bundle, output, trust = Path(bundle).resolve(), Path(output).resolve(), Path(trust).resolve()
     if output.exists():
         raise ValueError('release export already exists')

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Upload admitted protected objects before signed heads, retaining a signed release floor."""
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,9 @@ import tempfile
 import time
 
 loader = importlib.machinery.SourceFileLoader('protected_preparation', 'release/prepare-protected')
-preparation = loader.load_module()
+spec = importlib.util.spec_from_loader(loader.name, loader)
+preparation = importlib.util.module_from_spec(spec)
+loader.exec_module(preparation)
 ENDPOINT = 'https://c860af766754fb92eec27bc723e6db5d.r2.cloudflarestorage.com'
 
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build and run declared shell-free integration clients; never alter production services."""
 import hashlib
-from importlib.machinery import SourceFileLoader
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,11 @@ ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]*\Z')
 RUNTIME_GRANTS = {'python:native', 'node:native', 'java:native'}
 # Wait for the whole record before Expect prints its own result on this console.
 COMPLETION = r'werewolf-test: [^\r\n]*"event":"complete"[^\r\n]*\}\r*\n'
-console_clean = SourceFileLoader('werewolf_console', str(Path(__file__).with_name('cloud-console'))).load_module().clean
+loader = importlib.machinery.SourceFileLoader('werewolf_console', str(Path(__file__).with_name('cloud-console')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+console = importlib.util.module_from_spec(spec)
+loader.exec_module(console)
+console_clean = console.clean
 
 
 def call(*args, **kw):

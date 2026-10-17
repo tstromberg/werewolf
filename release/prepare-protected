@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare immutable protected objects only after admission and artifact-bound boot gates."""
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,9 @@ import tempfile
 import time
 
 loader = importlib.machinery.SourceFileLoader('protected_download', 'tools/boot-download')
-downloads = loader.load_module()
+spec = importlib.util.spec_from_loader(loader.name, loader)
+downloads = importlib.util.module_from_spec(spec)
+loader.exec_module(downloads)
 GATES = {'secure_boot', 'ipe', 'verified_root', 'rollback_protected', 'ab_upgrade',
          'operator_rollback', 'unhealthy_fallback', 'retirement_cuts', 'tamper_refused',
          'no_consumer_builds', 'no_vendor_private_keys', 'shared_issuer', 'fresh_download', 'independent_owners'}
@@ -48,7 +51,10 @@ def prepare(howl, bundle, report, provider, output, trust='release/protected', r
     downloads.native(howl, 'verify', bundle, request)
     exported = None
     if release_assets is not None:
-        exporter = importlib.machinery.SourceFileLoader('publication_export', 'release/export-protected').load_module()
+        loader = importlib.machinery.SourceFileLoader('publication_export', 'release/export-protected')
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        exporter = importlib.util.module_from_spec(spec)
+        loader.exec_module(exporter)
         exported = exporter.verify(release_assets, bundle, report, provider, trust)
     if output.exists():
         raise ValueError('publication output already exists')
