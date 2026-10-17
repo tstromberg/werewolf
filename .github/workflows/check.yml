@@ -48,12 +48,13 @@ jobs:
         # every form booted; shellfree every form rebuilt and booted as it
         # ships; integrity the slot, verity and the deadman; cloud the
         # metadata, no-data and lease boots and the ad-hoc form, whose OCI
-        # image is pulled; persist the UEFI-firmware power-cut run. forms and
+        # image is pulled; persist the UEFI-firmware power-cut run; syslog
+        # the shipped logger's attack probes. forms and
         # shellfree split over runners (SHARD=K/N). arm64 runs every group
-        # under KVM on the self-hosted runner (vm-arm64), so these 10 jobs
+        # under KVM on the self-hosted runner (vm-arm64), so these 11 jobs
         # leave room in the account's 20 hosted at once for kernel-build's
         # and glibc-build's publishes.
-        group: [integrity, cloud, persist]
+        group: [integrity, cloud, persist, syslog]
         include:
           - { group: forms, shard: 1, shards: 4 }
           - { group: forms, shard: 2, shards: 4 }
@@ -249,7 +250,7 @@ jobs:
         run: |
           jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs boots at once"
-          make -k -j"$jobs" check-forms check-shellfree check-integrity check-cloud check-persist
+          make -k -j"$jobs" check
       # arm64's only job saves its melange packages, as the check job's
       # forms jobs do x86_64's: saved even when a check fails.
       - name: Save melange packages

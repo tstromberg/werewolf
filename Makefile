@@ -366,7 +366,7 @@ fuzz-syslog:
 			--fuzz=$(SYSLOG_FUZZ_RUNS) --summary all || exit; \
 	done
 
-check-syslog: $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
+check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
 	@test -r $(BUILD)/vmlinuz || $(HOWL_BUILD) image
 	python3 test/check-syslog --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
 		--daemon $(call program_bin,syslogd) --probe $(SYSLOG_PROBE) \
