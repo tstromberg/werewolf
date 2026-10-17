@@ -36,7 +36,7 @@ set qemu [lrange $argv 3 end]
 log_user 0
 # Open the log here, unbuffered, so the console seen so far can be read back.
 set log_chan [open $log w]
-fconfigure $log_chan -buffering none
+fconfigure $log_chan -buffering none -encoding binary -translation binary
 log_file -a -open $log_chan
 set failed 0
 
@@ -140,6 +140,9 @@ proc give_up {what {hung 0}} {
 # lower to see a hang sooner when debugging one.
 set timeout [expr {[info exists env(BOOT_TIMEOUT)] ? $env(BOOT_TIMEOUT) : 300}]
 spawn -noecho {*}$qemu
+# Serial reads can split a UTF-8 character. Expect's text decoder can then
+# report a false EOF, closing the PTY and sending SIGHUP to a running VM.
+fconfigure $spawn_id -encoding binary -translation binary
 
 proc panicked {} {
 	global expect_out

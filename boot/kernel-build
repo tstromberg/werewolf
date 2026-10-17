@@ -2,4 +2,4 @@
 # builds IPE test kernels from. Move it on when kernel-build changes what
 # werewolf's tests rely on; published kernels come from kernel-build's CI.
 url=https://github.com/werewolf-linux/kernel-build
-commit=cd6e4bfef2b47de4a2d0f7fc9e34d577fac24463
+commit=c0bc74931626ca13bba36dc797d5d330896a1807
