@@ -1,4 +1,5 @@
 """Boot evidence required by every provider A/B lifecycle test."""
+import json
 import re
 import struct
 
@@ -36,6 +37,21 @@ def require_updater_console(console, boots=1):
         credentials = re.findall(rb'autoupdate: coordinator[^\r\n]*', boot)
         if not credentials or any(value != expected for value in credentials):
             raise AssertionError('missing or unsafe updater credentials in boot console')
+
+
+def require_refused_image_retry(returncode, before, after):
+    """A refused command must append a fresh reason to the durable updater log."""
+    if returncode != 1:
+        raise AssertionError('updater retry did not return a command refusal')
+    if not after.startswith(before):
+        raise AssertionError('updater audit log changed its existing history')
+    previous = json.loads(before.splitlines()[-1])['seq'] if before else 0
+    for line in after[len(before):].splitlines():
+        record = json.loads(line)
+        if (record['seq'] > previous and record.get('event') == 'error' and
+                record.get('error') == 'ImageRolledBack'):
+            return record
+    raise AssertionError('updater retry did not record a fresh ImageRolledBack refusal')
 
 
 def console_posture_failures(console):
@@ -88,6 +104,19 @@ def require_boot(value, release, slot, root_hash, previous=None, secure=True, co
 
 
 if __name__ == '__main__':
+    old_refusal = json.dumps(dict(seq=7, event='error', error='ImageRolledBack')) + '\n'
+    new_refusal = json.dumps(dict(seq=8, event='error', error='ImageRolledBack')) + '\n'
+    assert require_refused_image_retry(1, old_refusal, old_refusal + new_refusal)['seq'] == 8
+    assert require_refused_image_retry(1, '', new_refusal)['seq'] == 8
+    wrong_reason = json.dumps(dict(seq=8, event='error', error='NetworkUnavailable')) + '\n'
+    for code, log in [(0, old_refusal + new_refusal), (255, old_refusal + new_refusal),
+                      (1, old_refusal), (1, old_refusal + old_refusal),
+                      (1, old_refusal + wrong_reason), (1, new_refusal)]:
+        try:
+            require_refused_image_retry(code, old_refusal, log)
+        except AssertionError:
+            continue
+        raise AssertionError('accepted missing, stale or unrelated retry evidence')
     status = ('Uid:\t77\t77\t77\t77\nGid:\t77\t77\t77\t77\nThreads:\t1\n'
               'CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n'
               'CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n'
