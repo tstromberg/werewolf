@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Boot the exact compatibility disk and direct-boot image without Secure Boot or TPM."""
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path('release').resolve()))
+import legacy_images
+
+
+def firmware(arch):
+    if arch == 'aarch64':
+        candidates = ['/usr/share/AAVMF/AAVMF_CODE.fd',
+                      '/usr/share/qemu-efi-aarch64/QEMU_EFI.fd',
+                      '/opt/homebrew/share/qemu/edk2-aarch64-code.fd']
+    else:
+        candidates = ['/usr/share/OVMF/OVMF_CODE_4M.fd', '/usr/share/OVMF/OVMF_CODE.fd',
+                      '/usr/share/ovmf/OVMF.fd', '/opt/homebrew/share/qemu/edk2-x86_64-code.fd']
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+    raise ValueError('ordinary UEFI firmware is required to test legacy boot')
+
+
+def check(directory, output):
+    directory, output = Path(directory).resolve(), Path(output).resolve()
+    manifest = legacy_images.validate(json.loads((directory / 'manifest.json').read_text()), directory)
+    arch, form = manifest['arch'], manifest['form']
+    output.mkdir(parents=True)
+    excuses = subprocess.check_output(['build/host/form', 'excuses', form], text=True)
+    known = [line.split()[0] for line in excuses.splitlines() if line.strip()]
+    # QEMU restricts external traffic in these exact-image smoke boots. Root's
+    # assigned-DNS probe depends on a responding upstream DNS server; the form's
+    # integration suite tests its network policy with its own live fixtures.
+    known = ['?network-root-dns-assigned' if name == 'network-root-dns-assigned' else name
+             for name in known]
+    # Direct boot has no EFI variables, so the Secure Boot probe is skipped.
+    known += ['?boot-secure-boot', 'boot-rollback-protected', 'boot-ipe-enforced']
+    env = dict(os.environ, POSTURE_KNOWN=' '.join(known))
+    accel = 'kvm' if os.access('/dev/kvm', os.R_OK | os.W_OK) else 'tcg'
+    host_arch = {'arm64': 'aarch64', 'amd64': 'x86_64'}.get(platform.machine(), platform.machine())
+    if platform.system() == 'Darwin' and host_arch == arch:
+        accel = 'hvf'
+    command = ['qemu-system-' + arch, '-M', 'virt' if arch == 'aarch64' else 'q35',
+               '-accel', accel, '-cpu', 'host' if accel != 'tcg' else 'max',
+               '-nographic', '-smp', '2', '-m', '2048', '-no-reboot',
+               '-device', 'virtio-rng-pci', '-netdev', 'user,id=n0,restrict=on',
+               '-device', 'virtio-net-pci,netdev=n0,romfile=']
+    # Native serial posture checks judge production bytes without injecting a
+    # shell or test agent into either published image.
+    bios = firmware(arch)
+    uefi = ['-bios', bios]
+    if arch == 'x86_64' and '_CODE' in bios:
+        template = bios.replace('_CODE', '_VARS')
+        if not Path(template).is_file():
+            raise ValueError('matching ordinary UEFI variable template is missing')
+        variables = output / 'vars.fd'
+        shutil.copyfile(template, variables)
+        uefi = ['-drive', 'if=pflash,format=raw,readonly=on,file=' + bios,
+                '-drive', 'if=pflash,format=raw,file=' + str(variables)]
+    for mode, extra in [('uefi', [*uefi, '-snapshot', '-drive',
+                                 'file=' + str(directory / 'disk.qcow2') + ',format=qcow2,if=virtio']),
+                        ('direct', ['-kernel', str(directory / 'vmlinuz'), '-initrd',
+                                    str(directory / 'initramfs.zst'), '-append',
+                                    (directory / 'cmdline').read_text().strip() +
+                                    ' console=' + ('ttyAMA0' if arch == 'aarch64' else 'ttyS0')])]:
+        subprocess.run(['test/boot', 'legacy-' + form + '-' + mode, '-',
+                        str(output / (mode + '.log')), *command, *extra],
+                       env=env, check=True, timeout=600)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        sys.exit('usage: check-legacy-image CANDIDATE LOGS')
+    check(*sys.argv[1:])

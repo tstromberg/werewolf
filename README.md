@@ -68,6 +68,8 @@ howl test --with caddy
 `howl forms --published` checks the signed image catalog for current qcow2
 downloads. `howl forms NAME` links to the setup guide and configuration flags;
 many services need credentials before they can start.
+Image releases cover `minimal`, `prod-ssh` and `playground`, with explicit
+secure-boot and legacy-boot profiles; other forms are built from source.
 
 ## Secure Boot
 

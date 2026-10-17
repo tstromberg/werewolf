@@ -89,7 +89,7 @@ Other boots cover what one boot cannot:
 | `prod` behind a stand-in metadata server, as each cloud | take a good config on GCP, AWS (by session token only), Hetzner and Azure; refuse a tar with a link or `../`; ask nothing on no cloud or on Hyper-V | [test/metadata](../test/metadata), [test/cloud-boot](../test/cloud-boot) |
 | `prod` with no address; `minimal` with a packed one (`check-static`) | take it from DHCP, the client split as it claims; or from `howl pack --ip --gw --dns` | [test/checks-lease](../test/checks-lease), [test/checks-static](../test/checks-static) |
 | the slot | find `root.erofs` by UUID, keep `/boot` read-only, commit its EFI entry once healthy for a minute | a 128 MiB ext4 and a FAT EFI partition with one counted entry |
-| each release disk in `dist/` (`check-dist`, after `make dist`) | boot under UEFI firmware, with `-snapshot` and no way out, failing exactly its form.yaml's `weaknesses` | [test/check-dist](../test/check-dist); the release workflow |
+| each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image](../test/check-legacy-image); the shared image workflow |
 
 Each machine gets a blank disk, a config disk with a fixed test `data.key` (LUKS2
 `/data`) and forwarded ports (22200 and 23200 plus its place among the forms), so

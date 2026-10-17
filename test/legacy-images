@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Exercise signed boot-profile separation, exact candidate evidence and release floors."""
+import hashlib
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path('release').resolve()))
+import image_catalog as catalog
+import image_profiles as profiles
+import legacy_images as legacy
+
+publisher = importlib.machinery.SourceFileLoader('legacy_test_store', 'release/publish-protected').load_module()
+
+
+class LegacyImages(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.trust = tempfile.TemporaryDirectory(prefix='ww-legacy-trust-')
+        cls.key, cls.cert = [Path(cls.trust.name) / name for name in ('key.pem', 'image.crt')]
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256',
+                        '-days', '2', '-subj', '/CN=legacy-tests', '-keyout', cls.key, '-out', cls.cert],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.trust.cleanup()
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ww-legacy-release-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.environment = patch.dict(os.environ, WEREWOLF_PROTECTED_IMAGE_KEY=str(self.key), GITHUB_SHA='a' * 40)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.provenance = dict(repository='werewolf-linux/werewolf', commit='a' * 40,
+                               run='https://github.com/werewolf-linux/werewolf/actions/runs/123', attempt='1')
+        self.store = publisher.Store(str(self.root / 'store'))
+
+    def candidate(self, form='minimal', serial='20261017T010000Z'):
+        directory = self.root / ('verified-' + serial) / form
+        directory.mkdir(parents=True)
+        for name in legacy.FILES:
+            (directory / name).write_bytes((name + serial).encode())
+        (directory / 'cmdline').write_text('werewolf.disable=secureboot,tpm,ipe\n')
+        manifest = dict(format=legacy.FORMAT, **profiles.identity(form, 'x86_64', 'legacy-boot'),
+                        disabled=['secureboot', 'tpm', 'ipe'], serial=serial, commit='a' * 40, inputs='b' * 64,
+                        raw_size=8 << 30,
+                        files={name: catalog.record(directory / name) for name in sorted(legacy.FILES)})
+        legacy.write(directory / 'manifest.json', manifest)
+        legacy.write(directory / 'tests.json', dict(boot_profile='legacy-boot',
+            manifest=catalog.sha(directory / 'manifest.json'), checks={name: True for name in sorted(legacy.CHECKS)}))
+        return directory
+
+    def export(self, directory):
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        targets = {(manifest['form'], manifest['arch']): dict(manifest, status='build')}
+        return legacy.export(directory.parent, self.root / ('assets-' + directory.parent.name),
+                             self.provenance, targets, self.cert)
+
+    def test_artifact_must_match_the_trusted_resolved_plan(self):
+        candidate = self.candidate()
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        for changes in ({'inputs': 'c' * 64}, {'serial': '20261017T030000Z'}, {'status': 'resolution failed'}):
+            targets = {('minimal', 'x86_64'): dict(manifest, status='build') | changes}
+            with self.assertRaisesRegex(ValueError, 'resolved target'):
+                legacy.export(candidate.parent, self.root / 'foreign-assets', self.provenance, targets, self.cert)
+
+    def test_only_three_forms_and_two_profiles_are_publication_identities(self):
+        self.assertEqual({'minimal', 'prod-ssh', 'playground'}, set(profiles.FORMS))
+        for form in profiles.FORMS:
+            for profile in profiles.PROFILES:
+                self.assertIn(profile, profiles.prefix(form, 'aarch64', profile))
+        for form in ('prod', 'nginx', '../minimal'):
+            with self.assertRaises(ValueError):
+                profiles.identity(form, 'x86_64', 'legacy-boot')
+
+    def test_signed_legacy_assets_have_explicit_profile_and_independent_namespace(self):
+        for offset, form in enumerate(profiles.FORMS):
+            exported, = self.export(self.candidate(form, '20261017T01000%dZ' % offset))
+            assets = Path(exported['assets'])
+            signed = legacy.verify(assets, self.cert)
+            self.assertEqual('legacy-boot', signed['boot_profile'])
+            self.assertTrue((assets / (form + '-x86_64-legacy-boot.qcow2')).is_file())
+            rows = legacy.publish([exported], self.store, self.cert)
+            self.assertTrue(rows[0]['object'].startswith('legacy-boot/'))
+            self.assertFalse((self.root / 'store' / form / 'qemu/x86_64/latest/boot.json').exists())
+
+    def test_changed_candidate_or_nonboolean_gate_is_never_signed(self):
+        candidate = self.candidate()
+        (candidate / 'disk.qcow2').write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            self.export(candidate)
+        candidate = self.candidate('prod-ssh', '20261017T010001Z')
+        report = json.loads((candidate / 'tests.json').read_text())
+        report['checks']['uefi_boot'] = 1
+        legacy.write(candidate / 'tests.json', report)
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            self.export(candidate)
+
+    def test_secure_identity_cannot_be_labeled_legacy(self):
+        candidate = self.candidate()
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        (candidate / 'cmdline').write_text('werewolf.secure=1 werewolf.tpm=1\n')
+        manifest['files']['cmdline'] = catalog.record(candidate / 'cmdline')
+        with self.assertRaisesRegex(ValueError, 'incompatible boot identity'):
+            legacy.validate(manifest, candidate)
+        manifest['boot_profile'] = 'secure-boot'
+        with self.assertRaisesRegex(ValueError, 'invalid legacy boot manifest'):
+            legacy.validate(manifest, candidate)
+
+    def test_signed_asset_tampering_is_refused(self):
+        exported, = self.export(self.candidate())
+        assets = Path(exported['assets'])
+        (assets / 'minimal-x86_64-legacy-boot.qcow2').write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            legacy.verify(assets, self.cert)
+
+    def test_release_floor_survives_a_torn_head_and_refuses_rollback(self):
+        old, = self.export(self.candidate())
+        newer, = self.export(self.candidate(serial='20261017T020000Z'))
+        legacy.publish([newer], self.store, self.cert)
+        with self.assertRaisesRegex(ValueError, 'release floor'):
+            legacy.publish([old], self.store, self.cert)
+        # The accepted receipt protects the floor even if JSON/signature heads tear.
+        head = self.root / 'store/legacy-boot/minimal/x86_64/latest/minimal-x86_64-legacy-boot-downloads.json'
+        head.write_bytes(b'interrupted write')
+        with self.assertRaisesRegex(ValueError, 'release floor'):
+            legacy.publish([old], self.store, self.cert)
+
+    def test_same_serial_cannot_authorize_different_bytes(self):
+        candidate = self.candidate()
+        exported, = self.export(candidate)
+        legacy.publish([exported], self.store, self.cert)
+        signed = json.loads(next(Path(exported['assets']).glob('*-downloads.json')).read_text())
+        # Reissuing identical, authenticated bytes is an idempotent retry.
+        legacy.publish([exported], self.store, self.cert)
+        self.assertEqual('legacy-boot', signed['boot_profile'])
+        (candidate / 'disk.qcow2').write_bytes(b'a different disk under the same serial')
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        manifest['files']['disk.qcow2'] = catalog.record(candidate / 'disk.qcow2')
+        legacy.write(candidate / 'manifest.json', manifest)
+        report = json.loads((candidate / 'tests.json').read_text())
+        report['manifest'] = catalog.sha(candidate / 'manifest.json')
+        legacy.write(candidate / 'tests.json', report)
+        conflicting, = legacy.export(candidate.parent, self.root / 'conflicting-assets',
+                                     self.provenance, {('minimal', 'x86_64'): dict(manifest, status='build')}, self.cert)
+        with self.assertRaisesRegex(ValueError, 'release floor'):
+            legacy.publish([conflicting], self.store, self.cert)
+
+    def test_one_github_release_contains_both_profiles(self):
+        exported, = self.export(self.candidate())
+        github = importlib.machinery.SourceFileLoader('legacy_github_test', 'release/github-protected').load_module()
+        secure = self.root / 'secure'
+        secure.mkdir()
+        (secure / 'playground-qemu-x86_64-secure-boot.qcow2').write_bytes(b'protected disk')
+        manifest = dict(form='playground', provider='qemu', arch='x86_64', serial='20261017T010000Z',
+                        descriptor='d' * 64, provenance=self.provenance, boot_profile='secure-boot')
+        exporter = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected').load_module()
+        with patch.object(exporter, 'verify', return_value=manifest), \
+             patch.object(github, 'command') as command, \
+             patch.dict(os.environ, GITHUB_REPOSITORY='werewolf-linux/werewolf', GITHUB_OUTPUT=str(self.root / 'output')):
+            # github.draft reloads its verifier; intercept that loader to keep
+            # the secure fixture's native admission in the existing export suite.
+            original = github.importlib.machinery.SourceFileLoader
+            def loader(name, path):
+                if name == 'github_export':
+                    from unittest.mock import Mock
+                    return Mock(load_module=lambda: exporter)
+                return original(name, path)
+            with patch.object(github.importlib.machinery, 'SourceFileLoader', side_effect=loader):
+                github.draft([(secure, self.root / 'bundle', {}, 'qemu')],
+                             trust=Path(self.trust.name), legacy=[exported['assets']])
+        argv = command.call_args.args[0]
+        self.assertIn(str((secure / 'playground-qemu-x86_64-secure-boot.qcow2').resolve()), argv)
+        self.assertIn(str(Path(exported['assets']) / 'minimal-x86_64-legacy-boot.qcow2'), argv)
+        self.assertEqual(1, command.call_count)
+
+
+if __name__ == '__main__':
+    unittest.main()

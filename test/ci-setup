@@ -3,7 +3,7 @@
 # Ubuntu 26.04 runners and make ci's VM: tools/install-deps's tools, without
 # asking, and /dev/kvm opened to the user who runs the checks. With `apko`,
 # `zig` or both, it installs only those, for jobs that resolve packages or
-# build a tool. Run it as root. .github/workflows/check.yml, release.yml,
+# build a tool. Run it as root. .github/workflows/check.yml, form-images.yml,
 # update.yml and test/lima-ci use it. Like install-deps, it does only what is
 # not done yet, so a second run takes a second.
 set -eu
