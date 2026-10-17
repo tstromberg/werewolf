@@ -72,9 +72,30 @@ fn is(arg: ?[*:0]const u8, value: []const u8) bool {
 
 /// confine must run after closing inherited descriptors and before dropping
 /// SYS_CHROOT. No pathname metadata operation can reach the running machine.
-pub fn confine(state: [*:0]const u8, d: Destination) !void {
-    _ = try sandbox.sys(linux.chdir(state), "enter installer state");
-    _ = try sandbox.sys(linux.chroot("."), "chroot installer");
+pub fn confine(state: ?[*:0]const u8, d: Destination) !void {
+    // Metadata capabilities also apply to inherited descriptors. Keep only
+    // anonymous pipes, never the host's /dev/null, across the chroot.
+    var input: [2]i32 = undefined;
+    _ = try sandbox.sys(linux.pipe2(&input, .{ .CLOEXEC = true }), "installer input pipe");
+    defer _ = linux.close(input[1]);
+    if (input[0] != 0) {
+        defer _ = linux.close(input[0]);
+        _ = try sandbox.sys(linux.dup3(input[0], 0, 0), "installer input");
+    } else {
+        _ = try sandbox.sys(linux.fcntl(0, linux.F.SETFD, 0), "installer input flags");
+    }
+    for ([_]i32{ 1, 2 }) |fd| {
+        var st: linux.Statx = undefined;
+        _ = try sandbox.sys(
+            linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st),
+            "installer output",
+        );
+        if (st.mode & linux.S.IFMT != linux.S.IFIFO) return error.UnsafeInstallerOutput;
+    }
+    if (state) |root| {
+        _ = try sandbox.sys(linux.chdir(root), "enter installer state");
+        _ = try sandbox.sys(linux.chroot("."), "chroot installer");
+    }
     _ = try sandbox.sys(linux.chdir("/"), "enter installer root");
     var rules: [7]sandbox.Rule = undefined;
     var n: usize = 0;
@@ -132,10 +153,10 @@ pub fn filter() !void {
         "arch_prctl",      "getcwd",       "sendfile",        "fallocate",
         "fgetxattr",       "fsetxattr",    "flistxattr",      "getxattr",
         "lgetxattr",       "setxattr",     "lsetxattr",       "listxattr",
-        "llistxattr",
+        "llistxattr",      "mknod",        "mknodat",
     }) |call| f.allow(call);
     for ([_]u32{ 0x541b, 0x5401, 0x802c542a }) |req| f.allowArg("ioctl", 1, req);
-    inline for (.{ "socket", "socketpair", "mount", "umount2", "mknod", "mknodat" }) |call|
+    inline for (.{ "socket", "socketpair", "mount", "umount2" }) |call|
         f.refuse(call);
     try f.install();
 }
@@ -206,9 +227,21 @@ test "offline installer confines contents, metadata, descriptors and sockets" {
 
 fn installerProbe(base: [*:0]const u8, report: i32, external: i32) !void {
     try sandbox.closeAllBut(&.{report});
+    for ([_]i32{
+        1,
+        2,
+    }) |fd| _ = try sandbox.sys(linux.dup3(report, fd, 0), "installer test output");
     try confine(base, .{ .root = "/work/root", .cache = "/cache/root" });
     try sandbox.keepOnly((1 << linux.CAP.CHOWN) | (1 << linux.CAP.FOWNER));
     try filter();
+    var input: [1]u8 = undefined;
+    if (linux.read(0, &input, input.len) != 0) return error.NotEofInput;
+    var stdin_stat: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(0, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &stdin_stat),
+        "stat installer input",
+    );
+    if (stdin_stat.mode & linux.S.IFMT != linux.S.IFIFO) return error.HostInputDescriptor;
     if (linux.errno(linux.write(external, "out", 3)) != .BADF)
         return error.InheritedOutsideDescriptor;
     const raw = try sandbox.sys(linux.open("/work/root/new", .{
@@ -221,6 +254,12 @@ fn installerProbe(base: [*:0]const u8, report: i32, external: i32) !void {
     _ = try sandbox.sys(linux.fchown(fd, 1234, 1234), "preserve package ownership");
     _ = try sandbox.sys(linux.fchmod(fd, 0o640), "preserve package mode");
     _ = linux.close(fd);
+    _ = try sandbox.sys(
+        testNode("/work/root/fifo", linux.S.IFIFO | 0o600, 0),
+        "create package FIFO",
+    );
+    const device = testNode("/work/root/device", linux.S.IFCHR | 0o600, 0x103);
+    if (linux.errno(device) == .SUCCESS) return error.DeviceCreated;
     const cache = linux.open("/cache/root/kept", .{ .ACCMODE = .WRONLY }, 0);
     if (linux.errno(cache) != .ACCES) return error.WritableCache;
     if (linux.errno(linux.open("/work/root/escape", .{}, 0)) == .SUCCESS)
@@ -234,6 +273,11 @@ fn installerProbe(base: [*:0]const u8, report: i32, external: i32) !void {
     for ([_]u32{ linux.AF.INET, linux.AF.INET6, linux.AF.UNIX, linux.AF.NETLINK }) |family|
         if (linux.errno(linux.socket(family, linux.SOCK.STREAM, 0)) != .PERM)
             return error.SocketAllowed;
+}
+
+fn testNode(path: [*:0]const u8, mode: u32, dev: u32) usize {
+    const at: usize = @bitCast(@as(isize, linux.AT.FDCWD));
+    return linux.syscall4(.mknodat, at, @intFromPtr(path), mode, dev);
 }
 
 test "the image's offline apk initializes a database inside its jail" {
@@ -289,7 +333,7 @@ fn apkProbe(base: [*:0]const u8, usr: [*:0]const u8, output: i32) !noreturn {
     const args = [_:null]?[*:0]const u8{
         "/usr/bin/apk",  "--root",      "/work/root",   "--arch",       arch,
         "--cache-dir",   "/cache/root", "--no-network", "--no-scripts", "--quiet",
-        "--no-progress", "add",         "--initdb",
+        "--no-progress", "--initdb",    "add",
     };
     const env = [_:null]?[*:0]const u8{};
     _ = try sandbox.sys(linux.execve("/usr/bin/apk", &args, &env), "execute offline apk test");

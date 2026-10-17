@@ -86,6 +86,9 @@ your own keys.
 | [jre21](../forms/jre21/form.yaml) | A Java 21 runtime for applications that require it; no application service included. |
 | [kafka](../forms/kafka/README.md) | An Apache Kafka event stream on one KRaft node, with TLS, SCRAM authentication and ACLs. |
 | [keycloak](../forms/keycloak/README.md) | Single sign-on through OpenID Connect and SAML. |
+| [langflow](../forms/langflow/README.md) | The full Langflow editor/API with authenticated access, hosted providers and offline ONNX embeddings on hardened Python. |
+| [langflow-vuln-demo](../forms/langflow-vuln-demo/README.md) | Pinned vulnerable Langflow with public flow APIs on hardened Python. |
+| [libffi](../forms/libffi/README.md) | Static foreign-function callback trampolines for Python workloads under MDWE. |
 | [limesurvey](../forms/limesurvey/README.md) | Surveys and research data, stored in MariaDB. |
 | [loki](../forms/loki/README.md) | Log storage and queries over HTTPS, with authentication through Caddy. |
 | [mariadb-local](../forms/mariadb-local/README.md) | MariaDB for services in the same VM, accessed through a UNIX socket. |
@@ -102,6 +105,8 @@ your own keys.
 | [moodle](../forms/moodle/README.md) | Courses and learning management for schools and universities. |
 | [mosquitto](../forms/mosquitto/README.md) | An MQTT broker over TLS, with configured users and access rules. |
 | [mox](../forms/mox/README.md) | A mail server for your domain: SMTP, submission, IMAP and web administration. |
+| [n8n](../forms/n8n/README.md) | Workflow automation with a private editor/API and a separate JavaScript Code runner on hardened Node.js. |
+| [n8n-vuln-demo](../forms/n8n-vuln-demo/README.md) | Pinned vulnerable n8n with a public editor/API on hardened Node.js. |
 | [nats](../forms/nats/README.md) | A message bus over TLS, with JetStream for persistent messages. |
 | [nextcloud](../forms/nextcloud/README.md) | Files, calendars and contacts for a household. |
 | [nginx](../forms/nginx/form.yaml) | Serve your static website on port 80. Supply the site with `--app`. |
@@ -110,6 +115,8 @@ your own keys.
 | [node-example](../examples/nodejs/README.md) | A sample Node.js web application, with a tutorial. |
 | [oauth2-proxy](../forms/oauth2-proxy/README.md) | Put an OIDC login in front of another service. |
 | [ollama](../forms/ollama/README.md) | Run and serve AI models on the CPU. Add authentication before exposing the API. |
+| [onnx](../forms/onnx/README.md) | A source-built CPU inference runtime for hardened Python 3.15; applications supply their own service. |
+| [onnx-minilm](../forms/onnx-minilm/README.md) | Read-only MiniLM model and tokenizer for offline ONNX embeddings; no service included. |
 | [open-webui](../forms/open-webui/README.md) | A chat interface for Ollama models running in the same VM. |
 | [openbao](../forms/openbao/README.md) | Secrets storage. Supply TLS certificates, an unseal key and administrator credentials. |
 | [opencanary](../forms/opencanary/README.md) | A low-interaction honeypot that records connection attempts. |
@@ -139,6 +146,8 @@ your own keys.
 | [samba](../forms/samba/README.md) | SMB3 file sharing, with a directory per user and encryption required. |
 | [sftpgo](../forms/sftpgo/README.md) | SFTP file transfer for configured users; no shell, FTP, WebDAV or web administration. |
 | [sh-shim](../forms/sh-shim/form.yaml) | A helper for services that invoke `sh -c`; runs one program and its arguments, without shell syntax. |
+| [solr](../forms/solr/README.md) | Solr search and indexing on hardened OpenJDK 27, with a private API and no shell. |
+| [solr-vuln-demo](../forms/solr-vuln-demo/README.md) | Pinned Solr with vulnerable Log4j on hardened OpenJDK 27, without a shell. |
 | [squid](../forms/squid/README.md) | An outbound HTTPS proxy restricted to configured domains and client networks. |
 | [sshd](../forms/sshd/form.yaml) | Interactive SSH access using security keys, for inclusion in your own form. |
 | [step-ca](../forms/step-ca/README.md) | A private certificate authority with ACME support. Supply the root and intermediate certificates; keep the root key offline. |
@@ -151,6 +160,7 @@ your own keys.
 | [valkey-tcp](../forms/valkey-tcp/README.md) | Valkey for network clients on TCP port 6379, with a configured memory limit. |
 | [vaultwarden](../forms/vaultwarden/README.md) | A Bitwarden-compatible password manager server. |
 | [velociraptor](../forms/velociraptor/README.md) | A Velociraptor server for endpoint visibility and investigation. |
+| [vuln-demo](../forms/vuln-demo/README.md) | Three vulnerable products with a Go request/violation journal and any-password, command-only SSH; no shell. |
 | [webshell-example](../forms/webshell-example/README.md) | A deliberately vulnerable Python application for testing confinement. |
 | [wordpress](../forms/wordpress/README.md) | WordPress backed by SQLite, served through nginx. |
 | [wordpress-mariadb](../forms/wordpress-mariadb/README.md) | WordPress backed by MariaDB on a local UNIX socket. |

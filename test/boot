@@ -497,15 +497,22 @@ if {!$shell} {
 	send "system_powerdown\r"
 	expect -timeout 10 "(qemu)" {} timeout {}
 	send "\001c"
+	set shutdown_eof 0
 	expect {
 		-timeout 60
 		"power button on" { exp_continue }
 		"reboot: Power down" { say ok shutdown }
 		timeout { say FAIL shutdown "no power-off 60 s after the power button"; incr failed }
-		eof { say FAIL shutdown "QEMU ended without the kernel powering off"; incr failed }
+		eof { set shutdown_eof 1 }
 	}
-	expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not exit after powering off" }
-	wait
+	if {!$shutdown_eof} {
+		expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not exit after powering off" }
+	}
+	set shutdown_status [wait]
+	if {$shutdown_eof} {
+		say FAIL shutdown "QEMU ended without the kernel powering off; wait status: $shutdown_status"
+		incr failed
+	}
 	check_shutdown
 	if {$failed} { exit 1 }
 	say pass "all checks"

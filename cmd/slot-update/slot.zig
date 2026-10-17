@@ -10,6 +10,7 @@ const kernel_image = @import("image");
 const ipe = @import("ipe");
 const m = @import("slot-update.zig");
 const images = @import("images.zig");
+const workers = @import("workers.zig");
 const Io = m.Io;
 const Dir = m.Dir;
 const Allocator = m.Allocator;
@@ -66,12 +67,16 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     u.step = "root";
     // Copy werewolf's programs and the operator's --app as built, the apk
     // setup, and the build records except those compose just wrote.
-    for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try copyInto(u, r, "", p);
-    for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try copyInto(u, r, "", p);
+    for (try u.lines(try u.read(meta_dir ++
+        "/overlay"))) |p| try copyInto(u, r, if (workers.jailed) "/host" else "", p);
+    for (&[_][]const u8{
+        "etc/apk/repositories",
+        "etc/apk/arch",
+    }) |p| try copyInto(u, r, if (workers.jailed) "/host" else "", p);
     for (try u.listDir("/etc/apk/keys")) |name| try copyInto(
         u,
         r,
-        "",
+        if (workers.jailed) "/host" else "",
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
     // werewolf-advisories brings the new root's list; an image built from a
@@ -80,7 +85,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         &(compose.records ++ [_][]const u8{ "advisories", "local" })
     else
         &(compose.records ++ [_][]const u8{"local"});
-    try copyTree(u, r, "", "usr/share/werewolf", skip);
+    try copyTree(u, r, if (workers.jailed) "/host" else "", "usr/share/werewolf", skip);
     // local-NAME owns this isolated tree. Lay its application after the
     // carried programs, and never copy the running declaration over it.
     if (try r.exists(u, "usr/share/werewolf/local/overlay")) {
@@ -133,6 +138,9 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         // No xattrs, as in the build: a package's security.capability
         // would otherwise reach the image, inert only while / is nosuid.
         "-x-1",
+        // Source builds normalize immutable files to root in their tar.
+        // Package-only groups must not leave unowned files after an update.
+        "--all-root",
         work_dir ++ "/slot/root.erofs",
         root,
     });
@@ -244,7 +252,7 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     try writeAttempt(u, build);
     try u.record(.{ .event = "try", .slot = u.other, .declaration = expected });
     linux.sync();
-    try u.run(&.{"/usr/bin/reboot"});
+    try broker.reboot();
 }
 
 /// installEsp installs the other slot on werewolf's own disk
@@ -256,6 +264,18 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
 fn installEsp(u: *Update, build: []const u8) !void {
     const io = u.io;
     u.step = "install";
+    // Preserve the authenticated bytes of a signed command line.
+    if (u.image == null) try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
+    // The broker has no DAC override; publish authenticated staged artifacts
+    // read-only to it while retaining the coordinator's directory ownership.
+    for ([_][]const u8{
+        "slot/root.erofs", "slot/vmlinuz", "slot/stage0.zst", "slot/uki.efi",
+        "slot/cmdline",    "image.json",   "image.sig",
+    }) |name| {
+        const path = try u.gpa.printSentinel("{s}/{s}", .{ work_dir, name }, 0);
+        const rc = linux.fchmodat(linux.AT.FDCWD, path, 0o640);
+        if (linux.errno(rc) != .NOENT) _ = try u.sys(rc, "publish staged artifact");
+    }
     // Every install moves its slot files and TPM state through the broker's
     // detached mounts and reads through stage0's read-only /boot mount.
     var retirement = try @import("retire.zig").prepare(u);
@@ -276,9 +296,6 @@ fn installEsp(u: *Update, build: []const u8) !void {
     };
     errdefer broker.espDisarm() catch {};
     linux.sync();
-    // A signed slot's command line is already validated and authenticated.
-    // Normalizing its trailing newline would change the signed artifact digest.
-    if (u.image == null) try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
     // copyChecked goes through a temporary name, so each file is whole or absent.
     if (retirement) |*prepared| try prepared.apply();
     const root_art = if (u.image) |v|
@@ -436,12 +453,12 @@ pub fn apkAdd(
             "--cache-dir",  inside_cache, "--no-network",
         },
         source,
-        &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
+        &.{ "--no-scripts", "--quiet", "--no-progress", "--initdb", "add" },
         packages,
     }));
-    // Package extraction may change /; keep the staging directory 0700 until
-    // mkfs.erofs reads it.
-    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
+    // The coordinator reads the installed database; only the construction
+    // worker can change package-owned files.
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o755), "chmod root");
     try prune(u, cache, root);
 }
 
@@ -778,7 +795,7 @@ fn composeInto(u: *Update, r: Root) !void {
     var into = try staged.createDirPathOpen(io, "forms", .{});
     defer into.close(io);
     const world = try u.words(try u.read("/etc/apk/world"));
-    const running: Root = try .open(u, "/");
+    const running: Root = try .open(u, if (workers.jailed) "/host" else "/");
     defer running.close(u);
     const here = "usr/share/werewolf/forms";
     const mine = running.list(u, here) catch {
@@ -1191,10 +1208,9 @@ fn apkExec(
     scratch: [:0]const u8,
     out: i32,
 ) !noreturn {
-    try sandbox.closeAllBut(&.{out});
+    try sandbox.closeAllButAnonymous(&.{out});
     for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
-    // Open what it may reach while still root. With DHCP, resolv.conf is a
-    // link into /run, so it gets its own rule.
+    // Resolver files may link outside /etc, so grant their resolved inodes.
     const dir: linux.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true };
     const file: linux.O = .{ .PATH = true, .CLOEXEC = true };
     var rules: [9]sandbox.Rule = undefined;
@@ -1207,9 +1223,12 @@ fn apkExec(
         .{ "/dev/null", file, sandbox.read_file | sandbox.write_file },
         .{ cache, dir, sandbox.own_dir },
         .{ "/etc/resolv.conf", file, sandbox.read_file },
+        .{ "/etc/hosts", file, sandbox.read_file },
     }) |r| {
+        if (workers.jailed and std.mem.eql(u8, r[0], "/dev/null")) continue;
         const fd = linux.openat(linux.AT.FDCWD, r[0], r[1], 0);
-        if (linux.errno(fd) == .NOENT and std.mem.eql(u8, r[0], "/etc/resolv.conf")) continue;
+        if (linux.errno(fd) == .NOENT and (std.mem.eql(u8, r[0], "/etc/resolv.conf") or
+            std.mem.eql(u8, r[0], "/etc/hosts"))) continue;
         rules[n] = .{
             .fd = @intCast(try sandbox.sys(fd, "open what apk may reach")),
             .access = r[2],

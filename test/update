@@ -62,6 +62,7 @@ slots_ls() { "$debugfs" -R "ls -p $1" "$dir/slots.img" 2>/dev/null | awk -F/ '$6
 # ends by itself.
 boot() {
 	n=$1 slot=$2 kernel=$3 initrd=$4 until=$5 limit=$6
+	until="$until|worker setup:|cannot confine update coordinator|cannot write /run/werewolf/updater-ready|audit: type=1326"
 	shift 6
 	log=$dir/update-$n.log
 	: >"$log"
@@ -94,8 +95,8 @@ event() { grep -a -o "autoupdate: .*\"event\":\"$2\".*" "$dir/update-$1.log" | h
 
 state=/data/svc/autoupdate
 if [ -n "$staged" ]; then
-	# Seed a log from an earlier check, with the owner and mode the updater
-	# gives its own.
+	# Seed a completed check with the former root ownership. Startup must
+	# migrate both files before reading the log or deciding first-boot timing.
 	printf '{"time":"2026-01-01T00:00:00Z","host":"werewolf","event":"check","result":"current"}\n' >"$dir/seed.log"
 	for d in /data /data/svc $state; do
 		"$debugfs" -w -R "mkdir $d" "$dir/slots.img" >/dev/null 2>&1
@@ -107,6 +108,12 @@ if [ -n "$staged" ]; then
 	for field in "uid 0" "gid 0" "mode 0100600"; do
 		"$debugfs" -w -R "sif $state/log $field" "$dir/slots.img" >/dev/null 2>&1
 	done
+	: >"$dir/seed.checked"
+	"$debugfs" -w -R "write $dir/seed.checked $state/checked" "$dir/slots.img" >/dev/null 2>&1
+	for field in "uid 0" "gid 0" "mode 0100600"; do
+		"$debugfs" -w -R "sif $state/checked $field" "$dir/slots.img" >/dev/null 2>&1
+	done
+	slots_ls "$state" | grep -qx checked || { say FAIL "could not seed the completed-check marker"; exit 1; }
 	[ -n "$(slots_cat $state/log)" ] || { say FAIL "could not seed the updater's log"; exit 1; }
 	until='"event":"(stage|check|error)"'
 else
@@ -118,11 +125,13 @@ fi
 # stage event ends it: that is the power cut.
 boot 1 a "$dir/vmlinuz" "$dir/stage0.zst" "$until" 3600 "$@" || exit 1
 if [ -z "$(event 1 stage)" ]; then
-	say FAIL "no update: $(grep -a -o 'autoupdate: .*"event":"\(check\|error\)".*' "$dir/update-1.log" | head -1)"
+	say FAIL "no update: $(grep -a -E -m1 'autoupdate: (.*"event":"(check|error)"|worker setup:)|audit: type=1326' "$dir/update-1.log")"
 	exit 1
 fi
+check "slot a coordinator has no root credentials or capabilities" grep -q "coordinator uid=77 gid=77 caps=0 nnp=1" "$dir/update-1.log"
 say pass "slot a staged an update: $(event 1 stage | sed 's/.*"kernel":"\([^"]*\)".*"cves":\([0-9]*\).*/\1, \2 CVEs/')"
 if [ -n "$staged" ]; then
+	check "an earlier check disables first-boot timing" absent "It is this machine's first check" "$dir/update-1.log"
 	check "staged, and not yet due: the updater did not reboot" absent '"event":"reboot"' "$dir/update-1.log"
 	# After the cut, the filesystem's last changes are in its journal. The
 	# next mount replays it, but debugfs does not, so replay it first.
@@ -156,7 +165,8 @@ if [ -n "${PUBLISHED:-}" ]; then
 	check "slot b's prod is the package's, not slot a's older copy" sh -c \
 		"[ ! -e '$dir/b/etc/werewolf-old-form' ] && [ ! -e '$dir/b/usr/share/werewolf/forms/prod/rootfs/etc/werewolf-old-form' ]"
 fi
-check "EFI entry allows one try of slot b" mtype -i "$dir/esp.img" ::/loader/entries/werewolf-b+1.conf
+check "EFI entry allows one try of slot b" mcopy -o -i "$dir/esp.img" ::/loader/entries/werewolf-b+1.conf "$dir/b-entry.conf"
+check "EFI entry has a canonical version" grep -a -q -E '^version [0-9]{8}T[0-9]{6}Z$' "$dir/b-entry.conf"
 
 # Second boot: boot what the update built.
 mcopy -o -i "$dir/esp.img" ::/werewolf/b/vmlinuz "$dir/b-vmlinuz"
@@ -168,7 +178,12 @@ devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $
 built=$(devices "$dir/stage0.zst")
 check "slot b's stage0 has the build's device nodes" [ -n "$built" -a "$built" = "$(devices "$dir/b-stage0.zst")" ]
 boot 2 b "$dir/b-vmlinuz" "$dir/b-stage0.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
-check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/update-2.log"
-check "the commit says how long each tier waited" grep -a -q '"event":"commit",.*"waited":{' "$dir/update-2.log"
+check "slot b coordinator has no root credentials or capabilities" grep -q "coordinator uid=77 gid=77 caps=0 nnp=1" "$dir/update-2.log"
+# record syncs the audit log before printing it. QEMU can stop midway through
+# that console write, so inspect the durable record after replaying the journal.
+"$e2fsck" -y -E journal_only "$dir/slots.img" >"$dir/commit-journal.log" 2>&1
+slots_cat "$state/log" >"$dir/commit.log"
+check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/commit.log"
+check "the commit says how long each tier waited" grep -a -q '"event":"commit","slot":"b",.*"waited":{' "$dir/commit.log"
 check "no seccomp kill in slot b" absent 'type=1326' "$dir/update-2.log"
 exit $failed

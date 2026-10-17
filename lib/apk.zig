@@ -14,6 +14,7 @@ const rsa = Certificate.rsa;
 const Sha1 = std.crypto.hash.Sha1;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const package = @import("package");
+pub const versionOrder = @import("apk-version.zig").order;
 
 /// Inflated size limits for a signature segment, a control segment and an
 /// index, and how much of a package is read to find its control segment.

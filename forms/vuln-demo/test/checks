@@ -1,0 +1,7 @@
+ok  vuln-dashboard wget -q -T 10 -O - http://127.0.0.1:8080/ | grep -q 'vuln-demo'
+ok  vuln-solr wget -q -T 10 -O - http://127.0.0.1:8983/solr/admin/info/system?wt=json | grep -q '8.11.0'
+ok  vuln-n8n wget -q -T 10 -O - http://127.0.0.1:5678/healthz | grep -q ok
+ok  vuln-langflow wget -q -T 10 -O - http://127.0.0.1:7860/health_check | grep -q ok
+ok  vuln-request-log wget -q -T 10 --header='X-Demo-Check: observed' -O /dev/null http://127.0.0.1:8983/solr/ && wget -q -T 10 -O - http://127.0.0.1:8080/events.json | grep -q 'observed'
+ok  vuln-audit-enabled test -f /etc/werewolf/audit-exec-all && test -s /run/werewolf/vuln-kmsg
+ok  vuln-no-shell-runs ! grep -q '/bin/sh' /etc/sv/solr/service /etc/sv/n8n/service /etc/sv/langflow/service /etc/sv/vuln-sshd/service

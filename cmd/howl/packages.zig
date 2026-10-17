@@ -75,6 +75,40 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             .value = .{ .map = &.{.{ .key = "packages", .value = .{ .list = serials.items } }} },
         }},
     });
+    // A Wolfi upstream version can outrank any hardened revision. Constrain
+    // covered, explicitly requested packages to the signed feed before
+    // solving; their exact subpackage dependencies constrain the runtime too.
+    const contents = node.get("contents").?;
+    const repos = contents.get("repositories") orelse forms.Node{ .list = &.{} };
+    for (repos.list) |repo| {
+        if (!mem.eql(u8, repo.scalar.text, package.hardened_repository)) continue;
+        var why: @import("howl.zig").Why = .{};
+        const index = @import("published.zig").hardenedIndex(
+            b.io,
+            b.gpa,
+            b.spec.arch,
+            &why,
+        ) catch |err|
+            return b.fail(
+                "hardened feed: {s}",
+                .{if (why.text.len > 0) why.text else @errorName(err)},
+            );
+        const trust = [_]trusted_apk.Trusted{.{
+            .name = package.repository_key,
+            .key = try trusted_apk.parseKey(b.gpa, package.repository_pem),
+        }};
+        const pins_from_feed = try hardenedPins(
+            b.gpa,
+            (contents.get("packages") orelse forms.Node{ .list = &.{} }).list,
+            try trusted_apk.records(b.gpa, &trust, index),
+            b.locked_packages,
+        );
+        node = try forms.merge(b.gpa, node, .{ .map = &.{.{
+            .key = "contents",
+            .value = .{ .map = &.{.{ .key = "packages", .value = .{ .list = pins_from_feed } }} },
+        }} });
+        break;
+    }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);
     const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(1 << 20)) catch "";
@@ -83,6 +117,111 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
     try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
     try b.write(target, out.written());
     try b.steps.note("{s} written", .{target});
+}
+
+fn hardenedPins(
+    gpa: Allocator,
+    requested: []const forms.Node,
+    offered: []const trusted_apk.Record,
+    locked: []const []const u8,
+) ![]const forms.Node {
+    var out: std.ArrayList(forms.Node) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    for (requested) |item| {
+        const text = item.scalar.text;
+        const end = mem.indexOfAny(u8, text, "<>=~@") orelse text.len;
+        const name = text[0..end];
+        if (name.len == 0 or name[0] == '!' or seen.contains(name)) continue;
+        try seen.put(gpa, name, {});
+        // Explicit exact pins (not minimums) already bind native fixtures or
+        // caller-selected releases. Keep those; the payload verifier checks
+        // their version and checksum against the authenticated feed.
+        for (requested) |other| {
+            const constraint = other.scalar.text;
+            if (mem.startsWith(u8, constraint, name) and constraint.len > name.len and
+                constraint[name.len] == '=') break;
+        } else {
+            var best: ?trusted_apk.Record = null;
+            // Reuse an input-matching lock only when the authenticated feed
+            // still vouches for its version. A previous Wolfi fallback must
+            // not freeze an unhardened runtime into subsequent builds.
+            for (locked) |pin| {
+                if (pin.len <= name.len or pin[name.len] != '=' or
+                    !mem.startsWith(u8, pin, name)) continue;
+                for (offered) |r| {
+                    if (mem.eql(u8, r.name, name) and
+                        mem.eql(u8, r.version, pin[name.len + 1 ..]))
+                    {
+                        best = r;
+                        break;
+                    }
+                }
+                if (best != null) break;
+            }
+            const keep_locked = best != null;
+            for (offered) |r| {
+                if (keep_locked) break;
+                if (!mem.eql(u8, r.name, name)) continue;
+                if (best == null or
+                    trusted_apk.versionOrder(r.version, best.?.version) == .gt) best = r;
+            }
+            if (best) |r| {
+                const pin = try gpa.print("{s}={s}", .{ r.name, r.version });
+                try out.append(gpa, .{ .scalar = .{ .raw = pin, .text = pin } });
+            }
+        }
+    }
+    return out.items;
+}
+
+test "hardened runtime pins survive newer upstream versions and keep fixture pins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const offered = [_]trusted_apk.Record{
+        .{
+            .name = "python-3.15",
+            .version = "3.15.0_git20261010-r2000",
+            .depends = &.{},
+            .sha1 = @splat(0),
+        },
+        .{ .name = "openjdk-27-jre", .version = "27-r9000", .depends = &.{}, .sha1 = @splat(0) },
+        .{ .name = "openjdk-27-jre", .version = "27-r10000", .depends = &.{}, .sha1 = @splat(0) },
+    };
+    var diag: forms.Diagnostic = .{};
+    const request = try forms.parse(a,
+        \\packages:
+        \\  - python-3.15>=3.15.0_git20261010-r2000
+        \\  - openjdk-27-jre
+        \\  - python-3.13
+        \\  - libstdc++
+    , &diag);
+    const chosen = try hardenedPins(a, request.get("packages").?.list, &offered, &.{});
+    try std.testing.expectEqual(@as(usize, 2), chosen.len);
+    try std.testing.expectEqualStrings(
+        "python-3.15=3.15.0_git20261010-r2000",
+        chosen[0].scalar.text,
+    );
+    try std.testing.expectEqualStrings("openjdk-27-jre=27-r10000", chosen[1].scalar.text);
+    const reused = try hardenedPins(a, request.get("packages").?.list, &offered, &.{
+        "python-3.15=3.15.0_git20261017-r0", // A stock fallback is never reused.
+        "openjdk-27-jre=27-r9000", // A signed older release stays reproducible.
+    });
+    try std.testing.expectEqualStrings(chosen[0].scalar.text, reused[0].scalar.text);
+    try std.testing.expectEqualStrings("openjdk-27-jre=27-r9000", reused[1].scalar.text);
+    try std.testing.expect(trusted_apk.versionOrder(
+        "3.15.0_git20261017-r0",
+        offered[0].version,
+    ) == .gt);
+    const pinned = try forms.merge(a, request, try forms.parse(a,
+        \\packages:
+        \\  - python-3.15=3.15.0_git20261010-r2000
+        \\  - openjdk-27-jre=27-r9000
+    , &diag));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try hardenedPins(a, pinned.get("packages").?.list, &offered, &.{})).len,
+    );
 }
 
 /// bootConfig lays the kernel's and the boot loader's apko configs, and the

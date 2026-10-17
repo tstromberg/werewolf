@@ -19,7 +19,10 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
-    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
+    _ = try sandbox.sys(linux.close_range(3, std.math.maxInt(linux.fd_t), .{
+        .UNSHARE = false,
+        .CLOEXEC = false,
+    }), "close inherited posture descriptors");
     const gpa = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
@@ -135,11 +138,21 @@ fn serve(io: Io, gpa: Allocator) !void {
     if (report.known) |k| try printKnown(&line.writer, k);
     try Io.File.stdout().writeStreamingAll(io, line.written());
 
-    // Park the service, so runsv does not run it again until the next boot.
-    sandbox.keepOnly(0) catch {};
-    const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
-    std.debug.print("posture: sv down: {s}\n", .{@errorName(err)});
-    std.process.exit(1);
+    // Tell only our supervisor to stay down; no privileged exec follows the scan.
+    const control: i32 = @intCast(try sandbox.sys(linux.open("/etc/sv/posture/supervise/control", .{
+        .ACCMODE = .WRONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), "open posture service control"));
+    defer _ = linux.close(control);
+    try sandbox.keepOnly(0);
+    while (true) {
+        const rc = linux.write(control, "d", 1);
+        if (linux.errno(rc) == .INTR) continue;
+        if (try sandbox.sys(rc, "park posture service") != 1) return error.ShortControlWrite;
+        return;
+    }
 }
 
 /// put writes data to path whole, through a temporary name, and logs a failure.
@@ -564,14 +577,21 @@ pub const Posture = struct {
         defer _ = linux.close(fd);
         var log: std.ArrayList(u8) = .empty;
         var record: [8192]u8 = undefined;
-        while (true) {
+        // A producer must not keep a privileged scan reading forever.
+        for (0..65536) |_| {
+            if (log.items.len == max_evidence) break;
             const n = linux.read(fd, &record, record.len);
             switch (linux.errno(n)) {
-                .SUCCESS => log.appendSlice(p.gpa, record[0..n]) catch return log.items,
+                .SUCCESS => {
+                    if (n == 0) break;
+                    log.appendSlice(p.gpa, record[0..@min(n, max_evidence - log.items.len)]) catch
+                        return log.items;
+                },
                 .PIPE => {}, // older records were overwritten; keep reading
                 else => return log.items,
             }
         }
+        return log.items;
     }
 
     /// attacksAsked reports whether to attack: --attack, WEREWOLF_CHECK=1 in
@@ -842,11 +862,11 @@ pub const Posture = struct {
     /// read returns the whole file at path, or "". It avoids
     /// Dir.readFileAlloc, which trusts stat's size, and procfs reports 0.
     pub fn read(p: *Posture, path: []const u8) []const u8 {
-        var f = Dir.cwd().openFile(p.io, path, .{}) catch return "";
+        var f = evidenceFile(p.io, path) catch return "";
         defer f.close(p.io);
         var buf: [4096]u8 = undefined;
         var r = f.readerStreaming(p.io, &buf);
-        return r.interface.allocRemaining(p.gpa, .limited(16 << 20)) catch "";
+        return r.interface.allocRemaining(p.gpa, .limited(max_evidence)) catch "";
     }
 
     /// refused reports whether writing value to path fails.
@@ -856,13 +876,57 @@ pub const Posture = struct {
     }
 
     pub fn isElf(p: *Posture, path: []const u8) bool {
-        var f = Dir.cwd().openFile(p.io, path, .{}) catch return false;
+        var f = evidenceFile(p.io, path) catch return false;
         defer f.close(p.io);
         var magic: [4]u8 = undefined;
         const n = f.readPositionalAll(p.io, &magic, 0) catch return false;
         return n == 4 and std.mem.eql(u8, &magic, "\x7fELF");
     }
 };
+
+const max_evidence = 16 << 20;
+
+// Mutable evidence may have been replaced with a FIFO or device. Keep procfs
+// streaming reads, but never wait for a writer or consume a device as text.
+fn evidenceFile(io: Io, path: []const u8) !Io.File {
+    const file: Io.File = if (@import("builtin").os.tag == .linux) blk: {
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const name = try std.mem.printSentinel(&buf, "{s}", .{path}, 0);
+        const fd = try sandbox.sys(linux.open(name, .{
+            .NONBLOCK = true,
+            .NOCTTY = true,
+            .CLOEXEC = true,
+        }, 0), "open posture evidence");
+        break :blk .{ .handle = @intCast(fd), .flags = .{ .nonblocking = true } };
+    } else try Dir.cwd().openFile(io, path, .{});
+    errdefer file.close(io);
+    if ((try file.stat(io)).kind != .file) return error.NonRegularEvidence;
+    return file;
+}
+
+test "evidence reads reject FIFOs and devices without waiting for a writer" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "regular", .data = "\x7fELFkept" });
+    try tmp.dir.symLink(io, "regular", "alias", .{});
+    _ = try sandbox.sys(
+        linux.mknodat(tmp.dir.handle, "fifo", linux.S.IFIFO | 0o600, 0),
+        "evidence FIFO",
+    );
+    const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    var p: Posture = .{ .io = io, .gpa = gpa, .root = false };
+    try testing.expectEqualStrings("\x7fELFkept", p.read(try gpa.print("{s}/alias", .{path})));
+    try testing.expect(p.isElf(try gpa.print("{s}/regular", .{path})));
+    try testing.expectEqualStrings("", p.read(try gpa.print("{s}/fifo", .{path})));
+    try testing.expect(!p.isElf(try gpa.print("{s}/fifo", .{path})));
+    try testing.expectEqualStrings("", p.read("/dev/zero"));
+    try testing.expect(std.mem.indexOf(u8, p.read("/proc/self/status"), "Uid:") != null);
+}
 
 fn werewolfImage(io: Io, root: Dir) bool {
     var metadata = root.openDir(io, "usr/share/werewolf", .{}) catch return false;

@@ -640,6 +640,7 @@ pub const B = struct {
     /// (published.zig), each NAME-form in the image's world.
     from_repo: []const []const u8,
     locked_images: []const locks.Image = &.{},
+    locked_packages: []const []const u8 = &.{},
     resolved_images: std.ArrayList(locks.Image) = .empty,
     deployment: ?deployment.Prepared = null,
     /// name is the form's name, the last of its chain's.
@@ -850,6 +851,11 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     });
     const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
     const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
+    if (previous != null) b.locked_packages = try packages.pins(
+        gpa,
+        try b.read(lock, 64 << 20),
+        @tagName(s.arch),
+    );
     if (goals.lock and !image_goals) {
         try packages.apkoConfig(&b, config);
         return packages.boundLock(&b, lock, config, &fingerprint, previous != null);

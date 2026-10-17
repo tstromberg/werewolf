@@ -30,6 +30,10 @@ and seal-watch's refusal table provide the initial event sources.
 Their current releases listen on loopback until deliberately exposed. Each vulnerable
 counterpart pins application code and keeps the same runtime, paths and confinement.
 Dependency ports retain vulnerable endpoint implementations and have their own locks.
+Solr 8 uses its supported NIO directory factory and LRU caches so Unsafe stays closed.
+n8n's SQLite/expression native allowance is scoped to its cgroup; Code has its own user.
+Langflow shares the source-built Python 3.15 ONNX runtime. A hash-pinned MiniLM model
+and tokenizer in `onnx-minilm` provide offline local embeddings.
 
 `vuln-demo` composes those vulnerable forms. Each app listens on a private loopback
 port; the Go console proxies its expected public port without path prefixing. It logs
@@ -47,6 +51,8 @@ kernel device or change audit policy. It deduplicates records by kernel sequence
 SSH runs as a distinct unprivileged service. Only the username `demo` accepts password
 authentication. Exec sessions parse argv quoting and run the requested program
 directly under the service's leash; shell, PTY, forwarding and subsystem requests are
+refused. Only the three exposed command names map to narrow leash links, so their
+children cannot read the daemon's private host key. Alternate coreutils aliases are
 refused. Commands, authentication results and exit statuses enter the event journal.
 
 ## Drawbacks
@@ -73,5 +79,5 @@ has no command submission endpoint. SSH passwords are accepted but never recorde
 ## Reliability Considerations
 
 Buffers are bounded; kernel overruns are reported. Kmsg is finite evidence, not a
-lossless audit archive. A missing reader is visible in the dashboard. Services restart
-through runit; persistent data remains in their own directories.
+lossless audit archive. An unavailable capture file is visible in the dashboard.
+Services restart through runit; persistent data remains in their own directories.

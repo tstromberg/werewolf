@@ -5,6 +5,8 @@
 # a push, as CI will.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
+# Git fixtures create their own repositories, outside this hook's Git context.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR
 n=$(getconf _NPROCESSORS_ONLN)
 make -j"$n" test
 make lint

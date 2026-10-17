@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     const value = try std.json.parseFromSliceLeaky(std.json.Value, gpa, info.body, .{});
     const version = value.object.get("lucene").?.object.get("solr-spec-version").?.string;
     try ctx.result(io, suite, "version", std.mem.eql(u8, version, "8.11.0"));
-    try ctx.result(io, suite, "public-listener", try driver.tcpPrivate(io, gpa, 8983, false));
+    try ctx.result(io, suite, "public-listener", try publicListener(io, gpa));
     if (std.mem.eql(u8, ctx.phase, "seed")) {
         const created = try request(
             gpa,
@@ -83,6 +83,22 @@ pub fn main(init: std.process.Init) !void {
         "hardened-java",
         std.mem.startsWith(u8, rest[0..end], "27.") and epoch >= 2000,
     );
+}
+
+fn publicListener(io: Io, gpa: Allocator) !bool {
+    const table = try driver.readKernel(io, gpa, "/proc/net/tcp");
+    var lines = std.mem.tokenizeScalar(u8, table, '\n');
+    _ = lines.next();
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        _ = fields.next() orelse continue;
+        const local = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const state = fields.next() orelse continue;
+        if (std.mem.eql(u8, local, "00000000:2317") and std.mem.eql(u8, state, "0A"))
+            return true;
+    }
+    return false;
 }
 
 fn available(gpa: Allocator, verify: bool) bool {

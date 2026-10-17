@@ -52,8 +52,6 @@ const Tie = struct {
 /// points 0, 1 and 2 at /dev/null, so a child inherits none of root's
 /// files, not even the console.
 pub fn closeAllBut(keep: []const i32) !void {
-    var sorted: [8]i32 = undefined;
-    if (keep.len > sorted.len) return error.TooManyKept;
     const null_fd: i32 = @intCast(try sys(
         linux.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0),
         "open /dev/null",
@@ -62,6 +60,27 @@ pub fn closeAllBut(keep: []const i32) !void {
     for ([_]i32{ 0, 1, 2 }) |fd| if (fd != null_fd) {
         _ = try sys(linux.dup3(null_fd, fd, 0), "dup3");
     };
+    try closeExcept(keep);
+}
+
+/// closeAllButAnonymous uses an EOF pipe for stdio instead of a host device.
+pub fn closeAllButAnonymous(keep: []const i32) !void {
+    var pipe: [2]i32 = undefined;
+    _ = try sys(linux.pipe2(&pipe, .{ .CLOEXEC = true }), "anonymous stdio");
+    _ = linux.close(pipe[1]);
+    for ([_]i32{ 0, 1, 2 }) |fd| {
+        if (fd == pipe[0]) {
+            _ = try sys(linux.fcntl(fd, linux.F.SETFD, 0), "anonymous stdio flags");
+        } else {
+            _ = try sys(linux.dup3(pipe[0], fd, 0), "anonymous stdio dup");
+        }
+    }
+    try closeExcept(keep);
+}
+
+fn closeExcept(keep: []const i32) !void {
+    var sorted: [8]i32 = undefined;
+    if (keep.len > sorted.len) return error.TooManyKept;
     const k = sorted[0..keep.len];
     @memcpy(k, keep);
     std.mem.sort(i32, k, {}, std.sort.asc(i32));

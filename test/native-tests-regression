@@ -17,7 +17,52 @@ native = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests
 iteration = importlib.machinery.SourceFileLoader('native_iteration', 'test/native-iterate').load_module()
 
 
+class ProductionPackages(unittest.TestCase):
+    def test_runtime_grants_are_scoped_to_the_declared_driver(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            native.runtime_grants(root, [{'name': 'test-langflow', 'allow': ['python:native']}])
+            grants = [str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()]
+            self.assertEqual(grants, ['etc/runtime-hardening/allow/test-langflow/python/native'])
+            self.assertEqual((root / grants[0]).read_bytes(), b'')
+
+    def test_freezes_transitive_packages_from_actual_image(self):
+        installed = 'P:python-3.15\nV:3.15.0_git20261010-r2000\n\nP:libx11\nV:1.8.13-r7\n\nP:libLLVM-19\nV:19.1.7-r30\n\n'
+        with patch.object(native, 'call', return_value=type('DB', (), {'stdout': installed})()) as command:
+            self.assertEqual(native.production_pins(Path('baseline')), [
+                'libLLVM-19=19.1.7-r30', 'libx11=1.8.13-r7',
+                'python-3.15=3.15.0_git20261010-r2000'])
+            self.assertEqual(command.call_args.args, ('bsdtar', '-n', '-xOf',
+                Path('baseline/rootfs.tar'), 'usr/lib/apk/db/installed'))
+
+    def test_rejects_missing_duplicate_and_malformed_packages(self):
+        for installed in ('', 'P:python-3.15\n', 'P:bad/name\nV:1-r0\n',
+                          'P:python-3.15\nV:1-r0\n\nP:python-3.15\nV:2-r0\n'):
+            with self.subTest(installed=installed), \
+                    patch.object(native, 'call', return_value=type('DB', (), {'stdout': installed})()), \
+                    self.assertRaises(ValueError):
+                native.production_pins(Path('baseline'))
+
+
 class IterationInputs(unittest.TestCase):
+    def test_candidate_kernel_bytes_reset_the_vm_even_with_unchanged_mtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kernel = root / 'kernel.tar'
+            kernel.write_bytes(b'first kernel')
+            stamp = kernel.stat()
+            with patch.object(iteration, 'ROOT', root), \
+                    patch.dict(os.environ, {'KERNEL_ROOTFS': str(kernel)}), \
+                    patch.object(iteration, 'call', return_value=type('Dirs', (), {'stdout': ''})()):
+                fingerprint = lambda: iteration.fingerprint('example', root / 'plan', root / 'generated')
+                original = fingerprint()
+                kernel.write_bytes(b'next kernel')
+                os.utime(kernel, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                self.assertNotEqual(original, fingerprint())
+                kernel.unlink()
+                with self.assertRaisesRegex(ValueError, 'kernel archive'):
+                    fingerprint()
+
     def test_reuses_driver_edits_but_refreshes_image_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -162,6 +207,18 @@ class Protocol(unittest.TestCase):
 
 
 class Plans(unittest.TestCase):
+    def test_driver_memory_is_bounded_and_used_by_iteration(self):
+        for memory in (True, "1024", 0, 15, 8193, [1024]):
+            plan = native.read_plan('postgresql')
+            plan['drivers'][0]['memory'] = memory
+            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaises(ValueError):
+                    native.read_plan('postgresql')
+        driver = native.read_plan('postgresql')['drivers'][0]
+        self.assertIn('memory 128\n', iteration.service(driver))
+        driver['memory'] = 1024
+        self.assertIn('memory 1024\n', iteration.service(driver))
+
     def test_generated_form_preserves_real_check_budget_and_weaknesses(self):
         with tempfile.TemporaryDirectory() as temp:
             generated = Path(temp) / 'native-test-greenbone'
@@ -207,6 +264,15 @@ class Plans(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     native.read_plan('greenbone')
 
+    def test_runtime_grants_refuse_blankets_paths_and_unrelated_capabilities(self):
+        for grants in ('python:native', ['all:native'], ['python:exec'], ['../all:native'],
+                       ['python:native', 'python:native'], [['python:native']]):
+            plan = native.read_plan('greenbone')
+            plan['drivers'][0]['allow'] = grants
+            with self.subTest(grants=grants), patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaisesRegex(ValueError, 'runtime allowance'):
+                    native.read_plan('greenbone')
+
     def test_tcp_grants_are_single_valid_ports(self):
         for port in ('tcp/0', 'tcp/65536', 'tcp/any', 'tcp/443 public', 'udp/53'):
             plan = native.read_plan('greenbone')
@@ -248,6 +314,21 @@ class Payload(unittest.TestCase):
     def test_client_addition(self):
         self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database', 'usr/bin/psql': b'client'})
         self.compare()
+
+    def test_only_declared_driver_runtime_grants_can_be_added(self):
+        plan = native.read_plan('postgresql')
+        plan['drivers'][0]['allow'] = ['python:native']
+        namespace = plan['drivers'][0]['name']
+        grant = 'etc/runtime-hardening/allow/' + namespace + '/python/native'
+        files = {'usr/lib/werewolf/init': b'production init', grant: b''}
+        self.archive(self.test / 'overlay.tar', files)
+        with patch.object(native, 'read_plan', return_value=plan):
+            self.compare()
+            for changed in ({**files, grant: b'unexpected content'},
+                            {**files, 'etc/runtime-hardening/allow/all/python/native': b''}):
+                self.archive(self.test / 'overlay.tar', changed)
+                with self.assertRaises(ValueError):
+                    self.compare()
 
     def test_explicit_ipe_variant_paths(self):
         before, after = self.root / 'base-ipe', self.root / 'native-test-base-ipe'
@@ -314,6 +395,48 @@ class Payload(unittest.TestCase):
 
 
 class RunIdentity(unittest.TestCase):
+    def test_serial_carriage_returns_survive_until_console_cleaning(self):
+        plan = native.read_plan('postgresql')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            images = root / 'build'
+            paths = dict(kernel=images / 'vmlinuz',
+                         image=images / 'native-test-postgresql/initramfs.zst',
+                         production_image=images / 'postgresql/initramfs.zst',
+                         plan=root / 'forms/postgresql/test/native.json')
+            for path in paths.values():
+                native.write(path, 'original')
+
+            def boot(*args, **kwargs):
+                if str(args[0]) != 'test/boot':
+                    return
+                context = json.loads((root / 'check/postgresql-native/config/tests/context').read_text())
+                records = []
+                for driver in plan['drivers']:
+                    records.extend(dict(event='case', suite=driver['name'], case=name,
+                                        status='pass', **context) for name in driver['cases'][context['phase']])
+                    records.append(dict(event='driver', suite=driver['name'], status='pass', **context))
+                records.append(dict(event='complete', status='pass', **context))
+                transcript = '\r\r\n'.join('werewolf-test: ' + json.dumps(r) for r in records) + '\r\r\n'
+                transcript = transcript.replace('werewolf-test: {',
+                    'werewolf-test: {[ 16.429304] audit: type=1302 denied\r\r\n', 1)
+                Path(args[3]).write_bytes(transcript.encode())
+
+            cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.object(native, 'read_plan', return_value=plan), \
+                        patch.object(native, 'call', side_effect=boot), \
+                        patch.dict(os.environ, OUT=str(paths['image'].parent),
+                                   PRODUCTION_OUT=str(paths['production_image'].parent),
+                                   CHECK=str(root / 'check'), HOWL='howl',
+                                   KERNEL=str(paths['kernel']), CMDLINE='test'):
+                    native.run('postgresql', 'x86_64', [])
+                report = json.loads((root / 'check/postgresql-native/results.json').read_text())
+                self.assertEqual([phase['cases'] for phase in report['phases']], [12, 11])
+            finally:
+                os.chdir(cwd)
+
     def test_concurrent_input_change_cannot_write_success_report(self):
         plan = native.read_plan('postgresql')
         for changed in ('kernel', 'image', 'production_image', 'plan'):

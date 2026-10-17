@@ -14,6 +14,8 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const cap_sys_admin = 21;
 const roles = [_]broker.Role{ .updater, .keeper, .stage };
+var reboot_flag: i32 = -1;
+var stop_flag: i32 = -1;
 
 pub fn main() !void {
     var log: Log = .{};
@@ -44,6 +46,13 @@ fn setUp() !void {
         linux.close_range(6, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false }),
         "close_range",
     );
+    reboot_flag = try runitFlag("/run/runit/reboot");
+    stop_flag = try runitFlag("/run/runit/stopit");
+    var updater_group: linux.gid_t = 77;
+    _ = try sandbox.sys(
+        linux.setgroups(1, @ptrCast(&updater_group)),
+        "broker read-publication group",
+    );
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
@@ -53,6 +62,12 @@ fn setUp() !void {
         "munmap",        "mremap",    "fsync",      "mkdirat",         "unlinkat", "renameat",
         "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
     }) |name| f.allow(name);
+    f.allowArg("fchmod", 1, 0o640);
+    f.allowArg("fchmod", 1, 0o750);
+    f.allowTwo("fchown", 1, std.math.maxInt(u32), 2, 77);
+    f.allowTwo("fchmod", 0, @intCast(reboot_flag), 1, 0o100);
+    f.allowTwo("fchmod", 0, @intCast(stop_flag), 1, 0o100);
+    f.allowTwo("kill", 0, 1, 1, @backingInt(linux.SIG.CONT));
     f.allowArg("open_tree", 2, open_tree_flags);
     f.allowArg("move_mount", 4, move_mount_f_empty_path | move_mount_t_empty_path);
     f.allowTwo("mount_setattr", 2, linux.AT.EMPTY_PATH, 4, @sizeOf(MountAttr));
@@ -62,6 +77,27 @@ fn setUp() !void {
     f.allowArg("mount", 3, linux.MS.REMOUNT | linux.MS.RDONLY);
     f.allowArg("umount2", 1, 0);
     try f.install();
+}
+
+fn runitFlag(path: [:0]const u8) !i32 {
+    const fd = try fdOf(linux.open(path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), "open broker runit flag");
+    errdefer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .NLINK = true,
+    }, &st), "stat broker runit flag");
+    if (st.uid != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or st.nlink != 1 or
+        st.mode & 0o022 != 0)
+        return error.UnsafeRunitFlag;
+    return fd;
 }
 
 fn serve(log: *Log) noreturn {
@@ -284,7 +320,8 @@ fn roleForOp(op: []const u8) !broker.Role {
         std.mem.eql(u8, op, "esp-inspect") or std.mem.eql(u8, op, "esp-install") or
         std.mem.eql(u8, op, "slot-root") or std.mem.eql(u8, op, "slot-decl") or
         std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state") or
-        std.mem.eql(u8, op, "installer-runtime"))
+        std.mem.eql(u8, op, "installer-runtime") or std.mem.eql(u8, op, "reboot") or
+        std.mem.eql(u8, op, "updater-ready"))
         return .updater;
     return error.UnknownEspOperation;
 }
@@ -303,6 +340,18 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
     if (std.mem.eql(u8, op, "shutdown")) {
         if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
         shutdown(log);
+        return "ok\n";
+    }
+    if (std.mem.eql(u8, op, "updater-ready")) {
+        if (!std.mem.eql(u8, request, "updater-ready")) return error.BadRequest;
+        try publishMarker("/run/werewolf/updater-ready");
+        return "ok\n";
+    }
+    if (std.mem.eql(u8, op, "reboot")) {
+        if (!std.mem.eql(u8, request, "reboot")) return error.BadRequest;
+        _ = try sandbox.sys(linux.fchmod(reboot_flag, 0o100), "update reboot flag");
+        _ = try sandbox.sys(linux.fchmod(stop_flag, 0o100), "update stop flag");
+        _ = try sandbox.sys(linux.kill(1, linux.SIG.CONT), "wake runit for update");
         return "ok\n";
     }
     if (std.mem.eql(u8, op, "installer-runtime")) {
@@ -338,22 +387,7 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
     if (std.mem.eql(u8, op, "esp-commit")) {
         if (!std.mem.eql(u8, request, "esp-commit")) return error.BadRequest;
         try espCommitNow();
-        const marker = try openAt(linux.AT.FDCWD, "/run/werewolf/committed", .{
-            .ACCMODE = .WRONLY,
-            .CREAT = true,
-            .NOFOLLOW = true,
-            .NONBLOCK = true,
-            .CLOEXEC = true,
-        }, 0o644);
-        defer _ = linux.close(marker);
-        var st: linux.Statx = undefined;
-        _ = try sandbox.sys(linux.statx(marker, "", linux.AT.EMPTY_PATH, .{
-            .TYPE = true,
-            .MODE = true,
-            .UID = true,
-        }, &st), "stat committed marker");
-        if (st.uid != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or st.mode & 0o022 != 0)
-            return error.UnsafeCommittedMarker;
+        try publishMarker("/run/werewolf/committed");
         return "ok\n";
     }
     if (std.mem.eql(u8, op, "esp-disarm")) {
@@ -368,6 +402,27 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
     const req = try broker.parseEspInstall(request);
     try espInstallNow(req);
     return "ok\n";
+}
+
+fn publishMarker(path: [:0]const u8) !void {
+    const marker = try openAt(linux.AT.FDCWD, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .CLOEXEC = true,
+    }, 0o644);
+    defer _ = linux.close(marker);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(linux.statx(marker, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .NLINK = true,
+    }, &st), "stat committed marker");
+    if (st.uid != 0 or st.nlink != 1 or st.mode & linux.S.IFMT != linux.S.IFREG or
+        st.mode & 0o022 != 0)
+        return error.UnsafeCommittedMarker;
 }
 
 fn bootSlots() !struct { current: []const u8, other: []const u8 } {
@@ -615,12 +670,20 @@ fn espNewest(entries: i32) !i64 {
     return newest;
 }
 
-fn espVersion(newest: i64) ![20]u8 {
+fn espVersion(newest: i64) ![16]u8 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.REALTIME, &ts);
-    var buf: [20]u8 = undefined;
+    var buf: [16]u8 = undefined;
     _ = try std.mem.print(&buf, "{f}", .{policy.Serial{ .secs = @max(ts.sec, newest + 1) }});
     return buf;
+}
+
+test "EFI versions are canonical serials and advance past the newest entry" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const first = try espVersion(0);
+    const secs = try policy.parseSerial(&first);
+    const next = try espVersion(secs);
+    try std.testing.expect(try policy.parseSerial(&next) > secs);
 }
 
 fn espArmNow() !void {
@@ -709,13 +772,20 @@ fn digestAt(dirfd: i32, name: []const u8) !?Digest {
 
 fn validStagedDir(st: linux.Statx) bool {
     return (st.mode & linux.S.IFMT) == linux.S.IFDIR and
-        st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
+        (st.uid == 0 or st.uid == 77) and st.gid == st.uid and (st.mode & 0o022) == 0;
 }
 
 const installer_usr = "/data/svc/autoupdate/usr";
+const installer_host = "/data/svc/autoupdate/host";
 
-/// Only immutable /usr is attached, read-only, at this one checked directory.
+/// Attach immutable construction sources read-only at checked directories.
 fn installerRuntime() !void {
+    try readonlyRuntime("/usr", installer_usr);
+    try readonlyRuntime("/", installer_host);
+    try updaterReadAccess();
+}
+
+fn readonlyRuntime(source: [:0]const u8, destination: [:0]const u8) !void {
     const flags: linux.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true };
     const how: OpenHow = .{
         .flags = @as(u32, @bitCast(flags)),
@@ -725,7 +795,7 @@ fn installerRuntime() !void {
         linux.syscall4(
             .openat2,
             @bitCast(@as(isize, linux.AT.FDCWD)),
-            @intFromPtr(installer_usr),
+            @intFromPtr(destination.ptr),
             @intFromPtr(&how),
             @sizeOf(OpenHow),
         ),
@@ -743,10 +813,10 @@ fn installerRuntime() !void {
         ),
         "stat installer target",
     );
-    if (!validStagedDir(dst)) return error.UnsafeInstallerTarget;
+    if (!validStagedDir(dst) or dst.uid != 0) return error.UnsafeInstallerTarget;
     var src: linux.Statx = undefined;
     _ = try sandbox.sys(
-        linux.statx(linux.AT.FDCWD, "/usr", 0, .{ .INO = true }, &src),
+        linux.statx(linux.AT.FDCWD, source, 0, .{ .INO = true }, &src),
         "stat immutable usr",
     );
     if (dst.ino == src.ino and dst.dev_major == src.dev_major and dst.dev_minor == src.dev_minor)
@@ -755,7 +825,7 @@ fn installerRuntime() !void {
         linux.syscall3(
             .open_tree,
             @bitCast(@as(isize, linux.AT.FDCWD)),
-            @intFromPtr("/usr"),
+            @intFromPtr(source.ptr),
             open_tree_flags,
         ),
         "clone immutable usr",
@@ -784,7 +854,8 @@ fn installerRuntime() !void {
 
 fn validStagedFile(st: linux.Statx) bool {
     return (st.mode & linux.S.IFMT) == linux.S.IFREG and
-        st.nlink == 1 and st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
+        st.nlink == 1 and (st.uid == 0 or st.uid == 77) and st.gid == st.uid and
+        (st.mode & 0o022) == 0;
 }
 
 fn openStagedFile(rel: [:0]const u8) !i32 {
@@ -1003,7 +1074,68 @@ fn bootMount() !i32 {
 fn bootSlotDir(m: i32, slot: []const u8, create: bool) !i32 {
     const slot_root = try openDirAt(m, "slot", create);
     defer _ = linux.close(slot_root);
-    return openDirAt(slot_root, slot, create);
+    try updaterReadable(slot_root, true);
+    const leaf = try openDirAt(slot_root, slot, create);
+    errdefer _ = linux.close(leaf);
+    try updaterReadable(leaf, true);
+    return leaf;
+}
+
+// The updater may inspect boot artifacts, never change them through /boot.
+// Root owns every inode; group 77 gets read/traverse without write permission.
+fn updaterReadable(fd: i32, directory: bool) !void {
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .UID = true,
+        .NLINK = true,
+    }, &st), "stat updater inspection inode");
+    const kind: u16 = if (directory) linux.S.IFDIR else linux.S.IFREG;
+    if (st.uid != 0 or st.mode & linux.S.IFMT != kind or
+        (!directory and st.nlink != 1)) return error.UnsafeBootInspection;
+    _ = try sandbox.sys(linux.fchown(fd, std.math.maxInt(u32), 77), "boot inspection group");
+    _ = try sandbox.sys(linux.fchmod(fd, if (directory) 0o750 else 0o640), "boot inspection mode");
+}
+
+fn updaterReadableFile(dir: i32, name: []const u8) !void {
+    const fd = openAt(dir, name, .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .CLOEXEC = true,
+    }, 0) catch |err| {
+        if (err == error.SystemCall and sandbox.failed_errno == .NOENT) return;
+        return err;
+    };
+    defer _ = linux.close(fd);
+    try updaterReadable(fd, false);
+}
+
+fn updaterReadAccess() !void {
+    const mount = bootMount() catch |err| {
+        if (err == error.NoSlots) return;
+        return err;
+    };
+    defer _ = linux.close(mount);
+    for ([_][]const u8{ "a", "b" }) |name| {
+        const dir = bootSlotDir(mount, name, false) catch |err| {
+            if (err == error.SystemCall and sandbox.failed_errno == .NOENT) continue;
+            return err;
+        };
+        defer _ = linux.close(dir);
+        for ([_][]const u8{
+            "root.erofs", "image.json", "image.json.sig", "cmdline", "declaration",
+        }) |file|
+            try updaterReadableFile(dir, file);
+    }
+    const state = openDirAt(mount, "state", false) catch |err| {
+        if (err == error.SystemCall and sandbox.failed_errno == .NOENT) return;
+        return err;
+    };
+    defer _ = linux.close(state);
+    try updaterReadable(state, true);
+    for ([_][]const u8{ "0", "1" }) |name| try updaterReadableFile(state, name);
+    linux.sync();
 }
 
 fn slotRootNow(want: broker.EspArtifact) !void {
@@ -1013,6 +1145,7 @@ fn slotRootNow(want: broker.EspArtifact) !void {
     const dir = try bootSlotDir(m, slots.other, true);
     defer _ = linux.close(dir);
     try copyChecked(dir, "slot/root.erofs", "root.erofs", want, 16 << 30);
+    try updaterReadableFile(dir, "root.erofs");
     linux.sync();
 }
 
@@ -1024,11 +1157,13 @@ fn slotDeclNow(decl: broker.SlotDecl) !void {
         const dir = try bootSlotDir(m, slots.current, true);
         defer _ = linux.close(dir);
         try writeFileAt(dir, "declaration", text);
+        try updaterReadableFile(dir, "declaration");
     }
     if (decl.next) |text| {
         const dir = try bootSlotDir(m, slots.other, true);
         defer _ = linux.close(dir);
         try writeFileAt(dir, "declaration", text);
+        try updaterReadableFile(dir, "declaration");
     }
     linux.sync();
 }
@@ -1054,6 +1189,9 @@ fn slotMetaNow(meta: broker.SlotMeta) !void {
         max_staged,
     );
     try copyChecked(dir, "slot/cmdline", "cmdline", meta.cmdline_file, max_staged);
+    for ([_][]const u8{ "image.json", "image.json.sig", "cmdline" }) |name| {
+        try updaterReadableFile(dir, name);
+    }
     linux.sync();
 }
 
@@ -1063,7 +1201,9 @@ fn slotStateNow(req: broker.SlotJournal) !void {
     const dir = try openDirAt(m, "state", true);
     defer _ = linux.close(dir);
     const name: []const u8 = if (req.position == 0) "0" else "1";
+    try updaterReadable(dir, true);
     try copyChecked(dir, "boot.permit", name, req.permit, max_staged);
+    try updaterReadableFile(dir, name);
     linux.sync();
 }
 
@@ -1132,6 +1272,7 @@ test "each broker operation belongs to one socketpair role" {
 /// Each step runs whatever the last one did.
 fn shutdown(log: *Log) void {
     linux.sync();
+    _ = linux.umount2(installer_host, 0);
     _ = linux.umount2(installer_usr, 0);
     var mounts_buf: [16 << 10]u8 = undefined;
     const mounts = readFile("/proc/self/mounts", &mounts_buf);
@@ -1269,10 +1410,16 @@ test isMounted {
     try testing.expect(!isMounted("/dev/vda /boot2 ext4 ro 0 0\n", "/boot"));
 }
 
-test "staged files and directories must be root-owned, not group/world-writable, and unlinked" {
+test "staged inputs require trusted ownership, safe modes and one link" {
     var dir = std.mem.zeroes(linux.Statx);
     dir.mode = linux.S.IFDIR | 0o755;
     try testing.expect(validStagedDir(dir));
+    dir.uid = 77;
+    dir.gid = 77;
+    try testing.expect(validStagedDir(dir));
+    dir.gid = 0;
+    try testing.expect(!validStagedDir(dir));
+    dir.uid = 0;
     dir.mode = linux.S.IFDIR | 0o775;
     try testing.expect(!validStagedDir(dir));
     dir.mode = linux.S.IFDIR | 0o755;

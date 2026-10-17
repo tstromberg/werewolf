@@ -38,11 +38,12 @@ Patches allow fuzz 2, as Wolfi's do; stopped or fuzzed builds produce issues. CI
 the combined `apk/hardened` feed on R2, inherited once through `minimal`. Snapshots
 and release notes remain under `apk/RUNTIME/builds/BUILD-ID`.
 
-**No fallback.** A newer Wolfi version can outrank hardened epochs. After resolution,
-howl and the updater authenticate the combined index and require every covered package
-name to match a listed version and control checksum. Unavailable feeds, bad signatures
-or unhardened replacements fail before image or slot commit. Explicit older streams
-and OCI-bundled runtimes need separate migrations; their versions stay explicit.
+**No fallback.** New Wolfi versions can outrank hardened epochs. Before resolution,
+howl authenticates the feed and pins covered requested runtimes. Original constraints
+still apply: incompatible minimums fail; exact production/native-test pins stay fixed.
+After resolution, howl and the updater require covered names, versions and control
+checksums in the signed index. Bad or unavailable feeds and replacements fail before
+image or slot commit. Explicit older streams and OCI runtimes need separate migrations.
 
 **Allowances.** Pledge-style capability groups cover classes of functions: `exec`
 spawns programs; `native` permits native code or memory (`ctypes`, `dl`, `Unsafe`,
@@ -50,15 +51,15 @@ FFM, JNI); `deserialize` rebuilds objects (`ObjectInputStream`, `unserialize`,
 `pickle`); `phar` permits its wrapper; `inline` permits argv/stdin code;
 `writable-source` permits scripts on writable mounts. Renaming an API needs no grant.
 
-A form names `RUNTIME:GROUP` in `allow:`, e.g. `[jit, php:exec, java:deserialize]`;
-unknown groups fail the build. Each grant is an empty regular file, never a symlink:
+A service grants `[java:native]` in `services.NAME.allow`; top-level `allow` is
+image-wide. Unknown groups fail the build. The builder writes an empty regular file:
 `/etc/runtime-hardening/allow/<ns>/RUNTIME/GROUP`, read with `lstat`, fail closed.
 
 `<ns>` is the service's `/proc/self/cgroup` leaf: leash joins it as root; the service
-cannot leave or forge it. Runtimes check that namespace, then `all`. Forms currently
-write image-wide `all`; per-service declarations and an unfollowed lock-time link
-(`/+3s` or `/init`) are deferred. Distros without service cgroups use `all` alone,
-which a root compromise can write.
+cannot leave or forge it. Runtimes check that namespace, then `all`. Service grants
+follow whole-service replacement, so replacing a service drops its old grants.
+Grants require the machine's root; `all` is reserved. A lock-time link (`/+3s` or
+`/init`) is deferred. Distros without service cgroups use `all`, writable by root.
 
 **Effective root.** Runtime initialization (including embedding) rejects effective UID 0
 regardless of real UID; real UID 0 may run with non-root effective UID. Services and
@@ -98,8 +99,7 @@ migration. Declare allowances as weaknesses with excuses, like `jit`.
 
 ## Drawbacks
 
-- Generated code (Spring/Hibernate proxies, Twig/Blade/Smarty caches, Nextcloud apps)
-  needs root-held precompilation or `writable-source`.
+- Generated code needs root-held precompilation or `writable-source`.
 - Image-wide grants affect every service; build guests grant every group for testing.
 - Runtime upkeep is permanent; JDK/Python builds take ~1h/arch; drift delays fixes.
 

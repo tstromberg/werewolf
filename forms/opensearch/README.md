@@ -13,7 +13,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/opensearch/index.html).
 
 ### Weaknesses
 
-- Java runs OpenSearch, and the JVM compiles it as it runs. Both are named in
+- Java runs OpenSearch with native access for JNA's startup checks, scoped to the
+  OpenSearch service. The JVM also compiles code as it runs. Both are named in
   `form.yaml`.
 
 ## Getting Started
@@ -65,6 +66,7 @@ form does not import a snapshot.
 
 - There is no demo certificate and no `admin` / `admin` login.
 - The transport port listens on loopback, still in TLS.
+- Bouncy Castle uses its Java implementation; JNA loads from the read-only image.
 - One node. A cluster is the same form repeated, which this one is not.
 - The heap follows the machine's memory, so it refuses work instead of being killed.
 

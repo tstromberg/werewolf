@@ -23,7 +23,7 @@ mediated. An empty chroot also cannot execute apk's dynamic loader and libraries
 
 ## Non-Goals
 
-- Remove the coordinator's root identity before its remaining duties are split.
+- Define update decisions or worker dispatch ([coordinator](updater-coordinator.md)).
 - Add a general privileged service, setuid executable or file capabilities.
 - Change signing keys, package selection, rollback or activation policy.
 
@@ -34,12 +34,13 @@ arguments. It opens `/data/svc/autoupdate/usr` without symlinks, checks its root
 ownership and modes, and binds immutable `/usr` there read-only, nosuid and nodev.
 It reuses an existing bind to that same inode and unmounts it before shutdown.
 The source's execute permission remains available; `/data` itself stays noexec.
-Repositories and public keys are copied per pass and removed afterward.
+Repositories and public keys are copied before the private launcher starts.
 
-The existing tool child closes all inherited descriptors except its output and
-standard streams. It chroots to `/data/svc/autoupdate`, changes directory to `/`,
-and opens its Landlock grants there. Fixed root/cache pairs select either
-`/work/root` and `/cache/root`, or `/work/kernel` and `/cache/kernel`.
+The existing tool child closes inherited descriptors, retains its output pipe, and
+replaces stdin with an EOF pipe. No host device or file crosses the chroot. The launcher
+has already chrooted to `/data/svc/autoupdate` and dropped SYS_CHROOT. The tool changes
+directory to `/` and opens its narrower Landlock grants there. Fixed root/cache pairs
+select either `/work/root` and `/cache/root`, or `/work/kernel` and `/cache/kernel`.
 
 The runtime and matching cache are read-only. The candidate root permits normal
 files, directories, links and FIFOs, including cross-directory renames. No rule
@@ -58,8 +59,8 @@ The coordinator, not the installer, verifies freshness and final slot policy.
 
 ## Drawbacks
 
-One read-only bind remains attached for the boot, requiring shutdown cleanup.
-No package archive or library is copied, and no extra process is introduced.
+The shared launcher runtime remains attached for the boot, requiring shutdown
+cleanup. No package archive or library is copied.
 
 ## Alternatives Considered
 
@@ -76,7 +77,8 @@ The installer has no directory descriptor outside its chroot, cannot chroot agai
 and cannot mount or obtain an external descriptor through a socket. A package's
 absolute symlink resolves inside the chroot. Public keys and libraries come from
 the immutable running image; a downloaded package supplies none of the runtime.
-The coordinator remains privileged and is still an explicit service exception.
+The coordinator runs as `_updater` without capabilities; privileged construction
+stays inside this filesystem boundary.
 Package indexes still name packages by SHA-1; forging needs a second preimage.
 SHA-1 signatures remain refused.
 
@@ -85,3 +87,9 @@ SHA-1 signatures remain refused.
 Failure to provision or confine the runtime fails the pass before installation. A
 failed or killed installer leaves only scratch data for the next pass to remove.
 Tests exercise real confinement on Linux and the existing updater flow.
+After building an image, `make check-updater-installer` runs the image's actual
+apk and escape probes in private namespaces. On macOS, `LINUX_TEST_RUNNER` can
+name `limactl shell --workdir CHECKOUT VM sudo`. No test tool enters the image.
+On Linux with subordinate UID/GID ranges, use
+`LINUX_TEST_RUNNER='unshare --map-root-user --map-auto --mount'` to run the same
+checks without host root, including ownership changes to package UIDs.

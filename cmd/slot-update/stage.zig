@@ -537,7 +537,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     // previous time back.
     const prior = u.read(rebooted_path) catch null;
     u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(at)})) catch {};
-    u.run(&.{"/usr/bin/reboot"}) catch |err| {
+    @import("broker").reboot() catch |err| {
         if (prior) |old| {
             u.writeReplacing(rebooted_path, old) catch {};
         } else Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
@@ -560,7 +560,7 @@ fn warn(u: *Update, p: Pending, tier: policy.Tier, lead: i64, brief: bool) !void
         .body = noticeBody(u, p.report),
         .feed = keptFeed(u),
     });
-    const console = writeDevAt(linux.AT.FDCWD, "/dev/console", msg);
+    const console = writeConsole(msg);
     const sessions = writePts(u, msg);
     u.record(.{
         .event = "warn",
@@ -595,6 +595,12 @@ fn keptFeed(u: *Update) ?tiers.Feed {
     return tiers.open(u.gpa, key, data, sig, nowSecs(u.io), last) catch null;
 }
 
+fn writeConsole(text: []const u8) bool {
+    const fd = @import("workers.zig").console;
+    if (fd < 0) return false;
+    return writeDevice(fd, text);
+}
+
 fn writeDevAt(dirfd: i32, path: [*:0]const u8, text: []const u8) bool {
     const rc = linux.openat(dirfd, path, .{
         .ACCMODE = .WRONLY,
@@ -609,6 +615,10 @@ fn writeDevAt(dirfd: i32, path: [*:0]const u8, text: []const u8) bool {
     var st: linux.Statx = undefined;
     if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS or
         (st.mode & linux.S.IFMT) != linux.S.IFCHR) return false;
+    return writeDevice(fd, text);
+}
+
+fn writeDevice(fd: i32, text: []const u8) bool {
     var off: usize = 0;
     while (off < text.len) {
         const n = linux.write(fd, text[off..].ptr, text.len - off);

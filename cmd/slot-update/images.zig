@@ -34,6 +34,17 @@ fn open(u: *Update, arch: []const u8, data: []const u8, sig: []const u8) !signed
 }
 
 fn pseudo(u: *Update, path: []const u8) ![]const u8 {
+    const workers = @import("workers.zig");
+    const held = if (std.mem.eql(u8, path, ipe.policy_path))
+        workers.ipe_policy
+    else if (std.mem.eql(u8, path, ipe.active))
+        workers.ipe_active
+    else
+        workers.ipe_enforce;
+    if (held) |file| {
+        const bytes = try u.gpa.alloc(u8, 4096);
+        return bytes[0..try file.readPositionalAll(u.io, bytes, 0)];
+    }
     const f = try Dir.cwd().openFile(u.io, path, .{});
     defer f.close(u.io);
     const buf = try u.gpa.alloc(u8, 4096);
@@ -97,7 +108,7 @@ pub fn plan(u: *Update, arch: []const u8) !?m.Plan {
     u.step = "image-files";
     try Dir.cwd().deleteTree(u.io, work ++ "/slot");
     try Dir.cwd().createDirPath(u.io, work ++ "/slot");
-    _ = try u.sys(m.linux.fchmodat(m.linux.AT.FDCWD, work ++ "/slot", 0o700), "chmod slot");
+    _ = try u.sys(m.linux.fchmodat(m.linux.AT.FDCWD, work ++ "/slot", 0o750), "chmod slot");
     inline for (signed.names) |name| if (image.artifact(name)) |a| {
         const path = try u.gpa.printSentinel("{s}/slot/{s}", .{ work, name }, 0);
         const url = try u.gpa.print("{s}/{s}/{s}", .{ base, image.build, name });

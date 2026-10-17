@@ -3,6 +3,7 @@ base: app
 
 packages:
   - python-3.15>=3.15.0_git20261010-r2000
+  - libstdc++
 
 weaknesses:
   programs-no-interpreters: hardened Python 3.15 runs local ONNX inference

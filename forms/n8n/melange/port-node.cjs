@@ -27,3 +27,10 @@ function prune(dir) {
   }
 }
 prune('node_modules');
+
+// GCC 16 no longer supplies fixed-width integers through <memory>. Both
+// pinned isolated-vm releases use uint32_t without including its own header.
+const timerPath = 'node_modules/isolated-vm/src/lib/timer.h';
+const timer = fs.readFileSync(timerPath, 'utf8');
+if (!timer.startsWith('#pragma once\n')) throw new Error('unexpected isolated-vm timer header');
+fs.writeFileSync(timerPath, timer.replace('#pragma once\n', '#pragma once\n#include <cstdint>\n'));

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Run the installer tests with a locally built image's apk and public keys.
+# Linux root only; all image mounts live in a private mount namespace.
+set -eu
+if [ "$#" -ne 3 ]; then
+    echo 'usage: check-updater-installer ROOTFS.tar OVERLAY.tar LINUX-TEST-BINARY' >&2
+    exit 2
+fi
+if [ "$(uname -s)" != Linux ] || [ "$(id -u)" -ne 0 ]; then
+    echo 'check-updater-installer requires Linux root (a disposable Lima VM works)' >&2
+    exit 1
+fi
+rootfs=$(realpath "$1")
+overlay=$(realpath "$2")
+binary=$(realpath "$3")
+fixture_dir=$(mktemp -d /tmp/werewolf-installer.XXXXXXXX)
+trap 'rm -rf "$fixture_dir"' EXIT
+mkdir "$fixture_dir/image" "$fixture_dir/work"
+# Only these trees are mounted below; do not recreate image device nodes.
+tar -xf "$rootfs" -C "$fixture_dir/image" etc usr
+tar -xf "$overlay" -C "$fixture_dir/image" etc usr
+test -x "$fixture_dir/image/usr/bin/apk"
+test -d "$fixture_dir/image/etc/werewolf/kernel-keys"
+# shellcheck disable=SC2016 # Arguments expand inside the namespace's shell.
+unshare --mount --fork sh -euc '
+    mount --make-rprivate /
+    mount --bind -o ro "$1/etc" /etc
+    mount --bind -o ro "$1/usr" /usr
+    cd "$3"
+    exec "$2"
+' fixture "$fixture_dir/image" "$binary" "$fixture_dir/work"

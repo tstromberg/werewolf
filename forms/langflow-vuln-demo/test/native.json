@@ -1,0 +1,54 @@
+{
+  "format": "werewolf-native-tests/1",
+  "packages": [],
+  "drivers": [
+    {
+      "name": "test-langflow",
+      "source": "driver.zig",
+      "mode": "http",
+      "user": "langflow",
+      "pledge": "stdio rpath wpath inet connect proc exec",
+      "read": [
+        "/etc/sv/langflow/service",
+        "/usr/lib/apk/db/installed"
+      ],
+      "connect": [
+        "tcp/7860"
+      ],
+      "run": [
+        "/usr/lib/langflow/bin/python"
+      ],
+      "cases": {
+        "seed": [
+          "ready",
+          "version",
+          "editor",
+          "login",
+          "create-flow",
+          "persisted-flow",
+          "local-inference",
+          "direct-python",
+          "hardened-python",
+          "local-embedding",
+          "ffi-callback"
+        ],
+        "verify": [
+          "ready",
+          "version",
+          "editor",
+          "login",
+          "persisted-flow",
+          "local-inference",
+          "direct-python",
+          "hardened-python",
+          "local-embedding",
+          "ffi-callback"
+        ]
+      },
+      "memory": 1024,
+      "allow": [
+        "python:native"
+      ]
+    }
+  ]
+}

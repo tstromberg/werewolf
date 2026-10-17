@@ -1,0 +1,87 @@
+package:
+  name: langflow
+  version: 1.12.6
+  epoch: 0
+  description: Langflow editor, API and local CPU inference on hardened Python
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - python-3.15>=3.15.0_git20261010-r2000
+      - py3.15-onnxruntime=1.31.0-r0
+      - libstdc++
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - build-base
+      - clang-23
+      - cmake
+      - ninja-build
+      - rust-1.98
+      - ca-certificates-bundle
+      - python-3.15
+      - python-3.15-dev
+      - uv
+  environment:
+    CC: clang
+    CXX: clang++
+    CMAKE_BUILD_PARALLEL_LEVEL: "4"
+    PATH: /usr/lib/ninja-build/bin:/usr/local/bin:/usr/bin:/bin
+    UV_PYTHON_DOWNLOADS: never
+    UV_LINK_MODE: copy
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://files.pythonhosted.org/packages/15/4d/2c1b8c66885e4a0ba9084622c290e2381464a0a9e58a41cf23c64a8ca3ba/langflow-1.12.6-py3-none-any.whl
+      expected-sha256: 37ae2d1ce05687c64d6f345320b3547f774e90fb57b05b683a8f620f9759870e
+      extract: false
+
+  - uses: fetch
+    with:
+      uri: https://files.pythonhosted.org/packages/ea/10/ed0d9b8f63c363c0986e7fc73674bdc6630f2ae0c1a25e385c75e9e6938b/langflow_base-1.12.6-py3-none-any.whl
+      expected-sha256: 716ca9ac5d6a85e3e2c3c4eab5100aee719cef47ec4c5dac39e8704e308d0144
+      extract: false
+
+  - uses: fetch
+    with:
+      uri: https://files.pythonhosted.org/packages/8b/5d/90860a8147deb6136948ae52adf167d14bdac7d4f58bc5074e33bba2141f/lfx-1.12.6-py3-none-any.whl
+      expected-sha256: a24995df70df9e505c2355b50b17bfc6865c8d0fc0d49a6d1d80addcea7403d4
+      extract: false
+
+  - runs: |
+      # Use CP315 wheel tags. Only metadata's Python upper bounds are bypassed;
+      # no CP314 binary or alternate interpreter is installed.
+      python3.15 -m venv --system-site-packages /usr/lib/langflow
+      # FastUUID's PyO3 0.26 supports Python through 3.14. Its documented
+      # stable ABI mode is forward compatible; scope this to that build alone.
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 /usr/lib/langflow/bin/python -m pip install \
+        --no-deps --require-hashes --no-binary=fastuuid -r fastuuid-requirements.txt
+      /usr/lib/langflow/bin/python -m pip install --no-deps --ignore-requires-python \
+        --require-hashes --prefer-binary -r requirements.txt
+      /usr/lib/langflow/bin/python -m pip install --no-deps --ignore-requires-python \
+        langflow-1.12.6-py3-none-any.whl langflow_base-1.12.6-py3-none-any.whl lfx-1.12.6-py3-none-any.whl
+      /usr/lib/langflow/bin/python -P -c 'import fastuuid; value=fastuuid.uuid4(); assert fastuuid.UUID(str(value)) == value'
+      /usr/lib/langflow/bin/python port-python.py /usr/lib/langflow/lib/python3.15/site-packages
+      # Import the complete API during packaging, so missing runtime providers
+      # and interpreter compatibility errors fail before an image is shipped.
+      /usr/lib/langflow/bin/python -P -c 'from langflow.main import setup_app; assert callable(setup_app)'
+      cp server.py /usr/lib/langflow/server.py
+      cp check-embedding.py /usr/lib/langflow/check-embedding.py
+      PYTHONHASHSEED=0 /usr/lib/langflow/bin/python -m compileall \
+        -q -f -j 1 --invalidation-mode checked-hash /usr/lib/langflow
+      # Remove installer entrypoints and their implementations from the runtime.
+      rm -rf /usr/lib/langflow/lib/python3.15/site-packages/pip \
+        /usr/lib/langflow/lib/python3.15/site-packages/pip-*.dist-info
+      rm -f /usr/lib/langflow/bin/activate* /usr/lib/langflow/bin/pip*
+      mkdir -p ${{targets.destdir}}/usr/lib
+      cp -a /usr/lib/langflow ${{targets.destdir}}/usr/lib/langflow
+
+update:
+  enabled: false

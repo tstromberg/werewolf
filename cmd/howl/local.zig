@@ -107,6 +107,7 @@ pub fn createQemu(
             .disk_path = disk,
             .boot_key = keys.key,
             .boot_cert = keys.cert,
+            .kernel_rootfs = howl.environ.get("KERNEL_ROOTFS"),
             .ipe_kernel = howl.environ.get("WEREWOLF_IPE_KERNEL"),
             .ipe_key = if (howl.environ.get("WEREWOLF_IPE_KERNEL") != null)
                 howl.environ.get("WEREWOLF_IPE_KEY")

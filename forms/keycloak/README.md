@@ -13,8 +13,9 @@ instructions](https://dist.werewolf-linux.org/boot/v1/keycloak/index.html).
 
 ### Weaknesses
 
-- Java runs Keycloak, and the JVM and PostgreSQL compile code as they run. Both are
-  named in `form.yaml`.
+- Java runs Keycloak with native access for Infinispan's off-heap cache, scoped to
+  that service. The JVM and PostgreSQL compile code as they run. These are named in
+  `form.yaml`.
 
 ## Getting Started
 

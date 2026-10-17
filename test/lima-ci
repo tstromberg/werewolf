@@ -19,7 +19,7 @@ vm=werewolf-ci-${template#ubuntu-}
 repo=$(cd "$(dirname "$0")/.." && pwd)
 
 if ! limactl list --format '{{.Name}}' | grep -qx "$vm"; then
-	limactl create --name "$vm" --tty=false --cpus 8 --memory 8 --nested-virt "template://$template"
+	limactl create --name "$vm" --tty=false --cpus 8 --memory 16 --nested-virt "template://$template"
 fi
 [ "$(limactl list --format '{{.Status}}' "$vm")" = Running ] || limactl start "$vm"
 
@@ -41,5 +41,8 @@ limactl shell --workdir / "$vm" sh -euc "
 	# A boot takes two CPUs (CHECK_QEMU's -smp 2), so run one boot per two
 	# CPUs. Then no guest starves, which nested virtualization makes fatal
 	# (RCU stalls).
-	make -k -j\$(( (\$(nproc) + 1) / 2 )) check
+	jobs=\$(test/ci-vm-jobs)
+	cpu_jobs=\$(( (\$(nproc) + 1) / 2 ))
+	if [ \"\$jobs\" -gt \"\$cpu_jobs\" ]; then jobs=\$cpu_jobs; fi
+	make -k -j\"\$jobs\" check
 "

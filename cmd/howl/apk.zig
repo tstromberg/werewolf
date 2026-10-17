@@ -46,13 +46,39 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     var steps: progress.Steps = try .init(io, gpa, why, .{
         .verbose = verbose,
         .command = try gpa.print("howl build-apk {s}", .{try std.mem.join(gpa, " ", given)}),
-        .log = try gpa.print("build/log/{s}-{t}-build-apk.log", .{ std.fs.path.stem(r), for_arch }),
+        .log = try gpa.print("build/log/{s}-{t}-build-apk.log", .{ try logStem(gpa, r), for_arch }),
         .first = howl.start_phase,
     });
     report(io, gpa, &steps, for_arch, r) catch |err| switch (err) {
         error.Refused => return err,
         else => return steps.fail(@errorName(err)),
     };
+}
+
+// Current and vulnerable forms commonly give their recipes the same basename.
+// Hash the full path so queued builds never truncate each other's logs. Bound
+// the readable prefix so even a long recipe name fits one filesystem component.
+fn logStem(gpa: Allocator, recipe: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(recipe);
+    return gpa.print(
+        "{s}-{x:0>16}",
+        .{ stem[0..@min(stem.len, 96)], std.hash.Wyhash.hash(0, recipe) },
+    );
+}
+
+test "build-apk logs distinguish current and vulnerable recipes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    for ([_][]const u8{ "n8n", "langflow" }) |name| {
+        const current = try gpa.print("forms/{s}/melange/{s}.yaml", .{ name, name });
+        const vulnerable = try gpa.print("forms/{s}-vuln-demo/melange/{s}.yaml", .{ name, name });
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            try logStem(gpa, current),
+            try logStem(gpa, vulnerable),
+        ));
+    }
 }
 
 /// report builds recipe's packages for arch and prints them. It plans a

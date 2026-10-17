@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -43,14 +46,23 @@ func TestProxyPreservesEndpointAndBody(t *testing.T) {
 		if string(b) != body {
 			t.Error("forwarded body changed")
 		}
-		if r.RequestURI != "/solr/admin/cores?action=%24%7Bjndi%3Adns%3Ax%7D" {
+		if r.RequestURI != "/solr/%2e%2e/admin//cores?action=%24%7Bjndi%3Adns%3Ax%7D&odd=%ZZ;keep=1" {
 			t.Error(r.RequestURI)
+		}
+		if r.Host != "demo.example:8983" || r.Header.Get("X-Forwarded-Host") != "demo.example:8983" || r.Header.Get("X-Forwarded-Proto") != "http" || r.Header.Get("X-Forwarded-For") != "192.0.2.25" || r.Header.Get("Forwarded") != "" {
+			t.Error("untrusted forwarding metadata survived", r.Host, r.Header)
 		}
 		w.WriteHeader(201)
 	}))
 	defer backend.Close()
 	j := newJournal(nil)
-	r := httptest.NewRequest("POST", "/solr/admin/cores?action=%24%7Bjndi%3Adns%3Ax%7D", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/solr/%2e%2e/admin//cores?action=%24%7Bjndi%3Adns%3Ax%7D&odd=%ZZ;keep=1", strings.NewReader(body))
+	r.Host = "demo.example:8983"
+	r.RemoteAddr = "192.0.2.25:41123"
+	r.Header.Set("X-Forwarded-For", "198.51.100.66")
+	r.Header.Set("X-Forwarded-Host", "attacker.example")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("Forwarded", "for=198.51.100.66")
 	w := httptest.NewRecorder()
 	requestLog("solr", proxy(backend.URL, j), j).ServeHTTP(w, r)
 	if w.Code != 201 {
@@ -118,5 +130,74 @@ func TestSSHHostIdentityPersists(t *testing.T) {
 	}
 	if !bytes.Equal(a.PublicKey().Marshal(), b.PublicKey().Marshal()) {
 		t.Fatal("host identity changed")
+	}
+}
+
+func TestRuntimeDenialsAreVisibleAsViolations(t *testing.T) {
+	for _, message := range []string{`{"event":"runtime-denial","runtime":"node","group":"exec"}`, `java: {"event":"runtime-denial","group":"native"}`} {
+		if appEventKind(message) != "violation" {
+			t.Fatal(message)
+		}
+	}
+	if appEventKind(`not JSON runtime-denial`) != "app" {
+		t.Fatal("misclassified application text")
+	}
+	j := newJournal(nil)
+	var seq uint64
+	kernelRecords("6,42,9,-;audit: type=1423 blockers=fs.write_file path=\"/etc/x\"\n", &seq, j)
+	rows, _ := j.since(0)
+	if len(rows) != 1 || rows[0].Kind != "violation" {
+		t.Fatal(rows)
+	}
+}
+
+func TestKernelOverrunsDoNotReplayOnEveryPoll(t *testing.T) {
+	j := newJournal(nil)
+	var seq uint64
+	marker := "0,0,1,-;vuln-kmsg: kernel log overrun; records lost\n"
+	kernelRecords(marker+"6,100,9,-;next record\n", &seq, j)
+	kernelRecords(marker+"6,100,9,-;next record\n", &seq, j)
+	kernelRecords("0,0,2,-;vuln-kmsg: kernel log overrun; records lost\n", &seq, j)
+	rows, _ := j.since(0)
+	if len(rows) != 3 || rows[0].Kind != "loss" || rows[2].Kind != "loss" {
+		t.Fatal(rows)
+	}
+}
+
+func TestServiceCannotImpersonateKernelRecords(t *testing.T) {
+	j := newJournal(nil)
+	recordServiceEvent(j, event{Kind: "app", Service: "kernel", Message: `{"event":"runtime-denial"}`})
+	recordServiceEvent(j, event{Kind: "exec", Service: "kernel", Message: "forged exec"})
+	var seq uint64
+	kernelRecords("6,42,9,-;audit: type=1309 argc=1 a0=\"id\"\n", &seq, j)
+	rows, _ := j.since(0)
+	if len(rows) != 2 || rows[0].Service == "kernel" || rows[0].Kind != "violation" || rows[1].Service != "kernel" || rows[1].Kind != "exec" {
+		t.Fatal(rows)
+	}
+}
+
+func TestDashboardOnlyAllowsItsPackagedScriptAndStyle(t *testing.T) {
+	w := httptest.NewRecorder()
+	dashboard(newJournal(nil)).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	policy := w.Header().Get("Content-Security-Policy")
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(policy, "default-src 'none'") || strings.Contains(policy, "unsafe-inline") || strings.Contains(policy, "unsafe-eval") {
+		t.Fatal(w.Code, w.Header())
+	}
+	for _, tag := range []string{"script", "style"} {
+		blocks := regexp.MustCompile(`(?s)<`+tag+`>(.*?)</`+tag+`>`).FindAllSubmatch(w.Body.Bytes(), -1)
+		if len(blocks) != 1 {
+			t.Fatalf("expected one packaged %s block", tag)
+		}
+		digest := sha256.Sum256(blocks[0][1])
+		if !strings.Contains(policy, tag+"-src 'sha256-"+base64.StdEncoding.EncodeToString(digest[:])+"'") {
+			t.Fatalf("packaged %s would be blocked", tag)
+		}
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(" style=")) {
+		t.Fatal("inline style attributes are blocked by the dashboard policy")
+	}
+	attacker := sha256.Sum256([]byte("alert(document.cookie)"))
+	if strings.Contains(policy, base64.StdEncoding.EncodeToString(attacker[:])) {
+		t.Fatal("unpackaged script allowed")
 	}
 }

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Bound CI's boot concurrency by CPUs and the largest declared guest budget.
+set -eu
+make --no-print-directory -s build/host/form >&2
+max_memory_mib=4096
+forms=$(build/host/form for-arch "$(uname -m)")
+for form in $forms; do
+	memory_mib=$(build/host/form check "$form" memory)
+	memory_mib=${memory_mib:-1024}
+	[ "$memory_mib" -gt 0 ]
+	if [ "$memory_mib" -gt "$max_memory_mib" ]; then max_memory_mib=$memory_mib; fi
+done
+echo "ci-vm-jobs: reserving $max_memory_mib MiB per boot" >&2
+cpus=$(nproc)
+[ "$cpus" -gt 0 ]
+awk -v cpus="$cpus" -v memory_kib="$((max_memory_mib * 1024))" '
+	/^MemAvailable:/ { found = 1; n = int($2 / memory_kib); if (n < 1) n = 1; print (n < cpus ? n : cpus) }
+	END { if (!found) exit 1 }
+' /proc/meminfo

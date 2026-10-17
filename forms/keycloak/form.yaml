@@ -19,7 +19,7 @@ check:
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  programs-no-interpreters: java runs Keycloak, which is what this form is for
+  programs-no-interpreters: java runs Keycloak with native access for Infinispan's off-heap cache
   kernel-write-xor-execute: the JVM compiles Keycloak to machine code as it runs, and PostgreSQL its costly queries (allow jit, from jre and postgresql)
 
 services:
@@ -57,6 +57,8 @@ services:
   # administrator, from the config, is made before it serves. The heap is
   # under the memory limit, with room for the JVM's own.
   keycloak:
+    # Infinispan allocates off-heap cache memory through Unsafe.
+    allow: [java:native]
     exec: /usr/bin/java -Xms128m -Xmx768m -Djava.io.tmpdir=/run/svc/keycloak @/usr/lib/keycloak/java.args start --optimized
     user: keycloak
     # netlink: the JVM lists the host's addresses.

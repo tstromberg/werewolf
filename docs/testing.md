@@ -10,10 +10,11 @@ howl test --with caddy --arch x86_64
 Most forms run `make -k check-FORM check-shellfree-FORM`: integration tests in a DEV VM,
 then posture and console checks of the shipping form. Forms with `test/native.json`,
 such as `postgresql`, instead run compiled Zig drivers under leash as service clients,
-without shell or SSH, on a generated form compared with the plain build before boot
-([design](design/image-release-testing.md)). Image publishing requires further checks
-([form-images.md](form-images.md)); the [local iteration
-loop](design/local-test-iteration.md) keeps the VM running between client changes.
+without shell or SSH ([driver guide](testing-native.md)). A generated form pins the
+production package closure and is
+compared with production before boot ([design](design/image-release-testing.md)).
+Image publishing requires further checks ([form-images.md](form-images.md)).
+[Local iteration](design/local-test-iteration.md) keeps the VM running between changes.
 
 PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
 [Greenbone](../forms/greenbone/README.md#testing-status) tests GMP/OSP, database roles,
@@ -31,8 +32,13 @@ howl test --with postgresql --iterate --reset   # discard guest state
 howl test --with postgresql --iterate --stop
 ```
 
-Iteration uses SSH with `sh-shim`, without adding BusyBox. It is not release evidence.
-Run the plain command after the last edit for clean seed, reboot and verify checks.
+Native drivers default to 128 MiB; `memory` (16–8192 MiB) sizes their test cgroup.
+An optional driver `allow` list permits `python:native`, `node:native` or
+`java:native` in that driver's runtime namespace. Production grants stay unchanged;
+the payload comparison rejects blanket grants and undeclared files.
+Iteration uses SSH with `sh-shim`, without BusyBox. It is not release evidence.
+Run the plain command after editing. `KERNEL_ROOTFS=/path/rootfs.tar` tests a candidate
+kernel; changing its bytes resets the VM. This profile explicitly disables IPE.
 
 ```sh
 make test           # every program's and library's unit tests, in seconds
@@ -44,9 +50,8 @@ make check-dns      # Linux: resolver, DHCP and TLS fixtures in private namespac
 python3 test/form-coverage --list   # each form's integration cases
 ```
 
-Tests that need the network, a cloud or another host are in
-[testing-live.md](testing-live.md); Secure Boot, TPM and signed updates in
-[testing-secure-boot.md](testing-secure-boot.md).
+[Live tests](testing-live.md) cover network, cloud and remote hosts; see
+[secure boot tests](testing-secure-boot.md) for Secure Boot, TPM and signed updates.
 
 Besides the build's tools, `make check` needs QEMU, `expect` and `mke2fs` (`brew install
 qemu e2fsprogs` on a Mac); the tutorial forms also need Go, rustup with the
@@ -103,10 +108,6 @@ form's cases. The [exceptions](../test/form-coverage-exceptions) explain shared 
 for foundations and runtime-only forms. Review still judges case quality. `make
 check-apps` builds the `-app` forms and `php` with
 [test/app-fixtures](../test/app-fixtures) and tests their HTTP behaviour.
-
-## Porting a form to native tests
-
-See the [native-test porting guide](testing-native.md) for drivers and persistence.
 
 ## Writing a check
 
@@ -170,6 +171,5 @@ self-hosted Ampere runner, for pushes and maintainers' pull requests.
 `make check-native` still checks each form's root under `systemd-nspawn`
 ([test/cage](../test/cage)), attacking what holds in a container.
 
-`make ci` runs the same job here, in the `werewolf-ci-24.04` Lima VM with nested KVM,
-copying the tree in fresh without `config/` or `.git`; the VM and its caches stay
-(`limactl delete -f werewolf-ci-24.04` starts over).
+`make ci` copies fresh source (no `config/` or `.git`) into a 16 GiB Lima VM with KVM.
+VM and caches persist; `limactl delete -f werewolf-ci-24.04` starts over.

@@ -60,6 +60,7 @@ class Provider:
                 archive.addfile(entry, io.BytesIO(data))
 
     def run(self, args, check=True, timeout=900, input=None):
+        args = [str(arg) for arg in args]
         result = subprocess.run(args, env=self.env, capture_output=True, text=True,
                                 timeout=timeout, input=input)
         with (self.work / 'host.log').open('a') as output:

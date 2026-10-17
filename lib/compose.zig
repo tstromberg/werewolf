@@ -84,6 +84,14 @@ pub fn compose(
         const dir = try gpa.print("etc/sv/{s}", .{s.name});
         try ro.createDirPath(io, dir);
         try put(io, ro, try gpa.print("{s}/service", .{dir}), s.text);
+        for (s.allow) |word| {
+            const grant = allow.RuntimeAllowance.parse(word).?;
+            const path = try gpa.print("etc/runtime-hardening/allow/{s}/{t}", .{
+                s.name, grant.runtime,
+            });
+            try ro.createDirPath(io, path);
+            try put(io, ro, try gpa.print("{s}/{s}", .{ path, grant.name }), "");
+        }
         for ([_][2][]const u8{ .{ "run", "leash" }, .{ "finish", "leash-reap" } }) |link| {
             ro.symLink(
                 io,
@@ -1967,6 +1975,62 @@ test serviceDirOwner {
     try testing.expectEqual(null, serviceDirOwner("/data/svc"));
     try testing.expectEqual(null, serviceDirOwner("/data/svc/"));
     try testing.expectEqual(null, serviceDirOwner("/etc/nginx"));
+}
+
+test "compose: service runtime grants stay scoped and follow whole-service replacement" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    for ([_][2][]const u8{
+        .{ "base", "services:\n  search:\n    exec: /search\n    user: search\n" ++
+            "    pledge: stdio\n    allow: [java:native]\n  n8n:\n    exec: /n8n\n" ++
+            "    user: n8n\n    pledge: stdio\n    allow: [node:native]\n" },
+        .{ "site", "base: base\nservices:\n  search:\n    exec: /search\n    user: search\n" ++
+            "    pledge: stdio\n  runner:\n    exec: /runner\n    user: runner\n    pledge: " ++
+            "stdio\n" },
+    }) |fixture| {
+        try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{fixture[0]}));
+        try tmp.dir.writeFile(io, .{
+            .sub_path = try gpa.print("forms/{s}/form.yaml", .{fixture[0]}),
+            .data = fixture[1],
+        });
+    }
+    const image: Accounts = .{
+        .passwd = "root:x:0:0:root:/root:/sbin/nologin\n",
+        .group = "root:x:0:root\n",
+        .shadow = "root:*::0:::::\n",
+    };
+    for ([_][]const u8{ "base", "site" }) |name| {
+        var f: Failure = .{};
+        const forms = try form.chain(io, gpa, tmp.dir, name, &f);
+        var ro = try tmp.dir.createDirPathOpen(io, try gpa.print("{s}-ro", .{name}), .{});
+        defer ro.close(io);
+        var meta = try tmp.dir.createDirPathOpen(io, try gpa.print("{s}-meta", .{name}), .{});
+        defer meta.close(io);
+        try compose(io, gpa, tmp.dir, forms, image, ro, meta, .{ .arch = .aarch64 }, &f);
+        try testing.expectEqualStrings("", try ro.readFileAlloc(
+            io,
+            "etc/runtime-hardening/allow/n8n/node/native",
+            gpa,
+            .limited(1),
+        ));
+        if (mem.eql(u8, name, "base")) {
+            try ro.access(io, "etc/runtime-hardening/allow/search/java/native", .{});
+        } else {
+            try testing.expectError(error.FileNotFound, ro.access(
+                io,
+                "etc/runtime-hardening/allow/search",
+                .{},
+            ));
+        }
+        for ([_][]const u8{ "all", "runner" }) |ns| try testing.expectError(
+            error.FileNotFound,
+            ro.access(io, try gpa.print("etc/runtime-hardening/allow/{s}", .{ns}), .{}),
+        );
+    }
 }
 
 test "compose: ro and meta from a chain and a package-only image's accounts" {

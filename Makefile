@@ -249,7 +249,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
-	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
+	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
 	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -583,7 +583,7 @@ check-image-updater-uki: $(HOWL)
 		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
 		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
-check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
+check-cloud:     check-metadata check-nodata check-lease check-static check-people $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check: check-forms check-shellfree check-integrity check-cloud check-persist check-syslog
 	@echo "check: every form, and a slot, passed"
 
@@ -619,7 +619,7 @@ check-%: | _check-shared
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
 	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= image)
-	python3 test/native-tests prepare $* $(ARCH)
+	PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) python3 test/native-tests prepare $* $(ARCH)
 	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= image)
 	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) \
 		TEST_OUT=$(BUILD)/native-test-$*$(if $(IPE),-ipe) python3 test/native-tests compare $* $(ARCH)
@@ -667,10 +667,11 @@ check-adhoc: $(HOWL) | _check-shared
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
 
 # Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
+# People uses 22199, below the forms' ports, so check-cloud and check-forms can run together.
 check-bastion check-people: check-%: $(HOWL) $(TEST_SK) | _check-shared
 	@test/$*-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
 	@$(call built,$*,$(CHECK_MAKE) FORM=$(CHECK)/$*-check image)
-	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(call check_port,22200,$(if $(filter bastion,$*),bastion,prod-ssh)) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
+	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(if $(filter bastion,$*),$(call check_port,22200,bastion),22199) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree
@@ -688,6 +689,20 @@ $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $
 check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress
 	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
+
+$(BUILD)/updater-installer-test: cmd/slot-update/installer.zig lib/sandbox.zig lib/seal.zig
+	$(zig_check)
+	mkdir -p $(dir $@)
+	zig test -target $(ARCH)-linux-musl --test-no-exec -femit-bin=$@ \
+		--dep sandbox -Mroot=$< --dep seal -Msandbox=lib/sandbox.zig -Mseal=lib/seal.zig
+$(BUILD)/updater-coordinator-test: $(wildcard cmd/slot-update/*.zig) $(wildcard lib/*.zig)
+	$(zig_check)
+	mkdir -p $(dir $@)
+	zig test -target $(ARCH)-linux-musl --test-filter coordinator --test-no-exec -femit-bin=$@ $(call ZIG_MODULES,cmd/slot-update/slot-update.zig)
+.PHONY: check-updater-installer
+check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordinator-test
+	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-installer-test
+	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-coordinator-test
 
 check-lan: $(call program_bin,fence)
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
@@ -843,7 +858,7 @@ check-updater check-updater-staged check-updater-published: | _check-shared
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
-	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
+	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) DEBUGFS=$(DEBUGFS) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
 		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
 		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
 		-device virtio-net-pci,netdev=n0,romfile=

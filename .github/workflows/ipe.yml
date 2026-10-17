@@ -77,7 +77,7 @@ jobs:
           python3 test/check-cloud-tpm-activation
       - name: Build pinned measured stub
         run: |
-          tools/build-tpm-stub build/tpm-stub
+          sh tools/build-tpm-stub build/tpm-stub
           echo "UKI_STUB=$PWD/build/tpm-stub/linux.efi.stub" >> "$GITHUB_ENV"
       - name: Protected TPM guest and power cuts
         env:
@@ -115,6 +115,7 @@ jobs:
             build/*/ipe/check/tpm-guest/fixture.log
             build/*/ipe/check/tpm-guest/factory.log
             build/*/ipe/check/tpm-guest/guest/*.log
+            build/*/ipe/check/tpm-guest/guest/*.status
             build/*/ipe/check/tpm-guest/guest/evidence.jsonl
             build/*/ipe/check/tpm-bootstrap/*.log
             build/*/ipe/check/tpm-bootstrap/manifest.json

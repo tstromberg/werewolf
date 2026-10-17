@@ -1,6 +1,7 @@
 # Focused posture regressions, run on minimal by make check-posture.
 # Concurrent scans may exhaust printk's audit burst. Judge the attack checks
 # independently here, then require fresh audit evidence after a quiet interval.
+ok posture-service-parks i=0; while ! /usr/bin/sv status /etc/sv/posture | grep -q '^down:'; do i=$((i+1)); [ "$i" -lt 10 ] || exit 1; sleep 1; done; [ -s /run/werewolf/posture.json ]
 ok posture-concurrent-attacks for i in 1 2 3 4; do /usr/lib/werewolf/posture --json >/run/posture-concurrent.$i & done; wait; for i in 1 2 3 4; do for id in processes-leash-attack files-links-attack; do tr -d '[:space:]' </run/posture-concurrent.$i | grep -q '"id":"'"$id"'"[^}]*"result":"pass"' || { cat /run/posture-concurrent.$i; exit 1; }; done; done
 ok posture-stale-probe mkdir -p /run/svc/posture-probe /data/svc/posture-probe && echo stale >/run/svc/posture-probe/result && echo stale >/data/svc/posture-probe/leftover && chown -R 65534:65534 /run/svc/posture-probe /data/svc/posture-probe || exit 1; /usr/lib/werewolf/posture --json >/run/posture-stale.json; tr -d '[:space:]' </run/posture-stale.json | grep -q '"id":"processes-leash-attack"[^}]*"result":"pass"' && [ ! -e /run/svc/posture-probe ] && [ ! -e /data/svc/posture-probe ]
 ok posture-fresh-audit sleep 6; /usr/lib/werewolf/posture --json >/run/posture-fresh.json; tr -d '[:space:]' </run/posture-fresh.json | grep -q '"id":"kernel-exec-log"[^}]*"result":"pass"'

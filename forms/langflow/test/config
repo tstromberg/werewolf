@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$1/langflow"
+printf '%s' werewolf-check-password >"$1/langflow/password"
+printf '%s\n' '{"owner":"owner"}' >"$1/langflow/settings.json"

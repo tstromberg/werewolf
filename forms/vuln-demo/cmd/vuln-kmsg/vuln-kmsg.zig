@@ -4,7 +4,7 @@ const sandbox = @import("sandbox");
 const linux = std.os.linux;
 
 const log_path = "/run/werewolf/vuln-kmsg";
-const log_uid = 75;
+const log_uid = 590; // _vulnlog in this form's accounts
 const max_bytes = 2 << 20;
 
 pub fn main() !void {
@@ -34,6 +34,7 @@ pub fn main() !void {
     try filter.install();
     var buffer: [64 << 10]u8 = undefined;
     var offset: usize = 0;
+    var overruns: u64 = 0;
     while (true) {
         const n = linux.read(source, &buffer, buffer.len);
         switch (linux.errno(n)) {
@@ -41,7 +42,13 @@ pub fn main() !void {
             .INTR => continue,
             // The kernel overwrote records before the reader caught up.
             .PIPE => {
-                const lost = "0,0,0,-;vuln-kmsg: kernel log overrun; records lost\n";
+                overruns +|= 1;
+                var loss: [128]u8 = undefined;
+                const lost = std.mem.print(
+                    &loss,
+                    "0,0,{d},-;vuln-kmsg: kernel log overrun; records lost\n",
+                    .{overruns},
+                ) catch linux.exit_group(1);
                 if (!append(target, lost, &offset)) linux.exit_group(1);
                 continue;
             },

@@ -3,7 +3,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -27,6 +30,28 @@ func setup() error {
 		}
 		defer os.RemoveAll(tmp)
 		if err := os.CopyFS(tmp, os.DirFS("/usr/lib/solr/server/solr/configsets")); err != nil {
+			return err
+		}
+		// Solr 8 defaults to Caffeine 2, whose implementation needs Unsafe.
+		// Its supported LRU cache keeps query caching without native memory.
+		err = filepath.WalkDir(tmp, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || entry.Name() != "solrconfig.xml" {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			data, err = cacheConfig(data)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(path, data, 0600)
+		})
+		if err != nil {
 			return err
 		}
 		if err := os.Rename(tmp, filepath.Join(home, "configsets")); err != nil {
@@ -63,4 +88,54 @@ func setup() error {
 		}
 	}
 	return nil
+}
+
+// Preserve XML tokens, including placeholders and comments; replace rather than
+// duplicate a cache's existing class attribute in either packaged configset.
+func cacheConfig(data []byte) ([]byte, error) {
+	var output bytes.Buffer
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	encoder := xml.NewEncoder(&output)
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			replace := false
+			switch start.Name.Local {
+			case "filterCache", "queryResultCache", "documentCache", "fieldValueCache":
+				replace = true
+			case "cache":
+				// Named user caches (the default perSegFilter, for example)
+				// default to Caffeine too, including when class is omitted.
+				replace = true
+				for _, attr := range start.Attr {
+					if attr.Name.Local == "class" {
+						replace = attr.Value == "solr.CaffeineCache" || attr.Value == "org.apache.solr.search.CaffeineCache"
+					}
+				}
+			}
+			if replace {
+				attrs := make([]xml.Attr, 0, len(start.Attr)+1)
+				for _, attr := range start.Attr {
+					if attr.Name.Local != "class" {
+						attrs = append(attrs, attr)
+					}
+				}
+				start.Attr = append(attrs, xml.Attr{Name: xml.Name{Local: "class"}, Value: "solr.LRUCache"})
+				token = start
+			}
+		}
+		if err := encoder.EncodeToken(token); err != nil {
+			return nil, err
+		}
+	}
+	if err := encoder.Flush(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
