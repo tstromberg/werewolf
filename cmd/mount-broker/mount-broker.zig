@@ -650,10 +650,10 @@ fn espNewest(entries: i32) !i64 {
     return newest;
 }
 
-fn espVersion(newest: i64) ![20]u8 {
+fn espVersion(newest: i64) ![16]u8 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.REALTIME, &ts);
-    var buf: [20]u8 = undefined;
+    var buf: [16]u8 = undefined;
     _ = try std.mem.print(&buf, "{f}", .{policy.Serial{ .secs = @max(ts.sec, newest + 1) }});
     return buf;
 }
@@ -1338,4 +1338,12 @@ test "reboot requires the updater role and an exact request" {
     try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "reboot", &out));
     try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "reboot", &out));
     try testing.expectError(error.BadRequest, handleRequest(&log, .updater, "reboot extra", &out));
+}
+
+test "EFI versions contain only the canonical serial and advance" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const first = try espVersion(0);
+    const secs = try policy.parseSerial(&first);
+    const next = try espVersion(secs);
+    try testing.expect(try policy.parseSerial(&next) > secs);
 }
