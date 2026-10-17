@@ -10,7 +10,7 @@
 # machine and the scratch directory.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 say() { printf 'example: %s\n' "$*"; }
@@ -233,7 +233,11 @@ probe_tcp() {
 run_section() {
 	section=$1 form=$2
 	readme=$root/forms/$form/README.md
-	[ -f "$readme" ] || die "no form $form"
+	[ -f "$root/forms/$form/form.yaml" ] || die "no form $form"
+	if [ ! -f "$readme" ]; then
+		say "skip $form: no README"
+		exit 0
+	fi
 	fence=$(extract "$readme" "$section" "$form") && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		[ "$rc" -eq 2 ] || exit "$rc"
@@ -405,6 +409,14 @@ EOF
 	printf '# Plain\n\nNo fences.\n' >"$bad"
 	extract "$bad" local blocky >/dev/null 2>&1 && rc=0 || rc=$?
 	[ "$rc" -eq 2 ] || die "selftest: missing heading returned $rc"
+	mkdir -p "$tmp/forms/component"
+	printf 'base: minimal\n' >"$tmp/forms/component/form.yaml"
+	(root=$tmp; mode=check; run_section local component) >"$tmp/out"
+	grep -q 'skip component: no README' "$tmp/out" || die "selftest: component skipped"
+	if (root=$tmp; mode=check; run_section local missing) >"$tmp/out" 2>"$tmp/err"; then
+		die "selftest: unknown form accepted"
+	fi
+	grep -q 'no form missing' "$tmp/err" || die "selftest: unknown form message"
 	say "ok selftest"
 	trap - EXIT
 	rm -rf "$tmp"

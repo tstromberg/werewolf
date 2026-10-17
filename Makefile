@@ -938,5 +938,7 @@ $(DOC_CHECK): tools/doc-check.zig
 	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/doc-check.zig
 doc-lint: $(DOC_CHECK)
 	$(DOC_CHECK) $(DOC_SOURCES)
+	@test/example selftest
+	@for f in $(FORMS); do test/example check $$f >/dev/null || exit 1; done
 doc-fix: $(DOC_CHECK)
 	$(DOC_CHECK) --fix $(DOC_SOURCES)

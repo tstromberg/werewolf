@@ -44,7 +44,7 @@ The page is on the machine's port 8080. Try to escape; the page keeps the
 last 100 attempts, each with its source address, exit code and output, and
 `attempts.json` lists them:
 
-```sh
+```text
 $ curl --data-urlencode 'cmd=cat /etc/shadow && echo LEAK' MACHINE:8080
 # sh-shim: refused: unquoted & is shell syntax                  (no shell ships)
 $ curl --data-urlencode "cmd=/usr/bin/python3 -c \"open('/pwned','w')\"" MACHINE:8080
@@ -74,12 +74,13 @@ three ([test/console](test/console)), so the claim is tested, not just made.
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
-howl create webshell-example --with webshell-example --on gcp --allow-from 0.0.0.0/0
+howl create webshell-example --with webshell-example --on gcp --allow-from me
 ```
 
-The same machine on a real VM, with a firewall rule that opens its :8080 to
-anyone, so anyone can attack it. `howl delete webshell-example --on gcp`
-when you are done; the VM costs money until then.
+The firewall permits this computer on port 8080. Pass
+`--allow-from 0.0.0.0/0` to let anyone try the demo. Run
+`howl delete webshell-example --on gcp` when you are done; the VM costs
+money until then.
 
 ### Network Exposure
 
