@@ -2,6 +2,7 @@
 """Exercise host permit issuance, rollback context, restart, limits and HTTPS exposure."""
 import concurrent.futures
 import hashlib
+import http.client
 import importlib.machinery
 import json
 import os
@@ -56,6 +57,176 @@ class Issuance(unittest.TestCase):
 
     def approve(self, candidate):
         (self.root / 'approved.json').write_text(json.dumps({'candidate': candidate, 'serial': '20261012T000000Z'}))
+
+    def service(self, directory, port):
+        directory = directory.resolve()
+        directory.mkdir(parents=True)
+        (directory / 'registry').mkdir()
+        publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                       '-subj', '/CN=shared-checkouts', '-addext', 'subjectAltName=IP:127.0.0.1',
+                       '-keyout', directory / 'tls.key', '-out', directory / 'tls.crt'])
+        config = dict(authority=str(directory), registry=str(directory / 'registry'), port=port,
+                      certificate=str(directory / 'tls.crt'), key=str(directory / 'tls.key'), token='shared-checkouts')
+        (directory / 'publisher.json').write_text(json.dumps(config))
+        return directory, config
+
+    def free_port(self):
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            return reservation.getsockname()[1]
+
+    def test_live_legacy_publisher_is_shared_across_checkouts_preserving_trust(self):
+        other = Issuance('test_signed_ab_preserves_both_releases')
+        other.nonce = '43' * 32
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        first = (self.root / 'first').resolve()
+        second = (self.root / 'second').resolve()
+        second.mkdir()
+        port = self.free_port()
+        legacy, service = self.service(first / ('build/permit-service/lima-%d' % port), port)
+        shared = self.root.resolve() / 'state' / str(port)
+        certificate = (legacy / 'tls.crt').read_bytes()
+        self.config.update(service=str(legacy), channel='https://192.168.5.2:%d/_local/first' % port)
+        other.config.update(service=str(shared), channel='https://10.0.2.2:%d/_local/second' % port)
+        clients = []
+        for fixture in (self, other):
+            client = fixture.root / 'publisher.json'
+            client.write_text(json.dumps(fixture.config))
+            clients.append(client)
+        tool = [sys.executable, str(Path('tools/local-publisher').resolve())]
+        try:
+            publisher.run(tool + ['start', clients[0]])
+            with patch.object(publisher, 'worktrees', return_value=[second, first]):
+                publisher.prepare_service(shared, second)
+            self.assertTrue(legacy.is_symlink())
+            self.assertEqual(shared, legacy.resolve())
+            self.assertEqual(certificate, (shared / 'tls.crt').read_bytes())
+            config = json.loads((shared / 'publisher.json').read_text())
+            self.assertEqual(service['token'], config['token'])
+            self.assertTrue(publisher.control(config))
+            self.assertEqual(config, publisher.service_config(shared, port))
+            # A listener owns the migrated lifetime lock after the handover.
+            with (shared / 'publisher.lock').open('a+b') as guard:
+                with self.assertRaises(BlockingIOError):
+                    publisher.fcntl.flock(guard, publisher.fcntl.LOCK_EX | publisher.fcntl.LOCK_NB)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(lambda _: publisher.prepare_service(shared, second), range(8)))
+            config['program'] = str(self.root / 'previous-helper.py')
+            publisher.atomic(shared / 'publisher.json', json.dumps(config).encode())
+            publisher.prepare_service(shared, second)
+            config = json.loads((shared / 'publisher.json').read_text())
+            self.assertEqual(str(Path('tools/local-publisher').resolve()), config['program'])
+            self.assertEqual(certificate, (shared / 'tls.crt').read_bytes())
+            # The reloaded listener no longer depends on the old checkout.
+            legacy.unlink()
+            self.assertTrue(publisher.control(config))
+            publisher.run(tool + ['start', clients[1]])
+            registry = shared / 'registry'
+            self.assertEqual({self.factory['machine'], other.factory['machine']},
+                             {p.stem for p in registry.glob('*.json')})
+            context = ssl.create_default_context(cafile=config['certificate'])
+            for fixture in (self, other):
+                route = '/aarch64/permits/' + fixture.factory['machine'] + '/' + B + '.permit?from=' + \
+                    fixture.factory['anchor'] + '&retain=' + A
+                with urlopen('https://127.0.0.1:%d' % port + route, context=context, timeout=10) as reply:
+                    self.assertEqual(fixture.factory['machine'], publisher.record(reply.read())['machine'])
+            legacy.symlink_to(shared, target_is_directory=True)
+            publisher.run(tool + ['stop', clients[0]])
+            self.assertTrue(publisher.control(config))
+            self.assertEqual({other.factory['machine']}, {p.stem for p in registry.glob('*.json')})
+            publisher.run(tool + ['stop', clients[1]])
+            self.assertFalse(publisher.healthy(config))
+        finally:
+            path = (shared if shared.exists() else legacy) / 'publisher.json'
+            publisher.run(tool + ['stop', path])
+
+    def test_legacy_discovery_includes_linked_worktrees_with_spaces(self):
+        root = self.root.resolve()
+        checkout, linked = root / 'main checkout', root / 'linked checkout'
+        publisher.run(['git', 'init', checkout])
+        publisher.run(['git', '-C', checkout, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                       '-c', 'user.name=publisher fixture', '-c', 'user.email=fixture@example.invalid',
+                       'commit', '--allow-empty', '-m', 'fixture'])
+        publisher.run(['git', '-C', checkout, 'worktree', 'add', '--detach', linked, 'HEAD'])
+        self.assertEqual({checkout, linked}, set(publisher.worktrees(linked)))
+
+    def test_shared_state_refuses_an_unrelated_listener_without_mutating_it(self):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            shared = self.root.resolve() / 'state' / str(port)
+            with patch.object(publisher, 'worktrees', return_value=[self.root.resolve()]):
+                with self.assertRaisesRegex(RuntimeError, 'already occupied'):
+                    publisher.prepare_service(shared, self.root)
+            self.assertFalse(shared.exists())
+            self.assertEqual(port, listener.getsockname()[1])
+
+    def test_shared_listener_routes_provider_images_by_the_signed_channel_host(self):
+        other = Issuance('test_signed_ab_preserves_both_releases')
+        other.nonce = '43' * 32
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        directory, config = self.service(self.root / 'service', 0)
+        server = publisher.Server(config)
+        port = server.server_port
+        fixtures = [(self, '192.168.5.2', b'lima'), (other, '10.0.2.2', b'qemu')]
+        for fixture, host, content in fixtures:
+            fixture.config['channel'] = 'https://%s:%d/playground' % (host, port)
+            (directory / 'registry' / (fixture.factory['machine'] + '.json')).write_text(json.dumps(fixture.config))
+            head = fixture.public / 'aarch64/latest.json'
+            head.parent.mkdir()
+            head.write_bytes(content)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            context = ssl.create_default_context(cafile=config['certificate'])
+            for host, expected in [('192.168.5.2', b'lima'), ('10.0.2.2', b'qemu'), ('127.0.0.1', None)]:
+                connection = http.client.HTTPSConnection('127.0.0.1', port, context=context, timeout=10)
+                try:
+                    connection.request('GET', '/playground/aarch64/latest.json', headers={'Host': '%s:%d' % (host, port)})
+                    reply = connection.getresponse()
+                    if expected is None:
+                        self.assertEqual(404, reply.status)
+                        reply.read()
+                    else:
+                        self.assertEqual(200, reply.status)
+                        self.assertEqual(expected, reply.read())
+                finally:
+                    connection.close()
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_multiple_stopped_legacy_identities_are_not_silently_combined(self):
+        port = self.free_port()
+        checkout = self.root.resolve() / 'checkout'
+        legacy = []
+        for provider in ('lima', 'qemu'):
+            directory, config = self.service(checkout / ('build/permit-service/%s-%d' % (provider, port)), port)
+            legacy.append((directory, config))
+        shared = self.root.resolve() / 'state' / str(port)
+        with patch.object(publisher, 'worktrees', return_value=[checkout]):
+            with self.assertRaisesRegex(ValueError, 'multiple legacy'):
+                publisher.prepare_service(shared, checkout)
+        self.assertFalse(shared.exists())
+        for directory, config in legacy:
+            self.assertEqual(config, json.loads((directory / 'publisher.json').read_text()))
+
+    def test_failed_alias_creation_restores_the_legacy_identity(self):
+        port = self.free_port()
+        checkout = self.root.resolve() / 'checkout'
+        legacy, config = self.service(checkout / ('build/permit-service/lima-%d' % port), port)
+        shared = self.root.resolve() / 'state' / str(port)
+        with patch.object(publisher, 'worktrees', return_value=[checkout]), \
+                patch.object(Path, 'symlink_to', side_effect=OSError('fixture alias failure')):
+            with self.assertRaisesRegex(OSError, 'fixture alias failure'):
+                publisher.prepare_service(shared, checkout)
+        self.assertFalse(shared.exists())
+        self.assertFalse(legacy.is_symlink())
+        self.assertEqual(config, publisher.service_config(legacy, port))
 
     def test_signed_ab_preserves_both_releases(self):
         bundle = self.issue()
@@ -247,6 +418,10 @@ class Issuance(unittest.TestCase):
         (registry / ('46' * 32 + '.json')).symlink_to(registry / (self.factory['machine'] + '.json'))
         with self.assertRaises(ValueError):
             shared.for_machine('46' * 32)
+        with self.assertRaisesRegex(ValueError, 'invalid registration'):
+            shared.artifact('/playground/aarch64/latest.json')
+        for nonce in ('45', '46'):
+            (registry / (nonce * 32 + '.json')).unlink()
         head = self.public / 'aarch64/latest.json'
         head.parent.mkdir()
         head.write_text('{"vendor":"shared"}')

@@ -180,6 +180,30 @@ pub const Built = struct {
     stub: []const u8,
 };
 
+/// Locally signed update channels belong to a checkout, including when two
+/// checkouts use the same machine or form name on the shared host listener.
+pub fn localChannel(
+    gpa: Allocator,
+    directory: []const u8,
+    kind: []const u8,
+    name: []const u8,
+) ![]const u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(directory, &digest, .{});
+    return gpa.print("{s}/{x}/{s}", .{ kind, digest, name });
+}
+
+test "local update channels isolate like-named machines in separate checkouts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const first = try localChannel(gpa, "/one", "_local", "werewolf-run");
+    const again = try localChannel(gpa, "/one", "_local", "werewolf-run");
+    const other = try localChannel(gpa, "/two", "_local", "werewolf-run");
+    try std.testing.expectEqualStrings(first, again);
+    try std.testing.expect(!std.mem.eql(u8, first, other));
+}
+
 /// localBundle builds o's form into a protected bundle as
 /// release/build-protected builds werewolf's: Secure Boot, the TPM's
 /// firmware authority and IPE, on provider's permit endpoint, but signed
@@ -206,6 +230,10 @@ pub fn localBundle(
         "{s}: a protected image's form is named a-z, 0-9 and -, as its update channel is",
         .{o.form},
     );
+    const port = try @import("download.zig").permitPort(gpa);
+    // Resolve the host socket before a cold kernel build. Every checkout and
+    // provider shares its transport identity, independently of VM authorities.
+    _ = try sharedTls(io, gpa, steps, port);
     const prerequisites = try @import("prerequisites.zig").resolve(io, gpa, steps, arch, why);
     const boot = try secureboot.signer(io, gpa, steps, try howl.keysDir(
         io,
@@ -214,7 +242,6 @@ pub fn localBundle(
         try gpa.print("build/boot/{t}", .{arch}),
     ), false);
     const host = gateway(provider);
-    const port = try @import("download.zig").permitPort(gpa);
     const channel = try gpa.print("https://{s}:{d}/{s}", .{ host, port, channel_path });
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const work = try gpa.print("{s}/build/bundles/{t}-{t}/{s}", .{ cwd, provider, arch, form });
@@ -361,7 +388,12 @@ pub fn resumeLocal(
     options.first = .{ .name = "Building the protected image", .short = "image" };
     var steps: progress.Steps = try .init(io, gpa, why, options);
     // Each machine follows its own builds, never another's of a like-named form.
-    const channel = try gpa.print("_local/{s}", .{name});
+    const channel = if (existing) |p| retained: {
+        const uri = try std.Uri.parse(
+            p.local.?.ipe_updates orelse return error.ExistingImageAuthorityMismatch,
+        );
+        break :retained std.mem.trimStart(u8, try uri.path.toRawMaybeAlloc(gpa), "/");
+    } else try localChannel(gpa, try std.process.currentPathAlloc(io, gpa), "_local", name);
     const b = try localBundle(io, gpa, &steps, o.*, o.on.?, arch, channel, null, why);
     _ = try steps.finish();
     const p = existing orelse {
@@ -550,12 +582,37 @@ fn sharedTls(
     io: Io,
     gpa: Allocator,
     steps: *progress.Steps,
-    provider: howl.Platform,
     port: u16,
 ) !SharedTls {
     const cwd = try std.process.currentPathAlloc(io, gpa);
-    const dir = try gpa.print("{s}/build/permit-service/{t}-{d}", .{ cwd, provider, port });
-    try Dir.cwd().createDirPath(io, dir);
+    const root = try gpa.print("{s}/permit-service", .{try howl.dataDir(io, gpa)});
+    try Dir.cwd().createDirPath(io, root);
+    const helper = @import("files").local_publisher;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(helper, &digest, .{});
+    const program = try gpa.print("{s}/publisher-{x}.py", .{ root, digest });
+    {
+        const helper_guard = try Dir.cwd().createFile(io, try gpa.print(
+            "{s}/helper.lock",
+            .{root},
+        ), .{
+            .truncate = false,
+            .permissions = .fromMode(0o600),
+        });
+        defer helper_guard.close(io);
+        try helper_guard.lock(io, .exclusive);
+        defer helper_guard.unlock(io);
+        if (Dir.cwd().readFileAlloc(io, program, gpa, .limited(128 << 10))) |held| {
+            if (!std.mem.eql(u8, helper, held)) return error.WrongPublisherHelper;
+        } else |err| {
+            if (err != error.FileNotFound) return err;
+            try enrollment.durable(io, program, helper);
+        }
+    }
+    const dir = try gpa.print("{s}/{d}", .{ root, port });
+    if (!(try steps.exec(&.{.{ .argv = &.{
+        "python3", program, "prepare-service", dir, cwd,
+    } }}, .{})).ok) return error.PermitServiceStateFailed;
     try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{});
     const guard = try Dir.cwd().createFile(
         io,
@@ -610,6 +667,7 @@ fn sharedTls(
             .port = port,
             .certificate = cert,
             .key = key,
+            .program = program,
             .token = &std.fmt.bytesToHex(token, .lower),
             .refresh_seconds = 0,
         }, .{}));
@@ -656,7 +714,7 @@ fn importImage(
         code,
         owner,
     );
-    const tls = try sharedTls(io, gpa, steps, o.on.?, m.permit_port);
+    const tls = try sharedTls(io, gpa, steps, m.permit_port);
     const slot = try gpa.print("{s}/initial-slot", .{authority});
     try Dir.cwd().createDir(io, slot, .fromMode(0o700));
     try enrollment.durable(io, try gpa.print("{s}/release.id", .{slot}), &verified.release);

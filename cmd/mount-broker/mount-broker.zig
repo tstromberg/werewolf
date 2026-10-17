@@ -1249,6 +1249,7 @@ test "installer runtime accepts no paths and belongs only to the updater" {
 
 test "each broker operation belongs to one socketpair role" {
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("installer-runtime"));
+    try std.testing.expectEqual(broker.Role.updater, try roleForOp("reboot"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-status"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-commit"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("esp-disarm"));
@@ -1440,4 +1441,21 @@ test "staged inputs require trusted ownership, safe modes and one link" {
     try testing.expect(!validStagedFile(file));
     file.mode = linux.S.IFIFO | 0o600;
     try testing.expect(!validStagedFile(file));
+}
+
+test "reboot requires the updater role and an exact request" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var log: Log = .{};
+    var out: [1024]u8 = undefined;
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "reboot", &out));
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "reboot", &out));
+    try testing.expectError(error.BadRequest, handleRequest(&log, .updater, "reboot extra", &out));
+}
+
+test "EFI versions contain only the canonical serial and advance" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const first = try espVersion(0);
+    const secs = try policy.parseSerial(&first);
+    const next = try espVersion(secs);
+    try testing.expect(try policy.parseSerial(&next) > secs);
 }

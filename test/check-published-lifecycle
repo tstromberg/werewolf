@@ -194,7 +194,11 @@ def launch(args, label):
 
 
 def status(name):
-    command = ('/usr/lib/werewolf/posture --json; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
+    # Consume the boot service's report, as slot-keep does. Re-running every
+    # refusal probe on each poll floods audit while the startup scan is running.
+    # /run is fresh per boot; boot ID and the actual TPM measurements below
+    # still bind this evidence to the currently running signed release.
+    command = ('cat /run/werewolf/posture.json || exit 1; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
                'printf "CMDLINE "; cat /proc/cmdline; printf "COMMITTED "; '
                'if test -e /run/werewolf/committed; then echo yes; else echo no; fi')
     reply = ssh(name, command, name + '-status', check=False, timeout=15)
@@ -399,7 +403,7 @@ finally:
     server.server_close()
     shutil.rmtree(lima_home, ignore_errors=True)
     shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
-    shutil.rmtree(consumer / 'build/permit-service', ignore_errors=True)
+    shutil.rmtree(consumer / 'data/howl/permit-service', ignore_errors=True)
     identity.unlink(missing_ok=True)
     key.unlink(missing_ok=True)
     proxy_work.cleanup()

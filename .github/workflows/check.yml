@@ -197,6 +197,21 @@ jobs:
     # This job builds and boots the entire catalog, including cold source builds.
     timeout-minutes: 360
     steps:
+      - name: Make leftover recipe workspaces removable
+        # Go's module cache contains read-only directories. A failed Melange
+        # build can leave them here, preventing checkout from cleaning the
+        # persistent runner. Use no code from the previous checkout or sudo.
+        run: |
+          for relative in build build/vendor build/vendor/melange-tmp; do
+            path="$GITHUB_WORKSPACE/$relative"
+            if test -L "$path"; then
+              echo "Refusing redirected recipe workspace: $path" >&2
+              exit 1
+            fi
+          done
+          if test -d "$GITHUB_WORKSPACE/build/vendor/melange-tmp"; then
+            chmod -R u+rwX "$GITHUB_WORKSPACE/build/vendor/melange-tmp"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
