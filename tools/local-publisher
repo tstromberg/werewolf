@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -122,7 +123,7 @@ class Publisher:
                 atomic(cached, bundle)
                 return bundle
 
-    def artifact(self, route):
+    def artifact(self, route, authority=None):
         parts = route.split('/')
         if len(parts) not in [3, 4] or parts[0] != '' or parts[1] != self.config['arch']:
             raise ValueError('invalid path')
@@ -158,21 +159,34 @@ class Registry:
             raise ValueError('foreign registration')
         return issuer
 
-    def artifact(self, route):
+    def artifact(self, route, authority=None):
         # Each immutable channel has a shared public cache, independent of its issuers.
         registrations = sorted(self.directory.glob('*.json'))
         if len(registrations) > MAX_MACHINES:
             raise ValueError('registration limit')
+        matches = []
         for path in registrations:
             if path.is_symlink() or path.stat().st_size > 65536:
                 raise ValueError('invalid registration')
             config = json.loads(path.read_text())
             prefix = urlsplit(config['channel']).path.rstrip('/')
-            if route.startswith(prefix + '/'):
-                try:
-                    return Publisher(config).artifact(route[len(prefix):])
-                except FileNotFoundError:
-                    continue
+            if route.startswith(prefix + '/' + config['arch'] + '/'):
+                matches.append((config, route[len(prefix):]))
+        selected = [(config, path) for config, path in matches
+                    if urlsplit(config['channel']).netloc == authority]
+        if not selected:
+            # Host-side inspection may use loopback, but cannot guess between
+            # Lima and QEMU images whose signed channels have the same path.
+            if authority and urlsplit('https://' + authority).hostname not in ('127.0.0.1', 'localhost'):
+                raise ValueError('undeclared channel host')
+            selected = matches
+        if len({config['channel'] for config, _ in selected}) > 1:
+            raise ValueError('ambiguous channel host')
+        for config, path in selected:
+            try:
+                return Publisher(config).artifact(path)
+            except FileNotFoundError:
+                continue
         raise ValueError('undeclared channel')
 
 
@@ -242,7 +256,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if route.query:
                 raise ValueError('unexpected query')
-            path = self.server.publisher.artifact(route.path)
+            path = self.server.publisher.artifact(route.path, self.headers.get('Host'))
             with path.open('rb') as stream:
                 self.send_response(200)
                 self.send_header('Content-Length', str(os.fstat(stream.fileno()).st_size))
@@ -286,13 +300,139 @@ def control(config, stop=False):
         connection.close()
 
 
+def listening(port):
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.25):
+            return True
+    except ConnectionRefusedError:
+        return False
+
+
+def worktrees(directory):
+    """Legacy state may belong to another linked checkout. Git is optional."""
+    roots = [Path(directory).resolve()]
+    try:
+        result = subprocess.run(['git', '-C', str(directory), 'worktree', 'list', '--porcelain', '-z'],
+                                capture_output=True, timeout=10)
+        if result.returncode == 0:
+            roots += [Path(os.fsdecode(field[9:])) for field in result.stdout.split(b'\0')
+                      if field.startswith(b'worktree ')]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return list(dict.fromkeys(roots))
+
+
+def service_config(directory, port):
+    path = directory / 'publisher.json'
+    if directory.is_symlink() or path.is_symlink() or not path.is_file():
+        return None
+    if directory.stat().st_uid != os.getuid() or path.stat().st_size > 65536:
+        raise ValueError('invalid host publisher state')
+    config = json.loads(path.read_text())
+    if config.get('port') != port or config.get('authority') != str(directory) or \
+            config.get('registry') != str(directory / 'registry') or \
+            config.get('certificate') != str(directory / 'tls.crt') or config.get('key') != str(directory / 'tls.key'):
+        raise ValueError('invalid host publisher identity')
+    return config
+
+
+def healthy(config):
+    try:
+        return control(config)
+    except OSError:
+        return False
+
+
+def reload_service(config, path):
+    program = [sys.executable, config['program']]
+    run(program + ['stop', path])
+    run(program + ['start', path])
+
+
+def prepare_service(directory, checkout):
+    """One user-owned identity per host socket, shared by all providers/checkouts.
+
+    Adopt an authenticated legacy identity without changing certificates or
+    VM enrollment. Reload its listener so it no longer needs checkout paths;
+    old machine configurations retain aliases to the same shared state.
+    """
+    directory = Path(directory)
+    if not directory.is_absolute() or not directory.name.isdecimal() or not 1 <= int(directory.name) <= 65535:
+        raise ValueError('host publisher state must be an absolute directory named by its port')
+    port = int(directory.name)
+    directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (directory.parent / (directory.name + '.lock')).open('a+b') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        if directory.is_symlink():
+            raise ValueError('host publisher state cannot be a symlink')
+        if directory.exists():
+            config = service_config(directory, port)
+            active = config is not None and healthy(config)
+            if listening(port) and not active:
+                raise RuntimeError('host publisher port %d has a listener with a different TLS or control identity' % port)
+            program = str(Path(__file__).resolve())
+            if config and config.get('program') != program:
+                with (directory / 'service.lock').open('a+b') as service_guard, \
+                        (directory / 'registration.lock').open('a+b') as registration_guard:
+                    fcntl.flock(service_guard, fcntl.LOCK_EX)
+                    fcntl.flock(registration_guard, fcntl.LOCK_EX)
+                    config['program'] = program
+                    atomic(directory / 'publisher.json', json.dumps(config).encode())
+                    if active:
+                        reload_service(config, directory / 'publisher.json')
+            return
+        candidates = []
+        for root in worktrees(checkout):
+            for provider in ('lima', 'qemu'):
+                legacy = root / 'build/permit-service' / ('%s-%d' % (provider, port))
+                config = service_config(legacy, port)
+                if config:
+                    candidates.append((legacy, config))
+        active = [(legacy, config) for legacy, config in candidates if healthy(config)]
+        if listening(port) and not active:
+            raise RuntimeError('host publisher port %d is already occupied; no authenticated legacy service was found' % port)
+        selected = active or candidates
+        if len(selected) > 1:
+            raise ValueError('multiple legacy host publisher identities; start the service to retain before migration')
+        if not selected:
+            directory.mkdir(mode=0o700)
+            return
+        legacy, config = selected[0]
+        with (legacy / 'service.lock').open('a+b') as service_guard, \
+                (legacy / 'registration.lock').open('a+b') as registration_guard:
+            fcntl.flock(service_guard, fcntl.LOCK_EX)
+            fcntl.flock(registration_guard, fcntl.LOCK_EX)
+            saved = (legacy / 'publisher.json').read_bytes()
+            legacy.rename(directory)
+            try:
+                legacy.symlink_to(directory, target_is_directory=True)
+                config.update(authority=str(directory), registry=str(directory / 'registry'),
+                              certificate=str(directory / 'tls.crt'), key=str(directory / 'tls.key'),
+                              program=str(Path(__file__).resolve()))
+                atomic(directory / 'publisher.json', json.dumps(config).encode())
+            except BaseException:
+                if legacy.is_symlink():
+                    legacy.unlink()
+                directory.rename(legacy)
+                if (legacy / 'publisher.json').read_bytes() != saved:
+                    atomic(legacy / 'publisher.json', saved)
+                raise
+            if active:
+                reload_service(config, directory / 'publisher.json')
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['start', 'serve', 'stop', 'publish'])
+    parser.add_argument('action', choices=['start', 'serve', 'stop', 'publish', 'prepare-service'])
     parser.add_argument('config', type=Path)
     parser.add_argument('source', type=Path, nargs='?')
     args = parser.parse_args()
     os.umask(0o077)
+    if args.action == 'prepare-service':
+        if args.source is None:
+            parser.error('prepare-service needs the current checkout directory')
+        prepare_service(args.config, args.source)
+        return
     config = json.loads(args.config.read_text())
     if args.action == 'publish':
         publish(config, args.source)
@@ -316,8 +456,9 @@ def main():
                     return
             else:
                 raise ValueError('a machine registration cannot serve directly')
-            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), args.action,
-                                     str(service / 'publisher.json')], check=True)
+            service_path = service / 'publisher.json'
+            program = json.loads(service_path.read_text()).get('program', str(Path(__file__).resolve()))
+            result = subprocess.run([sys.executable, program, args.action, str(service_path)], check=True)
             return
     if args.action == 'stop':
         try:
@@ -350,11 +491,10 @@ def main():
                     if refresher:
                         refresher.join()
         return
-    try:
-        if control(config):
-            return
-    except OSError:
-        pass
+    if healthy(config):
+        return
+    if listening(config['port']):
+        raise RuntimeError('host publisher port %d has a listener with a different TLS or control identity' % config['port'])
     with (Path(config['authority']) / 'publisher.log').open('ab') as log:
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve', str(args.config.resolve())],
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)

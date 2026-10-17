@@ -78,7 +78,7 @@ ssh_wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\nos.execv(' + repr
     repr([ssh_binary, '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', str(identity)]) + '+sys.argv[1:])\n')
 ssh_wrapper.chmod(0o755)
 lima_home = Path(tempfile.mkdtemp(prefix='ww-production-run-', dir='/tmp'))
-env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(ca),
+env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(ca), XDG_DATA_HOME=str(consumer / 'data'),
            WEREWOLF_BOOT_MIRROR='https://127.0.0.1:%d' % server.server_port,
            PATH=str(wrappers) + os.pathsep + os.environ['PATH'], PYTHONDONTWRITEBYTECODE='1')
 roots = work / 'mirror-roots.pem'
@@ -189,6 +189,6 @@ finally:
     server.server_close()
     shutil.rmtree(lima_home, ignore_errors=True)
     shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
-    shutil.rmtree(consumer / 'build/permit-service', ignore_errors=True)
+    shutil.rmtree(consumer / 'data/howl/permit-service', ignore_errors=True)
     identity.unlink(missing_ok=True)
     key.unlink(missing_ok=True)

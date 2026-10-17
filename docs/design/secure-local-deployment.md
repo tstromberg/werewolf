@@ -9,8 +9,7 @@ firmware enrollment.
 
 ## Background
 
-The guest protocol and QEMU x86_64 lifecycle pass; protected Lima uses QEMU by default.
-The secured profile combines host enrollment, signing and permit issuance.
+The QEMU lifecycle passes; Lima uses QEMU. Both combine enrollment and permit issuance.
 
 ## Goals
 
@@ -67,6 +66,9 @@ retain recovery credentials and report the partial state rather than reset silen
 
 ### Images and permits
 
+A host listener is shared across checkouts/providers; its TLS identity and registry
+live in `$XDG_DATA_HOME/howl/permit-service/PORT`. Legacy identities retain certificates
+and VM enrollment during adoption. New local channels are scoped by checkout.
 Use one host-held signer across a machine's authorized release images. New roots select
 the enrolled firmware PK; legacy roots retain their embedded TPM verification key. The
 image manifest, embedded UKI identity and host PCR mapping must agree, and boot, IPE and

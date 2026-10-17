@@ -399,7 +399,7 @@ finally:
     server.server_close()
     shutil.rmtree(lima_home, ignore_errors=True)
     shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
-    shutil.rmtree(consumer / 'build/permit-service', ignore_errors=True)
+    shutil.rmtree(consumer / 'data/howl/permit-service', ignore_errors=True)
     identity.unlink(missing_ok=True)
     key.unlink(missing_ok=True)
     proxy_work.cleanup()
