@@ -95,7 +95,7 @@ class Images(unittest.TestCase):
         (path / 'boot.json.sig').write_bytes(catalog.sign((path / 'boot.json').read_bytes(), self.key))
         return path
 
-    def run_pipeline(self, serial, statuses=None, gated=True, focused=False):
+    def run_pipeline(self, serial, statuses=None, gated=True, focused=False, flat=False):
         """One workflow run: plan, verified evidence, a gated bundle, export and publish."""
         work = self.root / ('run-' + serial)
         statuses = statuses or {}
@@ -104,9 +104,11 @@ class Images(unittest.TestCase):
                         commit='b' * 40, serial=serial) for form in selected]
         if not focused:
             targets.append(dict(form='nginx', arch='x86_64', status='resolution failed'))
-        images.write(work / 'snapshots/inputs-x86_64-1/plan.json', dict(arch='x86_64', shard=1, targets=targets))
-        verified = work / 'verified/verified-x86_64-1'
-        bundle = self.bundle(work / 'gated/gated-qemu-x86_64/bundle', serial)
+        snapshots = work / ('snapshots' if flat else 'snapshots/inputs-x86_64-1')
+        images.write(snapshots / 'plan.json', dict(arch='x86_64', shard=1, targets=targets))
+        verified = work / ('verified' if flat else 'verified/verified-x86_64-1')
+        gates = work / ('gated' if flat else 'gated/gated-qemu-x86_64')
+        bundle = self.bundle(gates / 'bundle', serial)
         results = []
         for target in targets:
             results.append(dict(target, status='passed' if target['status'] == 'build' else target['status']))
@@ -134,6 +136,37 @@ class Images(unittest.TestCase):
 
     def rows(self):
         return images.index(self.store)
+
+    def test_single_artifact_downloads_publish_with_flat_directories(self):
+        for offset, focused in enumerate((False, True)):
+            with self.subTest(focused=focused):
+                serial = (datetime.datetime.strptime(self.serial, '%Y%m%dT%H%M%SZ') +
+                          datetime.timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')
+                outputs = self.root / ('flat-outputs-' + str(offset))
+                with patch.dict(os.environ, GITHUB_OUTPUT=str(outputs)):
+                    failed, listing = self.run_pipeline(serial, focused=focused, flat=True)
+                self.assertEqual(not focused, failed)  # The full run includes an unresolved nginx.
+                self.assertEqual('targets=1\nreleased=true\n', outputs.read_text())
+                self.assertEqual(['playground'], [target['form'] for target in listing])
+                row = self.rows()[images.FOCUSED_TARGET]
+                self.assertEqual(catalog.PUBLISHED, row['status'])
+                self.assertEqual(serial, row['latest']['serial'])
+                self.assertTrue((self.root / 'store' / row['latest']['object'] / 'disk.qcow2').is_file())
+
+    def test_missing_plans_fail_before_changing_the_catalog(self):
+        listing = self.root / 'exported.json'
+        images.write(listing, [])
+        with patch.object(self.store, 'upload') as upload:
+            with self.assertRaisesRegex(ValueError, 'plans are missing'):
+                images.publish(self.root / 'snapshots', self.root / 'verified', set(), listing, self.store,
+                               focused=True)
+            upload.assert_not_called()
+
+    def test_mixed_artifact_layouts_are_rejected(self):
+        images.write(self.root / 'snapshots/plan.json', {})
+        images.write(self.root / 'snapshots/inputs-x86_64-1/plan.json', {})
+        with self.assertRaisesRegex(ValueError, 'mixed flat and named'):
+            images.plans(self.root / 'snapshots')
 
     def test_gated_target_publishes_and_every_target_is_cataloged(self):
         outputs = self.root / 'outputs'

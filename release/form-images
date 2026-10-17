@@ -421,10 +421,24 @@ def gates(environ, focused=False):
     return dict(include=include)
 
 
+def artifact_directories(root, pattern, marker):
+    """download-artifact flattens a single match, even with merge-multiple false."""
+    root = Path(root)
+    directories = sorted(path.parent for path in root.glob(pattern + '/' + marker))
+    if (root / marker).is_file():
+        if directories:
+            raise ValueError('mixed flat and named form image artifacts')
+        return [root]
+    return directories
+
+
 def plans(snapshots):
     targets = {}
-    for path in sorted(Path(snapshots).glob('*/plan.json')):
-        plan = json.loads(path.read_text())
+    directories = artifact_directories(snapshots, 'inputs-*', 'plan.json')
+    if not directories:
+        raise ValueError('form image plans are missing')
+    for directory in directories:
+        plan = json.loads((directory / 'plan.json').read_text())
         for target in plan['targets']:
             key = (target['form'], target['arch'])
             if key in targets or target['arch'] != plan['arch']:
@@ -435,9 +449,9 @@ def plans(snapshots):
 
 def verified_results(verified):
     results = {}
-    for path in sorted(Path(verified).glob('verified-*/results.json')):
-        for result in json.loads(path.read_text()):
-            results[(result['form'], result['arch'])] = dict(result, directory=path.parent / result['form'])
+    for directory in artifact_directories(verified, 'verified-*', 'results.json'):
+        for result in json.loads((directory / 'results.json').read_text()):
+            results[(result['form'], result['arch'])] = dict(result, directory=directory / result['form'])
     return results
 
 
@@ -509,7 +523,7 @@ def export(snapshots, verified, gated, store, assets, listing):
     assets = Path(assets).resolve()
     assets.mkdir(parents=True, exist_ok=False)
     exported = []
-    for directory in sorted(Path(gated).glob('gated-*')):
+    for directory in artifact_directories(gated, 'gated-*', 'gates.json'):
         try:
             exported.append(export_one(directory, targets, results, previous, store, assets))
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
