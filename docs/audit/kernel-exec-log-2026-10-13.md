@@ -65,3 +65,19 @@ Kernel references: [rule
 evaluation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditsc.c), [rule
 installation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditfilter.c),
 [audit UAPI](https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/audit.h).
+
+
+## Follow-up: publishing gate, 2026-10-17
+
+The newer 7.2.11-werewolf kernel's publishing gate failed its second VM's
+initial commit. The console captured the exact probe child (160), but
+kauditd delivered its record after the 100 ms check had finished. The same
+boot logged `audit_backlog=65 > audit_backlog_limit=64` and lost records
+while the startup service and operator posture scans overlapped.
+
+Init now reserves a bounded 8192-record backlog before locking audit.
+The refused-exec rule, kernel-origin matching and 100 ms deadline remain
+unchanged. Four simultaneous full posture scans in a protected guest all
+matched their own refused-exec records. The concurrent posture regression
+now requires that result for every scan, alongside its existing attacks.
+This addresses the observed boot burst; missing evidence still fails.
