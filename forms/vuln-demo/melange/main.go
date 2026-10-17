@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +22,8 @@ import (
 
 //go:embed page.html
 var page []byte
+
+var pageCSP = dashboardPolicy(page)
 
 const eventSocket = "/run/svc/vuln-console/events.sock"
 
@@ -55,9 +59,16 @@ func main() {
 	go monitorSeal("/run/werewolf/seal/refused", j)
 	go receiveEvents(eventSocket, j)
 	for _, t := range targets {
-		go func() { log.Fatal(serveHTTP(t.public, requestLog(t.name, proxy(t.backend, j), j), false)) }()
+		go func() { log.Fatal(serveHTTP(t.public, requestLog(t.name, proxy(t.backend, j), j), false, t.name, j)) }()
 	}
-	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	j.add("start", "dashboard", "HTTP :8080; Solr :8983; n8n :5678; Langflow :7860; SSH demo :22")
+	log.Fatal(serveHTTP(*address, requestLog("dashboard", dashboard(j), j), true, "dashboard", j))
+}
+
+func dashboard(j *journal) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", pageCSP)
 		switch r.URL.Path {
 		case "/":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -75,17 +86,36 @@ func main() {
 			http.NotFound(w, r)
 		}
 	})
-	j.add("start", "dashboard", "HTTP :8080; Solr :8983; n8n :5678; Langflow :7860; SSH demo :22")
-	log.Fatal(serveHTTP(*address, requestLog("dashboard", mux, j), true))
 }
 
-func serveHTTP(address string, handler http.Handler, streaming bool) error {
+func dashboardPolicy(html []byte) string {
+	policy := "default-src 'none'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+	for _, tag := range []string{"script", "style"} {
+		_, rest, ok := bytes.Cut(html, []byte("<"+tag+">"))
+		if !ok {
+			continue
+		}
+		body, _, ok := bytes.Cut(rest, []byte("</"+tag+">"))
+		if !ok {
+			continue
+		}
+		digest := sha256.Sum256(body)
+		policy += "; " + tag + "-src 'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'"
+	}
+	return policy
+}
+
+func serveHTTP(address string, handler http.Handler, streaming bool, name string, j *journal) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
 	timeout := 30 * time.Second
 	if streaming {
 		timeout = 0
 	}
 	return (&http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 30 * time.Second, WriteTimeout: timeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10}).ListenAndServe()
+		ReadTimeout: 30 * time.Second, WriteTimeout: timeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10}).Serve(wireListener{listener, name, j})
 }
 
 func basicProbe(r *http.Request) bool {
@@ -126,7 +156,14 @@ func proxy(backend string, j *journal) http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	p := httputil.NewSingleHostReverseProxy(u)
+	p := &httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		r.SetURL(u)
+		r.Out.Host = r.In.Host
+		// The listener selects the backend; query text is never interpreted
+		// here. Preserve even malformed query parameters as received.
+		r.Out.URL.RawQuery = r.In.URL.RawQuery
+		r.SetXForwarded()
+	}}
 	p.Transport = &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 20 * time.Second, MaxIdleConnsPerHost: 8}
 	p.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -197,8 +234,31 @@ func receiveEvents(path string, j *journal) {
 			return
 		}
 		var e event
-		if json.Unmarshal(buffer[:n], &e) == nil && (e.Kind == "ssh" || e.Kind == "app") {
-			j.add(e.Kind, clip(e.Service, 64), strings.TrimSpace(e.Message))
+		if json.Unmarshal(buffer[:n], &e) == nil {
+			recordServiceEvent(j, e)
 		}
 	}
+}
+
+func recordServiceEvent(j *journal, e event) {
+	if e.Kind != "ssh" && e.Kind != "app" {
+		return
+	}
+	kind := e.Kind
+	if kind == "app" {
+		kind = appEventKind(e.Message)
+	}
+	// A compromised service controls its payload, including its label. Keep
+	// that namespace distinct from records read from the protected kernel log.
+	j.add(kind, "service/"+clip(e.Service, 56), strings.TrimSpace(e.Message))
+}
+
+func appEventKind(message string) string {
+	var record struct {
+		Event string `json:"event"`
+	}
+	if at := strings.IndexByte(message, '{'); at >= 0 && json.Unmarshal([]byte(message[at:]), &record) == nil && record.Event == "runtime-denial" {
+		return "violation"
+	}
+	return "app"
 }

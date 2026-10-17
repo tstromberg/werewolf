@@ -1,7 +1,5 @@
 base: node
 
-allow: [node:native]
-
 weaknesses:
   programs-no-interpreters: hardened Node.js runs n8n
   kernel-write-xor-execute: V8 compiles n8n as it runs
@@ -11,9 +9,17 @@ check:
 
 services:
   n8n:
-    exec: /usr/bin/node --max-old-space-size=1536 /usr/lib/n8n/node_modules/n8n/bin/n8n start
+    # SQLite and expression isolates need native access; the Code runner gets none.
+    allow: [node:native]
+    exec: /usr/bin/node --no-node-snapshot --max-old-space-size=1536 /usr/lib/n8n/node_modules/n8n/bin/n8n start
     user: n8n
     secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
+    config: settings /run/config/n8n/settings.json
+    setting:
+      - editor-url url as N8N_EDITOR_BASE_URL
+      - webhook-url url as N8N_WEBHOOK_URL
+      - proxy-hops int as N8N_PROXY_HOPS
+    render: env site
     pledge: stdio rpath wpath inet unix netlink listen proc connect
     listen: [tcp/5678 loopback, tcp/5679 loopback]
     connect: [tcp/443 public, udp/53 tcp/53]
@@ -21,6 +27,7 @@ services:
     nofile: 8192
     env:
       - HOME=/data/svc/n8n
+      - TMPDIR=/run/svc/n8n
       - N8N_USER_FOLDER=/data/svc/n8n
       - N8N_LISTEN_ADDRESS=127.0.0.1
       - N8N_PORT=5678
@@ -28,6 +35,7 @@ services:
       - N8N_DIAGNOSTICS_ENABLED=false
       - N8N_VERSION_NOTIFICATIONS_ENABLED=false
       - N8N_TEMPLATES_ENABLED=false
+      - N8N_COMMUNITY_PACKAGES_ENABLED=false
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_RUNNERS_ENABLED=true
       - N8N_RUNNERS_MODE=external
@@ -41,12 +49,13 @@ services:
     pledge: stdio rpath wpath inet unix netlink listen connect proc exec
     run: /usr/bin/node
     listen: tcp/5680 tcp/5681 loopback
-    connect: tcp/5679 tcp/5681 loopback
+    connect: tcp/5679 tcp/5681
     secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
     memory: 768
     nofile: 1024
     env:
       - HOME=/data/svc/n8n-runner
+      - TMPDIR=/run/svc/n8n-runner
       - N8N_RUNNERS_CONFIG_PATH=/usr/lib/n8n/task-runners.json
       - N8N_RUNNERS_TASK_BROKER_URI=http://127.0.0.1:5679
       - N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST=127.0.0.1

@@ -7,3 +7,5 @@ python     0        Runtime only; Python service behavior is tested by python-ex
 ruby       0        Runtime only; Ruby service behavior is tested by ruby-example and the supplied-code ruby-app boot.
 jre        0        Runtime only; Java service behavior is tested by jre-example and the supplied-code jre-app boot.
 jre21      0        Runtime only; Java 21 service behavior is tested by kafka and dependency-track.
+onnx-minilm 0 Read-only model data; both Langflow native suites verify offline embeddings with these assets
+libffi     0 Shared library only; both Langflow native suites exercise callbacks with MDWE enabled

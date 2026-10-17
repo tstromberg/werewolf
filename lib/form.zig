@@ -817,6 +817,28 @@ pub fn loadIn(
                     "{s}: services: {s}: {s} is a value or a list of values",
                     .{ path, s.key, d.key },
                 );
+                if (s.value.get("allow")) |grants| {
+                    if (!isScalars(grants)) return f.fail(
+                        gpa,
+                        "{s}: services: {s}: allow is a list of RUNTIME:NAME allowances",
+                        .{ path, s.key },
+                    );
+                    if (grants.list.len > 0 and (mem.eql(u8, s.key, allow.runtime_blanket) or
+                        s.value.get("image") != null or s.value.get("root") != null)) return f.fail(
+                        gpa,
+                        "{s}: services: {s}: runtime allowances need a service other than all, " ++
+                            "running in the machine's root",
+                        .{ path, s.key },
+                    );
+                    for (grants.list) |grant| if (allow.RuntimeAllowance.parse(
+                        grant.scalar.text,
+                    ) == null)
+                        return f.fail(
+                            gpa,
+                            "{s}: services: {s}: allow {s}: no such RUNTIME:NAME allowance",
+                            .{ path, s.key, grant.scalar.text },
+                        );
+                }
                 if (s.value.get("image")) |img| if (img != .scalar or !isImageRef(img.scalar.text))
                     return f.fail(
                         gpa,
@@ -913,7 +935,7 @@ const max_chain = 16;
 
 /// chain returns ref's chain of forms, base first, in the order the build
 /// lays them. Each form follows the forms it takes `with` it (and their
-/// bases), and ref comes last, so each form's files win over what it takes.
+/// dependencies), and ref comes last, so each form's files win over what it takes.
 pub fn chain(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error![]const Form {
     return chainIn(io, gpa, root, "forms", ref, f);
 }
@@ -927,31 +949,46 @@ pub fn chainIn(
     ref: []const u8,
     f: *Failure,
 ) Error![]const Form {
-    const top = try loadIn(io, gpa, root, names, ref, f);
-    var out: std.ArrayList(Form) = .empty;
-    for (try basesIn(io, gpa, root, names, top, f)) |form| {
-        for (try form.items(gpa, "with")) |member| {
+    var builder: ChainBuilder = .{ .io = io, .gpa = gpa, .root = root, .names = names };
+    try builder.visit(try loadIn(io, gpa, root, names, ref, f), f);
+    return builder.out.items;
+}
+
+const ChainBuilder = struct {
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    names: []const u8,
+    out: std.ArrayList(Form) = .empty,
+    pending: [max_chain][]const u8 = undefined,
+    depth: usize = 0,
+
+    fn visit(b: *ChainBuilder, form: Form, f: *Failure) Error!void {
+        for (b.pending[0..b.depth]) |dir| if (mem.eql(u8, dir, form.dir))
+            return f.fail(
+                b.gpa,
+                "{s}: takes itself, through {s}",
+                .{ form.dir, b.pending[b.depth - 1] },
+            );
+        for (b.out.items) |have| if (mem.eql(u8, have.dir, form.dir)) return;
+        if (b.depth == max_chain)
+            return f.fail(b.gpa, "{s}: depends on forms {d} deep", .{ form.dir, max_chain });
+        b.pending[b.depth] = form.dir;
+        b.depth += 1;
+        defer b.depth -= 1;
+        if (form.spec.get("base")) |base|
+            try b.visit(try loadIn(b.io, b.gpa, b.root, b.names, base.scalar.text, f), f);
+        for (try form.items(b.gpa, "with")) |member| {
             if (!isName(member)) return f.fail(
-                gpa,
+                b.gpa,
                 "{s}: with names forms in forms/, not {s}",
                 .{ form.dir, member },
             );
-            const m = try loadIn(io, gpa, root, names, member, f);
-            for (try basesIn(io, gpa, root, names, m, f)) |c| {
-                if (mem.eql(u8, c.dir, top.dir))
-                    return f.fail(gpa, "{s}: takes itself, through {s}", .{ top.dir, member });
-                try appendNew(gpa, &out, c);
-            }
+            try b.visit(try loadIn(b.io, b.gpa, b.root, b.names, member, f), f);
         }
-        try appendNew(gpa, &out, form);
+        try b.out.append(b.gpa, form);
     }
-    return out.items;
-}
-
-fn appendNew(gpa: Allocator, out: *std.ArrayList(Form), form: Form) Allocator.Error!void {
-    for (out.items) |have| if (mem.eql(u8, have.dir, form.dir)) return;
-    try out.append(gpa, form);
-}
+};
 
 /// bases returns form and the forms it is built on, base first.
 pub fn bases(io: Io, gpa: Allocator, root: Dir, form: Form, f: *Failure) Error![]const Form {
@@ -1350,6 +1387,8 @@ pub const Service = struct {
     name: []const u8,
     path: []const u8,
     text: []const u8,
+    /// Runtime allowances generated for this service's cgroup alone.
+    allow: []const []const u8 = &.{},
     /// Private UDP declarations do not produce public fence rules. Preserve
     /// their scope for composition; leash itself does not mediate UDP ports.
     loopback_udp: []const u16 = &.{},
@@ -1536,7 +1575,7 @@ fn render(
         skip = &.{ "image", "exec", "dir", "pledge", "memory", "link" };
     }
     for (spec.map) |d| {
-        if (isOneOf(d.key, skip)) continue;
+        if (mem.eql(u8, d.key, "allow") or isOneOf(d.key, skip)) continue;
         const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
         for (values) |v| {
             var line = v.scalar.text;
@@ -1634,6 +1673,7 @@ pub fn services(
                 .name = s.key,
                 .path = try gpa.print("{s}/form.yaml: services.{s}", .{ form.dir, s.key }),
                 .text = try render(io, gpa, root, forms, form, s.key, s.value, f),
+                .allow = try scalars(gpa, s.value.get("allow")),
                 .loopback_udp = try loopbackUdp(gpa, s.value),
             });
         }
@@ -1902,6 +1942,14 @@ test "chain: base first, each form after what it takes, itself last" {
         .{ "nginx", "base: prod\n" },
         .{ "mastodon", "base: ruby\nwith: [postgresql, nginx]\n" },
         .{ "mine", "base: mastodon\n" },
+        .{ "ffi", "base: prod\n" },
+        .{ "model", "base: prod\n" },
+        .{ "langflow", "base: ruby\nwith: [model, ffi]\n" },
+        .{ "bundle", "base: prod\nwith: [postgresql, langflow, model]\n" },
+        .{ "with-cycle-a", "with: [with-cycle-b]\n" },
+        .{ "with-cycle-b", "with: [with-cycle-a]\n" },
+        .{ "mixed-cycle-a", "base: prod\nwith: [mixed-cycle-b]\n" },
+        .{ "mixed-cycle-b", "base: mixed-cycle-a\n" },
         .{ "loop", "base: loop\n" },
         .{ "sshd", "base: minimal\nweaknesses:\n  programs-no-shell: a shell for logins\n" },
         .{ "bastion", "base: sshd\n" },
@@ -1917,6 +1965,10 @@ test "chain: base first, each form after what it takes, itself last" {
         .{ "nginx", &.{ "minimal", "prod", "nginx" } },
         .{ "mastodon", &.{ "minimal", "prod", "ruby", "postgresql", "nginx", "mastodon" } },
         .{ "mine", &.{ "minimal", "prod", "ruby", "postgresql", "nginx", "mastodon", "mine" } },
+        .{
+            "bundle",
+            &.{ "minimal", "prod", "postgresql", "ruby", "model", "ffi", "langflow", "bundle" },
+        },
     }) |c| {
         const got = try chain(io, gpa, tmp.dir, c[0], &f);
         try testing.expectEqual(c[1].len, got.len);
@@ -1924,6 +1976,17 @@ test "chain: base first, each form after what it takes, itself last" {
     }
     try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "loop", &f));
     try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "absent", &f));
+    try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "with-cycle-a", &f));
+    try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "mixed-cycle-a", &f));
+    for (0..max_chain + 1) |i| {
+        const name = try gpa.print("forms/deep{d}", .{i});
+        try tmp.dir.createDirPath(io, name);
+        try tmp.dir.writeFile(io, .{
+            .sub_path = try gpa.print("{s}/form.yaml", .{name}),
+            .data = if (i == max_chain) "" else try gpa.print("with: [deep{d}]\n", .{i + 1}),
+        });
+    }
+    try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "deep0", &f));
 
     // No weaknesses key, or no form.yaml, means no weaknesses: any posture
     // failure fails the form. Weaknesses are never inherited.
@@ -2028,6 +2091,34 @@ test "a service a later form names again is that form's, network and all" {
     );
 }
 
+test "service runtime allowances reject invalid grants and blanket namespaces" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/site");
+    for ([_][]const u8{
+        "  app:\n    allow: java:native\n",
+        "  app:\n    allow: [java:unknown]\n",
+        "  app:\n    allow: [perl:native]\n",
+        "  app:\n    allow: [jit]\n",
+        "  app:\n    allow: [java:../native]\n",
+        "  all:\n    allow: [java:native]\n",
+        "  app:\n    image: ghcr.io/x/app:1\n    allow: [java:native]\n",
+        "  app:\n    root: /oci/app\n    allow: [java:native]\n",
+    }) |spec| {
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "forms/site/form.yaml",
+            .data = try mem.concat(gpa, u8, &.{ "services:\n", spec }),
+        });
+        var f: Failure = .{};
+        try testing.expectError(error.Form, load(io, gpa, tmp.dir, "site", &f));
+        try testing.expect(mem.find(u8, f.text, "allow") != null);
+    }
+}
+
 test "services in form.yaml: rendered as leash reads them, their network fence's" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2044,6 +2135,7 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
         \\    exec: /usr/bin/web --port 80
         \\    user: web
         \\    pledge: stdio inet
+        \\    allow: [java:native, java:deserialize]
         \\    listen: [tcp/80 udp/53, tcp/8080 loopback, udp/5353 loopback]
         \\    connect: [tcp/443 udp/53 tcp/53 public, /run/svc/db/sock, icmp]
         \\    env: [A=1, B=2]
@@ -2063,6 +2155,9 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
     try testing.expectEqual(2, got.len);
     try testing.expectEqualStrings("web", got[1].name);
     try testing.expectEqualStrings("forms/site/form.yaml: services.web", got[1].path);
+    try testing.expectEqual(2, got[1].allow.len);
+    try testing.expectEqualStrings("java:native", got[1].allow[0]);
+    try testing.expectEqualStrings("java:deserialize", got[1].allow[1]);
     try testing.expectEqualStrings(
         "exec /usr/bin/web --port 80\nuser web\npledge stdio inet\nlisten tcp/80 udp/53\n" ++
             "listen tcp/8080\nlisten udp/5353\nconnect tcp/443 tcp/53\n" ++

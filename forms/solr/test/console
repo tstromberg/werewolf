@@ -1,3 +1,3 @@
 seen solr-jvm-started solr: .*Welcome to Apache Solr.*10.0.0
-seen solr-hardened-java solr: .*jvm 27.*wolfi-r2002
+seen solr-hardened-java solr: .*jvm 27.*wolfi-r[0-9]{4,}
 seen solr-http-started solr: .*127.0.0.1:8983

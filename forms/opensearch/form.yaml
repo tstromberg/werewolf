@@ -12,7 +12,7 @@ base: jre
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  programs-no-interpreters: java runs OpenSearch, which is what this form is for
+  programs-no-interpreters: java runs OpenSearch with native access for JNA's startup checks
   kernel-write-xor-execute: the JVM compiles OpenSearch to machine code as it runs (allow jit, from jre)
 
 # The check speaks HTTPS with curl.
@@ -33,7 +33,10 @@ services:
   # directories, reaches nothing on the network, and runs nothing. A
   # missing password or certificate parks it, saying which.
   opensearch:
-    exec: /usr/bin/java -Xms1g -Xmx1g -XX:MaxDirectMemorySize=512m @/usr/share/opensearch/java.args
+    # JNA performs the native startup checks; other services get no grant.
+    allow: [java:native]
+    # Bouncy Castle's Java provider avoids extracting executable libraries to /run.
+    exec: /usr/bin/java -Xms1g -Xmx1g -XX:MaxDirectMemorySize=512m -Dorg.bouncycastle.native.cpu_variant=java @/usr/share/opensearch/java.args
     before: /usr/lib/werewolf/opensearch-setup
     user: opensearch
     # netlink: the JVM lists the host's addresses.

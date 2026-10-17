@@ -5,6 +5,7 @@
 // admin-password file, which leash copied to /tmp. With an administrator
 // already there it changes nothing: a password changed in Overleaf stays.
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { db, waitForDb } from '/overleaf/services/web/app/src/infrastructure/mongodb.mjs'
 import UserRegistrationHandler from '/overleaf/services/web/app/src/Features/User/UserRegistrationHandler.mjs'
 
@@ -19,7 +20,11 @@ try {
     say('kept')
   } else {
     const password = fs.readFileSync('/tmp/admin-password', 'utf8').replace(/\r?\n$/, '')
-    const user = await UserRegistrationHandler.promises.registerNewUser({ email, password })
+    const user = await UserRegistrationHandler.promises.registerNewUser({
+      email,
+      password,
+      analyticsId: randomUUID(),
+    })
     await db.users.updateOne({ _id: user._id }, { $set: { isAdmin: true } })
     say('made', { email })
   }

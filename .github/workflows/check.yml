@@ -63,7 +63,9 @@ jobs:
           - { group: shellfree, shard: 2, shards: 3 }
           - { group: shellfree, shard: 3, shards: 3 }
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # Source-built applications and their native comparison images need more
+    # time on a cold cache; each guest still has its own bounded deadline.
+    timeout-minutes: ${{ (matrix.group == 'forms' || matrix.group == 'shellfree') && 180 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -107,7 +109,7 @@ jobs:
           command -v javac || sudo apt-get install -y default-jdk-headless
           test/ci-compilers
       # The packages melange builds from forms' recipes (cmd/howl/melange.zig),
-      # kept between runs by the recipes' contents and melange's version:
+      # kept between runs by all recipe inputs and melange's version:
       # vaultwarden's is a Rust build of twenty minutes. Saved even when a
       # check fails, as the packages are sound.
       # Checkout leaves the recipes newer than any stamp restored, so the
@@ -120,16 +122,17 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/*.yaml') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
       - name: Boot and check (${{ matrix.group }}${{ matrix.shard && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
-        # A boot a CPU: a guest has two (CHECK_QEMU's -smp 2) but spends
-        # most of its seconds waiting on its services, so four at once on
-        # four CPUs keep them busy. The forms jobs check demo, so persist
-        # need not first (PERSIST_AFTER).
-        run: make -k -j"$(nproc)" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+        # Boots spend much of their time waiting on services. Share CPUs,
+        # but reserve the largest form's RAM so large guests cannot exhaust
+        # the runner. Forms jobs check demo, so persist need not first.
+        run: |
+          jobs=$(test/ci-vm-jobs)
+          make -k -j"$jobs" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
       # integrity saves the Zig cache, when this week's has no entry for
       # these sources yet: every check job compiles the same programs, and
       # integrity is off the critical path.
@@ -191,7 +194,8 @@ jobs:
     # The fallback is never used (the if needs the variable); it keeps an unset
     # variable from failing the workflow should runs-on be evaluated anyway.
     runs-on: ${{ fromJSON(vars.WEREWOLF_ARM64_CHECK_RUNNER || '["ubuntu-26.04-arm"]') }}
-    timeout-minutes: 180
+    # This job builds and boots the entire catalog, including cold source builds.
+    timeout-minutes: 360
     steps:
       - name: Make leftover recipe workspaces removable
         # Go's module cache contains read-only directories. A failed Melange
@@ -235,15 +239,15 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/*.yaml') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
       - name: Boot and check every group
         # A boot a CPU, as the hosted jobs run them, but no more than memory
-        # holds: a guest takes 1 GiB, or its form's check memory, up to 4.
+        # holds. Reserve at least 4 GiB per boot, or the largest form's budget.
         run: |
-          jobs=$(awk -v cpus="$(nproc)" '/^MemAvailable:/ { n = int($2 / 4194304); if (n < 1) n = 1; print (n < cpus ? n : cpus) }' /proc/meminfo)
+          jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs boots at once"
           make -k -j"$jobs" check-forms check-shellfree check-integrity check-cloud check-persist
       # arm64's only job saves its melange packages, as the check job's

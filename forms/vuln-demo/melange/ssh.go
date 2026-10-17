@@ -66,17 +66,7 @@ func serveSSH(address, keyPath, user string) error {
 	if err != nil {
 		return err
 	}
-	config := &ssh.ServerConfig{MaxAuthTries: 3,
-		PasswordCallback: func(c ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) {
-			if c.User() != user {
-				sshEvent(fmt.Sprintf("auth refused remote=%s user=%q", c.RemoteAddr(), c.User()))
-				return nil, errors.New("unknown demo user")
-			}
-			sshEvent(fmt.Sprintf("auth accepted remote=%s user=%q (any password)", c.RemoteAddr(), c.User()))
-			return nil, nil
-		},
-	}
-	config.AddHostKey(key)
+	config := sshConfig(key, user)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -99,7 +89,28 @@ func serveSSH(address, keyPath, user string) error {
 	}
 }
 
+func sshConfig(key ssh.Signer, user string) *ssh.ServerConfig {
+	config := &ssh.ServerConfig{MaxAuthTries: 3,
+		PasswordCallback: func(c ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) {
+			if c.User() != user {
+				sshEvent(fmt.Sprintf("auth refused remote=%s user=%q", c.RemoteAddr(), c.User()))
+				return nil, errors.New("unknown demo user")
+			}
+			sshEvent(fmt.Sprintf("auth accepted remote=%s user=%q (any password)", c.RemoteAddr(), c.User()))
+			return nil, nil
+		},
+	}
+	config.AddHostKey(key)
+	return config
+}
+
+type commandFunc func(context.Context, string, ...string) *exec.Cmd
+
 func handleSSH(c net.Conn, config *ssh.ServerConfig) {
+	handleSSHCommands(c, config, exec.CommandContext)
+}
+
+func handleSSHCommands(c net.Conn, config *ssh.ServerConfig, command commandFunc) {
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 	conn, channels, requests, err := ssh.NewServerConn(c, config)
 	if err != nil {
@@ -125,11 +136,11 @@ func handleSSH(c net.Conn, config *ssh.ServerConfig) {
 		if err != nil {
 			return
 		}
-		go func() { defer channel.Close(); handleSession(conn.RemoteAddr().String(), channel, reqs) }()
+		go func() { defer channel.Close(); handleSession(conn.RemoteAddr().String(), channel, reqs, command) }()
 	}
 }
 
-func handleSession(remote string, channel ssh.Channel, requests <-chan *ssh.Request) {
+func handleSession(remote string, channel ssh.Channel, requests <-chan *ssh.Request, command commandFunc) {
 	for r := range requests {
 		if r.Type != "exec" {
 			sshEvent(fmt.Sprintf("request refused remote=%s type=%q", remote, r.Type))
@@ -151,7 +162,14 @@ func handleSession(remote string, channel ssh.Channel, requests <-chan *ssh.Requ
 		r.Reply(true, nil)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		program, ok := sshProgram(argv[0])
+		if !ok {
+			sshEvent(fmt.Sprintf("command refused remote=%s command=%q", remote, payload.Command))
+			io.WriteString(channel.Stderr(), "command unavailable\n")
+			channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{126}))
+			return
+		}
+		cmd := command(ctx, program, argv[1:]...)
 		// Inherit no SSH-controlled environment or stdin. Landlock and pledge
 		// enforce the service's executable, file and network policy on the child.
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/var/empty", "LANG=C"}
@@ -256,4 +274,18 @@ func commandArgs(s string) ([]string, error) {
 		return nil, errors.New("empty command")
 	}
 	return args, nil
+}
+
+// Never offer direct coreutils aliases: those could bypass the narrowing and
+// read the SSH daemon's private host key. Each exposed tool enters leash again.
+func sshProgram(name string) (string, bool) {
+	switch name {
+	case "id", "/usr/bin/id":
+		return "/etc/sv/vuln-sshd/narrow/id", true
+	case "uname", "/usr/bin/uname":
+		return "/etc/sv/vuln-sshd/narrow/uname", true
+	case "cat", "/usr/bin/cat":
+		return "/etc/sv/vuln-sshd/narrow/cat", true
+	}
+	return "", false
 }

@@ -48,8 +48,8 @@ pub const dir = "/etc/werewolf/allow";
 pub const runtime_dir = "/etc/runtime-hardening/allow";
 
 /// runtime_blanket names the namespace an image-wide runtime allowance uses.
-/// werewolf writes here, since a form's allow list is image-wide; per-service
-/// namespaces are a later revision.
+/// A form's top-level allow list writes here; services.NAME.allow writes to
+/// that service's cgroup namespace instead.
 pub const runtime_blanket = "all";
 
 /// Runtime is a language runtime werewolf rebuilds with its protections

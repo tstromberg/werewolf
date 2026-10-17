@@ -249,7 +249,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
-	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
+	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
 	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -583,7 +583,7 @@ check-image-updater-uki: $(HOWL)
 		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
 		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
-check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
+check-cloud:     check-metadata check-nodata check-lease check-static check-people $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check: check-forms check-shellfree check-integrity check-cloud check-persist check-syslog
 	@echo "check: every form, and a slot, passed"
 
@@ -619,7 +619,7 @@ check-%: | _check-shared
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
 	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= image)
-	python3 test/native-tests prepare $* $(ARCH)
+	PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) python3 test/native-tests prepare $* $(ARCH)
 	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= image)
 	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) \
 		TEST_OUT=$(BUILD)/native-test-$*$(if $(IPE),-ipe) python3 test/native-tests compare $* $(ARCH)
@@ -667,10 +667,11 @@ check-adhoc: $(HOWL) | _check-shared
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
 
 # Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
+# People uses 22199, below the forms' ports, so check-cloud and check-forms can run together.
 check-bastion check-people: check-%: $(HOWL) $(TEST_SK) | _check-shared
 	@test/$*-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
 	@$(call built,$*,$(CHECK_MAKE) FORM=$(CHECK)/$*-check image)
-	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(call check_port,22200,$(if $(filter bastion,$*),bastion,prod-ssh)) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
+	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(if $(filter bastion,$*),$(call check_port,22200,bastion),22199) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree

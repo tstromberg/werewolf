@@ -18,7 +18,7 @@ services:
       -Djava.io.tmpdir=/run/svc/solr -Djetty.home=/usr/lib/solr/server -Djetty.base=/usr/lib/solr/server
       -Dsolr.install.dir=/usr/lib/solr -Dsolr.solr.home=/data/svc/solr/home -Dsolr.log.dir=/run/svc/solr
       -Dlog4j.configurationFile=/usr/lib/solr/log4j2.xml -Djetty.host=0.0.0.0 -Djetty.port=8983
-      -Dsolr.jetty.threads.max=128 -jar /usr/lib/solr/server/start.jar --module=http
+      -Dsolr.directoryFactory=solr.NIOFSDirectoryFactory -Dsolr.jetty.threads.max=128 -jar /usr/lib/solr/server/start.jar --module=http
     before: /usr/lib/solr/setup
     user: solr
     pledge: stdio rpath wpath inet unix netlink listen proc exec

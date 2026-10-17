@@ -1,0 +1,49 @@
+package:
+  name: libffi-static-tramp
+  version: 3.8.0
+  epoch: 0
+  description: libffi with read-only static callback trampolines
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - libtool
+      - texinfo
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/libffi/libffi.git
+      tag: v${{package.version}}
+      expected-commit: 12ffd1f9dc56fcea79d2f742f424301ae668d663
+
+  - uses: autoconf/configure
+    with:
+      opts: >
+        --disable-builddir --enable-portable-binary --disable-pax_emutramp --enable-exec-static-tramp
+
+  - uses: autoconf/make
+
+  - runs: |
+      grep -q '^#define FFI_EXEC_STATIC_TRAMP 1' fficonfig.h
+      dest=${{targets.destdir}}/usr/lib
+      mkdir -p "$dest"
+      cp -a .libs/libffi.so.* "$dest/"
+      install -Dm644 LICENSE ${{targets.destdir}}/usr/share/licenses/libffi-static-tramp/LICENSE
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: libffi/libffi
+    strip-prefix: v

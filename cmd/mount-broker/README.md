@@ -61,7 +61,7 @@ Programs ask through `lib/broker.zig`.
 - **Updater runtime**: the updater alone can attach immutable `/usr` and the
   nonrecursive running root read-only at fixed, checked directories in its jail.
   Root-owned boot artifacts grant group 77 read/traverse access; `/boot` stays ro.
-  Fixed `updater-ready` publishes readiness.
+  Fixed `updater-ready` and `reboot` requests publish readiness and wake runit.
 - **Confined**: CAP_SYS_ADMIN only, locked (`lib/sandbox.zig`), and a seccomp allowlist:
   `recvfrom`, `sendto`, `poll`, the new mount calls, the file calls the ESP and slot
   operations need (`openat`, `openat2`, `read`, `write`, `renameat`, `unlinkat`,

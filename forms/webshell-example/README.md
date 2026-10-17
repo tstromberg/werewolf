@@ -8,6 +8,10 @@ shows what an attacker gets for it on werewolf: nothing worth having. The
 manifest is [form.yaml](form.yaml); the application is
 [webshell.py](rootfs/usr/lib/app/webshell.py).
 
+For full vulnerable Solr, n8n and Langflow products with a live containment
+journal, use [vuln-demo](../vuln-demo/README.md). Its services use hardened
+interpreters and direct command execution without a shell shim.
+
 ## Security Posture
 
 The execution is real, and the leash bounds it, not an empty image: the form

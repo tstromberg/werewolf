@@ -10,6 +10,13 @@ log=$CHECK/deadman.log
 rm -rf "$d" "$d.img" && mkdir -p "$d/slot/a"
 cp "$OUT/slot/root.erofs" "$d/slot/a/"
 mke2fs -q -F -t ext4 -U "$SLOTS" -d "$d" "$d.img" 128M && rm -r "$d"
+# Match production's numeric owners instead of the host builder's UID/GID.
+for path in /slot /slot/a /slot/a/root.erofs; do
+	for field in uid gid; do
+		printf 'sif %s %s 0\n' "$path" "$field"
+	done
+done >"$CHECK/deadman-ownership.debugfs"
+"$DEBUGFS" -w -f "$CHECK/deadman-ownership.debugfs" "$d.img" >"$CHECK/deadman-ownership.log" 2>&1
 fail() { echo "FAIL   deadman            $1; see $log"; exit 1; }
 rc=0
 timeout 180 "$@" -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \

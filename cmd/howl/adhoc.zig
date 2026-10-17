@@ -32,11 +32,12 @@ const syntax =
 
 /// service_keys are the keys a service takes from the line: leash's
 /// directives (cmd/leash/README.md), `image` and `link` (lib/form.zig
-/// render), and `user` and `group`. `root` is an image's, never the line's.
+/// render), `allow`, `user` and `group`. `root` is an image's, never the line's.
 const service_keys = [_][]const u8{
     "image",  "link",   "user",   "group",  "exec",     "dir",    "listen",  "connect",
     "write",  "read",   "run",    "env",    "secret",   "config", "setting", "render",
     "memory", "nofile", "pledge", "before", "requires", "share",  "cpu",     "narrow",
+    "allow",
 };
 /// service_once are the service keys that take one value, so a second is refused.
 const service_once = [_][]const u8{
@@ -1486,6 +1487,19 @@ test "form.yaml's lists and maps, by shape" {
             "--check.memory 512",
         try flags(gpa, p),
     );
+}
+
+test "service runtime allowances from flags remain a list" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const p = try planned(gpa, .run, &.{
+        "--services.app.allow", "java:native", "--services.app.allow", "java:deserialize",
+    }, "", &why);
+    const expected = "services:\n  app:\n    allow:\n      - java:native\n" ++
+        "      - java:deserialize\n";
+    try testing.expect(std.mem.find(u8, try renderForm(gpa, p), expected) != null);
 }
 
 test "put: a value set, a line added, a value there becoming the list's first" {

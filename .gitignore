@@ -1,5 +1,5 @@
 build/
-config/
+/config/
 dist/
 
 # added by lint-install

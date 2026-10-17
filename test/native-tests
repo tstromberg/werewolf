@@ -14,6 +14,7 @@ import tarfile
 
 IDENT = re.compile(r'[a-z][a-z0-9-]*\Z')
 ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]*\Z')
+RUNTIME_GRANTS = {'python:native', 'node:native', 'java:native'}
 # Wait for the whole record before Expect prints its own result on this console.
 COMPLETION = r'werewolf-test: [^\r\n]*"event":"complete"[^\r\n]*\}\r*\n'
 console_clean = SourceFileLoader('werewolf_console', str(Path(__file__).with_name('cloud-console'))).load_module().clean
@@ -43,8 +44,13 @@ def read_plan(form):
     names = set()
     for d in plan['drivers']:
         required = {'name', 'source', 'mode', 'user', 'pledge', 'read', 'connect', 'run', 'cases'}
-        if not required <= set(d) or set(d) - required - {'config', 'groups'}:
+        if not required <= set(d) or set(d) - required - {'config', 'groups', 'memory', 'allow'}:
             raise ValueError('invalid driver fields')
+        if type(d.get('memory', 128)) is not int or not 16 <= d.get('memory', 128) <= 8192:
+            raise ValueError('driver memory must be 16..8192 MiB')
+        grants = d.get('allow', [])
+        if not isinstance(grants, list) or any(not isinstance(grant, str) or grant not in RUNTIME_GRANTS for grant in grants) or len(set(grants)) != len(grants):
+            raise ValueError('invalid driver runtime allowance')
         for field in ('name', 'mode'):
             if not IDENT.fullmatch(d[field]):
                 raise ValueError('invalid driver identity')
@@ -94,9 +100,36 @@ def write(path, data):
         path.write_text(data)
 
 
-def form_config(form, plan):
+def runtime_grants(root, drivers):
+    for driver in drivers:
+        for grant in driver.get('allow', []):
+            runtime, name = grant.split(':')
+            write(root / 'etc/runtime-hardening/allow' / driver['name'] / runtime / name, '')
+
+
+def production_pins(root):
+    """Freeze the actual baseline payload, including transitive dependencies."""
+    installed = call('bsdtar', '-n', '-xOf', root / 'rootfs.tar', 'usr/lib/apk/db/installed',
+                     capture_output=True, text=True).stdout
+    pins = {}
+    for record in installed.split('\n\n'):
+        if not record.strip():
+            continue
+        names = [line[2:] for line in record.splitlines() if line.startswith('P:')]
+        versions = [line[2:] for line in record.splitlines() if line.startswith('V:')]
+        if len(names) != 1 or len(versions) != 1 or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9+_.-]*', names[0]) or not re.fullmatch(r'[a-zA-Z0-9_.+-]+', versions[0]):
+            raise ValueError('invalid production package database')
+        if names[0] in pins:
+            raise ValueError('duplicate production package')
+        pins[names[0]] = versions[0]
+    if not pins:
+        raise ValueError('empty production package database')
+    return [name + '=' + version for name, version in sorted(pins.items())]
+
+
+def form_config(form, plan, pins=()):
     excuses = call('build/host/form', 'excuses', form, capture_output=True, text=True).stdout
-    yaml = 'base: ' + form + '\npackages: ' + json.dumps(plan['packages']) + '\n'
+    yaml = 'base: ' + form + '\npackages: ' + json.dumps(list(pins) + plan['packages']) + '\n'
     # check metadata is not inherited by generated forms. Preserve the real
     # form's memory budget (notably Greenbone) and offline network requirement.
     check_settings = {}
@@ -126,8 +159,11 @@ def prepare(form, arch):
     # This directory is exclusively generated test output; clear stale drivers.
     if generated.exists():
         shutil.rmtree(generated)
-    write(generated / 'form.yaml', form_config(form, plan))
+    baseline = os.environ.get('PRODUCTION_OUT')
+    pins = production_pins(Path(baseline)) if baseline else ()
+    write(generated / 'form.yaml', form_config(form, plan, pins))
     write(root / 'usr/share/werewolf/test-image', 'werewolf-native-tests/1\n')
+    runtime_grants(root, plan['drivers'])
     compile_dir = work / 'compile'
     write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
     write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], wait=sorted({
@@ -147,7 +183,7 @@ def prepare(form, arch):
         compile(Path('forms') / form / 'test' / d['source'], root / binary.lstrip('/'))
         service = [f'exec {binary} {d["name"]} {d["mode"]} /run/svc/{d["name"]}/context',
                    'user ' + d['user'], 'pledge ' + d['pledge'],
-                   'config context /run/config/tests/context', 'memory 128', 'nofile 128']
+                   'config context /run/config/tests/context', f'memory {d.get("memory", 128)}', 'nofile 128']
         for field in ('read', 'connect', 'run'):
             service.extend(field + ' ' + item for item in d[field])
         service.extend('config ' + name + ' ' + source for name, source in d.get('config', {}).items())
@@ -252,6 +288,12 @@ def compare(form, arch):
     for driver in plan['drivers']:
         additions.add('usr/lib/werewolf/' + driver['name'])
         additions.add('usr/share/werewolf/tests/' + driver['name'] + '/service')
+        for grant in driver.get('allow', []):
+            runtime, name = grant.split(':')
+            allowance = 'etc/runtime-hardening/allow/' + driver['name'] + '/' + runtime + '/' + name
+            additions.add(allowance)
+            if allowance not in b or b[allowance][0] != tarfile.REGTYPE or b[allowance][-1] != hashlib.sha256(b'').hexdigest():
+                raise ValueError('invalid native runtime allowance file')
     parents = {str(parent) for name in additions for parent in Path(name).parents}
     metadata = 'usr/share/werewolf/forms/native-test-' + form
     for name in b.keys() - a.keys():
@@ -301,7 +343,8 @@ def run(form, arch, qemu):
              '-drive', f'file={packed},format=raw,if=virtio,readonly=on')
         if any(digest(path) != identity[name] for name, path in inputs.items()):
             raise ValueError('native test inputs changed during the run; rebuild and retry')
-        count = validate(log.read_text(errors='replace'), plan, context)
+        # Preserve serial CRs until console_clean removes interleaved kernel lines.
+        count = validate(log.read_bytes().decode(errors='replace'), plan, context)
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,

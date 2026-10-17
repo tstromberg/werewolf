@@ -8,6 +8,7 @@ package:
   dependencies:
     runtime:
       - nodejs-hardened
+      - nodejs-26>=26.12.0-r2000
       - libstdc++
 
 environment:
@@ -20,6 +21,14 @@ environment:
       - busybox
       - ca-certificates-bundle
       - build-base
+      # isolated-vm links the shared libraries in Node's build configuration.
+      - brotli-dev
+      - c-ares-dev
+      - icu-dev
+      - libuv-dev
+      - nghttp2-dev
+      - openssl-4.0-dev
+      - zlib-dev
       - nodejs-26
       - npm
       - node-gyp
@@ -36,17 +45,26 @@ pipeline:
   - runs: |
       # Build native addons for the same Node major as the hardened runtime.
       npm ci --omit=dev --ignore-scripts --no-audit --no-fund
-      (cd node_modules/sqlite3 && node-gyp rebuild --nodedir=/usr)
-      test -s node_modules/sqlite3/build/Release/node_sqlite3.node
       node port-node.cjs
+      (cd node_modules/sqlite3 && node-gyp rebuild --nodedir=/usr)
+      (cd node_modules/isolated-vm && node-gyp rebuild --nodedir=/usr)
+      test -s node_modules/sqlite3/build/Release/node_sqlite3.node
+      test -s node_modules/isolated-vm/build/Release/isolated_vm.node
+      node --no-node-snapshot -e 'const ivm = require("isolated-vm"); const isolate = new ivm.Isolate({memoryLimit: 16}); isolate.dispose();'
       dest=${{targets.destdir}}/usr/lib/n8n
       mkdir -p "$dest"
-      cp -a node_modules "$dest/"
+      # Move the installed tree: exporting a second source copy doubles
+      # builder I/O without changing the runtime package.
+      mv node_modules "$dest/"
       cp package.json package-lock.json "$dest/"
       mkdir launcher
       tar -xzf 871cb76bc35c990f368eaa788f0b4ce7b145e143 -C launcher --strip-components=1
+      # The launcher otherwise binds its private health endpoint on all interfaces.
+      sed -i 's/fmt.Sprintf(":%s", port)/fmt.Sprintf("127.0.0.1:%s", port)/' launcher/internal/http/healthcheck_server.go
       (cd launcher && CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags='-s -w' -o "$dest/task-runner-launcher" ./cmd/launcher)
       cp task-runners.json "$dest/"
+      install -Dm644 launcher/LICENSE.md "$dest/licenses/task-runner-launcher.LICENSE.md"
+      install -Dm644 launcher/LICENSE_EE.md "$dest/licenses/task-runner-launcher.LICENSE_EE.md"
 
 update:
   enabled: false

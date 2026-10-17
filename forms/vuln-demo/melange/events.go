@@ -25,10 +25,11 @@ type event struct {
 
 type journal struct {
 	sync.Mutex
-	next uint64
-	rows []event
-	wake chan struct{}
-	out  io.Writer
+	next     uint64
+	lastLoss uint64
+	rows     []event
+	wake     chan struct{}
+	out      io.Writer
 }
 
 func newJournal(out io.Writer) *journal {
@@ -91,7 +92,22 @@ func kernelRecords(text string, last *uint64, j *journal) {
 			continue
 		}
 		if seq == 0 && strings.HasPrefix(message, "vuln-kmsg:") {
-			j.add("loss", "kernel", message)
+			counter, err := strconv.ParseUint(fields[2], 10, 64)
+			if err != nil {
+				continue
+			}
+			if counter == 0 {
+				counter = 1
+			}
+			j.Lock()
+			fresh := counter > j.lastLoss
+			if fresh {
+				j.lastLoss = counter
+			}
+			j.Unlock()
+			if fresh {
+				j.add("loss", "kernel", message)
+			}
 			continue
 		}
 		if seq <= *last {
@@ -102,7 +118,7 @@ func kernelRecords(text string, last *uint64, j *journal) {
 		if strings.Contains(message, "type=1309") || strings.Contains(message, "type=1327") {
 			kind = "exec"
 		}
-		if strings.Contains(message, "SECCOMP") || strings.Contains(message, "type=1326") || strings.Contains(message, "landlock") || strings.Contains(message, "success=no") {
+		if strings.Contains(message, "SECCOMP") || strings.Contains(message, "type=1326") || strings.Contains(message, "type=1423") || strings.Contains(message, "landlock") || strings.Contains(message, "success=no") {
 			kind = "violation"
 		}
 		// Keep the authoritative raw audit record and render its hex argv too.

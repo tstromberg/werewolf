@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$1/n8n"
+openssl rand -hex 32 >"$1/n8n/task-token"

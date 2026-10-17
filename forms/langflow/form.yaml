@@ -1,0 +1,46 @@
+base: onnx
+with: [onnx-minilm, libffi]
+
+weaknesses:
+  programs-no-interpreters: hardened Python 3.15 runs Langflow and local ONNX inference
+
+check:
+  memory: 4096
+
+services:
+  langflow:
+    exec: /usr/lib/langflow/bin/python -B -u /usr/lib/langflow/server.py
+    # The numerical stack uses ctypes for scalar conversions and native callbacks.
+    allow: [python:native]
+    user: langflow
+    pledge: stdio rpath wpath inet unix netlink listen proc connect
+    listen: tcp/7860 loopback
+    # Hosted-model providers and model downloads use public HTTPS and resolver DNS.
+    connect: [tcp/443 public, udp/53 tcp/53]
+    secret: LANGFLOW_SUPERUSER_PASSWORD /run/config/langflow/password
+    config: settings /run/config/langflow/settings.json
+    setting: owner string required as LANGFLOW_SUPERUSER
+    render: env site
+    memory: 3072
+    nofile: 8192
+    env:
+      - HOME=/data/svc/langflow
+      - LANGFLOW_CONFIG_DIR=/data/svc/langflow
+      - LANGFLOW_DATABASE_URL=sqlite:////data/svc/langflow/langflow.db
+      - LANGFLOW_HOST=127.0.0.1
+      - LANGFLOW_PORT=7860
+      - LANGFLOW_AUTO_LOGIN=false
+      - LANGFLOW_ENABLE_SIGNUP=false
+      - LANGFLOW_WORKERS=1
+      - LANGFLOW_DEV=false
+      - LANGFLOW_OPEN_BROWSER=false
+      - LANGFLOW_ALEMBIC_LOG_TO_STDOUT=true
+      - LANGFLOW_LOG_LEVEL=info
+      - LANGFLOW_LOG_ENV=container_json
+      - LANGFLOW_DO_NOT_TRACK=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+      - HF_HOME=/data/svc/langflow/models
+      - XDG_CACHE_HOME=/data/svc/langflow/cache
+      - OMP_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false

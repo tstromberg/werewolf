@@ -8,3 +8,4 @@ cryptography>=50
 pillow>=12.3,<13
 onnxruntime>=1.24,<2
 setuptools>=83,<84
+clickhouse-connect>=1.11,<2

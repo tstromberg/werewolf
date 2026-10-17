@@ -1,0 +1,164 @@
+# Full vulnerable applications, at their normal public ports and URL paths.
+base: prod
+with: [solr-vuln-demo, n8n-vuln-demo, langflow-vuln-demo]
+
+updates: off
+
+weaknesses:
+  updates-enabled: deliberately pinned application vulnerabilities for containment demonstrations
+  programs-no-interpreters: hardened Java, Node.js and Python run the full applications
+  kernel-write-xor-execute: Java and V8 compile application code as they run
+
+check:
+  memory: 12288
+  web: 8080
+
+accounts:
+  groups:
+    - groupname: _vulnlog
+      gid: 590
+  users:
+    - username: _vulnlog
+      uid: 590
+      gid: 590
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+services:
+  solr:
+    exec: /usr/lib/werewolf/vuln-console -mode app -service solr -- /usr/bin/java -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Xms256m -Xmx768m
+      -Djava.io.tmpdir=/run/svc/solr -Djetty.home=/usr/lib/solr/server -Djetty.base=/usr/lib/solr/server
+      -Dsolr.install.dir=/usr/lib/solr -Dsolr.solr.home=/data/svc/solr/home -Dsolr.log.dir=/run/svc/solr
+      -Dlog4j.configurationFile=/usr/lib/solr/log4j2.xml -Djetty.host=127.0.0.1 -Djetty.port=18983
+      -Dsolr.directoryFactory=solr.NIOFSDirectoryFactory -Dsolr.jetty.threads.max=128 -jar /usr/lib/solr/server/start.jar --module=http
+    before: /usr/lib/solr/setup
+    user: solr
+    group: vuln-console
+    pledge: stdio rpath wpath inet unix netlink listen proc exec connect
+    run: [/usr/bin/java, /usr/bin/id, /usr/bin/uname, /usr/bin/cat]
+    listen: tcp/18983 loopback
+    connect: /run/svc/vuln-console/events.sock
+    memory: 1536
+    nofile: 8192
+    env: [HOME=/data/svc/solr, LANG=C.UTF-8]
+
+  n8n:
+    allow: [node:native]
+    exec: /usr/lib/werewolf/vuln-console -mode app -service n8n --
+      /usr/bin/node --no-node-snapshot --max-old-space-size=1536
+      /usr/lib/n8n/node_modules/n8n/bin/n8n start
+    user: n8n
+    group: vuln-console
+    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
+    config: settings /run/config/n8n/settings.json
+    setting:
+      - editor-url url as N8N_EDITOR_BASE_URL
+      - webhook-url url as WEBHOOK_URL
+    render: env site
+    pledge: stdio rpath wpath inet unix netlink listen proc exec connect
+    listen: [tcp/15678 loopback, tcp/5679 loopback]
+    run: /usr/bin/node
+    connect: /run/svc/vuln-console/events.sock
+    memory: 2048
+    nofile: 8192
+    env:
+      - HOME=/data/svc/n8n
+      - TMPDIR=/run/svc/n8n
+      - N8N_USER_FOLDER=/data/svc/n8n
+      - N8N_LISTEN_ADDRESS=127.0.0.1
+      - N8N_PORT=15678
+      - N8N_PROXY_HOPS=1
+      - N8N_PROTOCOL=http
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=false
+      - N8N_COMMUNITY_PACKAGES_ENABLED=false
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=127.0.0.1
+      - N8N_RUNNERS_BROKER_PORT=5679
+      - N8N_LOG_OUTPUT=console
+      - N8N_SECURE_COOKIE=false
+
+  n8n-runner:
+    exec: /usr/lib/werewolf/vuln-console -mode app -service n8n-runner -- /usr/lib/n8n/task-runner-launcher javascript
+    user: n8n-runner
+    group: vuln-console
+    pledge: stdio rpath wpath inet unix netlink listen connect proc exec
+    run: [/usr/lib/n8n/task-runner-launcher, /usr/bin/node]
+    listen: tcp/5680 tcp/5681 loopback
+    connect: [tcp/5679 tcp/5681, /run/svc/vuln-console/events.sock]
+    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
+    memory: 768
+    nofile: 1024
+    env:
+      - HOME=/data/svc/n8n-runner
+      - TMPDIR=/run/svc/n8n-runner
+      - N8N_RUNNERS_CONFIG_PATH=/usr/lib/n8n/task-runners.json
+      - N8N_RUNNERS_TASK_BROKER_URI=http://127.0.0.1:5679
+      - N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST=127.0.0.1
+      - N8N_RUNNERS_MAX_CONCURRENCY=2
+      - N8N_RUNNERS_TASK_TIMEOUT=60
+      - N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=15
+
+  langflow:
+    allow: [python:native]
+    exec: /usr/lib/werewolf/vuln-console -mode app -service langflow -- /usr/lib/langflow/bin/python -B -u /usr/lib/langflow/server.py
+    user: langflow
+    group: vuln-console
+    pledge: stdio rpath wpath inet unix netlink listen proc exec connect
+    listen: tcp/17860 loopback
+    run: /usr/lib/langflow/bin/python
+    connect: /run/svc/vuln-console/events.sock
+    memory: 3072
+    nofile: 8192
+    env:
+      - HOME=/data/svc/langflow
+      - LANGFLOW_CONFIG_DIR=/data/svc/langflow
+      - LANGFLOW_DATABASE_URL=sqlite:////data/svc/langflow/langflow.db
+      - LANGFLOW_HOST=127.0.0.1
+      - LANGFLOW_PORT=17860
+      - LANGFLOW_AUTO_LOGIN=true
+      - LANGFLOW_ENABLE_SIGNUP=false
+      - LANGFLOW_WORKERS=1
+      - LANGFLOW_DEV=false
+      - LANGFLOW_OPEN_BROWSER=false
+      - LANGFLOW_ALEMBIC_LOG_TO_STDOUT=true
+      - LANGFLOW_LOG_LEVEL=info
+      - LANGFLOW_LOG_ENV=container_json
+      - LANGFLOW_DO_NOT_TRACK=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+      - HF_HOME=/data/svc/langflow/models
+      - XDG_CACHE_HOME=/data/svc/langflow/cache
+      - OMP_NUM_THREADS=2
+      - TOKENIZERS_PARALLELISM=false
+
+  vuln-console:
+    exec: /usr/lib/werewolf/vuln-console -mode web -listen :8080
+    user: vuln-console
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: tcp/8080 tcp/8983 tcp/5678 tcp/7860
+    connect: tcp/18983 tcp/15678 tcp/17860
+    read: [/run/werewolf/vuln-kmsg, /run/werewolf/seal/refused]
+    share: shared
+    memory: 256
+    nofile: 2048
+    env: [HOME=/data/svc/vuln-console, GOMEMLIMIT=192MiB]
+
+  vuln-sshd:
+    exec: /usr/lib/werewolf/vuln-console -mode ssh -listen :22 -user demo
+    user: vuln-sshd
+    group: vuln-console
+    pledge: stdio rpath wpath inet unix connect listen proc exec landlock seccomp
+    listen: tcp/22
+    connect: /run/svc/vuln-console/events.sock
+    run: [/usr/bin/id, /usr/bin/uname, /usr/bin/cat]
+    narrow:
+      - /usr/bin/id pledge stdio rpath proc
+      - /usr/bin/uname pledge stdio rpath
+      - /usr/bin/cat pledge stdio rpath
+    memory: 128
+    nofile: 512
+    env: [HOME=/data/svc/vuln-sshd, GOMEMLIMIT=96MiB]

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Probe a shipping vuln-demo image over host-forwarded HTTP and SSH, without guest tools."""
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import socket
+import subprocess
+import sys
+import time
+
+
+def call(*args, **kwargs):
+    return subprocess.run([str(a) for a in args], check=True, **kwargs)
+
+
+def port():
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+def poweroff(process, qmp):
+    if process.poll() is not None:
+        return
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(5)
+            s.connect(str(qmp))
+            wire = s.makefile('rwb')
+            wire.readline()
+            for command in ('qmp_capabilities', 'system_powerdown'):
+                wire.write((json.dumps({'execute': command}) + '\n').encode())
+                wire.flush()
+                while True:
+                    reply = json.loads(wire.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply['error'])
+                    if 'return' in reply:
+                        break
+        process.wait(timeout=45)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build', type=Path, required=True, help='BUILD directory containing the shipping vuln-demo image')
+    args = parser.parse_args()
+    os.umask(0o077)
+    root = Path(__file__).resolve().parents[3]
+    os.chdir(root)
+    build = args.build.resolve()
+    out = build / 'vuln-demo'
+    for path in (build / 'vmlinuz', out / 'initramfs.zst', out / 'slot/cmdline'):
+        if not path.is_file():
+            raise ValueError('Build the shipping image first: missing ' + str(path))
+    work = build / 'check/vuln-demo-appliance'
+    work.mkdir(parents=True, exist_ok=True)
+    config = work / 'config'
+    config.mkdir(exist_ok=True)
+    (config / 'data.key').write_bytes(os.urandom(64))
+    call(root / 'forms/vuln-demo/test/config', config)
+    call(root / 'build/host/howl', 'pack', '--build', '--with', 'vuln-demo', '-o',
+         work / 'config.tar', '--config', config, stdout=subprocess.DEVNULL)
+    data = work / 'data.img'
+    with data.open('wb') as image:
+        image.truncate(4 << 30)
+    exposed = {guest: port() for guest in (22, 8080, 8983, 5678, 7860)}
+    network = 'user,id=n0' + ''.join(',hostfwd=tcp:127.0.0.1:' + str(host) + '-:' + str(guest)
+                                  for guest, host in exposed.items())
+    qmp = work / 'qmp.sock'
+    qmp.unlink(missing_ok=True)
+    machine = platform.machine().lower()
+    arch = 'aarch64' if machine in ('arm64', 'aarch64') else 'x86_64'
+    command = ['qemu-system-' + arch, '-M', 'virt,virtualization=on' if arch == 'aarch64' else 'q35',
+               '-accel', 'hvf' if sys.platform == 'darwin' else 'kvm', '-cpu', 'host',
+               '-nographic', '-smp', '4', '-m', '12288', '-no-reboot',
+               '-device', 'virtio-rng-pci', '-netdev', network,
+               '-device', 'virtio-net-pci,netdev=n0,romfile=',
+               '-kernel', str(build / 'vmlinuz'), '-initrd', str(out / 'initramfs.zst'),
+               '-append', (out / 'slot/cmdline').read_text().strip() +
+               ' werewolf.check=1 werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 werewolf.data=vda',
+               '-drive', 'file=' + str(data) + ',format=raw,if=virtio',
+               '-drive', 'file=' + str(work / 'config.tar') + ',format=raw,if=virtio,readonly=on',
+               '-qmp', 'unix:' + str(qmp) + ',server=on,wait=off']
+    env = dict(os.environ)
+    env.setdefault('GOCACHE', str(root / 'build/go-cache'))
+    env.setdefault('GOMODCACHE', str(root / 'build/go-mod-cache'))
+    for name, guest in (('URL', 8080), ('SOLR', 8983), ('N8N', 5678), ('LANGFLOW', 7860)):
+        env['VULN_DEMO_TEST_' + name] = 'http://127.0.0.1:' + str(exposed[guest])
+    env['VULN_DEMO_TEST_SSH'] = '127.0.0.1:' + str(exposed[22])
+    log = work / 'console.log'
+    with log.open('wb') as output:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            call('go', 'test', '-count=1', '-tags', 'integration', '-run', '^TestAppliance$', '-v',
+                 '-timeout', '15m', './...', cwd=root / 'forms/vuln-demo/melange', env=env)
+        finally:
+            poweroff(process, qmp)
+    print('vuln-demo appliance: passed; console: ' + str(log))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, subprocess.CalledProcessError) as error:
+        sys.exit('vuln-demo appliance: ' + str(error))
