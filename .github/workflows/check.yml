@@ -71,6 +71,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Make room for VM images
+        # Drop unused hosted SDKs; ci-compilers installs pinned .NET privately.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet/sdk /usr/share/dotnet/packs
+          df -h .
       - name: Install tools
         run: sudo test/ci-setup
       - name: Tool versions
@@ -132,8 +137,12 @@ jobs:
         # but reserve the largest form's RAM so large guests cannot exhaust
         # the runner. Forms jobs check demo, so persist need not first.
         run: |
-          jobs=$(test/ci-vm-jobs)
-          make -k -j"$jobs" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+          if [ "${{ matrix.group }}" = forms ] || [ "${{ matrix.group }}" = shellfree ]; then
+            ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} test/ci-forms ${{ matrix.group }}
+          else
+            jobs=$(test/ci-vm-jobs)
+            make -k -j"$jobs" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+          fi
       # integrity saves the Zig cache, when this week's has no entry for
       # these sources yet: every check job compiles the same programs, and
       # integrity is off the critical path.
@@ -168,14 +177,17 @@ jobs:
             build/*/check/*-native/results.json
             build/*/check/*-native/seed.log
             build/*/check/*-native/verify.log
-      - name: Keep the build and console logs
-        if: failure()
+      - name: Keep resolved packages, build logs and console logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: check-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
           path: |
+            build/lock/*.lock.json
+            build/*/check/ci-forms-*.json
             build/*/check/**/*.log
             build/*/check/*-native/results.json
+          retention-days: 3
 
   # arm64's whole check, as x86_64's: hosted arm runners have no KVM, so this
   # job boots werewolf's kernel and every form under KVM on the self-hosted
@@ -245,12 +257,13 @@ jobs:
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
       - name: Boot and check every group
-        # A boot a CPU, as the hosted jobs run them, but no more than memory
-        # holds. Reserve at least 4 GiB per boot, or the largest form's budget.
+        # Complete and clean each form before the next. Platform checks
+        # still share CPUs within the declared guest memory budget.
         run: |
+          ARCH=aarch64 SHARD='' test/ci-forms all
           jobs=$(test/ci-vm-jobs)
-          echo "vm-arm64: $jobs boots at once"
-          make -k -j"$jobs" check
+          echo "vm-arm64: $jobs platform boots at once"
+          make -k -j"$jobs" check-platform
       # arm64's only job saves its melange packages, as the check job's
       # forms jobs do x86_64's: saved even when a check fails.
       - name: Save melange packages
@@ -263,9 +276,13 @@ jobs:
             build/vendor/packages
             build/vendor/stamps
           key: ${{ steps.melange.outputs.cache-primary-key }}
-      - name: Keep the build and console logs
-        if: failure()
+      - name: Keep resolved packages, build logs and console logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: check-vm-arm64
-          path: build/*/check/**/*.log
+          path: |
+            build/lock/*.lock.json
+            build/*/check/ci-forms-*.json
+            build/*/check/**/*.log
+          retention-days: 3
