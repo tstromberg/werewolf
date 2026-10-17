@@ -305,7 +305,12 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
             .{ .form = ref, .app = o.app, .local = o.local },
             provider,
             o.arch,
-            try gpa.print("_build/{s}", .{f}),
+            try @import("local-secure.zig").localChannel(
+                gpa,
+                try std.process.currentPathAlloc(io, gpa),
+                "_build",
+                f,
+            ),
             out,
             why,
         );

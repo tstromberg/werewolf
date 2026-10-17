@@ -26,7 +26,11 @@ work.mkdir(mode=0o700, parents=True, exist_ok=False)
 os.umask(0o077)
 lima_home = Path(tempfile.mkdtemp(prefix='ww-shared-boot-', dir='/tmp'))
 names = ['ww-published-' + secrets.token_hex(5) for _ in range(2)]
-env = dict(os.environ, LIMA_HOME=str(lima_home), UKI_STUB=stub, PYTHONDONTWRITEBYTECODE='1')
+env = dict(os.environ, LIMA_HOME=str(lima_home), UKI_STUB=stub, PYTHONDONTWRITEBYTECODE='1',
+           XDG_DATA_HOME=str(work / 'host-data'))
+consumers = {name: work / 'consumers' / name for name in names}
+for directory in consumers.values():
+    directory.mkdir(parents=True)
 for variable in ('WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'WEREWOLF_BOOT_STATE',
                  'WEREWOLF_IPE_KEY', 'WEREWOLF_IPE_CRT', 'WEREWOLF_IPE_KERNEL'):
     env.pop(variable, None)
@@ -34,7 +38,7 @@ with socket.socket() as probe:
     probe.bind(('127.0.0.1', 0))
     port = probe.getsockname()[1]
 channel = 'https://192.168.5.2:%d/playground' % port
-service = Path('build/permit-service/lima-' + str(port))
+service = work / 'host-data/howl/permit-service' / str(port)
 commands = work / 'commands.jsonl'
 commands.touch()
 wrappers = work / 'bin'
@@ -71,8 +75,9 @@ label_file.write_text('A\n')
     Path('forms/playground/form.yaml').read_text().split('weaknesses:', 1)[1])
 
 
-def run(args, label, check=True, timeout=600):
-    result = subprocess.run(list(map(str, args)), env=env, capture_output=True, timeout=timeout)
+def run(args, label, check=True, timeout=600, machine=None):
+    result = subprocess.run(list(map(str, args)), env=env, cwd=consumers.get(machine),
+                            capture_output=True, timeout=timeout)
     with (work / (label + '.log')).open('ab') as log:
         log.write(result.stdout + result.stderr)
     if check and result.returncode:
@@ -82,12 +87,12 @@ def run(args, label, check=True, timeout=600):
 
 def ssh_run(name, command, label, **kwargs):
     check = kwargs.pop('check', True)
-    result = run([howl, 'ssh', name, '--', command], label, check=False, **kwargs)
+    result = run([howl, 'ssh', name, '--', command], label, check=False, machine=name, **kwargs)
     if check and result.returncode:
         run([howl, 'ssh', name, '--', '/usr/lib/werewolf/slot-update outcome'],
-            name + '-failure-outcome', check=False, timeout=15)
+            name + '-failure-outcome', check=False, timeout=15, machine=name)
         run([howl, 'ssh', name, '--', 'cat /data/svc/autoupdate/log'],
-            name + '-updater-log', check=False, timeout=15)
+            name + '-updater-log', check=False, timeout=15, machine=name)
         raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-2400:])
     return result
 
@@ -209,19 +214,20 @@ try:
         config = work / (name + '.tar')
         run([howl, 'pack', '--build', '--with', 'playground', '--hostname', name,
              '--root-keys', str(ssh_key) + '.pub', '-o', config], name + '-pack')
-        run([howl, '_enroll-image', name, image_a, code_cert, image_cert, channel, config, 'lima'], name + '-enroll')
+        run([howl, '_enroll-image', name, image_a, code_cert, image_cert, channel, config, 'lima'],
+            name + '-enroll', machine=name)
         states.append(wait(name, 'A'))
     no_build(before)
     if states[0]['release_id'] != states[1]['release_id'] or states[0]['pcr11'] != states[1]['pcr11']:
         raise RuntimeError('machines did not boot identical signed code')
-    authorities = [Path('build/machines') / name / 'authority' for name in names]
+    authorities = [consumers[name] / 'build/machines' / name / 'authority' for name in names]
     factories = [(path / 'factory.permit').read_bytes() for path in authorities]
     if factories[0][16:48] == factories[1][16:48] or states[0]['tpm_anchor'] == states[1]['tpm_anchor']:
         raise RuntimeError('machines share enrollment')
     if (authorities[0] / 'permit.pub').read_bytes() == (authorities[1] / 'permit.pub').read_bytes():
         raise RuntimeError('machines share owner keys')
     for name in names:
-        if (Path('build/machines') / name / 'boot.key').exists():
+        if (consumers[name] / 'build/machines' / name / 'boot.key').exists():
             raise RuntimeError('consumer has a vendor private boot key')
     print('pass: same artifact, distinct owner keys, nonces and TPM anchors', flush=True)
     unavailable(False)
@@ -229,7 +235,7 @@ try:
     unavailable(True)
     before = len(operations())
     for name in names:
-        run([howl, '_accept-image', name, image_b], name + '-accept-B')
+        run([howl, '_accept-image', name, image_b], name + '-accept-B', machine=name)
     cfg = json.loads((authorities[0] / 'publisher.json').read_text())
     head = shared_head(cfg)
     (work / 'shared-head.log').write_bytes(head)
@@ -237,29 +243,30 @@ try:
     for name, state in zip(names, updated):
         ssh_run(name, '/usr/lib/werewolf/slot-update try', name + '-rollback', check=False, timeout=30)
         wait(name, 'A', state['boot_id'], state['tpm_anchor'])
-        rejected = run([howl, '_accept-image', name, image_a], name + '-replay', check=False)
+        rejected = run([howl, '_accept-image', name, image_a], name + '-replay', check=False, machine=name)
         if rejected.returncode == 0:
             raise RuntimeError('accepted an older vendor head')
     no_build(before)
     # Removing one registration must not stop the other machine's shared issuer.
-    run([howl, 'delete', names[0], '--on', 'lima'], names[0] + '-delete')
+    run([howl, 'delete', names[0], '--on', 'lima'], names[0] + '-delete', machine=names[0])
     reply = ssh_run(names[1], '/usr/bin/ab-status', names[1] + '-still-running')
     if not json.loads(reply.stdout)['rollback_protected']:
         raise RuntimeError('deleting one machine affected another enrollment')
     if shared_head(cfg) != head:
         raise RuntimeError('deleting one machine stopped the shared issuer')
     (work / 'result.json').write_text(json.dumps({'same_vendor_artifact': True,
-        'independent_machine_authorities': True, 'vendor_keys_unavailable_to_consumer': True,
+        'independent_machine_authorities': True, 'independent_consumer_directories': True,
+        'vendor_keys_unavailable_to_consumer': True,
         'no_consumer_builds': True, 'ab_update_and_operator_rollback': True,
         'shared_service_survives_one_machine_removal': True}, indent=2) + '\n')
 finally:
     for name in names:
-        machine = Path('build/machines') / name
+        machine = consumers[name] / 'build/machines' / name
         if machine.exists():
             console = lima_home / name / 'serial.log'
             if console.exists():
                 shutil.copyfile(console, work / (name + '-console.log'))
-            result = subprocess.run([howl, 'delete', name, '--on', 'lima'], env=env,
+            result = subprocess.run([howl, 'delete', name, '--on', 'lima'], env=env, cwd=consumers[name],
                                     capture_output=True, timeout=120)
             (work / (name + '-cleanup.log')).write_bytes(result.stdout + result.stderr)
     if not any((lima_home / name).exists() for name in names):
