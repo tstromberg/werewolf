@@ -168,14 +168,16 @@ jobs:
             build/*/check/*-native/results.json
             build/*/check/*-native/seed.log
             build/*/check/*-native/verify.log
-      - name: Keep the build and console logs
-        if: failure()
+      - name: Keep resolved packages, build logs and console logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: check-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
           path: |
+            build/lock/*.lock.json
             build/*/check/**/*.log
             build/*/check/*-native/results.json
+          retention-days: 3
 
   # arm64's whole check, as x86_64's: hosted arm runners have no KVM, so this
   # job boots werewolf's kernel and every form under KVM on the self-hosted
@@ -263,9 +265,12 @@ jobs:
             build/vendor/packages
             build/vendor/stamps
           key: ${{ steps.melange.outputs.cache-primary-key }}
-      - name: Keep the build and console logs
-        if: failure()
+      - name: Keep resolved packages, build logs and console logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: check-vm-arm64
-          path: build/*/check/**/*.log
+          path: |
+            build/lock/*.lock.json
+            build/*/check/**/*.log
+          retention-days: 3
