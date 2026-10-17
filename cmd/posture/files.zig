@@ -56,6 +56,7 @@ fn firstDisk(buf: *[64]u8) [:0]const u8 {
 
 pub fn check(p: *Posture) !void {
     const mounts = p.read("/proc/self/mounts");
+    const root_views = try rootViews(p.gpa, p.read("/proc/self/mountinfo"));
     try p.add(.{
         .id = "files-root-readonly",
         .area = "files",
@@ -95,13 +96,14 @@ pub fn check(p: *Posture) !void {
         .result = if (nosuid.len == 0) .pass else .fail,
         .detail = nosuid,
     });
-    const noexec = try missingOption(p.gpa, mounts, "noexec", &.{"/"}, &.{});
+    const noexec = try missingOption(p.gpa, mounts, "noexec", root_views, &.{});
     try p.add(.{
         .id = "files-noexec-everywhere",
         .area = "files",
         .name = "Only the system's programs run",
-        .why = "Every filesystem but the root refuses to run programs from it.",
-        .how = "every mount in /proc/self/mounts but / is noexec",
+        .why = "Only the root filesystem and its read-only views may run programs.",
+        .how = "every other mount is noexec; mountinfo proves a view is read-only EROFS " ++
+            "on the root's device",
         .observed = try p.gpa.print(
             "applicable mounts missing noexec: {s}",
             .{if (noexec.len > 0) noexec else "none"},
@@ -127,13 +129,14 @@ pub fn check(p: *Posture) !void {
         .detail = nodev,
     });
     // /, /proc, /sys and /dev hold links that only the image, the kernel or
-    // root make. /data follows links because the updater builds roots there
-    // that contain them (docs/security.md, "Not yet").
+    // root make, as do read-only views of the same immutable root. /data
+    // follows links because the updater builds roots there that contain
+    // them (docs/security.md, "Not yet").
     const follows = try missingOption(
         p.gpa,
         mounts,
         "nosymfollow",
-        &.{ "/", "/data" },
+        try std.mem.concat(p.gpa, []const u8, &.{ root_views, &.{"/data"} }),
         &.{ "proc", "sysfs", "devtmpfs" },
     );
     const planted = followsLink(p);
@@ -143,9 +146,8 @@ pub fn check(p: *Posture) !void {
         .name = "Links in writable places not followed",
         .why = "A link planted in /tmp or another shared place leads nowhere, whoever " ++
             "follows it, root included: the kernel refuses to follow it.",
-        .how = "every mount in /proc/self/mounts but /, /data and the kernel's own (proc, " ++
-            "sysfs, devtmpfs) is nosymfollow, and opening a link this program makes in /tmp " ++
-            "is refused (ELOOP)",
+        .how = "mounts except /, its read-only EROFS views, /data and the kernel's own " ++
+            "(proc, sysfs, devtmpfs) are nosymfollow; a /tmp link is refused (ELOOP)",
         .result = if (follows.len == 0 and !planted) .pass else .fail,
         .detail = if (planted) "a link in /tmp was followed" else follows,
     });
@@ -574,6 +576,100 @@ fn mountedAs(gpa: Allocator, mounts: []const u8, fstype: []const u8) ![]const u8
         if (std.mem.eql(u8, kind, fstype)) try listAdd(gpa, &out, "{s}", .{point});
     }
     return out.items;
+}
+
+/// Read-only views of the running EROFS contain only the same system files.
+/// Use mountinfo's kernel device identity, never a mount's name or location.
+fn rootViews(gpa: Allocator, mountinfo: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    try out.append(gpa, "/");
+    var root: ?MountInfo = null;
+    var lines = std.mem.tokenizeScalar(u8, mountinfo, '\n');
+    while (lines.next()) |line| {
+        const m = MountInfo.parse(line) orelse continue;
+        if (!std.mem.eql(u8, m.point, "/")) continue;
+        if (root != null) return out.items;
+        root = m;
+    }
+    const r = root orelse return out.items;
+    if (!std.mem.eql(u8, r.kind, "erofs") or !r.has("ro")) return out.items;
+    lines.reset();
+    while (lines.next()) |line| {
+        const m = MountInfo.parse(line) orelse continue;
+        if (std.mem.eql(u8, m.point, "/")) continue;
+        if (std.mem.eql(u8, m.device, r.device) and
+            std.mem.eql(u8, m.kind, r.kind) and m.has("ro"))
+            try out.append(gpa, m.point);
+    }
+    return out.items;
+}
+
+const MountInfo = struct {
+    device: []const u8,
+    point: []const u8,
+    options: []const u8,
+    kind: []const u8,
+
+    fn parse(line: []const u8) ?MountInfo {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = fields.next() orelse return null; // Mount and parent IDs.
+        _ = fields.next() orelse return null;
+        const device = fields.next() orelse return null;
+        _ = fields.next() orelse return null; // Root within the filesystem.
+        const point = fields.next() orelse return null;
+        const options = fields.next() orelse return null;
+        while (fields.next()) |field| {
+            if (std.mem.eql(u8, field, "-")) return .{
+                .device = device,
+                .point = point,
+                .options = options,
+                .kind = fields.next() orelse return null,
+            };
+        }
+        return null;
+    }
+
+    fn has(m: MountInfo, option: []const u8) bool {
+        var options = std.mem.tokenizeScalar(u8, m.options, ',');
+        while (options.next()) |word| if (std.mem.eql(u8, word, option)) return true;
+        return false;
+    }
+};
+
+test "root views require read-only EROFS on the running root's device" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const root = "20 1 254:0 / / ro,nosuid shared:1 - erofs /dev/dm-0 ro\n";
+    const aliases = "21 20 254:0 /usr /data/svc/autoupdate/usr ro,nosuid,nodev - erofs " ++
+        "/dev/dm-0 ro\n22 20 254:0 / /data/svc/autoupdate/host ro,nosuid,nodev - erofs " ++
+        "/dev/dm-0 ro\n";
+    const untrusted = "23 20 0:8 / /data/fake ro - tmpfs /dev/dm-0 ro\n" ++
+        "24 20 254:1 / /data/other ro - erofs /dev/dm-0 ro\n" ++
+        "25 20 254:0 / /data/writable rw - erofs /dev/dm-0 ro\n" ++
+        "26 20 254:0 / /data/bad - erofs /dev/dm-0 ro\n";
+    const got = try rootViews(gpa, root ++ aliases ++ untrusted);
+    try testing.expectEqual(3, got.len);
+    for ([_][]const u8{
+        "/",
+        "/data/svc/autoupdate/usr",
+        "/data/svc/autoupdate/host",
+    }, got) |want, actual|
+        try testing.expectEqualStrings(want, actual);
+    for ([_][]const u8{
+        aliases,
+        "20 1 254:0 / / rw - erofs /dev/dm-0 ro\n" ++ aliases,
+        "20 1 254:0 / / ro - ext4 /dev/dm-0 ro\n" ++ aliases,
+        root ++ root ++ aliases,
+    }) |text| try testing.expectEqual(1, (try rootViews(gpa, text)).len);
+    const mounts = "/dev/dm-0 / erofs ro,nosuid 0 0\n" ++
+        "/dev/dm-0 /data/svc/autoupdate/usr erofs ro,nosuid,nodev 0 0\n" ++
+        "tmpfs /data/fake tmpfs ro 0 0\n";
+    for ([_][]const u8{ "noexec", "nosymfollow" }) |option|
+        try testing.expectEqualStrings(
+            "/data/fake",
+            try missingOption(gpa, mounts, option, got, &.{}),
+        );
 }
 
 test mountedAs {

@@ -8,9 +8,11 @@ import subprocess
 import struct
 import shutil
 import sys
+import tempfile
 import time
 
 from ab_providers import Provider
+from ab_checks import require_updater_status
 from tpm_proxy import Proxy
 
 fixture_file, work, probe = [Path(arg).resolve() for arg in sys.argv[1:]]
@@ -26,7 +28,10 @@ if not e2fsck.is_file():
     raise RuntimeError('e2fsck is required beside ' + str(debugfs))
 state = work / 'nv'
 state.mkdir()
-socket = work / 'tpm.sock'
+# Unix socket paths have a small platform limit; work may be deeply nested.
+sockets = tempfile.TemporaryDirectory(prefix='ww-tpm-', dir='/tmp')
+socket_dir = Path(sockets.name)
+socket = socket_dir / 'tpm.sock'
 fixture['tpm_socket'] = str(socket) + '.ctrl'
 backend = None
 machine = None
@@ -48,7 +53,7 @@ def swtpm(startup):
         if (not startup or socket.exists()) and Path(str(socket) + '.ctrl').exists():
             return process
         time.sleep(0.05)
-    process.terminate()
+    process.kill()
     process.communicate(timeout=10)
     raise RuntimeError('TPM sockets missing')
 
@@ -80,10 +85,14 @@ def wait_boot(release, previous=None, committed=True, timeout=400):
                 raise RuntimeError('UKI prediction disagrees with actual PCR 11: ' + str(value))
             if paused != value['boot_id']:
                 result = machine.ssh('while [ ! -e /run/werewolf/updater-ready ]; do sleep 1; done; '
-                                     '/usr/bin/sv down /etc/sv/autoupdate', check=False, timeout=15)
+                                     'p=$(cat /etc/sv/autoupdate/supervise/pid) && '
+                                     '[ "$p" -gt 1 ] && cat /proc/$p/status', check=False, timeout=15)
                 if result.returncode:
                     time.sleep(2)
                     continue
+                (work / ('updater-' + value['boot_id'] + '.status')).write_text(result.stdout)
+                require_updater_status(result.stdout)
+                machine.ssh('/usr/bin/sv down /etc/sv/autoupdate', timeout=15)
                 paused = value['boot_id']
             if value['committed'] is committed:
                 with (work / 'evidence.jsonl').open('a') as output:
@@ -109,7 +118,7 @@ def power_off():
 def power_on(args=None):
     global backend, proxy
     backend = swtpm(False)
-    proxy = Proxy(work / 'proxy.sock', str(socket) + '.ctrl')
+    proxy = Proxy(socket_dir / 'proxy.sock', str(socket) + '.ctrl')
     with machine.log.open('ab') as output:
         machine.process = subprocess.Popen(args or machine.qemu_args, env=machine.env, stdout=output,
                                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -124,16 +133,18 @@ def refusal(reason, offset, timeout=100):
     until = time.monotonic() + timeout
     while time.monotonic() < until:
         console = machine.log.read_bytes()[offset:].decode(errors='replace')
-        if 'handing over to runit' in console:
+        expected = console.find('TPM rollback: ' + reason + '; not handing over')
+        handover = console.find('handing over to runit')
+        if handover >= 0 and (expected < 0 or handover < expected):
             raise RuntimeError('unauthorized boot reached userspace')
-        if 'TPM rollback: ' + reason + '; not handing over' in console:
+        if expected >= 0:
             print('pass   tpm-guest-refusal: ' + reason + ' before handover', flush=True)
             return
         time.sleep(1)
     raise RuntimeError('missing explicit boot refusal: ' + console[-6000:])
 
 
-def replay_retired(unmeasured=False):
+def replay_release(release, unmeasured=False):
     # Mutate only the stopped test disk, retaining its protected TPM state.
     raw = work / 'replay.raw'
     disk = work / 'disk.qcow2'
@@ -165,7 +176,7 @@ def replay_retired(unmeasured=False):
     result = machine.run([e2fsck, '-fy', str(partition)], check=False)
     if result.returncode not in [0, 1]:
         raise RuntimeError('test filesystem recovery failed: ' + result.stderr)
-    source = fixture_file.parent / 'release-A'
+    source = fixture_file.parent / ('release-' + release)
     root = next(source.glob('*-root.erofs'))
     filesystem = str(partition)
     machine.run([debugfs, '-w', '-R', 'rm /slot/a/root.erofs', filesystem])
@@ -175,9 +186,9 @@ def replay_retired(unmeasured=False):
         raise RuntimeError('test filesystem edit failed: ' + result.stderr)
     readback = work / 'replayed.erofs'
     machine.run([debugfs, '-R', 'dump /slot/a/root.erofs ' + json.dumps(str(readback)), filesystem])
-    expected = fixture['releases']['A']['files']['root.erofs']['sha256']
+    expected = fixture['releases'][release]['files']['root.erofs']['sha256']
     if hashlib.sha256(readback.read_bytes()).hexdigest() != expected:
-        raise RuntimeError('retired root differs from the signed release')
+        raise RuntimeError('replayed root differs from the signed release')
     readback.unlink()
     with partition.open('rb') as filesystem, raw.open('r+b') as image:
         image.seek(root_offset)
@@ -187,7 +198,7 @@ def replay_retired(unmeasured=False):
     uki = fixture_file.parent / 'tpm/unmeasured.efi' if unmeasured else next(source.glob('*-uki'))
     machine.run(['mcopy', '-o', '-i', fat, str(uki), '::/werewolf/a/uki.efi'])
     entry = work / 'replay.conf'
-    entry.write_text('title retired A\nsort-key werewolf\nversion 99999999T999999Z\nuki /werewolf/a/uki.efi\n')
+    entry.write_text('title replayed ' + release + '\nsort-key werewolf\nversion 99999999T999999Z\nuki /werewolf/a/uki.efi\n')
     machine.run(['mdel', '-i', fat, '::/loader/entries/werewolf-a*.conf'])
     machine.run(['mcopy', '-o', '-i', fat, str(entry), '::/loader/entries/werewolf-a+1.conf'])
     restored = work / 'replay.qcow2'
@@ -206,11 +217,11 @@ try:
     backend = swtpm(True)
     subprocess.run([probe, 'bootstrap-pair', info['public'], fixture_file.parent / 'tpm/aa.permit',
                     'unix:' + str(socket), work / 'credentials'], check=True)
-    backend.terminate()
+    backend.kill()
     backend.communicate(timeout=10)
     backend = swtpm(False)
-    proxy = Proxy(work / 'proxy.sock', str(socket) + '.ctrl')
-    fixture['tpm_socket'] = str(work / 'proxy.sock')
+    proxy = Proxy(socket_dir / 'proxy.sock', str(socket) + '.ctrl')
+    fixture['tpm_socket'] = str(socket_dir / 'proxy.sock')
     machine = Provider('qemu', fixture, work, 'build/host/howl')
     machine.start()
     a = wait_boot('A')
@@ -284,7 +295,7 @@ try:
     if recovered['tpm_anchor'] != info['anchors']['bc']:
         raise RuntimeError('failed-trial recovery lost protected pair')
     power_off()
-    replay_retired()
+    replay_release('A')
     offset = machine.log.stat().st_size
     power_on()
     refusal('RollbackRefused', offset)
@@ -292,7 +303,7 @@ try:
     if replay_recovery['tpm_anchor'] != info['anchors']['bc']:
         raise RuntimeError('replay rejection changed the protected pair')
     power_off()
-    replay_retired(unmeasured=True)
+    replay_release('B', unmeasured=True)
     offset = machine.log.stat().st_size
     power_on()
     refusal('UnmeasuredBoot', offset)
@@ -337,5 +348,6 @@ finally:
     if proxy:
         proxy.close()
     if backend:
-        backend.terminate()
+        backend.kill()
         backend.communicate(timeout=10)
+    sockets.cleanup()

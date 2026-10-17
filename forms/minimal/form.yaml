@@ -37,6 +37,10 @@ archs:
 # network half, which fetches the packages and CVE sources it reads.
 accounts:
   groups:
+    - groupname: tty
+      gid: 5
+    - groupname: _updater
+      gid: 77
     - groupname: _seal
       gid: 66
     - groupname: _update
@@ -50,6 +54,11 @@ accounts:
     - groupname: _logfile
       gid: 76
   users:
+    - username: _updater
+      uid: 77
+      gid: 77
+      homedir: /var/empty
+      shell: /sbin/nologin
     - username: _seal
       uid: 66
       gid: 66

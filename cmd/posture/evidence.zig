@@ -161,11 +161,14 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     },
     .{ "files-boot-unmounted", "/proc/self/mounts: filesystem-type column" },
     .{ "files-nosuid-everywhere", "/proc/self/mounts: each mount's options column" },
-    .{ "files-noexec-everywhere", "/proc/self/mounts: each non-root mount's options column" },
+    .{
+        "files-noexec-everywhere",
+        "/proc/self/mounts: mount options; /proc/self/mountinfo: read-only EROFS root views",
+    },
     .{ "files-nodev-everywhere", "/proc/self/mounts: options and filesystem-type columns" },
     .{
         "files-nosymfollow-everywhere",
-        "/proc/self/mounts: options and filesystem-type columns; symlink/open probe in /tmp",
+        "/proc/self/mounts: options; /proc/self/mountinfo: root views; symlink/open in /tmp",
     },
     .{
         "files-exec-refused",

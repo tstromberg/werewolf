@@ -8,6 +8,13 @@ rm -rf "$v" "$img"
 mkdir -p "$v/slot/a"
 cp "$OUT/slot/root.erofs" "$v/slot/a/"
 mke2fs -q -F -t ext4 -U "$SLOTS" -d "$v" "$img" 128M
+# Match production's numeric owners instead of the host builder's UID/GID.
+for path in /slot /slot/a /slot/a/root.erofs; do
+	for field in uid gid; do
+		printf 'sif %s %s 0\n' "$path" "$field"
+	done
+done >"$CHECK/slot-ownership.debugfs"
+"$DEBUGFS" -w -f "$CHECK/slot-ownership.debugfs" "$img" >"$CHECK/slot-ownership.log" 2>&1
 cmdline="$CMDLINE init=/init werewolf.slots=$SLOTS werewolf.esp=57E1-F000"
 sh test/slot-esp "$CHECK/slot-esp.img" a "$cmdline"
 test/boot slot test/checks "$CHECK/slot.log" "$@" \

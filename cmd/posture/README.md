@@ -60,7 +60,8 @@ milliseconds, walk progress and totals to stderr.
   `--probe` tests its grants. A lock isolates concurrent attacks on werewolf.
 - **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other service to run
   5 s, writes `/run/werewolf/posture.json` and the login message `/run/werewolf/motd`
-  (`/etc/werewolf/motd`, then dev mode, a root console, `werewolf.disable`), and parks.
+  (`/etc/werewolf/motd`, then dev mode, a root console, `werewolf.disable`). It drops
+  capabilities, writes `d` to its own supervisor's control pipe and exits.
 - **Expected failures:** a werewolf image lists expected failures and excuses
   in `/usr/share/werewolf/weaknesses`. Any other failure prints
   `posture: WARNING: unexpected: ID,...` and names excuses no longer needed.
@@ -75,8 +76,7 @@ milliseconds, walk progress and totals to stderr.
 ## Alternatives Considered
 
 ### Lynis, OpenSCAP and other scanners
-They read configuration, need a shell and interpreters, and judge a general
-server. posture is one static binary that tests what the kernel refuses.
+They judge general server configuration; posture tests what the kernel refuses.
 
 ### Checks in test scripts only
 The machine itself would not know its posture; the service reports it on every boot.
@@ -90,11 +90,11 @@ The machine itself would not know its posture; the service reports it on every b
 | A planted file making a check pass | Random names for its copies; attack files made with `O_EXCL`. |
 | A directory swapped for a link mid-walk | Walks by descriptor, without following links, on one filesystem. |
 | Attacks harming a real machine | Off unless asked; each expects refusal; run as `nobody` where possible. |
-| Its own privilege | Root, in fence's domain and under the seal; it runs only itself, `leash` and `sv`. |
+| Its own privilege | One-shot root inspection under fence and the seal; [audit](../../docs/design/posture-inspection.md). |
 
 ## Reliability Considerations
 
-- **Bounded:** walks stop at depth 40; the service waits 60 s at most.
+- **Bounded:** walks stop at depth 40; settling waits 60 s. Evidence reads accept
+  regular files only, up to 16 MiB; kernel-log reads also stop after 65,536 attempts.
 - **Degrades:** a check it cannot make is skipped with the reason.
-- **Tested:** unit tests in each area; every `make check` boot judges the line against
-  `test/posture-known`.
+- **Tested:** unit tests and every `make check` boot against `test/posture-known`.

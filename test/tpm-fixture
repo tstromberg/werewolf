@@ -65,8 +65,9 @@ info = {'machine': machine.hex(), 'ids': {name: raw.hex() for name, raw in ids.i
         'pcrs': {name: raw.hex() for name, raw in pcrs.items()},
         'anchors': {name: anchor(raw).hex() for name, raw in states.items()}, 'public': str(public)}
 (destination / 'machine.json').write_text(json.dumps(info, indent=2) + '\n')
-# A correctly signed UKI with Alpine's measurement-disabled stub must fail closed.
-factory = next((root / 'release-A').glob('*-uki')).read_bytes()
+# B remains authorized after retirement, so its measurement-disabled stub tests
+# measurement enforcement independently of the retired-A refusal.
+factory = next((root / 'release-B').glob('*-uki')).read_bytes()
 pe = struct.unpack_from('<I', factory, 0x3c)[0]
 table = pe + 24 + struct.unpack_from('<H', factory, pe + 20)[0]
 arguments = []

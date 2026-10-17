@@ -18,6 +18,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 import ab_build
+from ab_checks import require_updater_console
 
 env = os.environ
 directory = pathlib.Path(env["CHECK"]) / "image-updater"
@@ -211,6 +212,7 @@ def firmware_update(image, document):
         os.close(master)
     if secure_boot and arch == "aarch64" and digest(enrolled / "vars.fd") != enrolled_digest:
         raise RuntimeError("Arm firmware changed immutable enrollment")
+    require_updater_console(seen, boots=2)
     if not re.search(rb"slot b:[^\r\n]*verified", seen) or seen.count(b"policy administration removed") < 2:
         raise RuntimeError("firmware boot did not verify slot b with IPE")
     if secure_boot and (seen.count(b"native UKI selected slot") < 2 or
@@ -336,6 +338,7 @@ def boot(label, image, slot, files, until, timeout=300):
             while time.monotonic() < deadline:
                 text = log.read_text(errors="replace")
                 if re.search(until + r'[^\r\n]*\r?\n', text):
+                    require_updater_console(text.encode())
                     return text
                 if process.poll() is not None:
                     break

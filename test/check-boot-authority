@@ -123,6 +123,7 @@ def main():
                        'virt' if args.arch == 'aarch64' else 'q35,smm=on', '-cpu',
                        'host' if args.accel != 'tcg' else 'max', '-smp', '2', '-m', '1024',
                        '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
+                       '-nic', 'none',
                        '-drive', 'if=pflash,format=raw,readonly=on,file=' + str(enrolled / 'code.fd'),
                        '-drive', 'if=pflash,format=raw,' +
                        ('readonly=on,' if args.arch == 'aarch64' else '') + 'file=' + str(variables),
