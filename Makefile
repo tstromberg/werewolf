@@ -689,6 +689,20 @@ check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dn
 	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
 
+$(BUILD)/updater-installer-test: cmd/slot-update/installer.zig lib/sandbox.zig lib/seal.zig
+	$(zig_check)
+	mkdir -p $(dir $@)
+	zig test -target $(ARCH)-linux-musl --test-no-exec -femit-bin=$@ \
+		--dep sandbox -Mroot=$< --dep seal -Msandbox=lib/sandbox.zig -Mseal=lib/seal.zig
+$(BUILD)/updater-coordinator-test: $(wildcard cmd/slot-update/*.zig) $(wildcard lib/*.zig)
+	$(zig_check)
+	mkdir -p $(dir $@)
+	zig test -target $(ARCH)-linux-musl --test-filter coordinator --test-no-exec -femit-bin=$@ $(call ZIG_MODULES,cmd/slot-update/slot-update.zig)
+.PHONY: check-updater-installer
+check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordinator-test
+	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-installer-test
+	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-coordinator-test
+
 check-lan: $(call program_bin,fence)
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
 
@@ -843,7 +857,7 @@ check-updater check-updater-staged check-updater-published: | _check-shared
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
-	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
+	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) DEBUGFS=$(DEBUGFS) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
 		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
 		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
 		-device virtio-net-pci,netdev=n0,romfile=

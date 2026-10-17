@@ -47,6 +47,14 @@ mkfs.erofs $EROFS_OPTS -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
 rm -rf "$dir/root.tar" "$dir/verity" && mkdir -p "$dir/verity"
 "$VERITY" "$dir/slots/slot/a/root.erofs" "$dir/verity/verity"
 mke2fs -q -F -t ext4 -U "$SLOTS" -d "$dir/slots" "$dir/slots.img" 3G
+# Match production disk creation: mke2fs preserves the host builder's owners,
+# while the mount broker deliberately has no DAC override capability.
+for path in /slot /slot/a /slot/a/root.erofs; do
+	for field in uid gid; do
+		printf 'sif %s %s 0\n' "$path" "$field"
+	done
+done >"$dir/ownership.debugfs"
+"$DEBUGFS" -w -f "$dir/ownership.debugfs" "$dir/slots.img" >"$dir/ownership.log" 2>&1
 cp "$OUT/slot/vmlinuz" "$dir/"
 (cd "$dir/verity" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) |
 	zstd -q -c | cat "$OUT/slot/stage0.zst" - >"$dir/stage0.zst"

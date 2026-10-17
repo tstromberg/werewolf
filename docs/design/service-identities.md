@@ -36,10 +36,22 @@ limit what it can do.
 | slot-keep | `_slotkeep` (72), no capabilities, read-only Landlock paths and its inherited keeper channel. The mount broker publishes the root-owned committed marker after keeping the EFI entry. Its own control pipe is opened before dropping root. |
 | DHCP | `_dhcp` (67) parses packets; `_netcfg` (73) applies validated leases with NET_ADMIN alone. Only the network-state directory changes owner. Neither side gains another channel or process. |
 | cloud-metadata | `_cloud` (68) fetches; `_usrmgr` (74) checks and rewrites bounded metadata in its scratch directory. A root publisher receives only bounded users/key records, derives accounts through `people.apply`, and keeps CHOWN alone. All three are forked before confinement; neither worker retains UID-changing capabilities. |
-| autoupdate | Root coordinator, unprivileged fetchers/readers and fixed mount-broker operations. Offline apk is confined to a state-directory chroot with immutable tools, a read-only cache, Landlock and seccomp ([installer boundary](updater-installer.md)). The coordinator still needs a separate construction boundary before giving up its ownership and worker-setup capabilities. |
-| posture | Keep privileged inspection once per boot. Dropping root must not silently skip protected process, account or attack checks. |
+| autoupdate | `_updater` (77), no capabilities, Landlock and seccomp; only it retains the updater broker channel. A private root launcher stays inside state with immutable sources, no host descriptors and no mount or chroot capability. Disposable construction jobs and `_update` (69) fetchers/readers run behind that boundary ([coordinator](updater-coordinator.md), [installer](updater-installer.md)). |
+| posture | Keep privileged inspection once per boot. Dropping root must not silently skip protected process, account or attack checks. Bound mutable evidence reads; drop capabilities and stop through its own control pipe ([audit](posture-inspection.md)). |
 | sshd / sshd-dev | Keep upstream's privileged monitor and unprivileged connection handling. The forwarding-only bastion already runs without root. |
 | debug-shell | Keep the explicit development-only root console; production images cannot enable it. |
+
+### Filesystem confinement
+
+Built-ins must declare a filesystem boundary before processing external input.
+Use an empty chroot for workers that need only inherited descriptors (power,
+DHCP packet parsing, metadata transport and log reception). CVE readers instead
+add an empty Landlock domain inside the updater jail. Use a
+state chroot for storage and construction (log writing and updater construction).
+Programs that must inspect host state or publish through preopened directories
+use named Landlock grants, dedicated identities and syscall filters. Their
+exceptions are explicit; a generic chroot must not add a writable host bind or
+make protected inspection disappear. New built-ins need the same review.
 
 ### Other root processes
 

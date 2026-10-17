@@ -10,21 +10,21 @@ due at once; `try [HASH]` selects the parked slot; a failed solve fails `update-
 
 ## Background
 
-A root is an immutable dm-verity EROFS image. A fix lands in the other slot, `a` or `b`;
-the loader falls back unless slot-keep commits it. It is composed locally from
-werewolf's repositories and Wolfi. Enrolled IPE machines fetch complete signed
-slots instead; unenrolled IPE holds updates
+A root is an immutable dm-verity EROFS image. A fix lands in the other slot; the
+loader falls back unless slot-keep commits it. Roots use werewolf and Wolfi
+packages. Enrolled IPE machines fetch signed slots; unenrolled IPE holds updates
 ([prebuilt-images.md](../../docs/design/prebuilt-images.md)).
 
 | File | Holds |
 | --- | --- |
 | `control.zig` | root-only operator requests delegated to the supervised service |
+| `workers.zig` | chrooted construction and worker launcher; inherited private channel |
 | `slot-update.zig` | daemon, `check`, `outcome`, the plans, the log |
 | `stage.zig` | settings, tiers feed, `attempt`, `pending`, lock, reboot |
 | `slot.zig` | building and installing the other slot; new roots (`Root`) |
 | `images.zig` | authenticated prebuilt delivery and retained slot proof |
 | `../../lib/apk.zig` | checking apk's cache before root's apk reads it; RSA keys |
-| `cve.zig` | CVE fetcher and reader children; root's checks of their lines |
+| `cve.zig` | CVE fetcher and reader children; coordinator checks of their lines |
 | `tiers.zig` | the signed CVE tiers feed; tiering an update's fixes |
 | `../../lib/update-policy.zig` | due times, settings, `why`, the log's chain |
 
@@ -82,9 +82,10 @@ Invariants to keep:
 
 ## Security Considerations
 
+- **Coordinator:** `_updater` (77), no capabilities, Landlock and seccomp
+  ([construction boundary](../../docs/design/updater-coordinator.md)).
 - **Network to `_update` children** (apk fetcher, CVE fetcher and reader): uid 69, no
-  capabilities, Landlock, seccomp, size and time limits. Root re-checks every line a
-  reader sends and rejects a source on one bad line.
+  capabilities, Landlock, seccomp and limits. The coordinator rejects bad reader lines.
 - **Signed inputs:** package indexes and the tiers feed use separate keys. A leaked feed
   key changes timing within bounds (serial at most a day ahead, expiry at most a week);
   package keys authorize code.
@@ -94,7 +95,6 @@ Invariants to keep:
 ## Reliability Considerations
 
 - A bad update costs a reboot and a rollback; `bad` stops it being retried.
-- Update reboots are an hour apart. Boot checks retry for 10 minutes; transient fetch
-  failures retry with jittered backoff for up to 2 minutes.
+- Reboots are an hour apart. Boot checks retry for 10 minutes; fetches for 2 minutes.
 - Tested by `make test`, `make check-updater` (a whole update), `check-updater-staged`
   (a power cut mid-update) and `SEAL_LEARN=1 check-updater` (what the seal refuses).

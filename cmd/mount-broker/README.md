@@ -58,15 +58,16 @@ Programs ask through `lib/broker.zig`.
   real disk would, it refuses.
 - **Mounting**: each mount is built detached (`fsopen`, `fsconfig`, `fsmount`) with
   `nosuid,nodev,noexec,nosymfollow` and closed as soon as the operation finishes.
-- **Installer runtime**: the updater alone can attach immutable `/usr` read-only at
-  `/data/svc/autoupdate/usr`. No paths are accepted; shutdown unmounts it first.
+- **Updater runtime**: the updater alone can attach immutable `/usr` and the
+  nonrecursive running root read-only at fixed, checked directories in its jail.
+  Root-owned boot artifacts grant group 77 read/traverse access; `/boot` stays ro.
+  Fixed `updater-ready` publishes readiness.
 - **Confined**: CAP_SYS_ADMIN only, locked (`lib/sandbox.zig`), and a seccomp allowlist:
   `recvfrom`, `sendto`, `poll`, the new mount calls, the file calls the ESP and slot
   operations need (`openat`, `openat2`, `read`, `write`, `renameat`, `unlinkat`,
   `mkdirat`, `fsync`, `getdents64`), classic `mount(2)` only to remount read-only,
   `umount2` only without flags, and the one device-mapper ioctl that removes a mapping.
   It runs nothing.
-- **Logging**: each event is one JSON line on the console.
 
 ## Drawbacks
 

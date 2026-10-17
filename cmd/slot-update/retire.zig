@@ -122,6 +122,10 @@ pub fn prepare(u: *m.Update) !?Prepared {
     if (!completed) {
         try old.record.transition(next, running, try device.pcr11());
         const permit = try signed.hashBytes(u.gpa, raw);
+        _ = try u.sys(
+            m.linux.fchmodat(m.linux.AT.FDCWD, m.work_dir ++ "/boot.permit", 0o640),
+            "publish boot permit",
+        );
         broker.slotState(old.position ^ 1, .{
             .size = permit.size,
             .sha256 = permit.sha256,

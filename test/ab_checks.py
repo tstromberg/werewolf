@@ -3,6 +3,41 @@ import re
 import struct
 
 
+def require_updater_status(status):
+    """Check the live coordinator, including saved/fs IDs and dormant capabilities."""
+    expected = {'Uid': [77] * 4, 'Gid': [77] * 4, 'Threads': [1],
+                'NoNewPrivs': [1], 'Seccomp': [2]}
+    expected.update({key: [0] for key in ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']})
+    found = set()
+    for line in status.splitlines():
+        key, separator, value = line.partition(':')
+        if not separator or key not in expected:
+            continue
+        if key in found:
+            raise AssertionError('duplicate updater status field: ' + key)
+        found.add(key)
+        try:
+            values = [int(word, 16 if key.startswith('Cap') else 10) for word in value.split()]
+        except ValueError as error:
+            raise AssertionError('invalid updater status field: ' + key) from error
+        if values != expected[key]:
+            raise AssertionError('unsafe updater status field: ' + line)
+    if found != set(expected):
+        raise AssertionError('missing updater status fields: ' + ', '.join(sorted(set(expected) - found)))
+
+
+def require_updater_console(console, boots=1):
+    """Each fresh boot must attest the checked credentials before its outcome."""
+    handovers = re.split(rb'werewolf: up in [^\r\n]*handing over to runit', console)
+    if len(handovers) != boots + 1:
+        raise AssertionError('unexpected boot count in updater console')
+    expected = b'autoupdate: coordinator uid=77 gid=77 caps=0 nnp=1'
+    for boot in handovers[1:]:
+        credentials = re.findall(rb'autoupdate: coordinator[^\r\n]*', boot)
+        if not credentials or any(value != expected for value in credentials):
+            raise AssertionError('missing or unsafe updater credentials in boot console')
+
+
 def console_posture_failures(console):
     """Recover a complete posture summary when kernel audits interrupt the UART."""
     clean = re.sub(rb'\[ *[0-9]+\.[0-9]+\] [^\n]*\n', b'', console)
@@ -53,6 +88,48 @@ def require_boot(value, release, slot, root_hash, previous=None, secure=True, co
 
 
 if __name__ == '__main__':
+    status = ('Uid:\t77\t77\t77\t77\nGid:\t77\t77\t77\t77\nThreads:\t1\n'
+              'CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n'
+              'CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n'
+              'CapAmb:\t0000000000000000\nNoNewPrivs:\t1\nSeccomp:\t2\n')
+    require_updater_status(status)
+    invalid = ['', status + 'Uid:\t77\t77\t77\t77\n']
+    for key in ['Uid', 'Gid']:
+        for column in range(4):
+            values = ['77'] * 4
+            values[column] = '0'
+            invalid.append(status.replace(key + ':\t77\t77\t77\t77', key + ':\t' + '\t'.join(values)))
+    for line in status.splitlines():
+        key, _, value = line.partition(':\t')
+        invalid.append(status.replace(line + '\n', ''))
+        wrong = '1' if key.startswith('Cap') else '2' if key == 'Threads' else '0'
+        invalid.append(status.replace(line, key + ':\t' + wrong))
+        invalid.append(status.replace(line, key + ':\tnot-a-number'))
+    for bad in invalid:
+        try:
+            require_updater_status(bad)
+        except AssertionError:
+            continue
+        raise AssertionError('accepted unsafe updater status: ' + bad)
+    boot = b'werewolf: up in 0.1s, handing over to runit\r\n'
+    credentials = b'autoupdate: coordinator uid=77 gid=77 caps=0 nnp=1\r\n'
+    require_updater_console(boot + credentials)
+    require_updater_console((boot + credentials) * 2, boots=2)
+    for console, count in [(b'', 1), (credentials + boot, 1), (boot, 1),
+                           (boot + credentials + boot, 2),
+                           ((boot + credentials) * 2, 1)]:
+        try:
+            require_updater_console(console, count)
+        except AssertionError:
+            continue
+        raise AssertionError('accepted missing or stale updater console evidence')
+    for old, new in [(b'uid=77', b'uid=0'), (b'gid=77', b'gid=0'),
+                     (b'caps=0', b'caps=1'), (b'nnp=1', b'nnp=0')]:
+        try:
+            require_updater_console(boot + credentials.replace(old, new))
+        except AssertionError:
+            continue
+        raise AssertionError('accepted unsafe updater console evidence')
     expected = {'boot-ipe-enforced', 'boot-rollback-protected'}
     interrupted = (b'posture: fail=bo[    6.82] audit: refusal\r\n'
                    b'ot-ipe-enforced,boot-rollback-protected pass=89 skip=4 {}\r\n')
@@ -82,4 +159,4 @@ if __name__ == '__main__':
         raise AssertionError('accepted stale boot evidence')
     assert require_boot(dict(good, secure_boot=False), 'B', 'b', 'a' * 64, secure=False)
     assert require_boot(dict(good, committed=False), 'B', 'b', 'a' * 64, committed=False)
-    print('pass   provider-ab evidence: fresh boots, exact roots, enforcement and commit state')
+    print('pass   provider-ab evidence: fresh boots, exact roots, updater credentials, enforcement and commit state')

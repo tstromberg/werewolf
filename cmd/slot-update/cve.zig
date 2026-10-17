@@ -1,15 +1,7 @@
-//! cve finds which CVEs an update fixes without letting CVE data reach root.
-//! slot-update.zig runs each source through two sandboxed children
-//! (docs/updater.md, Separation):
-//!
-//!   fetcher   as _update, chrooted with only the resolver's files, TCP to
-//!             ports 443 and 53 only: GETs the source into a file root opened.
-//!   reader    as _update in /var/empty, with no network or files, and only
-//!             pread64, write and memory calls: parses it and sends root a
-//!             line per CVE.
-//!
-//! Root then checks every line (packageFixes, kernelFixes). The sources'
-//! formats are in lib/cve.zig.
+//! CVE sources pass through separate _update fetchers and readers inside
+//! the updater jail. Fetchers have resolver files and bounded network access;
+//! readers have only their body descriptor and output pipe. The coordinator
+//! validates every returned line. Source formats live in lib/cve.zig.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,7 +12,7 @@ const sandbox = @import("sandbox");
 const sources = @import("cve");
 
 /// Limits: the most a fetcher may write, the total memory a reader may map,
-/// and the longest kernel CVE title root accepts.
+/// and the longest kernel CVE title the coordinator accepts.
 const max_fetch = 256 << 20;
 const reader_memory = 1 << 30;
 const max_title = 512;
@@ -36,7 +28,7 @@ pub const Job = union(enum) {
 /// GETs url into body, then writes "ok" or the reason to out.
 pub fn fetcher(
     id: u32,
-    root: [*:0]const u8,
+    root: ?[*:0]const u8,
     url: []const u8,
     body: i32,
     out: i32,
@@ -47,7 +39,7 @@ pub fn fetcher(
 
 pub fn fetcherBounded(
     id: u32,
-    root: [*:0]const u8,
+    root: ?[*:0]const u8,
     url: []const u8,
     body: i32,
     maximum: usize,
@@ -59,7 +51,7 @@ pub fn fetcherBounded(
 
 pub fn fetcherPinned(
     id: u32,
-    root: [*:0]const u8,
+    root: ?[*:0]const u8,
     url: []const u8,
     body: i32,
     maximum: usize,
@@ -85,14 +77,14 @@ pub fn fetcherPinned(
 fn fetchInto(
     gpa: Allocator,
     id: u32,
-    root: [*:0]const u8,
+    root: ?[*:0]const u8,
     url: []const u8,
     body: i32,
     out: i32,
     maximum: usize,
     ca: ?[]const u8,
 ) ![]const u8 {
-    try sandbox.closeAllBut(&.{ body, out });
+    try sandbox.closeAllButAnonymous(&.{ body, out });
     var threaded: Io.Threaded = .init_single_threaded;
     const io = threaded.io();
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
@@ -128,7 +120,7 @@ fn fetchInto(
     const permit_port = try std.fmt.parseUnsigned(u16, std.mem.trim(u8, permit_text, "\n"), 10);
     if (permit_port == 0) return error.BadPermitTransport;
     try sandbox.limit(.FSIZE, maximum);
-    try sandbox.dropTo(id, root);
+    if (linux.geteuid() != id) try sandbox.dropTo(id, root);
     const etc: i32 = @intCast(try sandbox.sys(
         linux.openat(
             linux.AT.FDCWD,
@@ -138,11 +130,23 @@ fn fetchInto(
         ),
         "open /etc",
     ));
-    try sandbox.landlock(
-        &.{.{ .fd = etc, .access = sandbox.read_file }},
-        &.{ 443, 53, port, permit_port },
-    );
-    _ = linux.close(etc);
+    var rules: [3]sandbox.Rule = undefined;
+    rules[0] = .{ .fd = etc, .access = sandbox.read_file };
+    var n: usize = 1;
+    defer for (rules[0..n]) |rule| {
+        _ = linux.close(rule.fd);
+    };
+    // The jail's resolver files link into scratch outside /etc.
+    for ([_][:0]const u8{ "/etc/resolv.conf", "/etc/hosts" }) |path| {
+        const fd = linux.openat(linux.AT.FDCWD, path, .{ .PATH = true, .CLOEXEC = true }, 0);
+        if (linux.errno(fd) == .NOENT) continue;
+        rules[n] = .{
+            .fd = @intCast(try sandbox.sys(fd, "open resolver file")),
+            .access = sandbox.read_file,
+        };
+        n += 1;
+    }
+    try sandbox.landlock(rules[0..n], &.{ 443, 53, port, permit_port });
     // Only what a traced request needs: the resolver's files, DNS over UDP
     // (bound to port 0) or TCP, TLS over TCP, and writes to body, out and
     // stderr.
@@ -276,7 +280,14 @@ test "fetch bound rejects a whole oversized or overflowing vector" {
 /// reader runs as id in the empty /var/empty, with no network or files and
 /// at most reader_memory of memory. It parses body for job and writes "ok"
 /// and a line per CVE, or the reason, to out.
-pub fn reader(id: u32, job: Job, body: Body, out: i32, parent: linux.pid_t) noreturn {
+pub fn reader(
+    id: u32,
+    root: ?[*:0]const u8,
+    job: Job,
+    body: Body,
+    out: i32,
+    parent: linux.pid_t,
+) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const gpa = arena.allocator();
@@ -284,6 +295,7 @@ pub fn reader(id: u32, job: Job, body: Body, out: i32, parent: linux.pid_t) nore
     readInto(
         gpa,
         id,
+        root,
         job,
         body,
         out,
@@ -292,10 +304,18 @@ pub fn reader(id: u32, job: Job, body: Body, out: i32, parent: linux.pid_t) nore
     sandbox.say(out, 0, "ok", lines.written());
 }
 
-fn readInto(gpa: Allocator, id: u32, job: Job, body: Body, out: i32, w: *Io.Writer) !void {
-    try sandbox.closeAllBut(&.{ body.fd, out });
+fn readInto(
+    gpa: Allocator,
+    id: u32,
+    root: ?[*:0]const u8,
+    job: Job,
+    body: Body,
+    out: i32,
+    w: *Io.Writer,
+) !void {
+    try sandbox.closeAllButAnonymous(&.{ body.fd, out });
     try sandbox.limit(.AS, reader_memory);
-    try sandbox.dropTo(id, "/var/empty");
+    if (linux.geteuid() != id) try sandbox.dropTo(id, root);
     try sandbox.landlock(&.{}, &.{});
     var f: sandbox.Filter = .{};
     f.allowArg("pread64", 0, @intCast(body.fd));

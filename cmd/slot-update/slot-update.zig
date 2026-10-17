@@ -27,6 +27,7 @@ pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
 const installer = @import("installer.zig");
+const workers = @import("workers.zig");
 const control = @import("control.zig");
 const broker = @import("broker");
 const Pending = stage.Pending;
@@ -77,18 +78,14 @@ pub const update_id: u32 = 69;
 /// net_root is the fetcher's chroot; cves_dir receives fetched files.
 const net_root = work_dir ++ "/net";
 pub const cves_dir = work_dir ++ "/cves";
-/// fetch_seconds, apk_seconds and read_seconds bound the fetchers and the
-/// reader; max_lines bounds what a reader sends back.
-const fetch_seconds = 600;
+/// apk_seconds bounds each apk invocation.
 /// max_retry_ms is the total time retries may wait (Update.again).
 const max_retry_ms = 120_000;
 pub const apk_seconds = 1800;
-const read_seconds = 300;
-const max_lines = 4 << 20;
 /// tool_seconds and max_tool_output bound a tool that root runs (mkfs.erofs,
 /// zstd, apk offline). A tool that hangs is killed and the pass
 /// fails, to be retried.
-const tool_seconds = 1800;
+pub const tool_seconds = 1800;
 const max_tool_output = 1 << 20;
 /// max_apk_file bounds each index or package apk's fetcher writes. The
 /// largest package (a JDK) is a few hundred megabytes.
@@ -111,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
         "";
     if (std.mem.eql(u8, mode, "daemon")) {
         broker.keepOnlyClient(.updater);
-        daemon(init.io);
+        daemon();
     }
     broker.keepOnlyClient(null);
     if (!std.mem.eql(u8, mode, "check") and !std.mem.eql(u8, mode, "outcome") and
@@ -181,7 +178,9 @@ fn failed(u: *Update, err: anyerror) void {
 /// (bootIfDue). A check that fails before this boot has finished one, and
 /// before the machine has been up ten minutes, is tried again in 30
 /// seconds. Off a slot it parks.
-fn daemon(io: Io) noreturn {
+fn daemon() noreturn {
+    var threaded: Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
     // Disable Speculative Store Bypass for the daemon and every child, since
     // apk and mkfs.erofs parse network data. Errors mean the CPU has no
     // control, so ignore them.
@@ -192,14 +191,20 @@ fn daemon(io: Io) noreturn {
         0,
         0,
     );
-    keepDaemonCaps(daemon_caps) catch park(io, "cannot drop capabilities");
+    const listener = control.listen() catch park(io, "cannot start operator request listener");
+    workers.start(io) catch |err| {
+        std.debug.print(
+            "autoupdate: worker setup: {s}: {s} ({s})\n",
+            .{ @errorName(err), sandbox.failed, sandbox.errnoName(sandbox.failed_errno) },
+        );
+        park(io, "cannot confine update coordinator");
+    };
     // A machine that has never finished a check boots its first update at
     // once. Test "never finished", not "never logged": a first check that
     // failed before the network was up still logs.
     var ctx: Ctx = .{ .first_boot = neverChecked(io) };
-    const listener = control.listen() catch park(io, "cannot start operator request listener");
     switch (pass(io, .setup, &ctx)) {
-        .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
+        .ok => broker.updaterReady() catch |err| {
             std.debug.print(
                 "autoupdate: cannot write {s}: {s}\n",
                 .{ ready_path, @errorName(err) },
@@ -209,6 +214,7 @@ fn daemon(io: Io) noreturn {
         .failed => {},
     }
     while (true) {
+        if (!workers.alive()) linux.exit_group(1);
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch {
             _ = requested(io, listener);
             io.sleep(.fromSeconds(1), .awake) catch {};
@@ -224,6 +230,7 @@ fn daemon(io: Io) noreturn {
     var next_check = nowSecs(io) + 10;
     var boot_checked = false;
     while (true) {
+        if (!workers.alive()) linux.exit_group(1);
         if (requested(io, listener)) continue;
         if (nowSecs(io) >= next_check) {
             if (pass(io, .check, &ctx) == .ok) {
@@ -338,13 +345,11 @@ fn updateEvery(io: Io) i64 {
 
 /// park logs why and marks the service down so runsv does not restart it.
 fn park(io: Io, why: []const u8) noreturn {
-    sandbox.keepOnly(0) catch {};
+    if (linux.geteuid() == 0) sandbox.keepOnly(0) catch {};
     Io.File.stdout().writeStreamingAll(io, "autoupdate: ") catch {};
     Io.File.stdout().writeStreamingAll(io, why) catch {};
     Io.File.stdout().writeStreamingAll(io, "\n") catch {};
-    const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
-    std.debug.print("autoupdate: sv down: {s}\n", .{@errorName(err)});
-    std.process.exit(1);
+    workers.park();
 }
 
 pub const Update = struct {
@@ -368,7 +373,10 @@ pub const Update = struct {
         // Parse as stage0 does (lib/cmdline.zig). werewolf.slot,
         // werewolf.slots and werewolf.esp identify a disk slot.
         var refused: cmdline.Failure = .{};
-        u.cmd = cmdline.parse(try u.read("/proc/cmdline"), &refused) orelse
+        u.cmd = cmdline.parse(
+            if (workers.boot_line.len > 0) workers.boot_line else try u.read("/proc/cmdline"),
+            &refused,
+        ) orelse
             return error.BadCommandLine;
         const s = u.cmd.slot orelse return error.NotBootedFromASlot;
         if (u.cmd.esp == null) return error.NotBootedFromASlot;
@@ -451,9 +459,9 @@ pub const Update = struct {
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
-        Dir.cwd().deleteTree(io, work_dir) catch {};
-        try Dir.cwd().createDirPath(io, work_dir);
-        defer Dir.cwd().deleteTree(io, work_dir) catch {};
+        try workers.reset(u);
+        defer workers.reset(u) catch {};
+        try u.netRoot();
         const arch = std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n");
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
         const image_update = try u.needsSignedImage();
@@ -496,11 +504,9 @@ pub const Update = struct {
         u.step = "cves";
         try u.netRoot();
         var sources: std.ArrayList(Source) = .empty;
-        // Wolfi's security.json, from the first repository that is not
-        // werewolf's own: werewolf's packages have no CVE feed there.
-        const repo = for (try u.words(try u.read("/etc/apk/repositories"))) |r| {
-            if (!std.mem.eql(u8, r, werewolf_repository)) break r;
-        } else return error.NoWolfiRepository;
+        // Werewolf's package feeds have no Wolfi security.json.
+        const repo = securityRepository(try u.words(try u.read("/etc/apk/repositories"))) orelse
+            return error.NoWolfiRepository;
         const applied = if (u.image != null)
             try images.applied(u)
         else
@@ -528,7 +534,10 @@ pub const Update = struct {
             .advisories = plan.advisories,
             .have = try u.ownAdvisories(),
         });
-        if (!image_update) try u.buildSlot(plan.new_kernel);
+        if (!image_update) {
+            try u.requireLocalUpdate();
+            try workers.build(u, plan.new_kernel);
+        }
         // Write pending only after install arms the new build, so a failed
         // install keeps the first-seen times. install removes attempt first,
         // so bootIfDue boots nothing meanwhile. Seen is stamped here, not
@@ -608,21 +617,12 @@ pub const Update = struct {
     /// work_dir/root and work_dir/kernel and returns the plan. It returns
     /// null, after logging, if nothing changed or a version would go back.
     fn packagesPlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
-        u.step = "installer-runtime";
-        defer installer.clean(u.io, u.gpa, state_dir) catch {};
-        try installer.prepare(u.io, u.gpa, state_dir);
-        broker.installerRuntime() catch |err| {
-            u.detail = broker.refusal;
-            return err;
-        };
         u.step = "userland";
-        try u.apkAdd(
-            work_dir ++ "/root",
-            arch,
-            "/etc/apk/keys",
-            &.{ "--repositories-file", "/etc/apk/repositories" },
-            try u.words(try u.read("/etc/apk/world")),
-        );
+        try workers.packages(u, .{
+            .kernel = false,
+            .arch = arch,
+            .packages = try u.words(try u.read("/etc/apk/world")),
+        });
         if (std.mem.find(
             u8,
             try u.read("/etc/apk/repositories"),
@@ -657,13 +657,12 @@ pub const Update = struct {
         // linux-werewolf, from the repository the image's kernel came from,
         // trusting werewolf's key alone: Wolfi's never vouches for a kernel.
         const repository = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel-repository"), "\n");
-        try u.apkAdd(
-            work_dir ++ "/kernel",
-            arch,
-            "/etc/werewolf/kernel-keys",
-            &.{ "--repository", repository },
-            &.{"linux-werewolf"},
-        );
+        try workers.packages(u, .{
+            .kernel = true,
+            .arch = arch,
+            .repository = repository,
+            .packages = &.{"linux-werewolf"},
+        });
         u.step = "kernel-config";
         try slot.checkKernelConfig(u, work_dir ++ "/kernel");
 
@@ -850,12 +849,7 @@ pub const Update = struct {
         ));
         errdefer _ = linux.close(fd);
         const ca = try @import("retire.zig").fetchAuthority(u, url);
-        const said = u.ask(
-            cve.fetcherPinned,
-            .{ update_id, net_root, url, fd, maximum, ca },
-            256,
-            fetch_seconds,
-        ) catch |err| {
+        const said = saidOf(try workers.fetch(u, url, fd, maximum, ca)) catch |err| {
             u.detail = url;
             return err;
         };
@@ -926,12 +920,10 @@ pub const Update = struct {
         body: cve.Body,
     ) ?[]const u8 {
         const source = &sources.items[sources.items.len - 1];
-        const said = u.ask(
-            cve.reader,
-            .{ update_id, job, body },
-            max_lines,
-            read_seconds,
-        ) catch |err| {
+        const said = saidOf(workers.read(u, job, body) catch |err| {
+            source.@"error" = @errorName(err);
+            return null;
+        }) catch |err| {
             source.@"error" = @errorName(err);
             return null;
         };
@@ -964,19 +956,6 @@ pub const Update = struct {
         }
         _ = linux.close(pipe[1]);
         return sandbox.collect(u.gpa, @intCast(rc), pipe[0], max, seconds);
-    }
-
-    /// ask runs a CVE child and splits its output into a status line ("ok" or
-    /// the reason, printable ASCII) and the rest. A nonzero exit or a
-    /// malformed status is an error.
-    fn ask(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !Said {
-        const e = try u.child(f, args, max, seconds);
-        if (e.code != 0) return error.ChildFailed;
-        const eol = std.mem.findScalar(u8, e.out, '\n') orelse return error.ChildSaidNothing;
-        const status = e.out[0..eol];
-        if (status.len == 0 or status.len > 128) return error.ChildSaidNonsense;
-        for (status) |c| if (c < 0x20 or c > 0x7e) return error.ChildSaidNonsense;
-        return .{ .status = status, .rest = e.out[eol + 1 ..] };
     }
 
     /// netRoot creates the fetcher's chroot, holding only copies of
@@ -1024,6 +1003,7 @@ pub const Update = struct {
     }
 
     pub fn needsSignedImage(u: *Update) !bool {
+        if (workers.channel >= 0 and workers.ipe_policy != null) return true;
         if (Dir.cwd().access(u.io, meta_dir ++ "/secure-boot", .{})) |_|
             return true
         else |err| switch (err) {
@@ -1224,6 +1204,14 @@ pub const Update = struct {
 // --- the CVE children -------------------------------------------------------
 
 const Said = struct { status: []const u8, rest: []const u8 };
+fn saidOf(e: sandbox.Exit) !Said {
+    if (e.code != 0) return error.ChildFailed;
+    const eol = std.mem.findScalar(u8, e.out, '\n') orelse return error.ChildSaidNothing;
+    const status = e.out[0..eol];
+    if (status.len == 0 or status.len > 128) return error.ChildSaidNonsense;
+    for (status) |c| if (c < 0x20 or c > 0x7e) return error.ChildSaidNonsense;
+    return .{ .status = status, .rest = e.out[eol + 1 ..] };
+}
 
 /// tool is the child Update.run forks: it execs argv with stdout and stderr
 /// on out, every other descriptor closed, and dies with its parent.
@@ -1236,19 +1224,13 @@ fn tool(argv: [:null]const ?[*:0]const u8, out: i32, parent: linux.pid_t) noretu
     ) catch |err| sandbox.say(out, 127, sandbox.whyNot(arena.allocator(), err), "");
 }
 
-const apk_caps: u32 = (1 << linux.CAP.CHOWN) |
+pub const apk_caps: u32 = (1 << linux.CAP.CHOWN) |
     (1 << linux.CAP.DAC_OVERRIDE) |
     (1 << linux.CAP.DAC_READ_SEARCH) |
     (1 << linux.CAP.FOWNER) |
     (1 << linux.CAP.FSETID);
 
-const daemon_caps: u32 = apk_caps |
-    (1 << linux.CAP.SETGID) |
-    (1 << linux.CAP.SETUID) |
-    (1 << linux.CAP.SETPCAP) |
-    (1 << linux.CAP.SYS_CHROOT);
-
-fn keepDaemonCaps(keep: u32) !void {
+pub fn keepDaemonCaps(keep: u32) !void {
     for (0..64) |cap| {
         if (cap < 32 and keep & (@as(u32, 1) << @intCast(cap)) != 0) continue;
         const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
@@ -1266,10 +1248,13 @@ fn keepDaemonCaps(keep: u32) !void {
 }
 
 fn execTool(argv: [:null]const ?[*:0]const u8, out: i32) !noreturn {
-    try sandbox.closeAllBut(&.{out});
+    try sandbox.closeAllButAnonymous(&.{out});
     for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
     if (std.mem.eql(u8, std.mem.span(argv[0].?), "/usr/bin/apk")) {
-        try installer.confine(state_dir, try installer.destination(argv));
+        try installer.confine(
+            if (workers.jailed) null else state_dir,
+            try installer.destination(argv),
+        );
         try keepDaemonCaps(apk_caps);
         try installer.filter();
     } else if (linux.geteuid() == 0) try sandbox.keepOnly(0);
@@ -1429,6 +1414,26 @@ fn backwards(
     const new = kernelPackage(new_kernel) orelse return null;
     if (cve.apkOrder(new.version, old.version) == .lt) return new.name;
     return null;
+}
+
+fn securityRepository(repositories: []const []const u8) ?[]const u8 {
+    for (repositories) |repo| {
+        if (std.mem.eql(u8, repo, werewolf_repository) or
+            std.mem.startsWith(u8, repo, werewolf_repository ++ "/")) continue;
+        return repo;
+    }
+    return null;
+}
+
+test "CVE source skips werewolf's hardened and package-specific feeds" {
+    const wolfi = "https://packages.wolfi.dev/os";
+    const ours = [_][]const u8{
+        werewolf_repository, werewolf_repository ++ "/hardened", werewolf_repository ++ "/python",
+    };
+    try std.testing.expect(securityRepository(&ours) == null);
+    try std.testing.expectEqualStrings(wolfi, securityRepository(&(ours ++ .{wolfi})).?);
+    const other = werewolf_repository ++ "-mirror";
+    try std.testing.expectEqualStrings(other, securityRepository(&.{other}).?);
 }
 
 test "a tool's output, exit and deadline" {
@@ -1637,6 +1642,7 @@ test {
     _ = tiers;
     _ = stage;
     _ = installer;
+    _ = workers;
     _ = slot;
     _ = @import("notice.zig");
 }
