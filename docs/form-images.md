@@ -12,14 +12,16 @@ releases of an older kind ([releases.md](releases.md)).
 ## The pipeline
 
 [form-images.yml](../.github/workflows/form-images.yml) runs on pushes to
-main that touch a form, hourly, and on demand. Each form and architecture
-has a digest over everything that reaches its image: its form chain,
-shared code and tests, trust, exact package versions and checksums, OCI
-digests, melange environments and host tool versions. A target whose
-signed catalog row carries the same digest and a passing attempt is
-skipped; a doc change or another form rebuilds nothing, and a failure is
-retried every run. Dispatching with `force` rebuilds everything, as after
-adding a gate runner.
+main that touch a form, hourly, and on demand. Each target's digest covers its
+form chain, shared code and tests, trust, exact packages and checksums, OCI
+digests, melange environments and host tools. An authenticated catalog row with
+matching inputs and a passing attempt skips the build; failures retry every run.
+`force` rebuilds the selected targets.
+
+Manual dispatch defaults to `target=playground/qemu/x86_64`, using the same
+checks on hosted runners; `target=all` selects the full catalog. Focused builds
+run alongside full builds. A shared publication lock protects the catalog;
+other targets keep their status, inputs and previous release.
 
 A changed form is built by `release/build-protected` for each provider of
 its architecture, with the dedicated boot and image keys: signed UEFI
