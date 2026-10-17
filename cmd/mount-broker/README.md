@@ -47,6 +47,9 @@ Programs ask through `lib/broker.zig`.
   `updater`, the broker mounts it detached, copies digest-checked staged files into
   `/slot/{a,b}` (`slot-root`, `slot-decl`, `slot-meta`) or `/state/{0,1}`
   (`slot-state`), syncs, and closes the mount.
+- **Update reboot**: on `updater`, `reboot` sets two root-owned runit flags
+  opened before confinement and wakes PID 1. Seccomp permits only those descriptors,
+  modes and signal; the updater needs no filesystem override or signal capability.
 - **Shutdown**: on `stage`, `shutdown` unmounts `/data` (or makes it read-only if busy),
   removes its LUKS mapping, and remounts `/boot` read-only (flushing its journal) and
   unmounts it.

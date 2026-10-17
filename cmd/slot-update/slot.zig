@@ -244,7 +244,7 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     try writeAttempt(u, build);
     try u.record(.{ .event = "try", .slot = u.other, .declaration = expected });
     linux.sync();
-    try u.run(&.{"/usr/bin/reboot"});
+    try broker.reboot();
 }
 
 /// installEsp installs the other slot on werewolf's own disk

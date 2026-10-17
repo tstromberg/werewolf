@@ -504,3 +504,8 @@ test "slot requests carry only digests and declarations" {
     try testing.expectEqual(42, st.permit.size);
     try testing.expectError(error.BadRequest, parseSlotState("slot-state p=2 k=42:" ++ hex));
 }
+
+/// Request a clean update reboot through the broker's fixed runit flags.
+pub fn reboot() !void {
+    try callOk(.updater, "reboot");
+}

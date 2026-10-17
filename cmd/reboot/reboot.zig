@@ -34,10 +34,15 @@ fn levelFor(name: []const u8) ?[]const u8 {
 /// setFlag creates runit's reboot flag if needed and sets its mode. runit reads
 /// it after stage 3: owner execute means restart, mode 0 means power off.
 fn setFlag(restart: bool) bool {
+    const mode: u32 = if (restart) 0o100 else 0;
+    // Root owns this flag even at mode 0000. Changing its mode needs no
+    // DAC_OVERRIDE capability and does not require opening it for writing.
+    if (linux.errno(linux.fchmodat2(linux.AT.FDCWD, reboot_flag, mode, 0)) == .SUCCESS)
+        return true;
     const fd = linux.open(reboot_flag, .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
     defer _ = linux.close(@intCast(fd));
-    return linux.errno(linux.fchmod(@intCast(fd), if (restart) 0o100 else 0)) == .SUCCESS;
+    return linux.errno(linux.fchmod(@intCast(fd), mode)) == .SUCCESS;
 }
 
 /// stageTwo returns the pid of runit's stage 2, the runsvdir that is PID 1's

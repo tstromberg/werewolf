@@ -42,6 +42,11 @@ const Status = extern struct {
     backlog_wait_time_actual: u32 = 0,
 };
 const status_enabled = 0x0001;
+const status_backlog_limit = 0x0010;
+// Boot-time posture and independent operator probes can emit hundreds of
+// records before kauditd drains them to a slow serial console. Keep the
+// queue bounded, but do not drop evidence at the kernel default of 64.
+const backlog_limit = 8192;
 
 /// locked is the enabled value for on and locked until reboot (0 is off, 1 on).
 pub const locked = 2;
@@ -81,7 +86,7 @@ pub const Error = error{
 };
 
 /// enable turns audit on with one rule, which logs every refused exec, and
-/// locks the configuration until reboot. The kernel keeps its queue defaults.
+/// locks the configuration until reboot, after reserving a bounded boot backlog.
 pub fn enable() Error!void {
     try configure(false);
 }
@@ -105,8 +110,9 @@ fn configure(all: bool) Error!void {
     const sock = try open();
     defer _ = linux.close(sock);
     const on: Status = .{
-        .mask = status_enabled,
+        .mask = status_enabled | status_backlog_limit,
         .enabled = 1,
+        .backlog_limit = backlog_limit,
     };
     try send(sock, msg_set, std.mem.asBytes(&on));
     const refused_exec = execRule(all);
