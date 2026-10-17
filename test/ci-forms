@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Check one form at a time; discard its generated images only after success."""
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+
+def selected(names, shard):
+    if not names or len(names) != len(set(names)) or any(not re.fullmatch(r'[a-z][a-z0-9-]*', n) for n in names):
+        raise ValueError('invalid form inventory')
+    names = sorted(names)
+    if not shard:
+        return names
+    match = re.fullmatch(r'([1-9][0-9]*)/([1-9][0-9]*)', shard)
+    if not match or int(match[1]) > int(match[2]):
+        raise ValueError('SHARD must be K/N, with 1 <= K <= N')
+    return names[int(match[1]) - 1::int(match[2])]
+
+
+def discard(path):
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        # OCI layers may contain read-only directories, owned by this runner.
+        path.chmod(path.stat().st_mode | 0o700)
+        for directory, dirs, _ in os.walk(path):
+            for name in dirs:
+                child = Path(directory) / name
+                if not child.is_symlink():
+                    child.chmod(child.stat().st_mode | 0o700)
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def clean(build, name):
+    # Platform checks reuse these small images after the form checks.
+    if name not in {'minimal', 'prod', 'prod-ssh'}:
+        for stem in (name, name + '-dev', name + '-app', name + '-dev-app', 'native-test-' + name):
+            discard(build / stem)
+    # Every repeat/native verification boot has finished before cleanup.
+    for suffix in ('.img', '-shellfree.img'):
+        discard(build / 'check' / (name + suffix))
+    native = build / 'check' / (name + '-native')
+    for part in ('data.img', 'config', 'seed.tar', 'verify.tar'):
+        discard(native / part)
+    discard(Path('build/native-tests') / build.name / name)
+    # No other form is building; its pinned layers can be fetched again.
+    discard(build / 'oci')
+
+
+def run(group, arch, shard):
+    env = dict(os.environ)
+    for key in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL', 'GNUMAKEFLAGS', 'MAKEFILES', 'SHARD'):
+        env.pop(key, None)
+    make = ['make', '--no-print-directory', '-j1', 'ARCH=' + arch, 'BUILD=build/' + arch]
+    subprocess.run(make + ['build/host/form'], env=env, check=True)
+    names = subprocess.check_output(['build/host/form', 'for-arch', arch], env=env, text=True).splitlines()
+    names = selected(names, shard)
+    build = Path('build') / arch
+    if build.is_symlink() or Path('build').is_symlink():
+        raise ValueError('redirected build directory')
+    check = build / 'check'
+    if check.is_symlink():
+        raise ValueError('redirected check directory')
+    check.mkdir(parents=True, exist_ok=True)
+    report = check / ('ci-forms-' + group + '.json')
+    result = dict(arch=arch, group=group, shard=shard, inventory=names, results=[], complete=False)
+
+    def record():
+        temporary = report.with_suffix('.tmp')
+        temporary.write_text(json.dumps(result, indent=2) + '\n')
+        temporary.replace(report)
+
+    record()
+    if group in ('forms', 'all'):
+        subprocess.run(make + ['_test/form-coverage'], env=env, check=True)
+    for name in names:
+        targets = ([] if group == 'shellfree' else ['check-' + name])
+        if group in ('shellfree', 'all'):
+            targets.append('check-shellfree-' + name)
+        command = make + targets
+        print('ci-forms: ' + ' '.join(targets), flush=True)
+        started = time.monotonic()
+        code = subprocess.run(command, env=env).returncode
+        result['results'].append(dict(form=name, command=command, exit=code,
+                                      seconds=round(time.monotonic() - started, 2)))
+        record()
+        if code:
+            # Retain the failed image and disk, and leave space for uploading logs.
+            return code
+        clean(build, name)
+    result['complete'] = True
+    record()
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 2 or sys.argv[1] not in ('forms', 'shellfree', 'all'):
+            raise ValueError('usage: ci-forms forms|shellfree|all')
+        arch = os.environ.get('ARCH', platform.machine())
+        arch = {'arm64': 'aarch64', 'amd64': 'x86_64'}.get(arch, arch)
+        if arch not in ('aarch64', 'x86_64'):
+            raise ValueError('unsupported architecture')
+        sys.exit(run(sys.argv[1], arch, os.environ.get('SHARD', '')))
+    except (ValueError, subprocess.CalledProcessError) as error:
+        sys.exit('ci-forms: ' + str(error))

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Exercise inventory coverage and cleanup boundaries without starting guests."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+loader = importlib.machinery.SourceFileLoader('ci_forms', str(Path(__file__).with_name('ci-forms')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+ci = importlib.util.module_from_spec(spec)
+loader.exec_module(ci)
+
+
+class Coverage(unittest.TestCase):
+    def setUp(self):
+        self.original = Path.cwd()
+        self.temp = tempfile.TemporaryDirectory()
+        os.chdir(self.temp.name)
+        self.addCleanup(self.restore)
+        self.build = Path('build/aarch64')
+
+    def restore(self):
+        os.chdir(self.original)
+        self.temp.cleanup()
+
+    def write(self, path, data='retained'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data)
+
+    def invoke(self, group, fail=None):
+        commands = []
+
+        def make(command, **_):
+            commands.append(command)
+            name = next((t.removeprefix('check-').removeprefix('shellfree-')
+                         for t in command if t.startswith('check-')), None)
+            if name:
+                self.write(self.build / name / 'slot/root.erofs')
+                self.write(self.build / 'oci/layer')
+                self.write(self.build / 'check' / (name + '.img'))
+            return subprocess.CompletedProcess(command, 7 if name == fail else 0)
+
+        with mock.patch.object(ci.subprocess, 'run', side_effect=make), \
+             mock.patch.object(ci.subprocess, 'check_output', return_value='alpha\nbeta\ngamma\n'):
+            code = ci.run(group, 'aarch64', '')
+        return code, commands
+
+    def test_shards_are_disjoint_and_cover_every_form(self):
+        names = ['gamma', 'alpha', 'beta', 'delta', 'epsilon']
+        for count in (3, 4):
+            shards = [ci.selected(names, str(n) + '/' + str(count)) for n in range(1, count + 1)]
+            self.assertEqual(sorted(names), sorted(n for shard in shards for n in shard))
+            self.assertEqual(shards[0], sorted(names)[::count])
+
+    def test_invalid_inventory_or_shard_is_rejected(self):
+        for names, shard in [([], ''), (['alpha', 'alpha'], ''), (['../outside'], ''),
+                             (['alpha'], '2/1'), (['alpha'], '0/3')]:
+            with self.assertRaises(ValueError):
+                ci.selected(names, shard)
+
+    def test_all_runs_both_targets_and_records_complete_inventory(self):
+        code, commands = self.invoke('all')
+        self.assertEqual(code, 0)
+        for name in ('alpha', 'beta', 'gamma'):
+            self.assertTrue(any(c[-2:] == ['check-' + name, 'check-shellfree-' + name] for c in commands))
+            self.assertFalse((self.build / name).exists())
+            self.assertFalse((self.build / 'check' / (name + '.img')).exists())
+        result = json.loads((self.build / 'check/ci-forms-all.json').read_text())
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['inventory'], [r['form'] for r in result['results']])
+
+    def test_failure_keeps_images_and_stops_before_next_form(self):
+        code, commands = self.invoke('forms', fail='beta')
+        self.assertEqual(code, 7)
+        self.assertFalse((self.build / 'alpha').exists())
+        self.assertTrue((self.build / 'beta/slot/root.erofs').exists())
+        self.assertTrue((self.build / 'oci/layer').exists())
+        self.assertFalse(any('check-gamma' in c for c in commands))
+        result = json.loads((self.build / 'check/ci-forms-forms.json').read_text())
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['results'][-1]['exit'], 7)
+
+    def test_cleanup_keeps_transcripts_results_and_shared_inputs(self):
+        for path in ('check/alpha-native/data.img', 'check/alpha-native/config/data.key',
+                     'check/alpha-native/seed.tar', 'check/alpha-native/verify.tar',
+                     'check/alpha-native/results.json', 'check/alpha-native/seed.log',
+                     'kernel/rootfs.tar', 'programs/init/init', 'minimal/slot/root.erofs'):
+            self.write(self.build / path)
+        ci.clean(self.build, 'alpha')
+        for part in ('results.json', 'seed.log'):
+            self.assertTrue((self.build / 'check/alpha-native' / part).exists())
+        self.assertFalse((self.build / 'check/alpha-native/data.img').exists())
+        for path in ('kernel/rootfs.tar', 'programs/init/init', 'minimal/slot/root.erofs'):
+            self.assertTrue((self.build / path).exists())
+
+    def test_cleanup_can_remove_read_only_generated_directories(self):
+        path = self.build / 'alpha/rootfs/readonly'
+        self.write(path / 'payload')
+        path.chmod(0o555)
+        ci.clean(self.build, 'alpha')
+        self.assertFalse((self.build / 'alpha').exists())
+
+    def test_cleanup_unlinks_redirect_without_following_it(self):
+        outside = Path('outside')
+        self.write(outside / 'evidence')
+        self.build.mkdir(parents=True)
+        (self.build / 'alpha').symlink_to(outside.resolve(), target_is_directory=True)
+        ci.clean(self.build, 'alpha')
+        self.assertTrue((outside / 'evidence').exists())
+        self.assertFalse((self.build / 'alpha').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
