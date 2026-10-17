@@ -537,7 +537,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     // previous time back.
     const prior = u.read(rebooted_path) catch null;
     u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(at)})) catch {};
-    u.run(&.{"/usr/bin/reboot"}) catch |err| {
+    @import("broker").reboot() catch |err| {
         if (prior) |old| {
             u.writeReplacing(rebooted_path, old) catch {};
         } else Dir.cwd().deleteFile(u.io, rebooted_path) catch {};

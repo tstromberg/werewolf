@@ -14,6 +14,8 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const cap_sys_admin = 21;
 const roles = [_]broker.Role{ .updater, .keeper, .stage };
+var reboot_flag: i32 = -1;
+var stop_flag: i32 = -1;
 
 pub fn main() !void {
     var log: Log = .{};
@@ -44,6 +46,8 @@ fn setUp() !void {
         linux.close_range(6, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false }),
         "close_range",
     );
+    reboot_flag = try runitFlag("/run/runit/reboot");
+    stop_flag = try runitFlag("/run/runit/stopit");
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
@@ -53,6 +57,9 @@ fn setUp() !void {
         "munmap",        "mremap",    "fsync",      "mkdirat",         "unlinkat", "renameat",
         "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
     }) |name| f.allow(name);
+    f.allowTwo("fchmod", 0, @intCast(reboot_flag), 1, 0o100);
+    f.allowTwo("fchmod", 0, @intCast(stop_flag), 1, 0o100);
+    f.allowTwo("kill", 0, 1, 1, @backingInt(linux.SIG.CONT));
     f.allowArg("open_tree", 2, open_tree_flags);
     f.allowArg("move_mount", 4, move_mount_f_empty_path | move_mount_t_empty_path);
     f.allowTwo("mount_setattr", 2, linux.AT.EMPTY_PATH, 4, @sizeOf(MountAttr));
@@ -62,6 +69,27 @@ fn setUp() !void {
     f.allowArg("mount", 3, linux.MS.REMOUNT | linux.MS.RDONLY);
     f.allowArg("umount2", 1, 0);
     try f.install();
+}
+
+fn runitFlag(path: [:0]const u8) !i32 {
+    const fd = try fdOf(linux.open(path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), "open broker runit flag");
+    errdefer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .NLINK = true,
+    }, &st), "stat broker runit flag");
+    if (st.uid != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or st.nlink != 1 or
+        st.mode & 0o022 != 0)
+        return error.UnsafeRunitFlag;
+    return fd;
 }
 
 fn serve(log: *Log) noreturn {
@@ -284,7 +312,7 @@ fn roleForOp(op: []const u8) !broker.Role {
         std.mem.eql(u8, op, "esp-inspect") or std.mem.eql(u8, op, "esp-install") or
         std.mem.eql(u8, op, "slot-root") or std.mem.eql(u8, op, "slot-decl") or
         std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state") or
-        std.mem.eql(u8, op, "installer-runtime"))
+        std.mem.eql(u8, op, "installer-runtime") or std.mem.eql(u8, op, "reboot"))
         return .updater;
     return error.UnknownEspOperation;
 }
@@ -303,6 +331,13 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
     if (std.mem.eql(u8, op, "shutdown")) {
         if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
         shutdown(log);
+        return "ok\n";
+    }
+    if (std.mem.eql(u8, op, "reboot")) {
+        if (!std.mem.eql(u8, request, "reboot")) return error.BadRequest;
+        _ = try sandbox.sys(linux.fchmod(reboot_flag, 0o100), "update reboot flag");
+        _ = try sandbox.sys(linux.fchmod(stop_flag, 0o100), "update stop flag");
+        _ = try sandbox.sys(linux.kill(1, linux.SIG.CONT), "wake runit for update");
         return "ok\n";
     }
     if (std.mem.eql(u8, op, "installer-runtime")) {
@@ -615,10 +650,10 @@ fn espNewest(entries: i32) !i64 {
     return newest;
 }
 
-fn espVersion(newest: i64) ![20]u8 {
+fn espVersion(newest: i64) ![16]u8 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.REALTIME, &ts);
-    var buf: [20]u8 = undefined;
+    var buf: [16]u8 = undefined;
     _ = try std.mem.print(&buf, "{f}", .{policy.Serial{ .secs = @max(ts.sec, newest + 1) }});
     return buf;
 }
@@ -1109,6 +1144,7 @@ test "installer runtime accepts no paths and belongs only to the updater" {
 
 test "each broker operation belongs to one socketpair role" {
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("installer-runtime"));
+    try std.testing.expectEqual(broker.Role.updater, try roleForOp("reboot"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-status"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-commit"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("esp-disarm"));
@@ -1293,4 +1329,21 @@ test "staged files and directories must be root-owned, not group/world-writable,
     try testing.expect(!validStagedFile(file));
     file.mode = linux.S.IFIFO | 0o600;
     try testing.expect(!validStagedFile(file));
+}
+
+test "reboot requires the updater role and an exact request" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var log: Log = .{};
+    var out: [1024]u8 = undefined;
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "reboot", &out));
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "reboot", &out));
+    try testing.expectError(error.BadRequest, handleRequest(&log, .updater, "reboot extra", &out));
+}
+
+test "EFI versions contain only the canonical serial and advance" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const first = try espVersion(0);
+    const secs = try policy.parseSerial(&first);
+    const next = try espVersion(secs);
+    try testing.expect(try policy.parseSerial(&next) > secs);
 }
