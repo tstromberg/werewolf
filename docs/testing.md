@@ -160,16 +160,16 @@ keeps every line.
 
 ## CI
 
-[check.yml](../.github/workflows/check.yml) runs `make test` on x86_64 and arm64 runners
-and `make lint` on one, and splits x86_64's `make check` into jobs that name their area
-(`forms`, `shellfree`, `integrity`, `cloud`, `persist`), the first two sharded again
-(`SHARD=K/N`): 10 jobs, each booting four machines at a time, with Zig's and apko's
-caches kept a week. [test/ci-setup](../test/ci-setup) installs the tools, pinned.
+[check.yml](../.github/workflows/check.yml) runs host tests on both architectures,
+four `forms` shards, three `shellfree` shards, and four platform groups.
+[test/ci-forms](../test/ci-forms) checks existing targets one form at a time,
+cleans successful images/disks, and retains logs, locks, and native results.
+Failures keep their images. Platform boots share CPUs within their memory budget.
+[test/ci-setup](../test/ci-setup) installs pinned tools.
 
-Hosted arm64 runners have no KVM, so `vm-arm64` runs every group under KVM on a
-self-hosted Ampere runner, for pushes and maintainers' pull requests.
-`make check-native` still checks each form's root under `systemd-nspawn`
-([test/cage](../test/cage)), attacking what holds in a container.
+Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
+`make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.
+`make check-native` attacks roots in `systemd-nspawn` ([test/cage](../test/cage)).
 
 `make ci` copies fresh source (no `config/` or `.git`) into a 16 GiB Lima VM with KVM.
 VM and caches persist; `limactl delete -f werewolf-ci-24.04` starts over.
