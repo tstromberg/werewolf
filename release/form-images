@@ -26,6 +26,7 @@ TRUST = Path('release/protected').resolve()
 # no lifecycle gates yet (docs/design/image-release-testing.md).
 GATED = ('playground',)
 CHECKS = {'coverage', 'integration', 'reproducible'}
+FOCUSED_TARGET = ('playground', 'qemu', 'x86_64')
 
 
 def load(name, path):
@@ -60,6 +61,22 @@ def native(arch):
 
 def forms():
     return sorted(p.parent.name for p in Path('forms').glob('*/form.yaml') if catalog.NAME.fullmatch(p.parent.name))
+
+
+def focused_target(value):
+    if value not in ('all', '/'.join(FOCUSED_TARGET)):
+        raise ValueError('target must be all or ' + '/'.join(FOCUSED_TARGET))
+    return value != 'all'
+
+
+def matrix(shards, focused=False):
+    if not 1 <= shards <= 32:
+        raise ValueError('use between 1 and 32 shards')
+    if focused:
+        return dict(include=[dict(arch='x86_64', runner='ubuntu-26.04', shard=1, shards=1)])
+    return dict(include=[dict(arch=arch, runner=runner, shard=shard, shards=shards)
+        for arch, runner in [('x86_64', 'ubuntu-26.04'), ('aarch64', 'ubuntu-26.04-arm')]
+        for shard in range(1, shards + 1)])
 
 
 def source_identity(form, chain):
@@ -118,10 +135,12 @@ def compiler(form):
             'aspnet-example': [('dotnet', '--version')]}.get(form, [])
 
 
-def resolve(arch, shard, shards, output):
+def resolve(arch, shard, shards, output, focused=False):
+    if focused and (arch, shard, shards) != ('x86_64', 1, 1):
+        raise ValueError('focused publication requires the single x86_64 shard')
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    selected = forms()[shard - 1::shards]
+    selected = [FOCUSED_TARGET[0]] if focused else forms()[shard - 1::shards]
     shared_inputs(arch, output)
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     serial = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -383,7 +402,7 @@ def check(snapshot, first, second, output, lifecycle):
     return any(t['status'] in ('tests or reproducibility failed', 'resolution failed') for t in results)
 
 
-def gates(environ):
+def gates(environ, focused=False):
     """Lifecycle runners by target. Self-hosted ones are repository variables
     holding a JSON list of runner labels; a target without one is not gated."""
     runners = {('qemu', 'x86_64'): '["ubuntu-26.04"]',
@@ -391,6 +410,8 @@ def gates(environ):
                ('lima', 'aarch64'): environ.get('LIMA_RUNNER', '')}
     include = []
     for (provider, arch), value in runners.items():
+        if focused and (provider, arch) != FOCUSED_TARGET[1:]:
+            continue
         if not value:
             continue
         labels = json.loads(value)
@@ -503,7 +524,7 @@ def output(**values):
             stream.writelines('%s=%s\n' % item for item in values.items())
 
 
-def publish(snapshots, verified, gated_targets, listing, store):
+def publish(snapshots, verified, gated_targets, listing, store, focused=False):
     """Advance each exported target, then sign the catalog of every target."""
     provenance = exporter.provenance()
     key = os.environ['WEREWOLF_PROTECTED_IMAGE_KEY']
@@ -511,6 +532,9 @@ def publish(snapshots, verified, gated_targets, listing, store):
     previous = index(store)
     exported = {catalog.namespace(t['form'], t['provider'], t['arch']): t
                 for t in json.loads(Path(listing).read_text())}
+    if focused and (set(targets) - {(FOCUSED_TARGET[0], FOCUSED_TARGET[2])} or
+                    set(exported) - {catalog.namespace(*FOCUSED_TARGET)}):
+        raise ValueError('focused publication contains an unrelated target')
     published = {}
     for name, target in sorted(exported.items()):
         try:
@@ -528,10 +552,13 @@ def publish(snapshots, verified, gated_targets, listing, store):
     # The GitHub release carries every exported target, so it follows R2 only
     # when all of them are there.
     output(released=str(published.keys() == exported.keys()).lower())
-    rows = []
+    # A focused run has no evidence about other targets. Preserve their signed
+    # rows, including failures, inputs and last publications, without relabeling.
+    rows = [row for target, row in previous.items() if target != FOCUSED_TARGET] if focused else []
+    attempted = []
     descriptions = catalog.descriptions()
-    for form in forms():
-        for arch in catalog.ARCHES:
+    for form in [FOCUSED_TARGET[0]] if focused else forms():
+        for arch in [FOCUSED_TARGET[2]] if focused else catalog.ARCHES:
             target = targets.get((form, arch))
             status = target['status'] if target else 'resolution or runner failed'
             if target is None:
@@ -565,12 +592,14 @@ def publish(snapshots, verified, gated_targets, listing, store):
                     else:
                         row['status'] = 'lifecycle gates or export failed'
                 rows.append(catalog.validate(row))
+                attempted.append(row)
+    rows.sort(key=lambda row: (row['form'], row['arch'], row['provider']))
     with tempfile.TemporaryDirectory(prefix='ww-image-catalog-') as temporary:
         work = Path(temporary)
         (work / 'index.json').write_bytes(catalog.envelope(dict(format=catalog.FORMAT, forms=rows), key))
         catalog.open_index((work / 'index.json').read_bytes(), TRUST / 'image.crt')
         store.upload('index.json', work / 'index.json', False)
-        for form in forms():
+        for form in sorted(set(forms()) | {row['form'] for row in rows}):
             (work / 'form.html').write_text(catalog.page([r for r in rows if r['form'] == form], form + ' images'))
             store.upload(form + '/index.html', work / 'form.html', False)
         (work / 'index.html').write_text(catalog.page(rows))
@@ -585,14 +614,14 @@ def publish(snapshots, verified, gated_targets, listing, store):
                     if latest else 'Not published'
                 stream.write('| %s | %s/%s | %s | %s |\n' % (row['form'], row['provider'], row['arch'],
                                                             row['status'], link))
-    return any(r['status'] not in catalog.SETTLED | {'unsupported architecture'} for r in rows)
+    return any(r['status'] not in catalog.SETTLED | {'unsupported architecture'} for r in attempted)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    matrix = commands.add_parser('matrix')
-    matrix.add_argument('--shards', type=int, default=8)
+    matrix_parser = commands.add_parser('matrix')
+    matrix_parser.add_argument('--shards', type=int, default=8)
     commands.add_parser('gates')
     resolve_parser = commands.add_parser('resolve')
     resolve_parser.add_argument('arch', choices=catalog.ARCHES)
@@ -612,19 +641,16 @@ def main():
     for name in ('snapshots', 'verified', 'listing'):
         publish_parser.add_argument(name)
     args = parser.parse_args()
+    focused = focused_target(os.environ.get('FORM_IMAGES_TARGET', 'all'))
     store = publisher.Store(os.environ.get('PROTECTED_BUCKET', 's3://werewolf/boot/v1'))
     if args.command == 'matrix':
-        if not 1 <= args.shards <= 32:
-            raise ValueError('use between 1 and 32 shards')
-        print(json.dumps(dict(include=[dict(arch=arch, runner=runner, shard=shard, shards=args.shards)
-            for arch, runner in [('x86_64', 'ubuntu-26.04'), ('aarch64', 'ubuntu-26.04-arm')]
-            for shard in range(1, args.shards + 1)])))
+        print(json.dumps(matrix(args.shards, focused)))
     elif args.command == 'gates':
-        print(json.dumps(gates(os.environ)))
+        print(json.dumps(gates(os.environ, focused)))
     elif args.command == 'resolve':
         if not 1 <= args.shard <= args.shards <= 32:
             raise ValueError('invalid form image shard')
-        resolve(args.arch, args.shard, args.shards, args.output)
+        resolve(args.arch, args.shard, args.shards, args.output, focused)
     elif args.command == 'build':
         return build(args.snapshot, args.output)
     elif args.command == 'check':
@@ -633,7 +659,7 @@ def main():
         export(args.snapshots, args.verified, args.gated, store, args.assets, args.listing)
     elif args.command == 'publish':
         gated = {(t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']}
-        return publish(args.snapshots, args.verified, gated, args.listing, store)
+        return publish(args.snapshots, args.verified, gated, args.listing, store, focused)
     return False
 
 

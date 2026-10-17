@@ -6,6 +6,7 @@
 # named by the WEREWOLF_ARM64_KVM_RUNNER (qemu) and WEREWOLF_LIMA_RUNNER
 # (macOS) repository variables, each a JSON list of runner labels.
 name: form-images
+run-name: Form images (${{ inputs.target || 'all' }})
 
 on:
   schedule:
@@ -28,6 +29,13 @@ on:
       - 'forms/**/rootfs/**/*.md'
   workflow_dispatch:
     inputs:
+      target:
+        description: Publish one supported target, or rebuild the full catalog
+        type: choice
+        options:
+          - playground/qemu/x86_64
+          - all
+        default: playground/qemu/x86_64
       force:
         description: Rebuild and retest even when authenticated inputs are unchanged
         type: boolean
@@ -37,10 +45,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: form-images
+  # Focused builds do not queue behind the full catalog. The publish job
+  # separately serializes all writers of the shared signed catalog.
+  group: form-images-build-${{ inputs.target || 'all' }}
   cancel-in-progress: false
 
 env:
+  FORM_IMAGES_TARGET: ${{ inputs.target || 'all' }}
   PYTHONDONTWRITEBYTECODE: '1'
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -80,9 +91,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Install pinned tools and example compilers
+      - name: Install pinned tools
+        run: sudo test/ci-setup
+      - name: Install example compilers for the full catalog
+        if: env.FORM_IMAGES_TARGET == 'all'
         run: |
-          sudo test/ci-setup
           command -v javac || sudo apt-get install -y default-jdk-headless
           test/ci-compilers
       - run: make howl build/host/form
@@ -119,9 +132,11 @@ jobs:
         with:
           name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}
           path: snapshot
-      - name: Install pinned tools and example compilers
+      - name: Install pinned tools
+        run: sudo test/ci-setup
+      - name: Install example compilers for the full catalog
+        if: env.FORM_IMAGES_TARGET == 'all'
         run: |
-          sudo test/ci-setup
           command -v javac || sudo apt-get install -y default-jdk-headless
           test/ci-compilers
       - run: make howl
@@ -171,9 +186,11 @@ jobs:
         with:
           pattern: images-${{ matrix.arch }}-${{ matrix.shard }}-*
           path: copies
-      - name: Install pinned tools and example compilers
+      - name: Install pinned tools
+        run: sudo test/ci-setup
+      - name: Install example compilers for the full catalog
+        if: env.FORM_IMAGES_TARGET == 'all'
         run: |
-          sudo test/ci-setup
           command -v javac || sudo apt-get install -y default-jdk-headless
           test/ci-compilers
       - run: make howl
@@ -269,6 +286,12 @@ jobs:
     if: always() && !cancelled() && needs.plan.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     environment: release
+    # Keep this name compatible with runs of the previous workflow, which
+    # held the same lock for their entire run. Catalog reads, release notes,
+    # heads and the catalog itself must advance under one writer.
+    concurrency:
+      group: form-images
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
