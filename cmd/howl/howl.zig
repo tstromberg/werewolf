@@ -321,52 +321,7 @@ pub fn addDevSsh(
     const ports = try forms.listens(gpa, original, &policy);
     if (std.mem.findScalar(u16, ports, dev_ssh_port) != null)
         return why.refuse("--dev reserves TCP port {d} for developer SSH", .{dev_ssh_port});
-    const access = try gpa.dupe(forms.Form, try devSshForm(io, gpa, why));
-    const existing = try forms.apko(gpa, original, &.{});
-    // Reuse a form's privilege-separation accounts. apko concatenates account
-    // lists, so declaring one twice would produce duplicate passwd entries.
-    for (access) |*fm| {
-        if (!std.mem.eql(u8, fm.name, "howl-dev")) continue;
-        const spec = try gpa.dupe(forms.Entry, fm.spec.map);
-        fm.spec.map = spec;
-        for (spec) |*entry| {
-            if (!std.mem.eql(u8, entry.key, "accounts")) continue;
-            const kinds = try gpa.dupe(forms.Entry, entry.value.map);
-            entry.value.map = kinds;
-            for (kinds) |*kind| {
-                const accounts = (existing.get(
-                    "accounts",
-                ) orelse continue).get(kind.key) orelse continue;
-                if (accounts != .list) continue;
-                const field = if (std.mem.eql(u8, kind.key, "users")) "username" else "groupname";
-                var needed: std.ArrayList(forms.Node) = .empty;
-                for (kind.value.list) |candidate| {
-                    const name = candidate.get(field).?.scalar.text;
-                    const found = for (accounts.list) |account| {
-                        const have = account.get(field) orelse continue;
-                        if (have == .scalar and std.mem.eql(u8, have.scalar.text, name))
-                            break true;
-                    } else false;
-                    if (!found) try needed.append(gpa, candidate);
-                }
-                kind.value = .{ .list = needed.items };
-            }
-        }
-    }
-    var out: std.ArrayList(forms.Form) = .empty;
-    const top = original[original.len - 1];
-    for (original[0 .. original.len - 1]) |f| try out.append(gpa, f);
-    for (access) |f| {
-        if (std.mem.eql(u8, f.dir, top.dir)) continue;
-        var seen = false;
-        for (out.items) |have| if (std.mem.eql(u8, have.dir, f.dir)) {
-            seen = true;
-            break;
-        };
-        if (!seen) try out.append(gpa, f);
-    }
-    try out.append(gpa, top);
-    return out.items;
+    return @import("compose").withDevSsh(gpa, original, try devSshForm(io, gpa, why));
 }
 
 pub const dev_ssh_port: u16 = 2222;

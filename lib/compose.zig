@@ -49,6 +49,77 @@ pub const release_forms = [_][]const u8{ "minimal", "prod", "prod-ssh" };
 /// Accounts holds an image's account files, as its packages leave them.
 pub const Accounts = struct { passwd: []const u8, group: []const u8, shadow: []const u8 };
 
+/// Reconstruct a staged development image's injected SSH layer as well as
+/// its leaf form. Older development images have no such staged layer.
+/// Production reconstruction never adds developer access.
+pub fn stagedChain(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    leaf: []const u8,
+    dev: bool,
+    f: *Failure,
+) ![]const Form {
+    const forms = try form.chain(io, gpa, root, leaf, f);
+    if (!dev or hasForm(forms, "howl-dev")) return forms;
+    root.access(io, "forms/howl-dev/form.yaml", .{}) catch |err| switch (err) {
+        error.FileNotFound => return forms,
+        else => return err,
+    };
+    return withDevSsh(gpa, forms, try form.chain(io, gpa, root, "howl-dev", f));
+}
+
+/// Add the developer layer before the leaf, reusing accounts the form
+/// already declares. The builder and staged reconstruction use the same rule.
+pub fn withDevSsh(gpa: Allocator, original: []const Form, layer: []const Form) ![]const Form {
+    const access = try gpa.dupe(Form, layer);
+    const existing = try form.apko(gpa, original, &.{});
+    // Reuse a form's privilege-separation accounts. apko concatenates account
+    // lists, so declaring one twice would produce duplicate passwd entries.
+    for (access) |*fm| {
+        if (!std.mem.eql(u8, fm.name, "howl-dev")) continue;
+        const spec = try gpa.dupe(form.Entry, fm.spec.map);
+        fm.spec.map = spec;
+        for (spec) |*entry| {
+            if (!std.mem.eql(u8, entry.key, "accounts")) continue;
+            const kinds = try gpa.dupe(form.Entry, entry.value.map);
+            entry.value.map = kinds;
+            for (kinds) |*kind| {
+                const declared = (existing.get(
+                    "accounts",
+                ) orelse continue).get(kind.key) orelse continue;
+                if (declared != .list) continue;
+                const field = if (std.mem.eql(u8, kind.key, "users")) "username" else "groupname";
+                var needed: std.ArrayList(form.Node) = .empty;
+                for (kind.value.list) |candidate| {
+                    const name = candidate.get(field).?.scalar.text;
+                    const found = for (declared.list) |account| {
+                        const have = account.get(field) orelse continue;
+                        if (have == .scalar and std.mem.eql(u8, have.scalar.text, name))
+                            break true;
+                    } else false;
+                    if (!found) try needed.append(gpa, candidate);
+                }
+                kind.value = .{ .list = needed.items };
+            }
+        }
+    }
+    var out: std.ArrayList(Form) = .empty;
+    const top = original[original.len - 1];
+    for (original[0 .. original.len - 1]) |f| try out.append(gpa, f);
+    for (access) |f| {
+        if (std.mem.eql(u8, f.dir, top.dir)) continue;
+        var seen = false;
+        for (out.items) |have| if (std.mem.eql(u8, have.dir, f.dir)) {
+            seen = true;
+            break;
+        };
+        if (!seen) try out.append(gpa, f);
+    }
+    try out.append(gpa, top);
+    return out.items;
+}
+
 /// compose writes what forms derive into two trees. ro is laid over the
 /// packages: the forms' rootfs, base first, then the generated files. meta
 /// gets werewolf's records in /usr/share/werewolf, with the chain staged for
@@ -1582,6 +1653,43 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
             "programs-no-interpreters " ++ dev ++ "\nkernel-y " ++ dev ++ "\n",
         try weaknesses(gpa, top, .{ .arch = .x86_64, .dev = true, .posture_known = known }),
     );
+}
+
+test "staged developer SSH preserves chain order and never enters production" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    for ([_][2][]const u8{
+        .{ "forms/base/form.yaml", "" },
+        .{ "forms/app/form.yaml", "base: base\n" },
+    }) |file| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    }
+    var f: Failure = .{};
+    // Development images from before SSH injection still reconstruct.
+    const old = try stagedChain(io, gpa, tmp.dir, "app", true, &f);
+    try testing.expectEqual(@as(usize, 2), old.len);
+    try tmp.dir.createDirPath(io, "forms/howl-dev");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/howl-dev/form.yaml", .data = "base: base\n" });
+    const dev = try stagedChain(io, gpa, tmp.dir, "app", true, &f);
+    try testing.expectEqual(@as(usize, 3), dev.len);
+    for (dev, [_][]const u8{ "base", "howl-dev", "app" }) |fm, name|
+        try testing.expectEqualStrings(name, fm.name);
+    const prod = try stagedChain(io, gpa, tmp.dir, "app", false, &f);
+    try testing.expectEqual(@as(usize, 2), prod.len);
+    try testing.expect(!hasForm(prod, "howl-dev"));
+    // A leaf that already references the layer must not acquire it twice.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/app/form.yaml",
+        .data = "base: base\nwith: [howl-dev]\n",
+    });
+    const linked = try stagedChain(io, gpa, tmp.dir, "app", true, &f);
+    try testing.expectEqual(@as(usize, 3), linked.len);
+    try testing.expectEqualStrings("app", linked[2].name);
 }
 
 test "SSH-only developer access preserves shell-free posture and uses sh-shim" {

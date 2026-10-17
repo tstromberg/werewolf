@@ -157,6 +157,18 @@ done
 slots_dump /slot/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
+# Development access is part of the staged image, not just its leaf form.
+# Inspect the sealed slot without extracting another root tree.
+for path in etc/sv/sshd-dev/service etc/ssh/howl-dev.conf; do
+	dump.erofs --cat --path="/$path" "$dir/b.erofs" >"$dir/b-${path##*/}" 2>/dev/null
+	check "slot b preserves $path" cmp "$OUT/ro/$path" "$dir/b-${path##*/}"
+done
+dump.erofs --cat --path=/usr/share/werewolf/dev "$dir/b.erofs" >"$dir/b-dev" 2>/dev/null
+check "slot b preserves developer mode" cmp "$OUT/meta/usr/share/werewolf/dev" "$dir/b-dev"
+dump.erofs --cat --path=/usr/share/werewolf/etc/passwd "$dir/b.erofs" >"$dir/b-passwd" 2>/dev/null
+built_root=$(grep '^root:' "$OUT/ro/usr/share/werewolf/etc/passwd")
+updated_root=$(grep '^root:' "$dir/b-passwd")
+check "slot b preserves root's login shell" [ -n "$built_root" -a "$built_root" = "$updated_root" ]
 if [ -n "${PUBLISHED:-}" ]; then
 	mkdir -p "$dir/b" && fsck.erofs --extract="$dir/b" --no-preserve "$dir/b.erofs" >/dev/null 2>&1
 	world=$(awk '/^P:/ { print substr($0, 3) }' "$dir/b/usr/lib/apk/db/installed" | grep -- '-form$' | sort | tr '\n' ' ')
