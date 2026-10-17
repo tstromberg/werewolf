@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import tarfile
 import tempfile
@@ -15,6 +16,67 @@ from unittest.mock import patch
 
 native = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests').load_module()
 iteration = importlib.machinery.SourceFileLoader('native_iteration', 'test/native-iterate').load_module()
+
+
+class ConsoleTransport(unittest.TestCase):
+    def boot(self, poweroff):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qemu = root / 'qemu'
+            qemu.write_text('''#!/usr/bin/env python3
+import os, sys, time, tty
+if '--version' in sys.argv:
+    print('fake QEMU for console transport regression')
+    sys.exit(0)
+tty.setraw(0)
+def send(data):
+    os.write(1, data)
+def until(ending):
+    data = b''
+    while not data.endswith(ending):
+        part = os.read(0, 1)
+        if not part:
+            sys.exit(1)
+        data += part
+    return data
+send(b'handing over to runit\\nposture: fail= pass=100 skip=0 COMPLETE\\n')
+until(b'\\x01c')
+send(b'(qemu) ')
+assert until(b'\\r') == b'system_powerdown\\r'
+send(b'(qemu) ')
+until(b'\\x01c')
+send(b'power button on\\r')
+time.sleep(.01)
+# Serial devices can split a UTF-8 character across reads. On macOS,
+# Expect's text decoder mistakes a partial character for EOF and sends HUP.
+for _ in range(30):
+    for byte in b'\\xe2\\x96\\xa1':
+        send(bytes([byte]))
+        time.sleep(.001)
+if sys.argv[1] == 'poweroff':
+    send(b'\\nreboot: Power down\\n')
+time.sleep(.01)
+''')
+            qemu.chmod(0o700)
+            checks = root / 'checks'
+            checks.write_text('seen complete COMPLETE\n')
+            log = root / 'console.log'
+            env = dict(os.environ, POSTURE_KNOWN='', SSH_PORT='', GITEA_PORT='')
+            result = subprocess.run(['test/boot', 'serial-utf8', str(checks), str(log),
+                                     str(qemu), 'poweroff' if poweroff else 'exit'],
+                                    env=env, capture_output=True, timeout=10)
+            return result, log.read_bytes()
+
+    def test_fragmented_utf8_survives_until_real_poweroff(self):
+        result, log = self.boot(True)
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
+        self.assertIn(b'\xe2\x96\xa1' * 30, log)
+        self.assertIn(b'reboot: Power down', log)
+
+    def test_successful_exit_without_poweroff_is_still_rejected(self):
+        result, _ = self.boot(False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'QEMU ended without the kernel powering off', result.stdout)
 
 
 class ProductionPackages(unittest.TestCase):

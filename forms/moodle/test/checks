@@ -10,7 +10,8 @@ ok  moodle-installed i=0; until wget -q -T 10 --no-check-certificate -O /tmp/moo
 ok  moodle-user      p=$(head -n 1 /run/cgroup/svc/moodle/cgroup.procs); u=$(grep '^moodle:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  moodle-https     wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
 # Profile icons and file downloads route through a PHP entry point's PATH_INFO.
-ok  moodle-path-info wget -q -T 20 --no-check-certificate -S -O /tmp/moodle.icon https://localhost/user/pix.php/0/f1.jpg 2>&1 | grep -qi 'Content-Type: image/' && [ -s /tmp/moodle.icon ]
+# Save the headers first: grep -q can close the pipe before wget writes the body.
+ok  moodle-path-info wget -q -T 20 --no-check-certificate -S -O /tmp/moodle.icon https://localhost/user/pix.php/0/f1.jpg 2>/tmp/moodle.icon.headers && grep -qi 'Content-Type: image/' /tmp/moodle.icon.headers && [ -s /tmp/moodle.icon ]
 # The administrator signs in with the config's password; a wrong one, and
 # the guest account, are refused: Moodle's login page, its token and
 # session cookie, then the redirect a good login gets (testsession).
