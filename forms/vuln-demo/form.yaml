@@ -49,7 +49,6 @@ services:
       /usr/lib/n8n/node_modules/n8n/bin/n8n start
     user: n8n
     group: vuln-console
-    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
     config: settings /run/config/n8n/settings.json
     setting:
       - editor-url url as N8N_EDITOR_BASE_URL
@@ -74,10 +73,17 @@ services:
       - N8N_TEMPLATES_ENABLED=false
       - N8N_COMMUNITY_PACKAGES_ENABLED=false
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+      - DB_SQLITE_POOL_SIZE=2
       - N8N_RUNNERS_ENABLED=true
       - N8N_RUNNERS_MODE=external
       - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=127.0.0.1
       - N8N_RUNNERS_BROKER_PORT=5679
+      # This only coordinates the two image-defined processes. Fence permits
+      # the runner alone to reach the loopback broker, so it is not an
+      # operator credential or a security boundary.
+      - N8N_RUNNERS_AUTH_TOKEN=werewolf-vuln-demo-local-runner-v1
       - N8N_LOG_OUTPUT=console
       - N8N_SECURE_COOKIE=false
 
@@ -89,7 +95,6 @@ services:
     run: [/usr/lib/n8n/task-runner-launcher, /usr/bin/node]
     listen: tcp/5680 tcp/5681 loopback
     connect: [tcp/5679 tcp/5681, /run/svc/vuln-console/events.sock]
-    secret: N8N_RUNNERS_AUTH_TOKEN /run/config/n8n/task-token
     memory: 768
     nofile: 1024
     env:
@@ -97,6 +102,7 @@ services:
       - TMPDIR=/run/svc/n8n-runner
       - N8N_RUNNERS_CONFIG_PATH=/usr/lib/n8n/task-runners.json
       - N8N_RUNNERS_TASK_BROKER_URI=http://127.0.0.1:5679
+      - N8N_RUNNERS_AUTH_TOKEN=werewolf-vuln-demo-local-runner-v1
       - N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST=127.0.0.1
       - N8N_RUNNERS_MAX_CONCURRENCY=2
       - N8N_RUNNERS_TASK_TIMEOUT=60
@@ -148,7 +154,7 @@ services:
     env: [HOME=/data/svc/vuln-console, GOMEMLIMIT=192MiB]
 
   vuln-sshd:
-    exec: /usr/lib/werewolf/vuln-console -mode ssh -listen :22 -user demo
+    exec: /usr/lib/werewolf/vuln-console -mode ssh -listen :22 -user root
     user: vuln-sshd
     group: vuln-console
     pledge: stdio rpath wpath inet unix connect listen proc exec landlock seccomp

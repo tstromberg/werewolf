@@ -364,8 +364,15 @@ pub fn address(text: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |l| {
         if (std.mem.find(u8, l, "\"event\":\"bound\"") == null) continue;
-        const at = std.mem.find(u8, l, "\"addr\":\"") orelse continue;
-        const rest = l[at + "\"addr\":\"".len ..];
+        // Current dhcp-client calls the assigned address `ip`; accept
+        // `addr` too so logs made by older guests remain useful.
+        const key = if (std.mem.find(u8, l, "\"ip\":\"")) |at|
+            .{ at, "\"ip\":\"".len }
+        else if (std.mem.find(u8, l, "\"addr\":\"")) |at|
+            .{ at, "\"addr\":\"".len }
+        else
+            continue;
+        const rest = l[key[0] + key[1] ..];
         const end = std.mem.findScalar(u8, rest, '"') orelse continue;
         const addr = rest[0..end];
         const ip = addr[0 .. std.mem.findScalar(u8, addr, '/') orelse addr.len];
@@ -403,6 +410,13 @@ test address {
         "werewolf: up in 0.7s\n" ++
         "dhcp-client: {\"event\":\"bound\",\"nic\":\"eth0\",\"addr\":\"192.168.1.40/24\"}\n";
     try testing.expectEqualStrings("192.168.1.40", address(text).?);
+    try testing.expectEqualStrings(
+        "10.9.8.180",
+        address(
+            "dhcp-client: {\"event\":\"bound\",\"nic\":\"eth0\",\"ip\":\"10.9.8.180/24\",\"gw\":" ++
+                "\"10.9.8.1\"}\r\n",
+        ).?,
+    );
     try testing.expectEqual(null, address("werewolf: up in 0.7s\n"));
 }
 

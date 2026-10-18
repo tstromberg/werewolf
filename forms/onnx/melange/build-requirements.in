@@ -1,7 +1,0 @@
-setuptools>=83,<84
-wheel>=0.46,<1
-packaging>=24
-numpy>=2.5,<3
-flatbuffers
-protobuf>=4.25.8
-sympy>=1.10

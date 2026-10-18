@@ -278,6 +278,8 @@ test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test
 _test/ci-forms: ; python3 test/ci-forms-test
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/form-coverage: ; python3 test/form-coverage
+_test/bhyve-network: ; python3 test/check-bhyve-network
+_test/package-sources: ; python3 test/package-sources
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing

@@ -96,13 +96,37 @@ def source_identity(form, chain):
     return resolver.source_identity(tree)
 
 
+def recipe_identity(recipes):
+    """Bind external build contexts too: their bytes are outside this Git tree."""
+    value = hashlib.sha256()
+    for directory in sorted({str(Path(recipe).parent) for recipe in recipes}):
+        root = Path(directory)
+        if not root.is_dir():
+            raise ValueError('missing recipe context: ' + directory)
+        for path in sorted(root.rglob('*')):
+            if '__pycache__' in path.parts or path.name.startswith('.'):
+                continue
+            name = str(path.relative_to(root))
+            if path.is_symlink():
+                content = dict(link=os.readlink(path))
+            elif path.is_file():
+                content = dict(sha256=catalog.sha(path), mode=path.stat().st_mode & 0o7777)
+            else:
+                continue
+            value.update(catalog.encode(dict(context=directory, path=name, **content)))
+    return value.hexdigest()
+
+
 def resolved_identity(form, arch, snapshot, chain):
     locks = {p.name: json.loads(p.read_text()) for p in
              [*snapshot.parent.glob('*.lock.json'), *snapshot.glob('*.lock.json')]}
     packages = resolver.identity(source_identity(form, chain), arch, locks)
     images = [json.loads(p.read_text())['werewolf']['images'] for p in sorted(snapshot.glob(form + '*.lock.json'))]
     versions = json.loads((snapshot / 'tools.json').read_text())
-    return hashlib.sha256(catalog.encode(dict(packages=packages, images=images, tools=versions))).hexdigest()
+    recipes = json.loads((snapshot / 'melange.json').read_text())
+    contexts = recipe_identity(recipes)
+    return hashlib.sha256(catalog.encode(dict(packages=packages, images=images, tools=versions,
+                                             recipes=contexts))).hexdigest()
 
 
 def lock_recipe(recipe, arch, output):
@@ -174,7 +198,7 @@ def resolve(arch, shard, shards, output, focused=False):
                 lock.unlink(missing_ok=True)
                 run([HOWL, '_build', '--with', form, '--arch', arch, *flags, 'lock'])
                 shutil.copyfile(lock, snapshot / lock.name)
-            recipes = sorted({str(p) for name in chain for p in Path('forms', name, 'melange').glob('*.yaml')})
+            recipes = query('recipes', form)
             mapping = {}
             for recipe in recipes:
                 filename = 'melange-' + hashlib.sha256(recipe.encode()).hexdigest()[:16] + '.lock.json'

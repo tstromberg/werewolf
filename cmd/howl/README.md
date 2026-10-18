@@ -2,10 +2,10 @@
 
 ## Summary
 
-howl builds images, packs boot config, and creates, updates, reaches and deletes
-machines here or in a cloud ([docs/design/cli.md](../../docs/design/cli.md)). A machine
-is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a config tar init
-reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
+howl builds images and manages machines locally or in a cloud
+([cli.md](../../docs/design/cli.md)). A machine combines a [form](../../docs/forms.md),
+its image, and a config tar read by init from a disk or [user
+data](../../docs/cloud.md).
 
 | Verb | Does |
 | --- | --- |
@@ -27,23 +27,21 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Machine records in `build/machines/NAME`; keys and repositories in
-  `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`.
+- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`).
 
-## Non-Goals
-
-- Compiling werewolf's programs, or managing cloud accounts, groups, IAM or networks.
+Cloud account and network management stay external. Local builds need the checkout
+and build tools; cloud operations need their provider CLIs.
 
 ## Detailed design
 
-**Forms.** A name uses NAME-form from the signed index (`published.zig`);
-unpublished names use `./forms/NAME` with a warning. Path forms are never updated.
+**Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
+Path forms are never updated.
 
-**Config tar.** Each service's `config`, `setting` and `render` lines declare a flag
-(`lib/service.zig`); howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,
-`--data-key`, `--root-keys`, `--update-policy`. A FILE flag reads a file or `-`, never a
-value, and the guest's code checks every value first. The tar is ustar, sorted, root's,
-0600, dated 1970, within init's and cloud-metadata's limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`
+(`lib/service.zig`). Howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,
+`--data-key`, `--root-keys`, `--update-policy`. FILE flags read a file or stdin; guests
+validate every value. The tar is sorted ustar, root-owned, 0600, dated 1970, within
+metadata limits.
 
 **Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing
 prerequisites fail. Other providers and `--dev` need `--disable=secureboot,tpm,ipe`
@@ -54,13 +52,20 @@ A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-m
 | `--on` | How | Needs |
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
-| bhyve | under `howl _bhyve` via daemon(8); slirp, loopback forwards | doas/sudo, vmm, bhyve-firmware |
+| bhyve | under `howl _bhyve` via daemon(8); TAP on an existing bridge by default; `--network slirp` retains loopback forwards | doas/sudo, vmm, bhyve-firmware; Python 3 for TAP |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket | gcloud |
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
+
+bhyve TAP uses the only existing bridge, or `--bridge NAME`, exposing the guest to
+that LAN. Use DHCP or `--ip CIDR --gw ADDR --dns ADDR` (also `--config DIR/network`).
+`howl ssh` uses the current boot's address. Missing or ambiguous bridges fail.
+Howl owns only its TAP: reboots retain it; exit, failed start, stop and delete remove
+it. Ownership tokens protect newer interfaces; host networking stays intact. Protected
+bhyve remains gated; experimental SLIRP enrollment lacks TAP update transport.
 
 Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
 their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
@@ -72,14 +77,9 @@ resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only d
 form reads once, while its data is first made ([data.md](../../docs/data.md)); a cloud
 cannot attach it. Progress goes to stderr and the machine record to stdout.
 
-## Drawbacks
-
-- `--build` and path forms need a checkout, make, Zig, melange, compilers, cloud CLIs.
-
 ## Alternatives Considered
 
-Make alone, SDKs and Terraform:
-[cli.md](../../docs/design/cli.md#alternatives-considered).
+[Make, SDKs and Terraform](../../docs/design/cli.md#alternatives-considered).
 
 ## Security Considerations
 

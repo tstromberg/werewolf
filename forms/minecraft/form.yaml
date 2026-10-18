@@ -1,10 +1,13 @@
 # minecraft: Minecraft Java Edition 26.3, the release pinned in
-# forms/minecraft/melange/minecraft.yaml. Nothing here notices when
+# ../packages/minecraft/minecraft.yaml. Nothing here notices when
 # Mojang publishes a newer server. It is the jre form, so it runs that
 # form's Java. The whitelist is the config's account names, resolved
 # with Mojang before each start. Online mode is on, and there is no
 # RCON or query port. The world is in /data. See forms/minecraft/README.md.
 base: jre
+
+recipes:
+  - ../../../packages/minecraft/minecraft.yaml
 
 # make check's (forms/README.md). The game port speaks Minecraft's
 # protocol, not HTTP. The heap and the world sit beside the machine's.

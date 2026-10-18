@@ -16,7 +16,7 @@ Real applications at their normal URLs make a more useful target for existing sc
 - Hardened OpenJDK 27, Node.js and Python; no OCI interpreter or shell fallback.
 - Separate service UIDs; normal public ports and paths; no app outbound network.
 - A read-only Go dashboard for requests, exec audit records and containment violations.
-- An exec-only SSH daemon accepting any password for `demo`, without a shell.
+- An exec-only SSH daemon accepting any password for `root`, without a shell.
 
 ## Non-Goals
 
@@ -48,12 +48,17 @@ RAM log, forks, drops to a dedicated UID with no capabilities, then installs a f
 allowing only reads and writes on those descriptors. The dashboard cannot open the
 kernel device or change audit policy. It deduplicates records by kernel sequence.
 
-SSH runs as a distinct unprivileged service. Only the username `demo` accepts password
-authentication. Exec sessions parse argv quoting and run the requested program
-directly under the service's leash; shell, PTY, forwarding and subsystem requests are
-refused. Only the three exposed command names map to narrow leash links, so their
-children cannot read the daemon's private host key. Alternate coreutils aliases are
-refused. Commands, authentication results and exit statuses enter the event journal.
+SSH runs as a distinct unprivileged service. Only the protocol username `root` accepts
+password authentication; it still executes as the confined `vuln-sshd` service UID.
+Exec sessions parse argv quoting and run the requested program directly under the
+service's leash; shell, PTY, forwarding and subsystem requests are refused. Only the
+three exposed command names map to narrow leash links, so their children cannot read
+the daemon's private host key. Alternate coreutils aliases are refused. Commands,
+authentication results and exit statuses enter the event journal.
+Offered public keys are rejected and journaled in authorized-keys form with their
+algorithm and SHA-256 fingerprint. The journal also records the requested SSH user,
+remote and local addresses, client and server version strings, and session ID.
+Password contents are never journaled.
 
 ## Drawbacks
 
@@ -75,6 +80,13 @@ retains the UID's filesystem, execution, network and cgroup restrictions.
 
 The dashboard renders attacker text as text, bounds history and request capture, and
 has no command submission endpoint. SSH passwords are accepted but never recorded.
+
+Native vulnerability regressions use contained canaries: Solr checks the vulnerable
+lookup implementation and unmitigated message layout, n8n exposes only the Node
+version through the escaped expression context, and Langflow returns a fixed value
+from injected component code through the unauthenticated public-build path. Current
+forms run the corresponding negative checks. None of the probes writes a file,
+launches a shell or requires outbound network access.
 
 ## Reliability Considerations
 

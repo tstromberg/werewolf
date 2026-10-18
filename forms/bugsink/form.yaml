@@ -8,6 +8,9 @@
 # forms/bugsink/README.md.
 base: prod
 
+recipes:
+  - ../../../packages/bugsink/bugsink.yaml
+
 with: [caddy]
 
 packages:

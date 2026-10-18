@@ -485,7 +485,7 @@ class Images(unittest.TestCase):
 
         def query(verb, form):
             queries.append((verb, form))
-            return ['x86_64'] if verb == 'archs' else [form]
+            return {'archs': ['x86_64'], 'names': [form], 'recipes': []}[verb]
 
         snapshot = self.root / 'focused-snapshot'
         with patch.object(images, 'shared_inputs'), patch.object(images, 'query', side_effect=query), \
@@ -495,7 +495,7 @@ class Images(unittest.TestCase):
                 patch.object(images, 'tool_versions', return_value={}), \
                 patch.object(images, 'resolved_identity', return_value='a' * 64):
             images.resolve('x86_64', 1, 1, snapshot, focused=True)
-        self.assertEqual([('archs', 'playground'), ('names', 'playground')], queries)
+        self.assertEqual([('archs', 'playground'), ('names', 'playground'), ('recipes', 'playground')], queries)
         plan = json.loads((snapshot / 'plan.json').read_text())
         self.assertEqual([('playground', 'build')], [(t['form'], t['status']) for t in plan['targets']])
         self.assertEqual(2, run.call_count)  # Release and integration locks.

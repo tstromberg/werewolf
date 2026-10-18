@@ -17,6 +17,26 @@ make hooks          # run test, lint and check-sshd before each commit
 Zig is pinned to the version in the Makefile's `ZIG_VERSION`. Zig changes between
 releases; when it moves, `make fix` (tools/zigfix.zig) rewrites most of what changed.
 
+## Package sources
+
+Third-party application packaging lives in a sibling `../packages` checkout;
+explicit hardening ports and runtimes live in `../hardened-packages`. Forms and
+distro-specific packages remain here with their source. Building howl or a base
+form needs only this repository; forms with third-party recipes need the siblings.
+
+CI runs `tools/checkout-packages` to provision and verify the contexts pinned in
+`release/package-sources.json`. Use `--check` to verify existing local sources
+without fetching. Commit reviewed package changes first, then use `--pin` to record
+their immutable commit and content hash. Publish that commit before updating the
+Werewolf lock so CI can fetch exactly the reviewed source.
+Add new context directories to that JSON file before pinning them.
+
+Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,
+`WEREWOLF_PACKAGES_REF` and the corresponding `WEREWOLF_HARDENED_PACKAGES_*`.
+GitHub Actions reads the same repository variables. The new package repository
+and hardening port must be published with the pinned bytes before CI can fetch them.
+Existing user-managed checkouts are verified without overwriting local changes.
+
 ## Find your way around
 
 | Path | What lives there |
@@ -24,6 +44,8 @@ releases; when it moves, `make fix` (tools/zigfix.zig) rewrites most of what cha
 | `cmd/NAME/` | one program per job, written in Zig, each with a README on how it works |
 | `cmd/howl/` | `howl`, the command users build and run machines with |
 | `lib/` | code the programs share: sandboxing, seccomp promises, verity, forms |
+| `../packages/NAME/` | third-party Melange recipes, patches, locks and bootstrap sources |
+| `../hardened-packages/` | hardened runtimes and explicit hardening ports |
 | `forms/NAME/` | a form: `form.yaml` (its packages, and what werewolf adds), `rootfs/`, `test/` ([forms/README.md](forms/README.md)) |
 | `test/` | the scripts `make check` boots and attacks machines with |
 | `release/` | building, signing and publishing releases |

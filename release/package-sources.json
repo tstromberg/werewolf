@@ -1,0 +1,54 @@
+{
+  "format": "werewolf-package-sources/1",
+  "sources": [
+    {
+      "contexts": [
+        "authelia",
+        "bloodhound",
+        "bugsink",
+        "continuwuity",
+        "galene",
+        "greenbone",
+        "keycloak",
+        "langflow",
+        "langflow-vuln-demo",
+        "limesurvey",
+        "mastodon",
+        "mattermost",
+        "mediawiki",
+        "minecraft",
+        "miniflux",
+        "moodle",
+        "mox",
+        "n8n",
+        "n8n-vuln-demo",
+        "nextcloud",
+        "onnx",
+        "onnx-minilm",
+        "open-webui",
+        "opensearch",
+        "paperless",
+        "postdoc-server",
+        "solr",
+        "solr-vuln-demo",
+        "suricata",
+        "vaultwarden",
+        "velociraptor",
+        "zot"
+      ],
+      "name": "packages",
+      "ref": "28d3cb7f04f38ddafb65c869d8356da5f28a8bb9",
+      "repository": "https://github.com/werewolf-linux/packages.git",
+      "sha256": "41a8d733897d6b6f9cd9f32bc31d2a6317dbc52a95a30878b569a9975c57ab46"
+    },
+    {
+      "contexts": [
+        "ports/libffi"
+      ],
+      "name": "hardened-packages",
+      "ref": "7708fe052315363bb66aa97c6dd376136673af10",
+      "repository": "https://github.com/werewolf-linux/hardened-packages.git",
+      "sha256": "570dafd2d9ae72d0239bc49c1bcca3c70ea59f219f7f1b17322575feebdc0915"
+    }
+  ]
+}

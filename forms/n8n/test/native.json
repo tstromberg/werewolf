@@ -27,6 +27,7 @@
           "persisted-workflow",
           "run-workflow",
           "code-runner",
+          "cve-2025-68613-fixed",
           "direct-node",
           "hardened-node",
           "private-listener",
@@ -42,6 +43,7 @@
           "persisted-workflow",
           "run-workflow",
           "code-runner",
+          "cve-2025-68613-fixed",
           "direct-node",
           "hardened-node",
           "private-listener"

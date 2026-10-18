@@ -1,4 +1,8 @@
 base: onnx
+
+recipes:
+  - ../../../packages/langflow/langflow.yaml
+
 with: [onnx-minilm, libffi]
 
 weaknesses:

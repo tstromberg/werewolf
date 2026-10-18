@@ -3,6 +3,8 @@
 [libffi](https://github.com/libffi/libffi) 3.8.0 with static callback trampolines.
 It supplies the same `libffi.so.8` ABI as Wolfi's package, enabling static
 trampolines so callbacks can execute from read-only library code under MDWE.
+Its hardening recipe lives in `../hardened-packages/ports/libffi` beside the
+other explicitly hardened packages; this form retains its image policy.
 
 ## Security Posture
 

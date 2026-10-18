@@ -7,6 +7,9 @@
 # this form's package, on Java 11. See forms/bloodhound/README.md.
 base: prod
 
+recipes:
+  - ../../../packages/bloodhound/neo4j.yaml
+
 with: [postgresql, caddy]
 
 packages:
@@ -14,7 +17,7 @@ packages:
   # form ships the server alone.
   - postgresql-17-contrib
   # Java 11. Neo4j 4.4 is the form's own package
-  # (forms/bloodhound/melange/neo4j.yaml), not a Wolfi package.
+  # (../packages/bloodhound/neo4j.yaml), not a Wolfi package.
   - openjdk-11-default-jvm
 
 # Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles

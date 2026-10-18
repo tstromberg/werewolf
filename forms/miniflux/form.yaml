@@ -3,9 +3,12 @@
 # certificate from Let's Encrypt; Miniflux, on loopback, keeps its tables
 # in a schema of its own and fetches feeds from public addresses alone.
 # Wolfi does not ship Miniflux: melange builds it from a pinned release
-# (forms/miniflux/melange/miniflux.yaml). Its administrator comes from the
+# (../packages/miniflux/miniflux.yaml). Its administrator comes from the
 # config before it serves. See forms/miniflux/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/miniflux/miniflux.yaml
 
 with: [postgresql, caddy]
 

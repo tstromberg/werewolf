@@ -10,7 +10,9 @@
       "pledge": "stdio rpath wpath inet connect",
       "read": [
         "/etc/sv/solr/service",
-        "/usr/lib/apk/db/installed"
+        "/usr/lib/apk/db/installed",
+        "/usr/lib/solr/log4j2.xml",
+        "/usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar"
       ],
       "connect": [
         "tcp/8983"
@@ -25,6 +27,7 @@
           "index-document",
           "persisted-document",
           "home-confined",
+          "cve-2021-44228-present-contained",
           "no-shell-launcher",
           "hardened-java"
         ],
@@ -34,6 +37,7 @@
           "public-listener",
           "persisted-document",
           "home-confined",
+          "cve-2021-44228-present-contained",
           "no-shell-launcher",
           "hardened-java"
         ]
