@@ -123,9 +123,8 @@ class OwnerControl(unittest.TestCase):
         disk.write_bytes(bytes(1 << 20))
         with (self.root / 'qemu.log').open('wb') as log:
             process = subprocess.Popen([qemu, '-M', 'none', '-display', 'none', '-qmp',
-                'unix:' + str(qmp) + ',server=on,wait=off', '-blockdev',
-                json.dumps(dict(driver='file', filename=str(disk), **{'node-name': 'disk-file'})),
-                '-blockdev', json.dumps(dict(driver='raw', file='disk-file', **{'node-name': 'disk-root'}))],
+                'unix:' + str(qmp) + ',server=on,wait=off', '-drive',
+                'file=' + str(disk) + ',format=raw,if=none,node-name=disk-root'],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             try:
                 for _ in range(100):
