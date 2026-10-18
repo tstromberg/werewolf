@@ -245,27 +245,60 @@ pub fn protectedReady(
     w: *Io.Writer,
     why: *Why,
 ) !void {
-    const port = if (provider == .lima)
-        lima.sshPort(io, gpa, name)
-    else
-        qemu.record(io, gpa, try machineDir(gpa, name), "ssh");
-    if (!(Io.File.stdout().isTty(io) catch false)) {
-        if (unchanged) {
-            try w.print(
-                "{s}\t{s}\tunchanged; running with Secure Boot, IPE, TPM A/B\n",
-                .{ name, form },
+    const ports = try listens(io, gpa, form, why);
+    const dir = try machineDir(gpa, name);
+    var mappings: std.ArrayList(lima.Forward) = .empty;
+    if (provider == .lima) {
+        try mappings.appendSlice(gpa, lima.forward(io, gpa, name, ports) catch |err|
+            return why.refuse(
+                "{s}: forwarding the declared services: {s}",
+                .{ name, @errorName(err) },
+            ));
+        var record: Io.Writer.Allocating = .init(gpa);
+        try record.writer.print("form {s}\n", .{form});
+        for (mappings.items) |mapping| try record.writer.print(
+            "port{d} {d}\n",
+            .{ mapping.guest, mapping.host },
+        );
+        try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), record.written(), why);
+    } else {
+        var web: ?u16 = null;
+        for (ports) |port| if (port != 22) {
+            web = port;
+        };
+        for (ports) |port| {
+            const key = if (port == 22) "ssh" else if (web == port) "web" else continue;
+            const host = qemu.record(io, gpa, dir, key) orelse continue;
+            try mappings.append(
+                gpa,
+                .{ .guest = port, .host = try std.fmt.parseInt(u16, host, 10) },
             );
-        } else try w.print(
-            "{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n",
-            .{ name, port orelse "0", form },
+        }
+    }
+    var primary: ?u16 = null;
+    for (mappings.items) |mapping| {
+        if (primary == null or mapping.guest != 22) primary = mapping.host;
+    }
+    const address = if (primary) |port| try gpa.print("127.0.0.1:{d}", .{port}) else "-";
+    if (!(Io.File.stdout().isTty(io) catch false)) {
+        try w.print(
+            "{s}\t{s}\t{s}\tSecure Boot, IPE, TPM A/B{s}\n",
+            .{ name, address, form, if (unchanged) "; unchanged" else "" },
         );
     }
     var out: Io.Writer.Allocating = .init(gpa);
     const next = &out.writer;
-    if (std.mem.findScalar(u16, try listens(io, gpa, form, why), 22) != null) {
-        try next.print("     SSH      {s}", .{try sshCommand(gpa, name)});
-        if (port) |p| try next.print("  (127.0.0.1:{s})", .{p});
-        try next.writeByte('\n');
+    for (mappings.items) |mapping| {
+        if (mapping.guest == 22) {
+            try next.print(
+                "     SSH      {s}  (127.0.0.1:{d})\n",
+                .{ try sshCommand(gpa, name), mapping.host },
+            );
+        } else if (mapping.guest == 80 or mapping.guest == 443) {
+            try next.print("     Open     {s}://127.0.0.1:{d}\n", .{
+                if (mapping.guest == 443) "https" else "http", mapping.host,
+            });
+        } else try next.print("     TCP/{d}  127.0.0.1:{d}\n", .{ mapping.guest, mapping.host });
     }
     try next.print("     Console  {s}\n     Stop     {s}\n", .{
         try consoleCommand(gpa, name), try stopCommand(gpa, name),

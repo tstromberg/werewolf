@@ -28,7 +28,9 @@ and 443 and to `/data/svc/caddy`. The root is read-only.
 howl create caddy --with caddy --domain www.home.arpa
 ```
 
-Open `https://www.home.arpa`. A name under `.home.arpa`, `.local`, `.internal` or
+Point `www.home.arpa` at the IP address Howl prints. With loopback forwarding,
+open the HTTPS port shown by Howl, for example `https://www.home.arpa:8443/`.
+A name under `.home.arpa`, `.local`, `.internal` or
 `.localhost` gets a certificate from Caddy's own CA. Without `--domain` the site is
 plain HTTP on port 80. The site is in [Caddy's
 documentation](https://caddyserver.com/docs/).

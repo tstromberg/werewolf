@@ -12,7 +12,8 @@ const Allocator = std.mem.Allocator;
 pub const leases = "/var/db/dhcpd_leases";
 /// user_ip and user_gw are the guest address and gateway of Lima's user
 /// network in every VM. The gateway also answers DNS.
-pub const user_ip = "192.168.5.15/24";
+const user_address = "192.168.5.15";
+pub const user_ip = user_address ++ "/24";
 pub const user_gw = "192.168.5.2";
 
 /// installed reports whether this is macOS with limactl on the PATH.
@@ -87,6 +88,117 @@ pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
     const p = std.mem.trim(u8, r.stdout, " \n");
     const n = std.fmt.parseInt(u16, p, 10) catch return null;
     return if (n == 0) null else p;
+}
+
+pub const Forward = struct { guest: u16, host: u16 };
+
+/// Forward declared TCP services in QEMU itself. Plain Lima has neither a
+/// guest agent nor SSH tunnels. Its monitor also preserves live mappings
+/// across repeated howl commands, without restarting the guest.
+pub fn forward(io: Io, gpa: Allocator, name: []const u8, ports: []const u16) ![]const Forward {
+    if (ports.len == 0) return &.{};
+    const instance = try dir(io, gpa, name) orelse return error.MissingLimaInstance;
+    const address = try Io.net.UnixAddress.init(try gpa.print("{s}/qmp.sock", .{instance}));
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    var buffer: [64 << 10]u8 = undefined;
+    var reader = stream.reader(io, &buffer);
+    _ = try qmpReply(gpa, &reader.interface);
+    try qmpSend(io, gpa, stream, .{ .execute = "qmp_capabilities" });
+    _ = try qmpReply(gpa, &reader.interface);
+    try qmpSend(io, gpa, stream, .{
+        .execute = "human-monitor-command",
+        .arguments = .{ .@"command-line" = "info usernet" },
+    });
+    const table = try qmpReply(gpa, &reader.interface);
+    if (table != .string) return error.BadQemuReply;
+    const held = try forwarded(gpa, table.string);
+    var result: std.ArrayList(Forward) = .empty;
+    for (ports) |guest| {
+        for (held) |mapping| {
+            if (mapping.guest == guest) {
+                try result.append(gpa, mapping);
+                break;
+            }
+        } else {
+            const host = try @import("qemu.zig").freePort(
+                io,
+                if (guest == 443) 8443 else if (guest < 1024) 8080 else guest,
+            );
+            const command = try gpa.print("hostfwd_add net0 tcp:127.0.0.1:{d}-{s}:{d}", .{
+                host, user_address, guest,
+            });
+            try qmpSend(io, gpa, stream, .{
+                .execute = "human-monitor-command",
+                .arguments = .{ .@"command-line" = command },
+            });
+            const reply = try qmpReply(gpa, &reader.interface);
+            if (reply != .string or reply.string.len != 0) return error.PortForwardFailed;
+            try result.append(gpa, .{ .guest = guest, .host = host });
+        }
+    }
+    return result.toOwnedSlice(gpa);
+}
+
+fn qmpSend(io: Io, gpa: Allocator, stream: Io.net.Stream, command: anytype) !void {
+    const json = try std.json.Stringify.valueAlloc(gpa, command, .{});
+    var writer = stream.writer(io, &.{});
+    try writer.interface.writeAll(json);
+    try writer.interface.writeByte('\n');
+}
+
+fn qmpReply(gpa: Allocator, reader: *Io.Reader) !std.json.Value {
+    while (true) {
+        const line = try reader.takeDelimiterInclusive('\n');
+        const reply = try std.json.parseFromSliceLeaky(std.json.Value, gpa, line, .{});
+        if (reply != .object or reply.object.contains("error")) return error.BadQemuReply;
+        if (reply.object.get("return")) |value| return value;
+        if (reply.object.contains("QMP")) return .null;
+        // Lifecycle events can arrive between command replies.
+        if (!reply.object.contains("event")) return error.BadQemuReply;
+    }
+}
+
+test "QMP skips lifecycle events and refuses command errors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var good: Io.Reader = .fixed("{\"event\":\"RESET\"}\n{\"return\":\"ready\"}\n");
+    try std.testing.expectEqualStrings("ready", (try qmpReply(gpa, &good)).string);
+    var bad: Io.Reader = .fixed("{\"error\":{\"class\":\"GenericError\"}}\n");
+    try std.testing.expectError(error.BadQemuReply, qmpReply(gpa, &bad));
+}
+
+fn forwarded(gpa: Allocator, table: []const u8) ![]const Forward {
+    var result: std.ArrayList(Forward) = .empty;
+    var lines = std.mem.splitScalar(u8, table, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        if (!std.mem.eql(u8, words.next() orelse continue, "TCP[HOST_FORWARD]")) continue;
+        _ = words.next() orelse continue; // QEMU's file descriptor.
+        if (!std.mem.eql(u8, words.next() orelse continue, "127.0.0.1")) continue;
+        const host = std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
+        if (!std.mem.eql(u8, words.next() orelse continue, user_address)) continue;
+        const guest = std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
+        if (host != 0 and guest != 0) try result.append(gpa, .{ .guest = guest, .host = host });
+    }
+    return result.toOwnedSlice(gpa);
+}
+
+test "QEMU forwarding table admits only loopback TCP mappings to this guest" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const mappings = try forwarded(arena.allocator(), "Hub -1 (net0):\r\n" ++
+        " TCP[HOST_FORWARD] 27 127.0.0.1 53129 192.168.5.15 22 0 0\r\n" ++
+        " TCP[ESTABLISHED] 28 127.0.0.1 8443 192.168.5.15 443 0 0\r\n" ++
+        " UDP[HOST_FORWARD] 29 127.0.0.1 5353 192.168.5.15 53 0 0\r\n" ++
+        " TCP[HOST_FORWARD] 30 0.0.0.0 8080 192.168.5.15 80 0 0\r\n" ++
+        " TCP[HOST_FORWARD] 31 127.0.0.1 8081 192.168.5.16 80 0 0\r\n" ++
+        " TCP[HOST_FORWARD] 32 127.0.0.1 8443 192.168.5.15 443 0 0\r\n");
+    try std.testing.expectEqualDeep(
+        &[_]Forward{ .{ .guest = 22, .host = 53129 }, .{ .guest = 443, .host = 8443 } },
+        mappings,
+    );
 }
 
 /// dir returns the instance's directory, which holds its console log, or
