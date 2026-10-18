@@ -276,7 +276,10 @@ TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig li
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/ci-forms: ; python3 test/ci-forms-test
+	python3 test/check-dispatch
 _test/cloud-console: ; python3 test/cloud-console --test
+	python3 test/consumer-trust
+	python3 test/check-host-keys
 _test/probes:
 	@mkdir -p build/test-probes
 	zig test -lc test/native/match.zig test/native/regex.c
@@ -625,7 +628,7 @@ check-one:
 check-posture: | _check-shared
 	@$(CHECK_MAKE) FORM=minimal CHECK_NAME=posture FORM_CHECKS=test/checks-posture _check-form
 
-check-%: _check-legacy-%
+$(addprefix check-,$(filter-out $(NATIVE_TEST_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
 
 _check-legacy-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)

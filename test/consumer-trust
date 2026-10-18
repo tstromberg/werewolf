@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Private mirrors must extend public TLS trust, including Fedora's bundle."""
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+import consumer_trust
+
+
+class Trust(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for name in ('system', 'mirror'):
+            subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509',
+                            '-days', '1', '-subj', '/CN=' + name, '-keyout', self.root / (name + '.key'),
+                            '-out', self.root / (name + '.crt')], check=True, capture_output=True)
+
+    def empty(self):
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    def test_missing_python_cafile_retains_system_and_mirror_roots(self):
+        with patch.object(consumer_trust.ssl, 'create_default_context', self.empty), \
+                patch.object(consumer_trust, 'SYSTEM_BUNDLES', (str(self.root / 'system.crt'),)), \
+                patch.dict(os.environ, {}, clear=True):
+            roots = consumer_trust.mirror_roots(self.root / 'mirror.crt')
+        context = self.empty()
+        context.load_verify_locations(cadata=roots.decode())
+        self.assertEqual(2, len(context.get_ca_certs(binary_form=True)))
+        self.assertIn((self.root / 'system.crt').read_bytes(), roots)
+        self.assertIn((self.root / 'mirror.crt').read_bytes(), roots)
+
+    def test_explicit_curl_roots_are_preserved(self):
+        with patch.object(consumer_trust.ssl, 'create_default_context', self.empty), \
+                patch.object(consumer_trust, 'SYSTEM_BUNDLES', ()), \
+                patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.root / 'system.crt')}, clear=True):
+            roots = consumer_trust.mirror_roots(self.root / 'mirror.crt')
+        self.assertIn((self.root / 'system.crt').read_bytes(), roots)
+
+    def test_absent_public_trust_refuses_instead_of_trusting_only_the_mirror(self):
+        with patch.object(consumer_trust.ssl, 'create_default_context', self.empty), \
+                patch.object(consumer_trust, 'SYSTEM_BUNDLES', (str(self.root / 'missing'),)), \
+                patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'public TLS roots'):
+                consumer_trust.mirror_roots(self.root / 'mirror.crt')
+
+
+unittest.main()

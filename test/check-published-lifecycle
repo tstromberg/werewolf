@@ -17,6 +17,7 @@ import threading
 import time
 from tpm_proxy import Proxy
 from owner_qmp import StorageFault
+from consumer_trust import mirror_roots
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'release'))
 import image_profiles
 
@@ -142,8 +143,7 @@ os.execv(''' + repr(qemu_binary) + ''',[''' + repr(qemu_binary) + ''',*args])
 qemu_wrapper.chmod(0o755)
 lima_home = Path(tempfile.mkdtemp(prefix='ww-published-lifecycle-', dir='/tmp'))
 roots = work / 'mirror-roots.pem'
-system_ca = ssl.get_default_verify_paths().cafile
-roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
+roots.write_bytes(mirror_roots(ca))
 # The consumer's howl data stays here too: a self-hosted runner's own is
 # never read or written.
 env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(roots), XDG_DATA_HOME=str(consumer / 'data'),
