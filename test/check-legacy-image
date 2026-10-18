@@ -46,8 +46,11 @@ def check(directory, output):
     host_arch = {'arm64': 'aarch64', 'amd64': 'x86_64'}.get(platform.machine(), platform.machine())
     if platform.system() == 'Darwin' and host_arch == arch:
         accel = 'hvf'
+    # Current AAVMF stalls before loading the disk with TCG's synthetic max
+    # CPU. A Cortex-A72 boots the same firmware and exact release disk.
+    cpu = 'host' if accel != 'tcg' else ('cortex-a72' if arch == 'aarch64' else 'max')
     command = ['qemu-system-' + arch, '-M', 'virt' if arch == 'aarch64' else 'q35',
-               '-accel', accel, '-cpu', 'host' if accel != 'tcg' else 'max',
+               '-accel', accel, '-cpu', cpu,
                '-nographic', '-smp', '2', '-m', '2048', '-no-reboot',
                '-device', 'virtio-rng-pci', '-netdev', 'user,id=n0,restrict=on',
                '-device', 'virtio-net-pci,netdev=n0,romfile=']
@@ -55,7 +58,7 @@ def check(directory, output):
     # shell or test agent into either published image.
     bios = firmware(arch)
     uefi = ['-bios', bios]
-    if arch == 'x86_64' and '_CODE' in bios:
+    if '_CODE' in bios:
         template = bios.replace('_CODE', '_VARS')
         if not Path(template).is_file():
             raise ValueError('matching ordinary UEFI variable template is missing')

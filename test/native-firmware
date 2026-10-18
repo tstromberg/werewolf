@@ -45,11 +45,20 @@ class NativeFirmware(unittest.TestCase):
             self.assertEqual(module.tools_python(), '/tools/python3.12')
 
     def test_unavailable_or_same_unsupported_interpreter_is_refused(self):
-        with patch.object(module.sys, 'version_info', (3, 15)):
+        with patch.object(module.sys, 'version_info', (3, 15)), \
+                patch.object(module, 'PYTHON_DIRECTORIES', ()):
             for candidate in [None, module.sys.executable]:
                 with self.subTest(candidate=candidate), \
                         patch.object(module.shutil, 'which', return_value=candidate):
                     self.assertIsNone(module.tools_python())
+
+    def test_macos_service_path_finds_an_installed_supported_interpreter(self):
+        with patch.object(module.sys, 'version_info', (3, 9)), \
+                patch.object(module.shutil, 'which', return_value=None), \
+                patch.object(module.Path, 'is_file', side_effect=lambda: True), \
+                patch.object(module.os, 'access', side_effect=lambda path, mode:
+                             path == '/opt/homebrew/bin/python3.14'):
+            self.assertEqual('/opt/homebrew/bin/python3.14', module.tools_python())
 
     def test_exact_bytes_and_size_required_and_symlinks_refused(self):
         records = {}
