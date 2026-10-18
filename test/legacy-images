@@ -104,6 +104,14 @@ class LegacyImages(unittest.TestCase):
             self.assertTrue(rows[0]['object'].startswith('legacy-boot/'))
             self.assertFalse((self.root / 'store' / form / 'qemu/x86_64/latest/boot.json').exists())
 
+    def test_prior_catalog_preserves_selected_forms_and_retires_excluded_forms(self):
+        exported, = self.export(self.candidate())
+        rows = legacy.publish([exported], self.store, self.cert)
+        retired = [dict(rows[0], form=form) for form in ('prod', 'caddy')]
+        legacy.write(self.root / 'store/boot-profiles.json', json.loads(catalog.envelope(
+            dict(format='werewolf-boot-profiles/1', secure_boot=[], legacy_boot=rows + retired), self.key)))
+        self.assertEqual(rows, legacy.publish([], self.store, self.cert))
+
     def test_changed_candidate_or_nonboolean_gate_is_never_signed(self):
         candidate = self.candidate()
         (candidate / 'disk.qcow2').write_bytes(b'tampered')
