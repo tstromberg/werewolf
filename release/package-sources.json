@@ -34,12 +34,13 @@
         "suricata",
         "vaultwarden",
         "velociraptor",
+        "wordpress-sqlite",
         "zot"
       ],
       "name": "packages",
-      "ref": "28d3cb7f04f38ddafb65c869d8356da5f28a8bb9",
+      "ref": "589f92c4d228bd7f63c9a519ef8f7fffe44863e6",
       "repository": "https://github.com/werewolf-linux/packages.git",
-      "sha256": "41a8d733897d6b6f9cd9f32bc31d2a6317dbc52a95a30878b569a9975c57ab46"
+      "sha256": "eec2602969bd412d9b7cab2893271ec10f222196ebfa89ce8a4468bd591fb751"
     },
     {
       "contexts": [

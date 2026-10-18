@@ -31,6 +31,13 @@ their immutable commit and content hash. Publish that commit before updating the
 Werewolf lock so CI can fetch exactly the reviewed source.
 Add new context directories to that JSON file before pinning them.
 
+The hourly package promotion workflow proposes pins only after verifying signed
+publication records for every application context on both architectures. Its PR
+runs the ordinary form checks and merges only the tested commit. Setup and
+failure handling are in [the design](docs/design/package-promotion.md). The
+promotion tool and its tests need Go 1.27 or newer. Normal manual `--pin` remains
+available for reviewed source changes.
+
 Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,
 `WEREWOLF_PACKAGES_REF` and the corresponding `WEREWOLF_HARDENED_PACKAGES_*`.
 GitHub Actions reads the same repository variables. The new package repository
