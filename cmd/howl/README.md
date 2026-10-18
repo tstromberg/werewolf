@@ -2,10 +2,10 @@
 
 ## Summary
 
-howl builds images, packs boot config, and creates, updates, reaches and deletes
-machines here or in a cloud ([docs/design/cli.md](../../docs/design/cli.md)). A machine
-is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a config tar init
-reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
+Howl builds and runs machines ([design](../../docs/design/cli.md)).
+Each combines a [form](../../docs/forms.md), image and init configuration.
+
+## Background
 
 | Verb | Does |
 | --- | --- |
@@ -27,29 +27,28 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Machine records in `build/machines/NAME`; keys and repositories in
-  `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`.
+- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl`
+  (`~/.local/share/howl`).
 
 ## Non-Goals
 
-- Compiling werewolf's programs, or managing cloud accounts, groups, IAM or networks.
+- Managing cloud accounts, IAM or cloud networks.
 
 ## Detailed design
 
-**Forms.** A name uses NAME-form from the signed index (`published.zig`);
-unpublished names use `./forms/NAME` with a warning. Path forms are never updated.
+**Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
+Path forms are never updated.
 
-**Config tar.** Each service's `config`, `setting` and `render` lines declare a flag
-(`lib/service.zig`); howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,
-`--data-key`, `--root-keys`, `--update-policy`. A FILE flag reads a file or `-`, never a
-value, and the guest's code checks every value first. The tar is ustar, sorted, root's,
-0600, dated 1970, within init's and cloud-metadata's limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`;
+`pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
+The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing
-prerequisites fail. Other providers and `--dev` need `--disable=secureboot,tpm,ipe`
-([why](../../docs/security.md#protections-a-machine-can-be-made-without)); a download
-needs its provider's [protected profile](../../docs/design/published-secure-boot.md).
-A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
+**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux). Missing tools fail.
+Other providers and `--dev` require [disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without).
+Downloads require the provider's [protected
+profile](../../docs/design/published-secure-boot.md). Local VMs use the host
+architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -84,12 +83,11 @@ cannot attach it. Progress goes to stderr and the machine record to stdout.
 
 ## Drawbacks
 
-- `--build` and path forms need a checkout, make, Zig, melange, compilers, cloud CLIs.
+Local builds need the checkout and build tools; clouds need their provider CLIs.
 
 ## Alternatives Considered
 
-Make alone, SDKs and Terraform:
-[cli.md](../../docs/design/cli.md#alternatives-considered).
+[Make, SDKs and Terraform](../../docs/design/cli.md#alternatives-considered).
 
 ## Security Considerations
 
@@ -105,6 +103,5 @@ Make alone, SDKs and Terraform:
 
 ## Reliability Considerations
 
-- Images are named by content: a retried upload or create finds them; `console` works
-  whether or not the machine came up. create does not roll back: a partial failure
-  leaves named leftovers. Open: Proxmox has never run on a real node.
+Content names make uploads and creates retryable; console works after a failed boot.
+Partial failures leave named resources. Proxmox still needs testing on a real node.

@@ -1,6 +1,7 @@
 """The public image set and explicit boot profiles of the shared release flow."""
-
 FORMS = ('minimal', 'prod-ssh', 'playground')
+# Keep existing dispatch scopes compatible; both select the same public set.
+BASE_FORMS = FORMS
 PROFILES = ('secure-boot', 'legacy-boot')
 ARCHES = ('aarch64', 'x86_64')
 

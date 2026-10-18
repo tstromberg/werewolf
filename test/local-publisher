@@ -6,9 +6,13 @@ import http.client
 import importlib.machinery
 import importlib.util
 import json
+import fcntl
 import os
 from pathlib import Path
 import socket
+import shlex
+import shutil
+import selectors
 import ssl
 import subprocess
 import sys
@@ -19,6 +23,7 @@ from unittest.mock import patch
 from urllib.request import urlopen
 from urllib.error import HTTPError
 
+sys.dont_write_bytecode = True
 loader = importlib.machinery.SourceFileLoader('publisher', 'tools/local-publisher')
 spec = importlib.util.spec_from_loader(loader.name, loader)
 publisher = importlib.util.module_from_spec(spec)
@@ -78,6 +83,156 @@ class Issuance(unittest.TestCase):
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             return reservation.getsockname()[1]
+
+    def private_service(self, name, port):
+        directory, config = self.service(self.root / name / str(port), port)
+        config['private'] = True
+        (directory / 'publisher.json').write_text(json.dumps(config))
+        endpoint = publisher.service_socket(config, create=True)
+        self.addCleanup(shutil.rmtree, endpoint.parent, True)
+        return directory, config
+
+    def test_private_consumers_coexist_with_an_occupied_virtual_tcp_port(self):
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen(1)
+            port = occupied.getsockname()[1]
+            publisher.prepare_service(self.root.resolve() / 'prepared' / str(port), self.root, private=True)
+            services = [self.private_service(name, port) for name in ('first', 'second')]
+            tool = [sys.executable, str(Path('tools/local-publisher').resolve())]
+            self.assertNotEqual(*(publisher.service_socket(config) for _, config in services))
+            try:
+                for directory, config in services:
+                    publisher.run(tool + ['start', directory / 'publisher.json'])
+                    self.assertTrue(publisher.control(config))
+                    self.assertEqual(0o600, publisher.service_socket(config).stat().st_mode & 0o777)
+                first, config = services[0]
+                registration = dict(self.config, channel='https://10.0.2.2:%d/playground' % port)
+                (first / 'registry' / (self.factory['machine'] + '.json')).write_text(json.dumps(registration))
+                context = ssl.create_default_context(cafile=config['certificate'])
+                connection = publisher.PrivateConnection(config, context)
+                route = '/aarch64/permits/' + self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor'] + '&retain=' + A
+                try:
+                    connection.request('GET', route)
+                    self.assertEqual(B, publisher.record(connection.getresponse().read())['candidate'])
+                finally:
+                    connection.close()
+                self.assertFalse(publisher.control(dict(config, token='wrong-owner')))
+                for _ in range(2):
+                    publisher.run(tool + ['stop', first / 'publisher.json'])
+                    self.assertTrue(publisher.control(services[1][1]))
+                    publisher.run(tool + ['start', first / 'publisher.json'])
+                    self.assertTrue(publisher.control(config))
+                occupied.settimeout(.1)
+                with self.assertRaises(socket.timeout):
+                    occupied.accept()
+            finally:
+                for directory, _ in services:
+                    publisher.run(tool + ['stop', directory / 'publisher.json'])
+
+    def test_private_socket_refuses_unsafe_directories_and_objects(self):
+        directory, config = self.private_service('unsafe', 9443)
+        endpoint = publisher.service_socket(config)
+        endpoint.parent.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'directory'):
+            publisher.service_socket(config)
+        endpoint.parent.chmod(0o700)
+        endpoint.write_bytes(b'not a socket')
+        with self.assertRaisesRegex(ValueError, 'socket'):
+            publisher.service_socket(config)
+        endpoint.unlink()
+        endpoint.symlink_to(directory / 'publisher.json')
+        with self.assertRaisesRegex(ValueError, 'socket'):
+            publisher.service_socket(config)
+
+    def test_private_socket_recovers_a_stale_listener(self):
+        directory, config = self.private_service('stale', 9443)
+        endpoint = publisher.service_socket(config)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+            stale.bind(str(endpoint))
+        server = publisher.Server(config)
+        server.server_close()
+        self.assertFalse(endpoint.exists())
+
+    def test_native_private_relay_preserves_binary_bytes_and_half_close(self):
+        _, config = self.private_service('relay', 9443)
+        endpoint = publisher.service_socket(config)
+        data = bytes(range(256)) * 1024
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(endpoint))
+            server.listen(1)
+            def echo():
+                stream, _ = server.accept()
+                with stream:
+                    while chunk := stream.recv(65536):
+                        stream.sendall(chunk)
+            worker = threading.Thread(target=echo)
+            worker.start()
+            process = subprocess.Popen([HOWL, '_permit-bridge', str(endpoint)], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                process.stdin.write(b'handshake')
+                process.stdin.flush()
+                with selectors.DefaultSelector() as ready:
+                    ready.register(process.stdout, selectors.EVENT_READ)
+                    self.assertTrue(ready.select(2), 'relay buffered a live handshake until EOF')
+                self.assertEqual(b'handshake', process.stdout.read(9))
+                output, errors = process.communicate(data, timeout=10)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=10)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close()
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(0, process.returncode, errors)
+        self.assertEqual(data, output)
+
+    def test_native_private_relay_rejects_excess_connections_and_unsafe_paths(self):
+        _, config = self.private_service('limits', 9443)
+        endpoint = publisher.service_socket(config)
+        held = []
+        try:
+            for n in range(8):
+                lock = (endpoint.parent / ('bridge-%d.lock' % n)).open('a+b')
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(lock)
+            result = subprocess.run([HOWL, '_permit-bridge', str(endpoint)], input=b'',
+                                    capture_output=True, timeout=2)
+            self.assertNotEqual(0, result.returncode)
+        finally:
+            for lock in held:
+                lock.close()
+        for path in ('/tmp/other.sock', str(endpoint.parent / 'other.sock')):
+            result = subprocess.run([HOWL, '_permit-bridge', path], input=b'', capture_output=True, timeout=2)
+            self.assertNotEqual(0, result.returncode)
+
+    def test_private_forwarding_quotes_paths_and_refuses_ambiguous_networks(self):
+        directory, config = self.private_service('forward', 9443)
+        machine = self.root / "machine ',$(false).json"
+        binary = "/tmp/a ',$(false)/howl"
+        machine.write_text(json.dumps(dict(service=str(directory), howl=binary)))
+        args = ['qemu-system-aarch64', '-netdev', 'user,id=net0', '-device', 'virtio-net-pci,netdev=net0']
+        forwarded = publisher.forward(args, machine, '10.0.2.2', 9443)
+        command = forwarded[2].split('-cmd:', 1)[1].replace(',,', ',')
+        self.assertEqual([binary, '_permit-bridge', str(publisher.service_socket(config))], shlex.split(command))
+        self.assertEqual('user,id=net0', args[2])
+        self.assertIn(',host=10.0.2.254,guestfwd=tcp:10.0.2.2:9443-', forwarded[2])
+        lima = ['qemu', '-netdev', 'user,id=n0,net=192.168.5.0/24,host=192.168.5.2']
+        self.assertIn(',host=192.168.5.254,guestfwd=tcp:192.168.5.2:9443-',
+                      publisher.forward(lima, machine, '192.168.5.2', 9443)[2])
+        with self.assertRaisesRegex(ValueError, 'host alias'):
+            publisher.forward(['qemu', '-netdev', 'user,id=n0,host=10.0.2.99'], machine, '10.0.2.2', 9443)
+        self.assertEqual(['qemu', '--version'], publisher.forward(['qemu', '--version'], machine, '10.0.2.2', 9443))
+        probe = ['qemu', '-M', 'none', '-accel', 'help']
+        self.assertEqual(probe, publisher.forward(probe, machine, '192.168.5.2', 9443))
+        for host, port in [('127.0.0.1', 9443), ('10.0.2.2', 443)]:
+            with self.assertRaises(ValueError):
+                publisher.forward(args, machine, host, port)
+        for command in ([], args + ['-netdev', 'user,id=other'], forwarded):
+            with self.assertRaisesRegex(ValueError, 'unambiguous'):
+                publisher.forward(command, machine, '10.0.2.2', 9443)
 
     def test_live_legacy_publisher_is_shared_across_checkouts_preserving_trust(self):
         other = Issuance('test_signed_ab_preserves_both_releases')

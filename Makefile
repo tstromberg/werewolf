@@ -289,6 +289,7 @@ _test/form-coverage: ; python3 test/form-coverage --probes
 _test/bhyve-network: ; python3 test/check-bhyve-network
 _test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
 _test/package-sources: ; python3 test/package-sources
+_test/package-pins: ; go -C tools/package-pins test ./...
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing
@@ -302,7 +303,7 @@ _test/local-prerequisites: $(HOWL)
 	python3 test/lima-state $(HOWL)
 	python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
-_test/local-publisher: $(HOWL) build/host/tpm-policy
+_test/local-publisher: $(HOWL) build/host/tpm-policy build/host/form
 	python3 test/local-publisher $(HOWL)
 	python3 test/boot-images $(HOWL)
 	python3 test/boot-download $(HOWL)

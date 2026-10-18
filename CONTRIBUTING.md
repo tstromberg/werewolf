@@ -26,8 +26,17 @@ form needs only this repository; forms with third-party recipes need the sibling
 
 CI runs `tools/checkout-packages` to provision and verify the contexts pinned in
 `release/package-sources.json`. Use `--check` to verify existing local sources
-without fetching; after reviewing a package change, use `--pin` to record it.
+without fetching. Commit reviewed package changes first, then use `--pin` to record
+their immutable commit and content hash. Publish that commit before updating the
+Werewolf lock so CI can fetch exactly the reviewed source.
 Add new context directories to that JSON file before pinning them.
+
+The hourly package promotion workflow proposes pins only after verifying signed
+publication records for every application context on both architectures. Its PR
+runs the ordinary form checks and merges only the tested commit. Setup and
+failure handling are in [the design](docs/design/package-promotion.md). The
+promotion tool and its tests need Go 1.27 or newer. Normal manual `--pin` remains
+available for reviewed source changes.
 
 Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,
 `WEREWOLF_PACKAGES_REF` and the corresponding `WEREWOLF_HARDENED_PACKAGES_*`.

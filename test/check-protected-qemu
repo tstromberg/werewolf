@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'release'))
+import image_profiles
 
 
 def run(args, env):
@@ -37,7 +39,7 @@ def check():
             kernel = work / 'test-kernel.tar'
             run(['sh', 'tools/test-kernel', 'x86_64', trust / 'image.crt', kernel], env)
             env['WEREWOLF_PROTECTED_TEST_KERNEL'] = str(kernel)
-            for form in ('minimal', 'prod-ssh', 'playground'):
+            for form in image_profiles.BASE_FORMS:
                 start = datetime.datetime.now(datetime.timezone.utc)
                 bundles = []
                 for offset in range(3):

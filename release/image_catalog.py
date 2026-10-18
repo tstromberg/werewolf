@@ -193,9 +193,11 @@ def page(rows, title='Werewolf images', legacy_rows=()):
         base = PUBLIC + '/' + row['object']
         disk = row['files']['disk.qcow2']['asset']
         manifest = row['form'] + '-' + row['arch'] + '-legacy-boot-downloads.json'
+        changes = row['files'].get('release-notes.html')
+        changes = ' · <a href="' + html.escape(base + '/' + changes['asset'], quote=True) + '">Package changes</a>' if changes else ''
         body.append('<p>' + html.escape(row['form'] + ' / ' + row['arch']) + ': '
                     '<a href="' + html.escape(base + '/' + disk, quote=True) + '">legacy-boot qcow2</a> · '
                     '<a href="' + html.escape(base + '/' + manifest, quote=True) + '">manifest</a> · '
                     '<a href="' + html.escape(base + '/' + manifest + '.sig', quote=True) + '">signature</a> · ' +
-                    html.escape(row['serial']) + '</p>')
+                    html.escape(row['serial']) + changes + '</p>')
     return '\n'.join(body + ['</html>']) + '\n'

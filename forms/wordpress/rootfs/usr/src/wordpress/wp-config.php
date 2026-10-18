@@ -26,8 +26,7 @@ define( 'DB_PASSWORD', '' );
 define( 'DB_HOST', '' );
 define( 'DB_CHARSET', 'utf8mb4' );
 define( 'DB_COLLATE', '' );
-define( 'DB_DIR', '/data/svc/php-fpm/database' );
-define( 'DB_FILE', 'wordpress.sqlite' );
+define( 'DB_PATH', '/data/svc/php-fpm/database/wordpress.sqlite' );
 $table_prefix = 'wp_';
 
 // Salts: the config's, or the ones install.php made once on /data.

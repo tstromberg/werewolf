@@ -17,6 +17,8 @@ import threading
 import time
 from tpm_proxy import Proxy
 from owner_qmp import StorageFault
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'release'))
+import image_profiles
 
 if len(sys.argv) != 6:
     sys.exit('usage: check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT')
@@ -32,7 +34,7 @@ permit_port = manifests[0]['permit_port']
 shellfree = provider == 'qemu'
 if provider is None or arch not in ('aarch64', 'x86_64') or (provider == 'lima' and arch != 'aarch64'):
     sys.exit('unsupported published lifecycle target')
-if form not in ('minimal', 'prod-ssh', 'playground') or (not shellfree and form != 'playground'):
+if form not in image_profiles.FORMS or (not shellfree and form != 'playground'):
     sys.exit('this form requires the QEMU owner-control lifecycle')
 if any(m['form'] != form or m['image']['arch'] != arch or
        m['permit_host'] != manifests[0]['permit_host'] or m['permit_port'] != permit_port for m in manifests):
@@ -116,6 +118,11 @@ qemu_wrapper.write_text('''#!/usr/bin/env python3
 import json,os,sys,time
 from pathlib import Path
 args=sys.argv[1:]
+for i,arg in enumerate(args):
+    if i and args[i-1]=='-drive' and '/werewolf-run/disk.img,' in arg and ',node-name=' not in arg:
+        # Reopening an automatically named -drive node attempts to change its
+        # immutable node-name option. This label affects only host QMP control.
+        args[i]=arg+',node-name=werewolf-lifecycle-boot'
 root=Path(''' + repr(str(proxy_dir)) + ''')
 for i,arg in enumerate(args):
     if i and args[i-1]=='-chardev' and 'socket,' in arg and 'tpm' in arg:
@@ -150,12 +157,21 @@ names = ['werewolf-run', 'ww-published-second']
 machines = [consumer / 'build/machines' / name for name in names]
 proxy = None
 observed = {}
+storage_fault = None
+storage_restored = threading.Event()
 
 
 def observe(command, response):
+    global storage_fault
     if int.from_bytes(response[6:10], 'big'):
         return
     code = int.from_bytes(command[6:10], 'big')
+    if code == 0x144 and storage_fault is not None:
+        # Hold the next boot's TPM startup reply until writes work again,
+        # before its retained filesystem may need journal recovery.
+        storage_fault.restore()
+        storage_fault = None
+        storage_restored.set()
     if code == 0x14e and int.from_bytes(command[10:14], 'big') == 0x01500021:
         if response[:2] == b'\x80\x02' and response[14:16] == b'\x00\x20':
             observed['anchor'] = response[16:48].hex()
@@ -417,29 +433,20 @@ try:
     update(names[0], 'try', 'try-unhealthy', check=False, timeout=30)
     if shellfree:
         # Fail a real storage dependency after boot-counter consumption and
-        # updater readiness, before the keeper can commit the exact candidate.
-        until = time.monotonic() + 180
-        while True:
-            candidate = owner(names[0], 'status', 'trial-ready', check=False, timeout=15)
-            if candidate and candidate['ready'] and releases[2] in candidate['cmdline']:
-                if candidate['committed']:
-                    raise RuntimeError('trial committed before the disk fault was injected')
-                owner(names[0], 'pause', 'pause-trial-updater')
-                break
-            if time.monotonic() > until:
-                raise RuntimeError('trial did not reach updater readiness')
-            time.sleep(1)
-        fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
-        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', node=fault.root)))
+        # successful posture probes, before the keeper commits the candidate.
+        # The normal waiter also retries unavailable owner requests during boot.
+        trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
+        storage_fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
+        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', iotype='write', node=storage_fault.root)))
         trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
         # The production deadman gets its real 600 seconds. No guest process is
         # paused, no image is edited and no reboot is substituted for the failure.
         began_fault = time.monotonic()
-        while observed.get('pcr11') != manifests[0]['pcr11']:
+        while not storage_restored.wait(2):
+            if proxy.failures:
+                raise RuntimeError('storage recovery failed: ' + repr(proxy.failures))
             if time.monotonic() - began_fault > 780:
                 raise RuntimeError('storage-failed trial did not fall back through its deadman')
-            time.sleep(2)
-        fault.restore()
         console = (machines[0] / 'console.log').read_text(errors='replace')
         if 'did not commit in 600s; rebooting into the last good slot' not in console:
             raise RuntimeError('missing actual unhealthy-slot deadman evidence')
@@ -457,6 +464,9 @@ try:
         wait(names[0], releases[0], trial['boot_id'], trial['anchor'])
     if credentials(machines[0]) != before or credentials(machines[1]) != owner2:
         raise RuntimeError('lifecycle replaced owner or TPM custody')
+    console = lima_home / names[0] / 'serial.log' if provider == 'lima' else machines[0] / 'console.log'
+    if console.exists():
+        shutil.copyfile(console, work / (names[0] + '-console.log'))
     run([howl, 'delete', names[0], '--on', provider], 'delete-first')
     wait(names[1], releases[1])
     run([howl, '_local-refresh', machines[1]], 'surviving-owner-refresh')
@@ -471,6 +481,10 @@ try:
         unchanged_run_no_network=True, retained_enrollment=True, lifecycle_evidence='evidence.jsonl'), indent=2) + '\n')
     print('pass: exact production default download, independent owners, A/B, rollback, retirement cuts and failed-trial fallback', flush=True)
 finally:
+    if provider == 'lima':
+        for instance in names:
+            for log in (lima_home / instance).glob('*.log'):
+                shutil.copyfile(log, work / (instance + '-' + log.name))
     for name, machine in zip(names, machines):
         creation_log = machine / 'create.log'
         if creation_log.exists():

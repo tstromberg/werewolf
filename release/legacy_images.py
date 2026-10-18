@@ -9,15 +9,42 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 
 import image_catalog as catalog
 import image_profiles as profiles
+import image_notes as notes
 
 FORMAT = 'werewolf-legacy-downloads/1'
 FILES = {'disk.qcow2', 'disk.img.zst', 'vmlinuz', 'initramfs.zst', 'cmdline',
          'stage0.zst', 'root.erofs', 'inputs.tar.gz', 'packages.json'}
 CHECKS = {'reproducible', 'coverage', 'integration', 'package_update',
           'disk_parity', 'uefi_boot', 'direct_boot'}
+NOTES = {'release-notes.json', 'release-notes.html'}
+
+
+def settled(form, arch, inputs, certificate):
+    profiles.identity(form, arch, 'legacy-boot')
+    request = urllib.request.Request(catalog.PUBLIC + '/legacy-boot/%s/%s/latest/accepted.json' % (form, arch),
+                                     headers={'User-Agent': 'Werewolf-form-images/1'})
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            raw = response.read((4 << 20) + 1)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+    if len(raw) > 4 << 20:
+        raise ValueError('legacy publication receipt is too large')
+    envelope = json.loads(raw)
+    catalog.verify_signature(envelope['manifest'].encode(), bytes.fromhex(envelope['signature']), certificate)
+    manifest = json.loads(envelope['manifest'])
+    if (manifest['form'], manifest['arch'], manifest['boot_profile'], manifest['format']) != \
+            (form, arch, 'legacy-boot', FORMAT):
+        raise ValueError('foreign legacy publication receipt')
+    checks = manifest['tests']['checks']
+    return manifest['inputs'] == inputs and set(checks) == CHECKS and all(value is True for value in checks.values())
 
 
 def run(*args, **kwargs):
@@ -100,6 +127,9 @@ def build(images, snapshot, output):
         result = dict(target, status='build failed')
         results.append(result)
         try:
+            if target['status'] == 'unsupported architecture' or target.get('legacy_status') == 'unchanged':
+                result['status'] = 'unsupported architecture' if target['status'] == 'unsupported architecture' else 'unchanged'
+                continue
             # Legacy heads have their own publication history. A settled secure
             # target never implies that this profile has been built or tested.
             if target['status'] not in ('build', 'unchanged'):
@@ -116,7 +146,7 @@ def build(images, snapshot, output):
             print('legacy-boot: %s build failed: %s' % (target['form'], error), flush=True)
         finally:
             write(output / 'results.json', results)
-    return any(result['status'] != 'built' for result in results)
+    return any(result['status'] not in ('built', 'unchanged', 'unsupported architecture') for result in results)
 
 
 def check(images, snapshot, first, second, output):
@@ -126,10 +156,16 @@ def check(images, snapshot, first, second, output):
     images.native(plan['arch'])
     output.mkdir(parents=True)
     failed = False
+    results = []
     for target in plan['targets']:
         if target['form'] not in profiles.FORMS:
             raise ValueError('unlisted form in legacy image plan')
         form, arch = target['form'], target['arch']
+        result = dict(form=form, arch=arch, status='failed')
+        results.append(result)
+        if target['status'] == 'unsupported architecture' or target.get('legacy_status') == 'unchanged':
+            result['status'] = 'unsupported architecture' if target['status'] == 'unsupported architecture' else 'unchanged'
+            continue
         try:
             left, right = first / form, second / form
             manifest = validate(json.loads(catalog.read(left / 'manifest.json')), left)
@@ -155,13 +191,37 @@ def check(images, snapshot, first, second, output):
             write(destination / 'tests.json', dict(boot_profile='legacy-boot',
                 manifest=catalog.sha(destination / 'manifest.json'),
                 checks={name: True for name in sorted(CHECKS)}))
+            result['status'] = 'passed'
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             print('legacy-boot: %s verification failed: %s' % (form, error), flush=True)
             failed = True
+    write(output / 'results.json', results)
     return failed
 
 
-def export(verified, output, provenance, targets, certificate='release/protected/image.crt'):
+def previous_inventory(store, form, arch, certificate, work):
+    namespace = 'legacy-boot/' + form + '/' + arch
+    receipt = work / 'accepted.json'
+    if store is None or not store.fetch(namespace + '/latest/accepted.json', receipt):
+        return None, None
+    envelope = json.loads(catalog.read(receipt, 4 << 20))
+    raw = envelope['manifest'].encode()
+    catalog.verify_signature(raw, bytes.fromhex(envelope['signature']), certificate)
+    manifest = json.loads(raw)
+    if (manifest['form'], manifest['arch'], manifest['boot_profile']) != (form, arch, 'legacy-boot'):
+        raise ValueError('foreign previous legacy release')
+    object = namespace + '/objects/' + hashlib.sha256(raw).hexdigest()
+    expected = manifest['files']['packages.json']
+    inventory = work / 'packages.json'
+    if expected['asset'] != profiles.prefix(form, arch, 'legacy-boot') + '-packages.json' or \
+            not store.fetch(object + '/' + expected['asset'], inventory) or \
+            catalog.record(inventory) != {key: expected[key] for key in ('sha256', 'size')}:
+        raise ValueError('previous legacy package inventory is missing or changed')
+    return dict(object=object, serial=manifest['serial'], commit=manifest['commit']), \
+        notes.validate(json.loads(catalog.read(inventory, 4 << 20)), form, arch)
+
+
+def export(verified, output, provenance, targets, certificate='release/protected/image.crt', store=None):
     """Sign only fully verified legacy artifacts; never produce a protected head."""
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -190,6 +250,15 @@ def export(verified, output, provenance, targets, certificate='release/protected
             asset = prefix + ('.qcow2' if name == 'disk.qcow2' else '-' + name)
             shutil.copyfile(directory / name, assets / asset)
             files[name] = dict(asset=asset, **catalog.record(assets / asset))
+        with tempfile.TemporaryDirectory(prefix='ww-legacy-notes-') as temporary:
+            previous, old = previous_inventory(store, manifest['form'], manifest['arch'], certificate, Path(temporary))
+            current = json.loads(catalog.read(directory / 'packages.json', 4 << 20))
+            release = notes.release(dict(manifest, provider='legacy-boot'), current, previous, old)
+        write(assets / (prefix + '-release-notes.json'), release)
+        (assets / (prefix + '-release-notes.html')).write_text(notes.page(release, prefix + '-'))
+        for name in NOTES:
+            asset = prefix + '-' + name
+            files[name] = dict(asset=asset, **catalog.record(assets / asset))
         signed = dict(manifest, files=files, tests=report, provenance=provenance)
         head = assets / (prefix + '-downloads.json')
         write(head, signed)
@@ -212,7 +281,8 @@ def verify(assets, certificate='release/protected/image.crt'):
     prefix = profiles.prefix(manifest['form'], manifest['arch'], manifest['boot_profile'])
     if manifest['format'] != FORMAT or manifest['boot_profile'] != 'legacy-boot' or \
             manifest['disabled'] != ['secureboot', 'tpm', 'ipe'] or \
-            set(manifest['files']) != FILES | {'tests.json'}:
+            not FILES | {'tests.json'} <= set(manifest['files']) <= FILES | {'tests.json'} | NOTES or \
+            set(manifest['files']) & NOTES not in (set(), NOTES):
         raise ValueError('invalid signed legacy profile')
     expected = {head.name, head.name + '.sig'}
     for name, record in manifest['files'].items():
@@ -230,7 +300,7 @@ def verify(assets, certificate='release/protected/image.crt'):
         raise ValueError('legacy release tests are incomplete')
     candidate = {key: value for key, value in manifest.items() if key not in ('tests', 'provenance')}
     candidate['files'] = {name: {key: record[key] for key in ('sha256', 'size')}
-                          for name, record in manifest['files'].items() if name != 'tests.json'}
+                          for name, record in manifest['files'].items() if name in FILES}
     if report['boot_profile'] != 'legacy-boot' or \
             report['manifest'] != hashlib.sha256(catalog.encode(candidate)).hexdigest():
         raise ValueError('legacy tests describe another candidate')
@@ -248,6 +318,8 @@ def publish(exported, store, certificate='release/protected/image.crt'):
             if signed['format'] != 'werewolf-boot-profiles/1':
                 raise ValueError('invalid prior boot profile catalog')
             for row in signed['legacy_boot']:
+                if row['form'] not in profiles.FORMS:
+                    continue
                 profiles.identity(row['form'], row['arch'], row['boot_profile'])
                 rows[(row['form'], row['arch'])] = row
     for target in exported:
@@ -284,7 +356,7 @@ def publish(exported, store, certificate='release/protected/image.crt'):
                     spec = importlib.util.spec_from_loader(loader.name, loader)
                     downloader = importlib.util.module_from_spec(spec)
                     loader.exec_module(downloader)
-                    downloader.fetch(catalog.PUBLIC + '/' + key, existing, path.stat().st_size,
+                    downloader.fetch(catalog.PUBLIC + '/' + key, Path(temporary) / 'public', path.stat().st_size,
                                      catalog.record(path))
         head = directory / (profiles.prefix(manifest['form'], manifest['arch'], 'legacy-boot') + '-downloads.json')
         with tempfile.TemporaryDirectory(prefix='ww-legacy-receipt-') as temporary:

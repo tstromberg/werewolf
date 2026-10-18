@@ -18,6 +18,7 @@ FILES = {
     'code.fd': ('AAVMF_CODE.secboot.fd', 'd37119b2c1173ecdc88d09c00848842fdf575899403b7549a5b51f06766c20d6'),
     'template.fd': ('AAVMF_VARS.fd', 'b3b855c5a80310168051164986855692d1bdb06e67619856177965cd87c6774f'),
 }
+PYTHON_DIRECTORIES = ('/opt/homebrew/bin', '/usr/local/bin')
 
 
 def tools_python():
@@ -28,6 +29,11 @@ def tools_python():
         python = shutil.which('python3.' + str(minor))
         if python and python != sys.executable:
             return python
+    for minor in range(14, 9, -1):
+        for directory in PYTHON_DIRECTORIES:
+            python = str(Path(directory) / ('python3.' + str(minor)))
+            if python != sys.executable and Path(python).is_file() and os.access(python, os.X_OK):
+                return python
     return None
 
 

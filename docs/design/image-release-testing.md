@@ -15,14 +15,15 @@ four core forms**, contingent on the gaps below; shell-suite ports and export ar
 ## Current state
 
 `howl test` runs DEV integration tests and a separate production boot. The
-[form-images](../../release/form-images) pipeline builds minimal, prod-ssh and
-playground in secure-boot and legacy-boot profiles, compares independent builds, runs
-coverage and `howl test`, and keeps inventories, notes and a signed R2 catalog. It
-publishes a target only once its exact bundle passes the [lifecycle
-test](../../test/check-published-lifecycle). QEMU uses the production owner channel
-for all three forms; Lima currently uses SSH for playground.
-Compatibility images have separate exact-disk and direct-boot checks. The earlier
-stock-disk publisher is retired; both profiles share one release flow.
+[form-images](../../release/form-images) pipeline builds only `minimal`, `prod-ssh`
+and `playground` in
+secure-boot and legacy-boot profiles, compares independent builds, runs coverage and
+`howl test`, and keeps inventories, notes and a signed R2 catalog. It publishes a target
+only once its exact bundle passes the [lifecycle
+test](../../test/check-published-lifecycle). QEMU uses the production owner channel for
+all three published forms; Lima currently uses SSH for playground. Compatibility images
+have separate exact-disk and direct-boot checks. The earlier stock-disk publisher is
+retired; both profiles share one release flow.
 
 ## Coverage contract
 
