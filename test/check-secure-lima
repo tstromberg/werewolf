@@ -7,7 +7,6 @@ the next bundle. Keys go to a private XDG_DATA_HOME, never the caller's own."""
 import concurrent.futures
 import hashlib
 import json
-import ssl
 import os
 from pathlib import Path
 import secrets
@@ -17,9 +16,8 @@ import tempfile
 import subprocess
 import sys
 import time
-from urllib.request import urlopen
-from urllib.error import HTTPError
 from tpm_proxy import Proxy
+from publisher_transport import connection as publisher_connection
 
 howl, kernel, key, cert, stub, output = sys.argv[1:7]
 provider = sys.argv[7] if len(sys.argv) == 8 else "lima"
@@ -229,13 +227,15 @@ try:
     current_head = json.loads((authority / 'approved.json').read_text())
     route = '/' + arch + '/permits/' + factory_record[16:48].hex() + '/' + factory_record[112:144].hex() + \
             '.permit?from=' + c['tpm_anchor'] + '&retain=' + current_head['candidate']
-    context = ssl.create_default_context(cafile=configuration['certificate'])
+    connection = publisher_connection(configuration)
     try:
-        urlopen('https://127.0.0.1:' + str(configuration['port']) + route, context=context, timeout=10)
-        raise RuntimeError('host issuer reauthorized a retired image')
-    except HTTPError as failure:
-        if failure.code != 404:
-            raise
+        connection.request('GET', route)
+        response = connection.getresponse()
+        response.read()
+        if response.status != 404:
+            raise RuntimeError('host issuer did not refuse a retired image: %d' % response.status)
+    finally:
+        connection.close()
     ssh('/usr/lib/werewolf/slot-update try', 'rollback-B', check=False, timeout=30)
     b2 = wait_boot('B', c['boot_id'], c['tpm_anchor'])
     # An unchanged create keeps a running machine. Request the restart explicitly.

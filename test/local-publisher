@@ -24,6 +24,8 @@ from urllib.request import urlopen
 from urllib.error import HTTPError
 
 sys.dont_write_bytecode = True
+from publisher_transport import connection as publisher_connection
+
 loader = importlib.machinery.SourceFileLoader('publisher', 'tools/local-publisher')
 spec = importlib.util.spec_from_loader(loader.name, loader)
 publisher = importlib.util.module_from_spec(spec)
@@ -109,12 +111,25 @@ class Issuance(unittest.TestCase):
                 first, config = services[0]
                 registration = dict(self.config, channel='https://10.0.2.2:%d/playground' % port)
                 (first / 'registry' / (self.factory['machine'] + '.json')).write_text(json.dumps(registration))
-                context = ssl.create_default_context(cafile=config['certificate'])
-                connection = publisher.PrivateConnection(config, context)
+                machine_config = dict(service=str(first))
+                connection = publisher_connection(machine_config)
                 route = '/aarch64/permits/' + self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor'] + '&retain=' + A
                 try:
                     connection.request('GET', route)
-                    self.assertEqual(B, publisher.record(connection.getresponse().read())['candidate'])
+                    accepted = publisher.record(connection.getresponse().read())
+                    self.assertEqual(B, accepted['candidate'])
+                finally:
+                    connection.close()
+                self.approve(C)
+                current = publisher.record(self.issue(C, previous=accepted['anchor'], retained=B))
+                retired = '/aarch64/permits/' + self.factory['machine'] + '/' + A + \
+                    '.permit?from=' + current['anchor'] + '&retain=' + C
+                connection = publisher_connection(machine_config)
+                try:
+                    connection.request('GET', retired)
+                    response = connection.getresponse()
+                    self.assertEqual(404, response.status)
+                    response.read()
                 finally:
                     connection.close()
                 self.assertFalse(publisher.control(dict(config, token='wrong-owner')))
@@ -600,6 +615,14 @@ class Issuance(unittest.TestCase):
         try:
             origin = 'https://127.0.0.1:' + str(server.server_port)
             context = ssl.create_default_context(cafile=self.config['certificate'])
+            connection = publisher_connection(dict(self.config, port=server.server_port))
+            try:
+                connection.request('GET', '/_health', headers={'X-Werewolf-Control': 'secret'})
+                response = connection.getresponse()
+                self.assertEqual(200, response.status)
+                self.assertEqual(b'ready\n', response.read())
+            finally:
+                connection.close()
             route = '/aarch64/permits/' + self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor'] + '&retain=' + A
             with urlopen(origin + route, context=context, timeout=10) as response:
                 self.assertEqual(B, publisher.record(response.read())['candidate'])
