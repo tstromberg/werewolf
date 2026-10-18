@@ -1,0 +1,49 @@
+version: 1
+suites:
+  - name: test-jre-example
+    cases:
+      - name: java-site
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              status: 200
+              body:
+                contains: the JDK's web server is serving this page
+            await: 60s
+      - name: java-not-found
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/missing.html
+            expect:
+              status: 404
+      - name: java-method-refused
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+              method: POST
+              body: changed
+              headers:
+                Content-Type: application/x-www-form-urlencoded
+            expect:
+              status: 405
+      - name: java-head
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+              method: HEAD
+            expect:
+              status: 200
+              body: ''
+      - name: java-traversal
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/../../etc/passwd
+            expect:
+              status:
+                one_of:
+                  - 400
+                  - 403
+                  - 404
+              body:
+                absent: root:x:0:0

@@ -1,0 +1,56 @@
+version: 1
+suites:
+  - name: oauth2-proxy
+    cases:
+      - name: o2p-user
+        steps:
+          - service: oauth2-proxy
+            expect:
+              user: oauth2-proxy
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: o2p-ping
+        steps:
+          - fetch:
+              url: http://127.0.0.1:4180/ping
+            expect:
+              status: 200
+              body:
+                contains: OK
+            await: 60s
+      - name: o2p-wall
+        steps:
+          - fetch:
+              url: http://127.0.0.1:4180/
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://idp[.]example[.]test/authorize
+      - name: o2p-auth-401
+        steps:
+          - fetch:
+              url: http://127.0.0.1:4180/oauth2/auth
+            expect:
+              status: 401
+      - name: o2p-forged
+        steps:
+          - fetch:
+              url: http://127.0.0.1:4180/
+              headers:
+                Cookie: _oauth2_proxy=forged|1700000000|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+            expect:
+              status: 302
+      - name: o2p-private
+        steps:
+          - file: /run/config/oauth2-proxy/client_secret
+            expect:
+              uid: 0
+              mode: '600'
+          - file: /run/svc/oauth2-proxy/provider
+            expect:
+              body:
+                absent: werewolf-check-client-secret

@@ -63,10 +63,13 @@ fn setUp() !void {
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
-        "recvfrom",        "sendto",   "sendmsg",  "read",     "write",         "close",     "poll",
-        "ppoll",           "openat",   "openat2",  "fstat",    "statx",         "pread64",   "getdents64",
-        "fsopen",          "fsconfig", "fsmount",  "sync",     "mmap",          "munmap",    "mremap",
-        "fsync",           "mkdirat",  "unlinkat", "renameat", "clock_gettime", "nanosleep", "exit_group",
+        "recvfrom",        "sendto",        "sendmsg",   "read",
+        "write",           "close",         "poll",      "ppoll",
+        "openat",          "openat2",       "fstat",     "statx",
+        "pread64",         "getdents64",    "fsopen",    "fsconfig",
+        "fsmount",         "sync",          "mmap",      "munmap",
+        "mremap",          "fsync",         "mkdirat",   "unlinkat",
+        "renameat",        "clock_gettime", "nanosleep", "exit_group",
         "restart_syscall",
     }) |name| f.allow(name);
     f.allowArg("fchmod", 1, 0o640);

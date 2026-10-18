@@ -196,15 +196,36 @@ fn ownerReply(gpa: Allocator, id: []const u8, err: ?anyerror) void {
 fn ownerStatus(io: Io, gpa: Allocator, id: []const u8) !void {
     const Check = struct { id: []const u8, result: enum { pass, fail, skip } };
     const OwnerPosture = struct { checks: []const Check };
-    const raw = Dir.cwd().readFileAlloc(io, "/run/werewolf/posture.json", gpa, .limited(4 << 20)) catch |err|
+    const raw = Dir.cwd().readFileAlloc(
+        io,
+        "/run/werewolf/posture.json",
+        gpa,
+        .limited(4 << 20),
+    ) catch |err|
         if (err == error.FileNotFound) null else return err;
-    const report = if (raw) |text| try std.json.parseFromSliceLeaky(OwnerPosture, gpa, text, .{ .ignore_unknown_fields = true }) else null;
+    const report = if (raw) |text|
+        try std.json.parseFromSliceLeaky(
+            OwnerPosture,
+            gpa,
+            text,
+            .{ .ignore_unknown_fields = true },
+        )
+    else
+        null;
     var u: Update = .{ .io = io, .gpa = gpa };
     const boot_id = try u.bootId();
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(workers.boot_line, &refused) orelse return error.BadCommandLine;
-    const other_cmdline = if (cmd.slot) |boot_slot| Dir.cwd().readFileAlloc(io, try gpa.print("/boot/slot/{s}/cmdline", .{@tagName(boot_slot.other())}), gpa, .limited(4096)) catch |err|
-        if (err == error.FileNotFound) null else return err else null;
+    const other_cmdline = if (cmd.slot) |boot_slot|
+        Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("/boot/slot/{s}/cmdline", .{@tagName(boot_slot.other())}),
+            gpa,
+            .limited(4096),
+        ) catch |err|
+            if (err == error.FileNotFound) null else return err
+    else
+        null;
     const response = try std.json.Stringify.valueAlloc(gpa, .{
         .format = "werewolf-owner-status/1",
         .id = id,

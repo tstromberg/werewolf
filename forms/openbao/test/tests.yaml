@@ -1,0 +1,90 @@
+version: 1
+suites:
+  - name: openbao
+    fixtures:
+      password: /run/config/openbao/admin-password
+    cases:
+      - name: bao-user
+        steps:
+          - service: openbao
+            await: 60s
+            expect:
+              user: openbao
+              uid: {min: 65536}
+              capabilities: []
+              no_new_privileges: true
+      - name: bao-unsealed
+        steps:
+          - fetch:
+              url: https://127.0.0.1:8200/v1/sys/health
+              ca: /run/config/openbao/tls.crt
+            await: 90s
+            expect:
+              status: 200
+              json: {'/initialized': true, '/sealed': false}
+      - name: bao-tls-only
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8200/v1/sys/health
+            expect:
+              status: 400
+              body: {contains: Client sent an HTTP request to an HTTPS server}
+      - name: bao-admin-login
+        steps:
+          - name: login
+            fetch:
+              url: https://127.0.0.1:8200/v1/auth/userpass/login/admin
+              ca: /run/config/openbao/tls.crt
+              method: POST
+              json: {password: {fixture: password}}
+            expect:
+              status: 200
+              json:
+                /auth/client_token: {matches: '.+'}
+                /auth/policies: [admin, default]
+          - name: audit
+            fetch:
+              url: https://127.0.0.1:8200/v1/sys/audit
+              ca: /run/config/openbao/tls.crt
+              headers:
+                X-Vault-Token: {step: login, json: /auth/client_token}
+            expect:
+              status: 200
+              json:
+                /data/stdout~1/type: file
+                /data/stdout~1/options/file_path: stdout
+          - name: raw-storage-refused
+            fetch:
+              url: https://127.0.0.1:8200/v1/sys/raw/core
+              ca: /run/config/openbao/tls.crt
+              headers:
+                X-Vault-Token: {step: login, json: /auth/client_token}
+            expect:
+              status: 404
+      - name: bao-wrong-password
+        steps:
+          - fetch:
+              url: https://127.0.0.1:8200/v1/auth/userpass/login/admin
+              ca: /run/config/openbao/tls.crt
+              method: POST
+              json: {password: werewolf-wrong}
+            expect:
+              status: 400
+              json:
+                /errors: {contains: invalid username or password}
+      - name: bao-cluster-local
+        steps:
+          - listeners: tcp
+            expect:
+              contains: [{address: 127.0.0.1, port: 8201}]
+              absent: [{address: 0.0.0.0, port: 8201}, {address: '::', port: 8201}]
+      - name: bao-private
+        steps:
+          - file: /run/svc/openbao/unseal-key
+            expect: {uid: openbao, mode: '600'}
+          - file: /run/svc/openbao/admin-password
+            expect: {uid: openbao, mode: '600'}
+          - file: /run/svc/openbao/tls-key
+            expect: {uid: openbao, mode: '600'}
+          - file: /data/svc/openbao/vault.db
+            expect: {type: file}

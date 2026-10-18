@@ -3,7 +3,12 @@ const std = @import("std");
 const test_driver = @import("test-driver");
 const Io = std.Io;
 const linux = std.os.linux;
-const Plan = struct { drivers: []const struct { name: []const u8, wait: []const []const u8 } };
+const Plan = struct { drivers: []const struct {
+    name: []const u8,
+    mode: []const u8 = "probes",
+    root: bool = false,
+    wait: []const []const u8,
+} };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -46,14 +51,25 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const result = std.process.run(gpa, io, .{
-            .argv = &.{"/usr/lib/werewolf/leash"},
+            .argv = if (d.root) &.{
+                try gpa.print(
+                    "/usr/lib/werewolf/{s}",
+                    .{name},
+                ),
+                name,
+                d.mode,
+                "/run/config/tests/context",
+            } else &.{"/usr/lib/werewolf/leash"},
             .cwd = .{ .path = try gpa.print(
                 "/usr/share/werewolf/tests/{s}",
                 .{name},
             ) },
             .stdout_limit = .limited(64 << 10),
             .stderr_limit = .limited(16 << 10),
-            .timeout = test_driver.deadline(io, 180),
+            .timeout = test_driver.deadline(
+                io,
+                if (std.mem.eql(u8, name, "test-platform")) 360 else 180,
+            ),
         }) catch |err| {
             try test_driver.emit(
                 io,

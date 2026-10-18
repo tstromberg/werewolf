@@ -217,9 +217,12 @@ FreeBSD)
 	# ASSUME_ALWAYS_YES also bootstraps pkg itself without asking.
 	install="env ASSUME_ALWAYS_YES=yes pkg install"
 	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
-	# howl create keeps machines on bhyve, which needs bhyve-firmware (its
-	# UEFI firmware) and libslirp (its user-mode network).
-	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp
+	# bhyve uses U-Boot on arm64 and UEFI firmware on amd64.
+	case $arch in
+	aarch64) bhyve_firmware=u-boot-bhyve-arm64 ;;
+	*) bhyve_firmware=bhyve-firmware ;;
+	esac
+	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect $bhyve_firmware libslirp
 		python3 swtpm virt-firmware osslsigncode"
 	apko_pkgs=''
 	zig_pkgs=curl

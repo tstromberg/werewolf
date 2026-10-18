@@ -1,0 +1,153 @@
+version: 1
+suites:
+  - name: grafana
+    cases:
+      - name: grafana-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/api/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /database: ok
+            await: 120s
+      - name: grafana-user
+        steps:
+          - service: grafana
+            expect:
+              user: _oci-grafana
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: grafana-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: grafana-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/user
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /isGrafanaAdmin: true
+      - name: grafana-key
+        steps:
+          - file: /data/svc/grafana/secret-key
+            expect:
+              uid: _oci-grafana
+              mode: '600'
+              body:
+                matches: "^[0-9a-f]{64}\n?$"
+      - name: grafana-root-url
+        steps:
+          - fetch:
+              url: https://localhost/api/admin/settings
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /server/root_url:
+                  one_of:
+                    - https://localhost
+                    - https://localhost/
+      - name: grafana-quiet
+        steps:
+          - fetch:
+              url: https://localhost/api/admin/settings
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /analytics/reporting_enabled: 'false'
+                /analytics/check_for_updates: 'false'
+                /analytics/check_for_plugin_updates: 'false'
+                /plugins/preinstall_disabled: 'true'
+      - name: grafana-plugin
+        steps:
+          - fetch:
+              url: https://localhost/api/datasources
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+              method: POST
+              json:
+                name: check
+                uid: check
+                type: prometheus
+                access: proxy
+                url: http://127.0.0.1:9090
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/api/datasources/uid/check/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 400
+        phases:
+          - seed
+      - name: grafana-plugin-kept
+        steps:
+          - fetch:
+              url: https://localhost/api/datasources/uid/check/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 400
+        phases:
+          - verify
+      - name: grafana-data
+        steps:
+          - file: /data/svc/grafana/grafana.db
+            expect:
+              type: file
+              uid: _oci-grafana
+      - name: grafana-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/search
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: grafana-wrong
+        steps:
+          - fetch:
+              url: https://localhost/api/user
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d3JvbmctcGFzc3dvcmQ=
+            expect:
+              status: 401
+      - name: grafana-signup
+        steps:
+          - fetch:
+              url: https://localhost/api/user/signup
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: stranger@example.test
+            expect:
+              status:
+                min: 400
+                max: 499

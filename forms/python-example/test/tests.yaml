@@ -1,0 +1,53 @@
+version: 1
+suites:
+  - name: test-python-example
+    cases:
+      - name: app-greeting
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              status: 200
+              body:
+                matches: "^Hello from Python on werewolf!\n*$"
+            await: 60s
+      - name: app-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/health
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: app-not-found
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/werewolf-missing
+            expect:
+              status: 404
+      - name: app-method-refused
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+              method: POST
+              body: changed
+              headers:
+                Content-Type: application/x-www-form-urlencoded
+            expect:
+              status: 501
+      - name: app-query
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/health?probe=integration
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: app-content-type
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              headers:
+                content-type:
+                  matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$

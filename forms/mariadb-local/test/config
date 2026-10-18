@@ -1,0 +1,17 @@
+#!/bin/sh
+# Make a fresh database marker; the same config disk survives the reboot.
+set -eu
+umask 077
+d=$1/tests
+mkdir -p "$d"
+marker=$(openssl rand -hex 32)
+printf '%s\n' "$marker" >"$d/mariadb-marker"
+cat >"$d/mariadb-migration" <<SQL
+CREATE DATABASE IF NOT EXISTS shop CHARACTER SET utf8mb4;
+CREATE USER IF NOT EXISTS 'app'@'localhost' IDENTIFIED VIA unix_socket;
+GRANT ALL PRIVILEGES ON shop.* TO 'app'@'localhost';
+CREATE TABLE IF NOT EXISTS shop.items (sku VARCHAR(32) PRIMARY KEY, name VARCHAR(64) NOT NULL);
+INSERT IGNORE INTO shop.items (sku, name) VALUES ('bolt', 'M8 bolt'), ('nut', 'M8 nut');
+CREATE TABLE IF NOT EXISTS shop.test_marker (value VARCHAR(64) PRIMARY KEY);
+INSERT IGNORE INTO shop.test_marker VALUES ('$marker');
+SQL

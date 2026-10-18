@@ -25,6 +25,12 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     python = root / 'bin/python3'
     python.write_text(f'''#!{sys.executable}
 import json, os, pathlib, sys
+if sys.argv[1:3] == ['test/native-tests', 'describe']:
+    directory = pathlib.Path('forms') / sys.argv[3] / 'test'
+    native = directory / 'native.json'
+    legacy = json.loads(native.read_text()).get('legacy', False) if native.exists() else False
+    print(json.dumps(dict(legacy=legacy or (directory / 'checks').exists())))
+    sys.exit(0)
 pathlib.Path(os.environ['HOWL_TEST_RECORD']).write_text(json.dumps(dict(
     tool='python3', args=sys.argv[1:],
     inherited=[k for k in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL') if k in os.environ])))
@@ -64,6 +70,11 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     native.write_text('{}')
     assert 'native clients, no DEV' in run('--with', 'caddy').stderr
     assert json.loads(record.read_text())['args'][-2:] == ['check-native-tests-caddy', 'check-shellfree-caddy']
+    checks = native.with_name('checks')
+    checks.write_text('ok retained true')
+    assert 'native clients plus legacy DEV checks' in run('--with', 'caddy').stderr
+    assert json.loads(record.read_text())['args'][-2:] == ['check-caddy', 'check-shellfree-caddy']
+    checks.unlink()
     native.write_text('{"legacy":true}')
     assert 'native clients plus legacy DEV checks' in run('--with', 'caddy').stderr
     assert json.loads(record.read_text())['args'][-2:] == ['check-caddy', 'check-shellfree-caddy']
@@ -82,6 +93,11 @@ sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
     run('--with', 'caddy', '--arch', 'arm64', '--iterate', '--stop')
     assert json.loads(record.read_text())['args'][-2:] == ['stop', 'seed']
     native.unlink()
+    yaml_plan = native.with_name('tests.yaml')
+    yaml_plan.write_text('version: 1')
+    assert 'native clients, no DEV' in run('--with', 'caddy').stderr
+    assert json.loads(record.read_text())['args'][-2:] == ['check-native-tests-caddy', 'check-shellfree-caddy']
+    yaml_plan.unlink()
     record.unlink()
     for args in [[], ['--with'], ['caddy'], ['--with', 'missing'],
                  ['--with', 'caddy,sshd'], ['--with', '../caddy'],

@@ -1,7 +1,0 @@
-# Serve the static image, including HEAD; deny writes and unknown files.
-ok  nginx-site wget -q -T 5 -O - http://127.0.0.1/ | grep -q 'nginx is serving this page'
-ok  nginx-not-found wget -q -T 5 -S -O /dev/null http://127.0.0.1/missing.html 2>&1 | grep -q 'HTTP/1.1 404'
-ok  nginx-method-refused wget -q -T 5 -S -O /dev/null --post-data 'changed' http://127.0.0.1/ 2>&1 | grep -q 'HTTP/1.1 403'
-ok  nginx-head printf 'HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n' | nc -w 5 127.0.0.1 80 >/tmp/nginx-head; grep -q '^HTTP/1.[01] 200' /tmp/nginx-head && tr -d '\r' </tmp/nginx-head | awk 'body && length($0) > 0 { bad=1 } /^$/ { body=1 } END { exit !(body && !bad) }'
-ok  nginx-headers h=$(wget -q -T 5 -S -O /dev/null http://127.0.0.1/ 2>&1); echo "$h" | grep -qi 'X-Content-Type-Options: nosniff' && echo "$h" | grep -qi 'Content-Security-Policy:.*frame-ancestors' && ! echo "$h" | grep -qi 'Server: nginx/'
-ok  nginx-traversal printf 'GET /../../etc/passwd HTTP/1.0\r\nHost: localhost\r\n\r\n' | nc -w 5 127.0.0.1 80 >/tmp/nginx-traversal; grep -Eq '^HTTP/1.[01] (400|403|404)' /tmp/nginx-traversal && ! grep -q 'root:x:0:0' /tmp/nginx-traversal

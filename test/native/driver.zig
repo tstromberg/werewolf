@@ -1,6 +1,8 @@
 //! Shared console protocol for boot-time integration clients. No shell or commands from config.
 const std = @import("std");
 const Io = std.Io;
+pub const fetch = @import("fetch.zig");
+pub const system = @import("system.zig");
 
 pub const Run = struct {
     run: []const u8,

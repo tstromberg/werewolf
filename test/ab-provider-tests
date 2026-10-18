@@ -3,6 +3,7 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 from ab_providers import Provider
 import ab_build
 
@@ -40,10 +41,104 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
     assert len(list(destination.iterdir())) == 6
     assert all(b'private signing key' not in path.read_bytes() for path in destination.iterdir())
 
+    for arch in ('x86_64', 'aarch64'):
+        work = root / ('bhyve-' + arch)
+        work.mkdir()
+        vm = Provider('bhyve', dict(fixture, arch=arch, disk='fixture.qcow2'), work, 'howl')
+        launches = []
+
+        def fake_run(args, **kwargs):
+            if 'input' in kwargs:
+                launches.append(kwargs['input'])
+            return subprocess.CompletedProcess(args, 0, '123\n', '')
+
+        vm.run = fake_run
+        vm.remote_command = lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, '/tmp/ww-ab.unit\n', '')
+        vm.start_remote()
+        launch = launches[0]
+        assert '3,virtio-blk,/tmp/ww-ab.unit/disk.img' in launch
+        assert '4,virtio-blk,/tmp/ww-ab.unit/config.tar,ro' in launch
+        if arch == 'aarch64':
+            assert '-o console=stdio' in launch and 'u-boot-bhyve-arm64/u-boot.bin' in launch
+            assert '1,lpc' not in launch and '-H' not in launch and '-l com1' not in launch
+        else:
+            assert '-H -w -u' in launch and '1,lpc' in launch and '-l com1,stdio' in launch
+        vm.fixture['mode'], vm.fixture['arch'] = 'secure', 'aarch64'
+        try:
+            vm.start_remote()
+        except RuntimeError as error:
+            assert 'arm64 bhyve Secure Boot' in str(error)
+        else:
+            raise AssertionError('accepted unsupported ARM64 Secure Boot')
+
     def machine(kind, suffix):
         work = root / suffix
         work.mkdir()
         return Provider(kind, fixture, work, 'howl')
+
+    with patch.dict('os.environ', {'BHYVE_BINARY': '/var/tmp/rtc-test/bhyve',
+                                  'BHYVE_ARM64_FIRMWARE': '/var/tmp/firmware-test/u-boot.bin',
+                                  'BHYVE_TAP': 'tap7',
+                                  'BHYVE_TEST_IP': '192.0.2.2/30',
+                                  'BHYVE_TEST_GW': '192.0.2.1'}):
+        tap = machine('bhyve', 'bhyve-tap')
+    launches = []
+    tap.run = fake_run
+    tap.remote_command = lambda *args, **kwargs: subprocess.CompletedProcess(
+        [], 0, '/tmp/ww-ab.unit\n', '')
+    tap.fixture = dict(fixture, disk='fixture.qcow2', arch='aarch64')
+    tap.start_remote()
+    assert '/var/tmp/rtc-test/bhyve' in launches[0]
+    assert 'bootrom=/var/tmp/firmware-test/u-boot.bin' in launches[0]
+    assert '2,virtio-net,tap7' in launches[0] and 'hostfwd=' not in launches[0]
+    assert '192.0.2.2:22' in tap.proxy
+    assert (tap.config / 'network').read_text() == (
+        'werewolf.ip=192.0.2.2/30 werewolf.gw=192.0.2.1 werewolf.dns=192.0.2.1\n')
+    calls = []
+    tap.console = lambda: ''
+    tap.remote_command = lambda args, **kwargs: calls.append(args)
+    tap.stop()
+    assert not any('ifconfig' in args for args in calls), 'caller owns TAP cleanup'
+    with patch.dict('os.environ', {'BHYVE_LAUNCH': 'howl', 'BHYVE_BRIDGE': 'bridge7',
+                                  'BHYVE_TEST_IP': '192.0.2.2/30',
+                                  'BHYVE_TEST_GW': '192.0.2.1'}):
+        normal = machine('bhyve', 'bhyve-normal')
+    normal.remote, normal.remote_dir = 'test-host', '/tmp/ww-ab.normal'
+    calls = []
+    normal.run = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, '', '')
+    normal.remote_command = lambda args, **kwargs: calls.append(args)
+    normal.start_bhyve_howl()
+    assert normal.bhyve_machine.endswith('/build/machines/' + normal.name)
+    launch = calls[-1][-1]
+    assert './howl-freebsd create ' in launch and '--bridge bridge7' in launch
+    assert '_bhyve' not in launch and 'BHYVE_BINARY=bhyve' not in launch
+    assert '192.0.2.2:22' in normal.proxy
+    normal.console = lambda: ''
+    normal.stop()
+    assert any('./howl-freebsd delete ' in str(args) for args in calls)
+    assert not any('bhyvectl' in args for args in calls), 'normal launch uses normal cleanup'
+    calls.clear()
+    normal.remote_howl = lambda *args: (_ for _ in ()).throw(RuntimeError('stop failed'))
+    try:
+        normal.stop()
+    except RuntimeError as error:
+        assert 'retained /tmp/ww-ab.normal' in str(error)
+    else:
+        raise AssertionError('lost failed normal-launch cleanup')
+    assert not any('rm' in args for args in calls), 'retain disk when normal cleanup fails'
+    for number, env in enumerate([{'BHYVE_TAP': 'tap7,slirp'},
+                                 {'BHYVE_BINARY': 'relative/bhyve'},
+                                 {'BHYVE_ARM64_FIRMWARE': 'relative/u-boot.bin'},
+                                 {'BHYVE_ARM64_FIRMWARE': '/firmware,extra'},
+                                 {'BHYVE_ARM64_FIRMWARE': '/firmware\nextra'}]):
+        with patch.dict('os.environ', env):
+            try:
+                machine('bhyve', 'bhyve-invalid-' + str(number))
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('accepted invalid bhyve override')
 
     cloud = machine('gcp', 'cloud')
     cloud.cloud_created, cloud.image = True, 'owned-image'

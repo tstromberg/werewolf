@@ -1,9 +1,16 @@
 #!/bin/sh
 # forms/loki/test/config DIR: the loki form's config for make check, in
 # DIR: its domain, localhost, for which Caddy's own CA signs, and the user
-# and password Caddy lets through, which test/checks uses.
+# and password Caddy lets through, which the YAML probes uses.
 set -eu
 mkdir -p "$1/caddy"
 umask 077
 printf '%s' werewolf-check-pass-1 >"$1/caddy/loki-password"
 echo '{"domain":"localhost","loki-user":"alloy"}' >"$1/caddy/settings.json"
+mkdir -p "$1/tests"
+printf 'Basic %s' "$(printf %s alloy:werewolf-check-pass-1 | openssl base64 -A)" \
+	>"$1/tests/loki-authorization"
+marker=$(openssl rand -hex 32)
+printf '%s' "$marker" >"$1/tests/loki-marker"
+printf '{"streams":[{"stream":{"job":"check"},"values":[["%s000000000","%s"]]}]}' \
+	"$(date +%s)" "$marker" >"$1/tests/loki-push"

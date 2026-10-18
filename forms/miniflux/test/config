@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/miniflux/test/config DIR: the miniflux form's config for make
 # check, in DIR: its base URL, https://localhost, for which Caddy's own CA
-# signs, and its administrator and password, which test/checks signs in
+# signs, and its administrator and password, which the YAML probes signs in
 # with.
 set -eu
 mkdir -p "$1/miniflux" "$1/caddy"
@@ -9,3 +9,6 @@ umask 077
 printf '%s' werewolf-check-pass-1 >"$1/miniflux/admin-password"
 echo '{"base-url":"https://localhost","admin":"admin"}' >"$1/miniflux/settings.json"
 echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"
+mkdir -p "$1/tests"
+printf 'Basic %s' "$(printf %s admin:werewolf-check-pass-1 | openssl base64 -A)" \
+	>"$1/tests/miniflux-authorization"

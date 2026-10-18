@@ -1,4 +1,4 @@
-//! bhyve runs a machine as a bhyve VM on FreeBSD x86_64 (experimental),
+//! bhyve runs a machine as a bhyve VM on FreeBSD x86_64 or arm64 (experimental),
 //! under a supervisor that restarts bhyve on reboot. See README.md.
 
 const std = @import("std");
@@ -8,8 +8,47 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-/// firmware is bhyve's UEFI firmware, from the bhyve-firmware package.
-pub const firmware = "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd";
+pub const firmware = firmwareFor(builtin.cpu.arch);
+pub const firmware_package = if (builtin.cpu.arch == .aarch64)
+    "u-boot-bhyve-arm64"
+else
+    "bhyve-firmware";
+
+fn firmwareFor(arch: std.Target.Cpu.Arch) []const u8 {
+    return if (arch == .aarch64)
+        "/usr/local/share/u-boot/u-boot-bhyve-arm64/u-boot.bin"
+    else
+        "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd";
+}
+
+/// Resolve overrides before privilege elevation; the supervisor retains the
+/// resolved arguments across guest reboots. Never fall back after an override fails.
+pub const Runtime = struct {
+    binary: []const u8 = "bhyve",
+    arm64_firmware: ?[]const u8 = null,
+
+    pub fn fromEnvironment(env: *const std.process.Environ.Map) !Runtime {
+        const runtime: Runtime = .{
+            .binary = env.get("BHYVE_BINARY") orelse "bhyve",
+            .arm64_firmware = env.get("BHYVE_ARM64_FIRMWARE"),
+        };
+        if (env.get("BHYVE_BINARY")) |path| try validatePath(path);
+        if (runtime.arm64_firmware) |path| try validatePath(path);
+        return runtime;
+    }
+
+    fn validatePath(path: []const u8) !void {
+        if (!std.mem.startsWith(u8, path, "/") or
+            std.mem.findAny(u8, path, ",\r\n\x00") != null) return error.BadBhyvePath;
+    }
+
+    pub fn firmwarePath(runtime: Runtime, arch: std.Target.Cpu.Arch) []const u8 {
+        return if (arch == .aarch64)
+            runtime.arm64_firmware orelse firmwareFor(arch)
+        else
+            firmwareFor(arch);
+    }
+};
 /// user_ip, user_gw and user_dns are slirp's fixed guest network, written
 /// into the config tar for a form with no DHCP client.
 pub const user_ip = "10.0.2.15/24";
@@ -42,7 +81,13 @@ pub fn prepareNetwork(
         try downNetwork(io, gpa, at, null);
         return .{ .mode = .slirp };
     }
-    const result = try networkHelper(io, gpa, "up", at, bridge);
+    const result = networkHelper(io, gpa, "up", at, bridge) catch |err| switch (err) {
+        error.FileNotFound => return why.refuse(
+            "bhyve TAP needs python3: pkg install python3",
+            .{},
+        ),
+        else => return err,
+    };
     if (result.term != .exited or result.term.exited != 0)
         return why.refuse("TAP setup failed: {s}", .{std.mem.trim(u8, result.stderr, " \n")});
     return std.json.parseFromSliceLeaky(Network, gpa, result.stdout, .{});
@@ -131,11 +176,10 @@ pub fn awaitAddress(io: Io, gpa: Allocator, log: []const u8, seen: u64) !?[]cons
     return null;
 }
 
-/// installed reports whether this is FreeBSD on x86_64 with vmm loaded
-/// (/dev/vmmctl exists; kldload vmm). bhyve on arm64 needs other firmware
-/// and flags, which howl does not support yet.
+/// installed reports whether this is a supported FreeBSD host with vmm loaded.
 pub fn installed(io: Io) bool {
-    if (builtin.os.tag != .freebsd or builtin.cpu.arch != .x86_64) return false;
+    if (builtin.os.tag != .freebsd or
+        (builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .aarch64)) return false;
     Dir.cwd().access(io, "/dev/vmmctl", .{}) catch return false;
     return true;
 }
@@ -209,6 +253,58 @@ pub fn command(
     import_disk: ?[]const u8,
     protection: ?Protection,
 ) ![]const []const u8 {
+    return commandFor(builtin.cpu.arch, gpa, name, disk, config, backend, import_disk, protection);
+}
+
+pub fn commandWith(
+    gpa: Allocator,
+    name: []const u8,
+    disk: []const u8,
+    config: []const u8,
+    backend: Backend,
+    import_disk: ?[]const u8,
+    protection: ?Protection,
+    runtime: Runtime,
+) ![]const []const u8 {
+    return commandForWith(
+        builtin.cpu.arch,
+        gpa,
+        name,
+        disk,
+        config,
+        backend,
+        import_disk,
+        protection,
+        runtime,
+    );
+}
+
+fn commandFor(
+    arch: std.Target.Cpu.Arch,
+    gpa: Allocator,
+    name: []const u8,
+    disk: []const u8,
+    config: []const u8,
+    backend: Backend,
+    import_disk: ?[]const u8,
+    protection: ?Protection,
+) ![]const []const u8 {
+    return commandForWith(arch, gpa, name, disk, config, backend, import_disk, protection, .{});
+}
+
+fn commandForWith(
+    arch: std.Target.Cpu.Arch,
+    gpa: Allocator,
+    name: []const u8,
+    disk: []const u8,
+    config: []const u8,
+    backend: Backend,
+    import_disk: ?[]const u8,
+    protection: ?Protection,
+    runtime: Runtime,
+) ![]const []const u8 {
+    if (arch != .x86_64 and arch != .aarch64) return error.UnsupportedArchitecture;
+    if (arch == .aarch64 and protection != null) return error.UnsupportedProtection;
     var net: std.ArrayList(u8) = .empty;
     switch (backend) {
         .tap => |tap| {
@@ -224,19 +320,18 @@ pub fn command(
         },
     }
     var out: std.ArrayList([]const u8) = .empty;
+    try out.append(gpa, runtime.binary);
+    if (arch == .x86_64) try out.appendSlice(gpa, &.{ "-H", "-w", "-u" });
     try out.appendSlice(gpa, &.{
-        "bhyve",
-        "-H",
-        "-w",
-        "-u",
         "-c",
         std.fmt.comptimePrint("{d}", .{howl.local_cpus}),
         "-m",
         std.fmt.comptimePrint("{d}M", .{howl.local_mib}),
         "-s",
         "0,hostbridge",
-        "-s",
-        "1,lpc",
+    });
+    if (arch == .x86_64) try out.appendSlice(gpa, &.{ "-s", "1,lpc" });
+    try out.appendSlice(gpa, &.{
         "-s",
         try gpa.print("2,{s}", .{net.items}),
         "-s",
@@ -250,15 +345,25 @@ pub fn command(
         "-s",
         try gpa.print("6,virtio-blk,{s},ro", .{p}),
     });
-    try out.appendSlice(gpa, &.{ "-l", "com1,stdio", "-l" });
-    if (protection) |p| {
+    if (arch == .aarch64) {
+        try out.appendSlice(gpa, &.{
+            "-o", "console=stdio", "-o",
+            try gpa.print(
+                "bootrom={s}",
+                .{runtime.firmwarePath(arch)},
+            ),
+        });
+    } else if (protection) |p| {
+        try out.appendSlice(gpa, &.{ "-l", "com1,stdio", "-l" });
         try out.append(gpa, try gpa.print("bootrom,{s},{s}", .{ p.code, p.vars }));
         // The TPM's ACPI table and event log are delivered through fw_cfg.
         try out.appendSlice(gpa, &.{
             "-o", "lpc.fwcfg=qemu",
             "-l", try gpa.print("tpm,swtpm,{s}", .{p.tpm_socket}),
         });
-    } else try out.append(gpa, "bootrom," ++ firmware);
+    } else try out.appendSlice(gpa, &.{
+        "-l", "com1,stdio", "-l", try gpa.print("bootrom,{s}", .{firmwareFor(arch)}),
+    });
     try out.append(gpa, name);
     return out.items;
 }
@@ -371,7 +476,7 @@ test "protected bhyve keeps enrolled firmware and uses the TPM command socket" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const line = try std.mem.join(gpa, " ", try command(gpa, "edge", "/m/disk.im" ++
+    const line = try std.mem.join(gpa, " ", try commandFor(.x86_64, gpa, "edge", "/m/disk.im" ++
         "g", "/m/config.tar", .{
         .tap = "tap7",
     }, null, .{
@@ -382,7 +487,7 @@ test "protected bhyve keeps enrolled firmware and uses the TPM command socket" {
     try testing.expect(std.mem.find(u8, line, "bootrom,/m/code.fd,/m/vars.fd") != null);
     try testing.expect(std.mem.find(u8, line, "-o lpc.fwcfg=qemu") != null);
     try testing.expect(std.mem.find(u8, line, "tpm,swtpm,/private-tpm/data.sock") != null);
-    try testing.expect(std.mem.find(u8, line, firmware) == null);
+    try testing.expect(std.mem.find(u8, line, firmwareFor(.x86_64)) == null);
 }
 
 pub fn supervised(io: Io, gpa: Allocator, at: []const u8) !bool {
@@ -433,6 +538,45 @@ pub fn stopProtected(io: Io, gpa: Allocator, name: []const u8, at: []const u8) !
 
 const testing = std.testing;
 
+test "runtime overrides are explicit paths and preserve protection gates" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    try testing.expectEqualStrings("bhyve", (try Runtime.fromEnvironment(&env)).binary);
+    for ([_][]const u8{ "relative", "", "/bad,option", "/bad\npath", "/bad\rpath" }) |bad| {
+        try env.put("BHYVE_BINARY", bad);
+        try testing.expectError(error.BadBhyvePath, Runtime.fromEnvironment(&env));
+    }
+    try env.put("BHYVE_BINARY", "/private build/bhyve");
+    try env.put("BHYVE_ARM64_FIRMWARE", "relative");
+    try testing.expectError(error.BadBhyvePath, Runtime.fromEnvironment(&env));
+    try env.put("BHYVE_ARM64_FIRMWARE", "/private build/u-boot.bin");
+    const runtime = try Runtime.fromEnvironment(&env);
+    const args = try commandForWith(
+        .aarch64,
+        gpa,
+        "test",
+        "/disk",
+        "/config",
+        .{ .tap = "tap0" },
+        null,
+        null,
+        runtime,
+    );
+    try testing.expectEqualStrings(runtime.binary, args[0]);
+    const line = try std.mem.join(gpa, " ", args);
+    try testing.expect(std.mem.find(u8, line, "bootrom=/private build/u-boot.bin") != null);
+    try testing.expectEqualStrings(firmwareFor(.x86_64), runtime.firmwarePath(.x86_64));
+    try testing.expectError(error.UnsupportedProtection, commandForWith(.aarch64, gpa, "test", "/disk", "/config", .{
+        .tap = "tap0",
+    }, null, .{
+        .code = "/code",
+        .vars = "/vars",
+        .tpm_socket = "/tpm",
+    }, runtime));
+}
+
 test forwards {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -450,10 +594,10 @@ test argv {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const a = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", .{ .slirp = &.{
+    const a = try commandFor(.x86_64, gpa, "edge", "/m/disk.img", "/m/config.tar", .{ .slirp = &.{
         .{ .host = 23400, .guest = 22 },
         .{ .host = 23401, .guest = 443 },
-    } }, null);
+    } }, null, null);
     try testing.expectEqualStrings("bhyve", a[0]);
     try testing.expectEqualStrings("edge", a[a.len - 1]);
     try testing.expectEqualStrings(
@@ -461,20 +605,53 @@ test argv {
         a[13],
     );
     try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[17]);
-    const brought = try argv(
+    const brought = try commandFor(
+        .x86_64,
         gpa,
         "edge",
         "/m/disk.img",
         "/m/config.tar",
         .{ .tap = "tap7" },
         "/m/import.img",
+        null,
     );
     try testing.expectEqualStrings("2,virtio-net,tap7", brought[13]);
     try testing.expectEqualStrings("6,virtio-blk,/m/import.img,ro", brought[21]);
-    const none = try argv(gpa, "m", "/d", "/c", .{ .slirp = &.{} }, null);
+    const none = try commandFor(.x86_64, gpa, "m", "/d", "/c", .{ .slirp = &.{} }, null, null);
     try testing.expectEqualStrings("2,virtio-net,slirp,open", none[13]);
     const d = try destroy(gpa, "edge");
     try testing.expectEqualStrings("--vm=edge", d[1]);
+}
+
+test "arm64 bhyve uses U-Boot and no x86-only devices or options" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    for ([_]Backend{
+        .{ .tap = "tap7" },
+        .{ .slirp = &.{.{ .host = 23400, .guest = 22 }} },
+    }) |net| {
+        const args = try commandFor(.aarch64, gpa, "arm", "/d", "/c", net, "/i", null);
+        const line = try std.mem.join(gpa, " ", args);
+        for ([_][]const u8{ "-H", "-w", "-u", "-l", "1,lpc" }) |flag|
+            for (args) |arg| try testing.expect(!std.mem.eql(u8, flag, arg));
+        try testing.expect(std.mem.find(u8, line, "-o console=stdio -o bootrom=" ++
+            "/usr/local/share/u-boot/u-boot-bhyve-arm64/u-boot.bin") != null);
+        try testing.expect(std.mem.find(u8, line, "3,virtio-blk,/d") != null);
+        try testing.expect(std.mem.find(u8, line, "4,virtio-blk,/c,ro") != null);
+        try testing.expect(std.mem.find(u8, line, "6,virtio-blk,/i,ro") != null);
+        try testing.expectEqualStrings("arm", args[args.len - 1]);
+    }
+    try testing.expectError(error.UnsupportedProtection, commandFor(
+        .aarch64,
+        gpa,
+        "arm",
+        "/d",
+        "/c",
+        .{ .tap = "tap7" },
+        null,
+        .{ .code = "/code", .vars = "/vars", .tpm_socket = "/tpm" },
+    ));
 }
 
 test "bhyve TAP names cannot inject backend options" {

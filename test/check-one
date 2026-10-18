@@ -1,17 +1,26 @@
 #!/bin/sh
 # check-one N DIR NAME COMMAND... runs COMMAND, a check of the form NAME, N
-# times, to chase a flake (make check-one). Each failing boot's console,
-# DIR/NAME.log, is kept as DIR/NAME-one-I.log, and its FAIL lines shown.
+# times, to chase a flake (make check-one). Keep each failure's output and
+# console logs before the next run replaces them, including both native phases.
 set -u
 n=$1 dir=$2 name=$3
 shift 3
 failed=0
 for i in $(seq "$n"); do
+	# A build failure must not inherit the preceding boot's evidence.
+	rm -f "$dir/$name.log" "$dir/$name-native/"*.log "$dir/$name-native/results.json"
 	"$@" >"$dir/$name-one.out" 2>&1 || {
 		failed=$((failed + 1))
-		cp "$dir/$name.log" "$dir/$name-one-$i.log"
+		cp "$dir/$name-one.out" "$dir/$name-one-$i.out"
+		[ ! -f "$dir/$name.log" ] || cp "$dir/$name.log" "$dir/$name-one-$i.log"
+		if [ -d "$dir/$name-native" ]; then
+			mkdir -p "$dir/$name-one-$i"
+			for log in "$dir/$name-native/"*.log "$dir/$name-native/results.json"; do
+				[ ! -f "$log" ] || cp "$log" "$dir/$name-one-$i/"
+			done
+		fi
 		echo "boot $i of $n:"
-		grep -E -A6 '^FAIL' "$dir/$name-one.out" | head -8
+		tail -20 "$dir/$name-one.out"
 	}
 done
 echo "$name: $failed of $n boots failed"

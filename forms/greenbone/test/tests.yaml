@@ -1,0 +1,158 @@
+version: 1
+packages:
+  - postgresql-17-client
+suites:
+  - name: test-greenbone-database
+    source: driver.zig
+    mode: database
+    user: postgres
+    cases:
+      seed:
+        - ordinary-database-roles
+        - database-owner-role
+        - database-extensions
+      verify:
+        - ordinary-database-roles
+        - database-owner-role
+        - database-extensions
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+  - name: test-greenbone-valkey
+    source: driver.zig
+    mode: valkey
+    user: _oci-openvas
+    cases:
+      seed:
+        - config-get-databases
+        - config-set-refused
+      verify:
+        - config-get-databases
+        - config-set-refused
+    policy:
+      pledge: stdio rpath inet connect proc exec
+      read: []
+      connect:
+        - tcp/6379
+      run:
+        - /usr/bin/valkey-cli
+  - name: test-greenbone-scanner
+    source: driver.zig
+    mode: scanner
+    user: _oci-gvmd
+    groups:
+      - _oci-openvas
+    cases:
+      seed:
+        - osp-version
+        - shared-mount-modes
+      verify:
+        - osp-version
+        - shared-mount-modes
+    policy:
+      pledge: stdio rpath unix connect
+      read:
+        - /data/share/gvm/ospd
+      connect:
+        - /data/share/gvm/ospd/ospd.sock
+      run: []
+  - name: test-greenbone-scanner-denied
+    source: driver.zig
+    mode: scanner-denied
+    user: nobody
+    groups: []
+    cases:
+      seed:
+        - socket-refused
+      verify:
+        - socket-refused
+    policy:
+      pledge: stdio rpath unix connect
+      read:
+        - /data/share/gvm/ospd
+      connect:
+        - /data/share/gvm/ospd/ospd.sock
+      run: []
+  - name: test-greenbone-manager
+    source: driver.zig
+    mode: manager
+    user: _oci-gvmd
+    cases:
+      seed:
+        - configured-login
+        - create-target
+        - persisted-target
+        - scanner-configured
+        - scanner-verified
+        - default-password-refused
+        - wrong-password-refused
+        - private-port-5432
+        - private-port-6379
+        - private-port-9391
+        - private-port-9392
+      verify:
+        - configured-login
+        - persisted-target
+        - scanner-configured
+        - scanner-verified
+        - default-password-refused
+        - wrong-password-refused
+        - private-port-5432
+        - private-port-6379
+        - private-port-9391
+        - private-port-9392
+    policy:
+      pledge: stdio rpath inet unix connect
+      read:
+        - /run/svc/gvmd/run
+      connect:
+        - /run/svc/gvmd/run/gvmd.sock
+      run: []
+    fixtures:
+      password: /run/config/gvmd/admin-password
+  - name: test-greenbone-bridge
+    source: driver.zig
+    mode: bridge
+    user: _oci-gsad
+    cases:
+      seed:
+        - configured-login
+        - persisted-target
+        - default-password-refused
+        - wrong-password-refused
+      verify:
+        - configured-login
+        - persisted-target
+        - default-password-refused
+        - wrong-password-refused
+    policy:
+      pledge: stdio rpath unix connect
+      read:
+        - /run/svc/gsad/run
+      connect:
+        - /run/svc/gsad/run/manager.sock
+      run: []
+    fixtures:
+      password: /run/config/gvmd/admin-password
+  - name: test-greenbone-denied
+    source: driver.zig
+    mode: denied
+    user: nobody
+    cases:
+      seed:
+        - socket-refused
+      verify:
+        - socket-refused
+    policy:
+      pledge: stdio rpath unix connect
+      read:
+        - /run/svc/gvmd/run
+      connect:
+        - /run/svc/gvmd/run/gvmd.sock
+      run: []
+legacy: true

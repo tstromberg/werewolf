@@ -1,0 +1,62 @@
+version: 1
+suites:
+  - name: caddy
+    cases:
+      - name: caddy-user
+        steps:
+          - service: caddy
+            expect:
+              user: caddy
+              uid:
+                min: 65536
+              capabilities:
+                - net_bind_service
+              no_new_privileges: true
+            await: 60s
+      - name: caddy-https
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: Caddy
+            await: 60s
+      - name: caddy-headers
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              headers:
+                x-content-type-options:
+                  matches: ^[Nn][Oo][Ss][Nn][Ii][Ff][Ff]$
+                referrer-policy: strict-origin-when-cross-origin
+                server: null
+      - name: caddy-redirect
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: caddy-no-admin
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 2019
+      - name: caddy-kept
+        steps:
+          - file: /data/svc/caddy/certificates/local/localhost/localhost.crt
+            expect:
+              type: file
+              size:
+                min: 1

@@ -26,12 +26,12 @@ loader.exec_module(iteration)
 
 
 class ConsoleTransport(unittest.TestCase):
-    def boot(self, poweroff):
+    def boot(self, poweroff, fragment=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             qemu = root / 'qemu'
             qemu.write_text('''#!/usr/bin/env python3
-import os, sys, time, tty
+import os, select, sys, time, tty
 if '--version' in sys.argv:
     print('fake QEMU for console transport regression')
     sys.exit(0)
@@ -47,6 +47,12 @@ def until(ending):
         data += part
     return data
 send(b'handing over to runit\\nposture: fail= pass=100 skip=0 COMPLETE\\n')
+if sys.argv[2] != 'whole':
+    if sys.argv[2] == 'fragment': time.sleep(.2)
+    send(b'werewolf-test: {"event":"complete","status":"pass"}\\r')
+    time.sleep(.2)
+    assert not select.select([0], [], [], 0)[0], 'host advanced before the newline'
+    send(b'\\r\\n')
 until(b'\\x01c')
 send(b'(qemu) ')
 assert until(b'\\r') == b'system_powerdown\\r'
@@ -66,13 +72,25 @@ time.sleep(.01)
 ''')
             qemu.chmod(0o700)
             checks = root / 'checks'
-            checks.write_text('seen complete COMPLETE\n')
+            checks.write_text('seen complete ' + (native.COMPLETION if fragment else 'COMPLETE') + '\n')
             log = root / 'console.log'
             env = dict(os.environ, POSTURE_KNOWN='', SSH_PORT='', GITEA_PORT='')
             result = subprocess.run(['test/boot', 'serial-utf8', str(checks), str(log),
-                                     str(qemu), 'poweroff' if poweroff else 'exit'],
+                                     str(qemu), 'poweroff' if poweroff else 'exit',
+                                     'fragment' if fragment is True else fragment or 'whole'],
                                     env=env, capture_output=True, timeout=10)
             return result, log.read_bytes()
+
+    def test_completion_fragment_does_not_gain_a_synthetic_newline(self):
+        for mode in ('fragment', 'immediate'):
+            with self.subTest(mode=mode):
+                result, log = self.boot(True, fragment=mode)
+                self.assertEqual(result.returncode, 0, result.stdout.decode(errors='replace'))
+                records = [line.split('werewolf-test: ', 1)[1]
+                           for line in native.console_clean(log).decode().splitlines()
+                           if 'werewolf-test: ' in line]
+                self.assertEqual([json.loads(line) for line in records],
+                                 [dict(event='complete', status='pass')])
 
     def test_fragmented_utf8_survives_until_real_poweroff(self):
         result, log = self.boot(True)
@@ -86,65 +104,33 @@ time.sleep(.01)
         self.assertIn(b'QEMU ended without the kernel powering off', result.stdout)
 
 
-class ConsoleTransport(unittest.TestCase):
-    def boot(self, poweroff):
+class RepeatedChecks(unittest.TestCase):
+    def test_keeps_native_failure_logs_before_the_next_run(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            qemu = root / 'qemu'
-            qemu.write_text('''#!/usr/bin/env python3
-import os, sys, time, tty
-if '--version' in sys.argv:
-    print('fake QEMU for console transport regression')
-    sys.exit(0)
-tty.setraw(0)
-def send(data):
-    os.write(1, data)
-def until(ending):
-    data = b''
-    while not data.endswith(ending):
-        part = os.read(0, 1)
-        if not part:
-            sys.exit(1)
-        data += part
-    return data
-send(b'handing over to runit\\nposture: fail= pass=100 skip=0 COMPLETE\\n')
-until(b'\\x01c')
-send(b'(qemu) ')
-assert until(b'\\r') == b'system_powerdown\\r'
-send(b'(qemu) ')
-until(b'\\x01c')
-send(b'power button on\\r')
-time.sleep(.01)
-# Serial devices can split a UTF-8 character across reads. On macOS,
-# Expect's text decoder mistakes a partial character for EOF and sends HUP.
-for _ in range(30):
-    for byte in b'\\xe2\\x96\\xa1':
-        send(bytes([byte]))
-        time.sleep(.001)
-if sys.argv[1] == 'poweroff':
-    send(b'\\nreboot: Power down\\n')
-time.sleep(.01)
-''')
-            qemu.chmod(0o700)
-            checks = root / 'checks'
-            checks.write_text('seen complete COMPLETE\n')
-            log = root / 'console.log'
-            env = dict(os.environ, POSTURE_KNOWN='', SSH_PORT='', GITEA_PORT='')
-            result = subprocess.run(['test/boot', 'serial-utf8', str(checks), str(log),
-                                     str(qemu), 'poweroff' if poweroff else 'exit'],
-                                    env=env, capture_output=True, timeout=10)
-            return result, log.read_bytes()
-
-    def test_fragmented_utf8_survives_until_real_poweroff(self):
-        result, log = self.boot(True)
-        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
-        self.assertIn(b'\xe2\x96\xa1' * 30, log)
-        self.assertIn(b'reboot: Power down', log)
-
-    def test_successful_exit_without_poweroff_is_still_rejected(self):
-        result, _ = self.boot(False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'QEMU ended without the kernel powering off', result.stdout)
+            command = root / 'run'
+            command.write_text("""#!/bin/sh
+n=$(cat "$1/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" >"$1/count"
+if [ "$n" -eq 3 ]; then echo "build failed"; exit 1; fi
+mkdir -p "$1/sample-native"
+echo "seed $n" >"$1/sample-native/seed.log"
+echo "verify $n" >"$1/sample-native/verify.log"
+echo "result $n"
+[ "$n" -ne 1 ]
+""")
+            command.chmod(0o700)
+            result = subprocess.run(['test/check-one', '3', str(root), 'sample',
+                                     str(command), str(root)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('2 of 3 boots failed', result.stdout)
+            self.assertEqual((root / 'count').read_text(), '3\n')
+            self.assertEqual((root / 'sample-one-1.out').read_text(), 'result 1\n')
+            for phase in ('seed', 'verify'):
+                self.assertEqual((root / 'sample-one-1' / (phase + '.log')).read_text(),
+                                 phase + ' 1\n')
+                self.assertFalse((root / 'sample-one-3' / (phase + '.log')).exists())
 
 
 class ProductionPackages(unittest.TestCase):
@@ -217,6 +203,23 @@ class IterationInputs(unittest.TestCase):
                 library.chmod(mode ^ 0o100)
                 self.assertNotEqual(original, fingerprint())
 
+    def test_yaml_assertions_reuse_vm_but_identity_and_package_changes_do_not(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = native.read_plan('gatus')
+            with patch.object(iteration, 'ROOT', root), \
+                    patch.object(iteration.NATIVE, 'read_plan', side_effect=lambda _: plan), \
+                    patch.object(iteration, 'call', return_value=type('Dirs', (), {'stdout': ''})()):
+                fingerprint = lambda: iteration.fingerprint('gatus', root / 'tests.yaml', root / 'generated')
+                original = fingerprint()
+                plan['drivers'][0]['probes']['cases'][1]['steps'][0]['expect']['status'] = 503
+                self.assertEqual(original, fingerprint())
+                plan['drivers'][0]['user'] = 'gatus'
+                self.assertNotEqual(original, fingerprint())
+                plan['drivers'][0]['user'] = 'root'
+                plan['packages'].append('postgresql-17-client')
+                self.assertNotEqual(original, fingerprint())
+
     def test_first_build_records_resolved_locks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -235,6 +238,7 @@ class IterationInputs(unittest.TestCase):
                     patch.object(iteration, 'running', return_value=False), \
                     patch.object(iteration, 'config_for', return_value=work / 'config'):
                 plan = root / 'forms/example/test/native.json'
+                native.write(plan, '{}')
                 before = iteration.fingerprint('example', plan, generated)
                 state = iteration.ensure('howl', 'example', 'aarch64', work,
                                          generated, machine, before, False)
@@ -341,7 +345,7 @@ class Plans(unittest.TestCase):
         for memory in (True, "1024", 0, 15, 8193, [1024]):
             plan = native.read_plan('postgresql')
             plan['drivers'][0]['memory'] = memory
-            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+            with patch('probe_plan.load', return_value=plan):
                 with self.assertRaises(ValueError):
                     native.read_plan('postgresql')
         driver = native.read_plan('postgresql')['drivers'][0]
@@ -371,26 +375,24 @@ class Plans(unittest.TestCase):
                        {'password\nrun': '/run/config/gvmd/admin-password'}):
             plan = copy.deepcopy(original)
             plan['drivers'][0]['config'] = config
-            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+            with patch('probe_plan.load', return_value=plan):
                 with self.assertRaises(ValueError):
                     native.read_plan('greenbone')
 
-    def test_root_driver_and_invalid_legacy_flag_refused(self):
-        for change in ('root', 'legacy'):
-            plan = native.read_plan('greenbone')
-            if change == 'root':
-                plan['drivers'][0]['user'] = 'root'
-            else:
-                plan['legacy'] = 'false'
-            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
-                with self.assertRaises(ValueError):
-                    native.read_plan('greenbone')
+    def test_root_driver_allowed_but_invalid_legacy_flag_refused(self):
+        plan = native.read_plan('greenbone')
+        plan['drivers'][0]['user'] = 'root'
+        with patch('probe_plan.load', return_value=plan):
+            self.assertEqual(native.read_plan('greenbone')['drivers'][0]['user'], 'root')
+        plan['legacy'] = 'false'
+        with patch('probe_plan.load', return_value=plan):
+            with self.assertRaises(ValueError): native.read_plan('greenbone')
 
     def test_test_groups_are_explicit_named_non_root_groups(self):
         for groups in ('_oci-openvas', ['root'], ['_oci-openvas', '_oci-openvas'], [['nested']], ['bad\ngroup']):
             plan = native.read_plan('greenbone')
             plan['drivers'][0]['groups'] = groups
-            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+            with patch('probe_plan.load', return_value=plan):
                 with self.assertRaises(ValueError):
                     native.read_plan('greenbone')
 
@@ -399,7 +401,7 @@ class Plans(unittest.TestCase):
                        ['python:native', 'python:native'], [['python:native']]):
             plan = native.read_plan('greenbone')
             plan['drivers'][0]['allow'] = grants
-            with self.subTest(grants=grants), patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+            with self.subTest(grants=grants), patch('probe_plan.load', return_value=plan):
                 with self.assertRaisesRegex(ValueError, 'runtime allowance'):
                     native.read_plan('greenbone')
 
@@ -407,9 +409,113 @@ class Plans(unittest.TestCase):
         for port in ('tcp/0', 'tcp/65536', 'tcp/any', 'tcp/443 public', 'udp/53'):
             plan = native.read_plan('greenbone')
             plan['drivers'][0]['connect'] = [port]
-            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+            with patch('probe_plan.load', return_value=plan):
                 with self.assertRaises(ValueError):
                     native.read_plan('greenbone')
+
+
+class PlatformPlan(unittest.TestCase):
+    def test_retained_shell_checks_cannot_be_silently_disabled(self):
+        plan = native.read_plan('gatus')
+        self.assertFalse(plan['legacy'])
+        for filename in ('checks', 'checks-again'):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / filename).write_text('ok retained true\n')
+                with patch.object(native, 'plan_path', return_value=root / 'tests.yaml'), \
+                        patch('probe_plan.load', return_value=copy.deepcopy(plan)):
+                    self.assertTrue(native.read_plan('gatus')['legacy'])
+
+    def test_foundation_iteration_refuses_before_creating_a_vm(self):
+        with patch.object(iteration, 'local_arch', return_value='aarch64'), \
+                patch.object(iteration.sys, 'argv', ['native-iterate', 'howl', 'minimal', 'aarch64', 'ensure', 'seed']), \
+                patch.object(iteration, 'ensure') as start:
+            with self.assertRaisesRegex(ValueError, 'shared boot checks'): iteration.main()
+            start.assert_not_called()
+
+    def test_only_declared_foundations_can_use_the_platform_suite_alone(self):
+        self.assertEqual(native.read_plan('minimal')['drivers'], [])
+        self.assertEqual([d['name'] for d in native.boot_plan('minimal')['drivers']], ['test-platform'])
+        plan = native.read_plan('gatus')
+        plan['drivers'] = []
+        with patch('probe_plan.load', return_value=plan):
+            with self.assertRaisesRegex(ValueError, 'own test suites'): native.read_plan('gatus')
+
+    def test_clean_boot_requires_platform_records_but_iteration_does_not(self):
+        application = native.read_plan('gatus')
+        clean = native.boot_plan('gatus')
+        self.assertEqual(clean['drivers'][0]['name'], 'test-platform')
+        self.assertEqual(len(clean['drivers'][0]['cases']['seed']), 16)
+        self.assertEqual(clean['drivers'][0]['cases']['verify'], ['data-usable', 'data-kept'])
+        self.assertNotIn('test-platform', [d['name'] for d in application['drivers']])
+        context = dict(run='a' * 32, phase='seed')
+        records = []
+        for driver in application['drivers']:
+            records.extend(dict(event='case', suite=driver['name'], case=case, status='pass', **context)
+                           for case in driver['cases']['seed'])
+            records.append(dict(event='driver', suite=driver['name'], status='pass', **context))
+        records.append(dict(event='complete', status='pass', **context))
+        transcript = '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
+        self.assertEqual(native.validate(transcript, application, context), 6)
+        with self.assertRaises(ValueError): native.validate(transcript, clean, context)
+
+    def test_platform_honors_only_known_form_exclusions(self):
+        with patch.object(native, 'call', return_value=type('Output', (), {'stdout': 'http-answering'})()):
+            plan = native.boot_plan('gatus')
+            self.assertNotIn('http-answering', plan['drivers'][0]['cases']['seed'])
+            self.assertIn('reaped', plan['drivers'][0]['cases']['seed'])
+        with patch.object(native, 'call', return_value=type('Output', (), {'stdout': 'misspelled'})()):
+            with self.assertRaisesRegex(ValueError, 'unknown shared check'): native.boot_plan('gatus')
+
+    def test_form_cannot_replace_the_platform_suite(self):
+        plan = native.read_plan('gatus')
+        plan['drivers'][0]['name'] = 'test-platform'
+        with patch('probe_plan.load', return_value=plan):
+            with self.assertRaisesRegex(ValueError, 'reserved'): native.read_plan('gatus')
+
+
+class CompiledApplications(unittest.TestCase):
+    def test_removed_observe_field_is_rejected(self):
+        plan = native.read_plan('greenbone')
+        plan['drivers'][0]['observe'] = []
+        with patch('probe_plan.load', return_value=plan):
+            with self.assertRaises(ValueError): native.read_plan('greenbone')
+
+    def test_yaml_and_json_plans_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native.write(root / 'forms/example/test/tests.yaml', 'version: 1')
+            self.assertEqual(native.plan_path('example', root).suffix, '.yaml')
+            native.write(root / 'forms/example/test/native.json', '{}')
+            with self.assertRaises(ValueError): native.plan_path('example', root)
+
+    def test_clients_wait_for_production_created_inodes_before_landlock(self):
+        driver = dict(read=['/etc/passwd', '/run/cgroup/svc/app', '/data/svc/app/database'],
+                      connect=['tcp/8080', '/run/svc/app/socket', '/data/share/app/socket'])
+        self.assertEqual(native.wait_paths(driver), [
+            '/data/share/app/socket', '/data/svc/app/database',
+            '/run/cgroup/svc/app', '/run/svc/app/socket'])
+
+    def test_generated_form_reuses_exact_production_application(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary) / 'production'
+            root = Path(temporary) / 'generated/rootfs'
+            binary = base / 'application/usr/lib/app/server'
+            native.write(binary, 'production executable, not a recompilation')
+            binary.chmod(0o755)
+            native.application_overlay('go-example', base, root)
+            copied = root / 'usr/lib/app/server'
+            self.assertEqual(copied.read_bytes(), binary.read_bytes())
+            self.assertEqual(copied.stat().st_mode & 0o777, 0o755)
+            copied.write_text('changed test copy')
+            self.assertEqual(binary.read_text(), 'production executable, not a recompilation')
+
+    def test_missing_compiled_application_fails_before_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            for form in native.COMPILED_EXAMPLES:
+                with self.assertRaisesRegex(ValueError, 'missing compiled production application'):
+                    native.application_overlay(form, base, base / 'generated')
 
 
 class Payload(unittest.TestCase):
@@ -438,7 +544,7 @@ class Payload(unittest.TestCase):
     def compare(self, **env):
         plan = native.read_plan('postgresql')
         with patch.dict(os.environ, BUILD=str(self.root), **env), contextlib.redirect_stdout(io.StringIO()), \
-                patch.object(native, 'read_plan', return_value=plan):
+                patch.object(native, 'boot_plan', return_value=plan):
             native.compare('base', 'aarch64')
 
     def test_client_addition(self):
@@ -525,7 +631,7 @@ class Payload(unittest.TestCase):
 
 
 class RunIdentity(unittest.TestCase):
-    def test_serial_carriage_returns_survive_until_console_cleaning(self):
+    def serial_run(self, reformat=False):
         plan = native.read_plan('postgresql')
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -550,33 +656,47 @@ class RunIdentity(unittest.TestCase):
                 transcript = '\r\r\n'.join('werewolf-test: ' + json.dumps(r) for r in records) + '\r\r\n'
                 transcript = transcript.replace('werewolf-test: {',
                     'werewolf-test: {[ 16.429304] audit: type=1302 denied\r\r\n', 1)
+                if reformat and context['phase'] == 'verify':
+                    transcript += 'werewolf: making LUKS2 on /dev/vda\n'
                 Path(args[3]).write_bytes(transcript.encode())
 
             cwd = Path.cwd()
             try:
                 os.chdir(root)
-                with patch.object(native, 'read_plan', return_value=plan), \
+                with patch.object(native, 'boot_plan', return_value=plan), \
                         patch.object(native, 'call', side_effect=boot), \
                         patch.dict(os.environ, OUT=str(paths['image'].parent),
                                    PRODUCTION_OUT=str(paths['production_image'].parent),
                                    CHECK=str(root / 'check'), HOWL='howl',
                                    KERNEL=str(paths['kernel']), CMDLINE='test'):
+                    if reformat:
+                        with self.assertRaisesRegex(ValueError, 'reformatted'):
+                            native.run('postgresql', 'x86_64', [])
+                        self.assertFalse((root / 'check/postgresql-native/results.json').exists())
+                        return
                     native.run('postgresql', 'x86_64', [])
                 report = json.loads((root / 'check/postgresql-native/results.json').read_text())
                 self.assertEqual([phase['cases'] for phase in report['phases']], [12, 11])
             finally:
                 os.chdir(cwd)
 
+    def test_serial_carriage_returns_survive_until_console_cleaning(self):
+        self.serial_run()
+
+    def test_reformatting_cannot_pass_even_with_successful_case_records(self):
+        self.serial_run(reformat=True)
+
     def test_concurrent_input_change_cannot_write_success_report(self):
         plan = native.read_plan('postgresql')
-        for changed in ('kernel', 'image', 'production_image', 'plan'):
+        for changed in ('kernel', 'image', 'production_image', 'plan', 'platform_plan', 'platform_driver'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 images = root / 'build'
                 paths = dict(kernel=images / 'vmlinuz',
                              image=images / 'native-test-postgresql/initramfs.zst',
                              production_image=images / 'postgresql-ipe/initramfs.zst',
-                             plan=root / 'forms/postgresql/test/native.json')
+                             plan=root / 'forms/postgresql/test/native.json',
+                             platform_plan=root / 'platform.yaml', platform_driver=root / 'platform.zig')
                 for path in paths.values():
                     native.write(path, 'original')
 
@@ -587,7 +707,8 @@ class RunIdentity(unittest.TestCase):
                 cwd = Path.cwd()
                 try:
                     os.chdir(root)
-                    with patch.object(native, 'read_plan', return_value=plan), \
+                    with patch.object(native, 'boot_plan', return_value=plan), \
+                            patch.object(native, 'PLATFORM', paths['platform_plan']), \
                             patch.object(native, 'call', side_effect=boot), \
                             patch.dict(os.environ, OUT=str(paths['image'].parent),
                                        PRODUCTION_OUT=str(paths['production_image'].parent),

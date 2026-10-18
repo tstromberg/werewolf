@@ -54,7 +54,7 @@ A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-m
 | `--on` | How | Needs |
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
-| bhyve | under `howl _bhyve` via daemon(8); TAP on an existing bridge by default; `--network slirp` retains loopback forwards | doas/sudo, vmm, bhyve-firmware; Python 3 for TAP |
+| bhyve | FreeBSD x86_64 or arm64, supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm, Python 3; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
@@ -62,20 +62,15 @@ A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-m
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve TAP selects the host's only existing bridge, or `--bridge NAME` chooses one.
-For example, `howl create edge --with playground --build --on bhyve
---disable=secureboot,tpm,ipe --bridge re0bridge` uses the LAN bridge; it exposes the
-guest directly to that LAN. The guest uses DHCP, or `--ip CIDR --gw ADDR --dns ADDR`
-(also accepted in `--config DIR/network`). A form without DHCP needs static settings;
-TAP never inherits SLIRP's private addresses. `howl ssh edge` uses the current boot's
-address; SLIRP still uses its localhost forward. There is no silent SLIRP fallback.
-
-howl creates only its own TAP, records its ownership token, and removes it on final
-VM exit, failed startup, stop or delete. Reboots retain the TAP; an old supervisor
-cannot remove a newer VM's interface. Existing bridges, host IPs, routes and firewall
-rules are not changed. Missing or ambiguous bridges fail before launch. Protected
-bhyve deployment remains gated; its experimental SLIRP enrollment does not yet
-provide TAP update transport.
+bhyve uses the only bridge or `--bridge NAME`, with DHCP or `--ip CIDR --gw ADDR
+--dns ADDR`. howl owns only its TAP: retained across reboots, removed on stop,
+delete or final exit; existing host networking is unchanged. Missing/ambiguous
+bridges fail without SLIRP fallback. ARM64 needs legacy virtio (kernel 7.2.11-r6+);
+its full signed A/B test passed, but a longer TAP soak hit a virtio TX panic.
+It remains experimental without a protected profile. For unprotected launches,
+`BHYVE_BINARY` and `BHYVE_ARM64_FIRMWARE` select absolute host paths; set them on
+each create/reconfigure. See [live tests](../../docs/testing-live.md#bhyve) and the
+[private runtime recipe](../../tools/bhyve-arm64/README.md) for limits and validation.
 
 Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
 their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and

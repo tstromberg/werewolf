@@ -2,7 +2,7 @@
 # forms/openbao/test/config DIR: the openbao form's config for make check, in DIR,
 # as an operator would make one (forms/openbao/README.md): a 32-byte unseal key, a
 # certificate for localhost, the admin's first password and the API's
-# address. The password is "werewolf-check", which forms/openbao/test/checks
+# address. The password is "werewolf-check", which forms/openbao/test/tests.yaml
 # logs in with; a wrong one must be refused.
 set -eu
 d=$1/openbao

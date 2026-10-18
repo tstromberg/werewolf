@@ -1,0 +1,20 @@
+#!/bin/sh
+# Credentials and a fresh marker are retained across both boot phases.
+set -eu
+umask 077
+d=$1/tests
+mkdir -p "$d"
+password=$(openssl rand -hex 32)
+marker=$(openssl rand -hex 32)
+printf '%s\n' "$password" >"$d/mariadb-password"
+printf '%s\n' "$marker" >"$d/mariadb-marker"
+cat >"$d/mariadb-account" <<SQL
+CREATE DATABASE integration;
+CREATE USER 'network_check'@'127.0.0.1' IDENTIFIED BY '$password';
+GRANT ALL ON integration.* TO 'network_check'@'127.0.0.1';
+SQL
+cat >"$d/mariadb-write" <<SQL
+CREATE TABLE integration.items (id INT PRIMARY KEY, value VARCHAR(64));
+INSERT INTO integration.items VALUES (1, '$marker');
+SELECT value FROM integration.items WHERE id=1;
+SQL

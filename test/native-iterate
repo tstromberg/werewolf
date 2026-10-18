@@ -86,6 +86,9 @@ def prepare(form, arch, plan):
         shutil.rmtree(generated)
     root = generated / 'rootfs'
     write(generated / 'form.yaml', NATIVE.form_config(form, plan))
+    if form in NATIVE.COMPILED_EXAMPLES:
+        call(['make', '--no-print-directory', 'ARCH=' + arch, 'FORM=' + form, 'DEV=', 'image'])
+        NATIVE.application_overlay(form, ROOT / 'build' / arch / form, root)
     control = root / CONTROL.removeprefix('/')
     control.parent.mkdir(parents=True, exist_ok=True)
     call(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip',
@@ -104,6 +107,10 @@ def prepare(form, arch, plan):
             link.unlink(missing_ok=True)
             link.symlink_to(target)
         write(root / 'usr/share/werewolf/tests' / name / 'service', service(driver))
+        write(root / 'usr/share/werewolf/tests' / name / 'launch.json',
+              dict(root=driver['user'] == 'root', mode=driver['mode'], probes='probes' in driver))
+        if 'probes' in driver:
+            (root / 'usr/share/werewolf/tests' / name / 'probes.json').symlink_to('/run/howl-dev/' + name + '.json')
     return work, generated
 
 
@@ -139,8 +146,13 @@ def fingerprint(form, plan_path, generated):
     result = hashlib.sha256()
     for directory in dirs:
         hash_tree(result, ROOT / directory, exclude_tests=True)
+    if plan_path.suffix == '.yaml':
+        plan = NATIVE.read_plan(form)
+        fixed = {**plan, 'drivers': [{k: v for k, v in d.items() if k not in {'probes', 'cases'}} for d in plan['drivers']]}
+        result.update(json.dumps(fixed, sort_keys=True).encode())
+    else:
+        hash_tree(result, plan_path)
     for path in (
-        plan_path,
         ROOT / 'boot',
         ROOT / 'cmd',
         ROOT / 'lib',
@@ -222,7 +234,7 @@ def ensure(howl, form, arch, work, generated, machine, wanted, reset):
         ])
         # A first build may create or resolve its package locks. Record the
         # resolved inputs so the next driver edit can reuse this very boot.
-        wanted = fingerprint(form, ROOT / 'forms' / form / 'test/native.json', generated)
+        wanted = fingerprint(form, NATIVE.plan_path(form, ROOT), generated)
     if not state.get('run'):
         state['run'] = secrets.token_hex(16)
     state.update(format='werewolf-native-iteration/1', form=form, arch=arch,
@@ -258,10 +270,14 @@ def scp(machine, name, source, destination):
 
 
 def compile_driver(form, arch, driver, work):
+    if 'probes' in driver:
+        return NATIVE.probe_binary(arch)
     output = work / 'drivers' / (driver['name'] + '.new')
     output.parent.mkdir(parents=True, exist_ok=True)
+    transport = 'libcurl-openssl4' in NATIVE.read_plan(form)['packages']
     call([
-        'zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target', arch + '-linux-musl',
+        'zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target',
+        arch + ('-linux-gnu' if transport else '-linux-musl'), *(['-lc'] if transport else []),
         '--dep', 'test-driver',
         '-Mroot=' + str(ROOT / 'forms' / form / 'test' / driver['source']),
         '-Mtest-driver=' + str(ROOT / 'test/native/driver.zig'),
@@ -271,8 +287,7 @@ def compile_driver(form, arch, driver, work):
 
 
 def wait_paths(howl, name, driver):
-    paths = sorted({path for path in driver['read'] + driver['connect']
-                    if path.startswith(('/run/svc/', '/data/share/'))})
+    paths = NATIVE.wait_paths(driver)
     for path in paths:
         for _ in range(240):
             command = CONTROL + ' ready ' + path
@@ -309,6 +324,10 @@ def run_driver(howl, form, arch, driver, phase, work, machine, state):
     write(context_path, context, 0o600)
     remote_binary = '/run/howl-dev/.' + driver['name'] + '.new'
     scp(machine, name, binary, remote_binary)
+    if 'probes' in driver:
+        recipe = work / (driver['name'] + '.json.new')
+        write(recipe, driver['probes'], 0o600)
+        scp(machine, name, recipe, '/run/howl-dev/.' + driver['name'] + '.json.new')
     scp(machine, name, context_path, '/run/config/.native-iterate-context.new')
     ssh(howl, name, CONTROL + ' install ' + driver['name'])
     wait_paths(howl, name, driver)
@@ -329,8 +348,10 @@ def main():
     driver_name = sys.argv[6] if len(sys.argv) == 7 else None
     if not IDENT.fullmatch(form) or arch not in ('aarch64', 'x86_64') or arch != local_arch():
         raise ValueError('SSH iteration runs the host architecture, aarch64 or x86_64')
-    plan_path = ROOT / 'forms' / form / 'test/native.json'
+    plan_path = NATIVE.plan_path(form, ROOT)
     plan = NATIVE.read_plan(form)
+    if not plan['drivers'] and action != 'stop':
+        raise ValueError('this foundation has only shared boot checks; run howl test without --iterate')
     if phase not in ('seed', 'verify'):
         raise ValueError('phase is seed or verify')
     call(['make', '--no-print-directory', 'build/host/form'], stdout=subprocess.DEVNULL)

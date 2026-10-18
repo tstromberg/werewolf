@@ -1,0 +1,29 @@
+version: 1
+packages:
+  - libcurl-openssl4
+suites:
+  - name: test-webshell-example
+    source: driver.zig
+    mode: http
+    user: nobody
+    cases:
+      seed:
+        - webshell-page
+        - webshell-history
+        - webshell-secret-refused
+        - webshell-escaped
+        - webshell-not-found
+        - webshell-method-refused
+      verify:
+        - webshell-page
+        - webshell-history
+        - webshell-secret-refused
+        - webshell-escaped
+        - webshell-not-found
+        - webshell-method-refused
+    policy:
+      pledge: stdio rpath inet connect
+      read: []
+      connect:
+        - tcp/8080
+      run: []

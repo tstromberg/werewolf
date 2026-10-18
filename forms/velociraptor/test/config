@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/velociraptor/test/config DIR: the administrator's password, which
-# test/checks signs in with, and the domain, localhost, for which Caddy's
+# the YAML probes sign in with, and the domain, localhost, for which Caddy's
 # own CA signs.
 set -eu
 mkdir -p "$1/velociraptor" "$1/caddy"
@@ -8,3 +8,6 @@ umask 077
 printf '%s' werewolf-check-pass-1 >"$1/velociraptor/admin-password"
 echo '{"domain":"localhost"}' >"$1/velociraptor/settings.json"
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
+mkdir -p "$1/tests"
+printf 'Basic %s' "$(printf %s admin:werewolf-check-pass-1 | openssl base64 -A)" \
+	>"$1/tests/velociraptor-authorization"

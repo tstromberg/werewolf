@@ -80,10 +80,23 @@ pub fn command(
     var legacy = false;
     const native = blk: {
         const path = try gpa.print("forms/{s}/test/native.json", .{name});
-        const raw = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 10)) catch |err| {
-            if (err == error.FileNotFound) break :blk false;
-            return why.refuse("{s}: {s}", .{ path, @errorName(err) });
+        const yaml_path = try gpa.print("forms/{s}/test/tests.yaml", .{name});
+        const yaml = if (std.Io.Dir.cwd().access(io, yaml_path, .{})) true else |err| blk2: {
+            if (err != error.FileNotFound) return err;
+            break :blk2 false;
         };
+        if (!yaml) std.Io.Dir.cwd().access(io, path, .{}) catch |err| {
+            if (err == error.FileNotFound) break :blk false;
+            return err;
+        };
+        const result = try std.process.run(gpa, io, .{
+            .argv = &.{ "python3", "test/native-tests", "describe", name, @tagName(target) },
+            .stdout_limit = .limited(64 << 10),
+            .stderr_limit = .limited(64 << 10),
+        });
+        if (result.term != .exited or result.term.exited != 0)
+            return why.refuse("{s}: {s}", .{ if (yaml) yaml_path else path, result.stderr });
+        const raw = result.stdout;
         const plan = std.json.parseFromSliceLeaky(
             struct { legacy: bool = false },
             gpa,
@@ -95,7 +108,7 @@ pub fn command(
         break :blk true;
     };
     if (iterate) {
-        if (!native) return why.refuse("{s} has no test/native.json to iterate", .{name});
+        if (!native) return why.refuse("{s} has no native test plan to iterate", .{name});
         if (reset and stop) return why.refuse("--reset and --stop are separate operations", .{});
         if ((reset or stop) and driver != null)
             return why.refuse("--driver cannot accompany --reset or --stop", .{});

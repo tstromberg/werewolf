@@ -1,0 +1,111 @@
+version: 1
+suites:
+  - name: valkey-tcp-policy
+    cases:
+      - name: valkey-cap
+        steps:
+          - file: /run/svc/valkey/override.conf
+            expect:
+              body:
+                contains: "maxmemory 64mb\n"
+      - name: valkey-uncapped
+        steps:
+          - file: /run/cgroup/svc/valkey/memory.max
+            expect:
+              body: "max\n"
+      - name: valkey-tcp-listener
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - port: 6379
+  - name: valkey-tcp
+    user: nobody
+    policy:
+      pledge: stdio rpath wpath proc inet connect exec
+      connect:
+        - tcp/6379
+      run:
+        - /usr/bin/valkey-cli
+    fixtures:
+      password: /run/config/valkey/password
+    cases:
+      - name: valkey-tcp
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', ping]
+              readonly: true
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout: "PONG\n"
+            await: 60s
+      - name: valkey-auth
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', ping]
+            expect:
+              exit: 1
+              stderr:
+                contains: NOAUTH
+      - name: valkey-tcp-roundtrip
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', set, integration,
+                     {run: true}]
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout: "OK\n"
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', get, integration]
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', del, integration]
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout: "1\n"
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', get, integration]
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout: "\n"
+      - name: valkey-wrong-password
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', ping]
+              env:
+                VALKEYCLI_AUTH: wrong-password
+            expect:
+              exit: 1
+              stderr:
+                contains: WRONGPASS
+      - name: valkey-tcp-no-admin
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', config,
+                     set, dir, /tmp]
+              env:
+                VALKEYCLI_AUTH:
+                  fixture: password
+            expect:
+              exit: 1
+              stderr:
+                contains: NOPERM

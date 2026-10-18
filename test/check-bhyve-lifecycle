@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Exercise howl's bhyve lifecycle using a private copy of a playground disk.
+
+Usage: check-bhyve-lifecycle HOST ARCH DISK.zst KEY [tap|slirp] [SECONDS]
+Requires passwordless doas, installed firmware, and a bridge for TAP. No host
+bridge, address, route or firewall rule is created. Logs and disk evidence stay
+under build/bhyve-validation; the remote private directory is retained on failure.
+The seed form record avoids rebuilding the supplied image on the FreeBSD host.
+"""
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import time
+
+
+host, arch, image, key, *options = sys.argv[1:]
+mode = options[0] if options else 'tap'
+seconds = int(options[1]) if len(options) > 1 else 180
+if arch not in ('x86_64', 'aarch64') or mode not in ('tap', 'slirp'):
+    sys.exit('invalid architecture or network backend')
+if not re.fullmatch(r'[A-Za-z0-9_.-]+', host) or host.startswith('-'):
+    sys.exit('invalid host')
+name = 'wwlife-' + os.urandom(5).hex()
+work = Path('build/bhyve-validation') / name
+work.mkdir(mode=0o700)
+key = str(Path(key).resolve())
+remote_dir = None
+loaded_vmm = False
+started = False
+passed = False
+phases = []
+
+
+def run(args, *, check=True, timeout=240, **kwargs):
+    result = subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
+    with (work / 'host.log').open('ab') as log:
+        log.write((shlex.join(map(str, args)) + '\n').encode() + result.stderr)
+    if check and result.returncode:
+        raise RuntimeError(shlex.join(map(str, args[:5])) + ': ' +
+                           result.stderr.decode(errors='replace')[-4000:])
+    return result
+
+
+def remote(args, **kwargs):
+    return run(['ssh', '-o', 'BatchMode=yes', host, shlex.join(map(str, args))], **kwargs)
+
+
+def howl(*args, **kwargs):
+    overrides = [name + '=' + os.environ[name] for name in
+                 ('BHYVE_BINARY', 'BHYVE_ARM64_FIRMWARE') if name in os.environ]
+    return remote(['sh', '-c', 'cd ' + shlex.quote(remote_dir) + ' && ' +
+                   shlex.join(['env', *overrides, './howl-freebsd', *args])], **kwargs)
+
+
+def report(phase, **facts):
+    phases.append(dict(phase=phase, **facts))
+    (work / 'phases.json').write_text(json.dumps(phases, indent=2) + '\n')
+    print(host + ' ' + mode + ': ' + phase, flush=True)
+
+
+def console():
+    data = remote(['cat', machine + '/console.log'], check=False).stdout
+    (work / 'console.log').write_bytes(data)
+    if re.search(rb'EXT4-fs error|Corrupt filesystem|Kernel panic|worker setup:|failed CRC', data):
+        raise AssertionError('guest storage, kernel or updater error; see console.log')
+    return data
+
+
+def guest(command, **kwargs):
+    return run(['ssh', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'UserKnownHostsFile=' + str(work / 'known_hosts'),
+                '-o', 'HostKeyAlias=' + name, '-o', 'ConnectTimeout=5',
+                '-o', 'ProxyCommand=' + shlex.join(['ssh', '-o', 'BatchMode=yes',
+                                                  host, '-W', address + ':' + port]),
+                '-i', key, 'root@127.0.0.1', command], **kwargs)
+
+
+def ready(previous=None):
+    until = time.monotonic() + 120
+    while time.monotonic() < until:
+        console()
+        result = guest('cat /proc/sys/kernel/random/boot_id', check=False, timeout=15)
+        boot = result.stdout.decode().strip()
+        if result.returncode == 0 and boot and boot != previous:
+            return boot
+        time.sleep(2)
+    raise AssertionError('guest did not become ready with a fresh boot ID')
+
+
+def filesystem(raw, label):
+    # Check the data partition from a private snapshot, never a mounted disk.
+    with raw.open('rb') as disk:
+        disk.seek(512)
+        header = disk.read(512)
+        if header[:8] != b'EFI PART':
+            raise AssertionError('disk is not GPT')
+        table, _, size = struct.unpack_from('<QII', header, 72)
+        disk.seek(table * 512 + size)  # Werewolf's second partition is /data.
+        entry = disk.read(size)
+        first, last = struct.unpack_from('<QQ', entry, 32)
+        disk.seek(first * 512)
+        target = work / (label + '-data.ext4')
+        remaining = (last - first + 1) * 512
+        with target.open('wb') as output:
+            while remaining:
+                chunk = disk.read(min(remaining, 1 << 20))
+                if not chunk:
+                    raise AssertionError('truncated data partition')
+                output.write(chunk)
+                remaining -= len(chunk)
+    fsck = shutil.which('e2fsck') or '/opt/homebrew/opt/e2fsprogs/sbin/e2fsck'
+    if label != 'before':
+        # A full preen also refreshes superblock free counts from the recovered
+        # group descriptors; journal_only leaves those counters stale.
+        replay = run([fsck, '-p', str(target)], check=False)
+        (work / (label + '-journal.log')).write_bytes(replay.stdout + replay.stderr)
+        if replay.returncode != 0:
+            raise AssertionError('filesystem needs repairs beyond normal journal recovery')
+    result = run([fsck, '-fn', str(target)], check=False)
+    (work / (label + '-fsck.log')).write_bytes(result.stdout + result.stderr)
+    if result.returncode or b'Fix? no' in result.stdout:
+        raise AssertionError(label + ': offline filesystem check failed')
+    target.unlink()
+    report(label + ': offline ext4 check clean')
+
+
+try:
+    binary = Path('build') / arch / 'tools/howl-freebsd'
+    run(['make', str(binary)], timeout=600)
+    raw = work / 'before.img'
+    run(['zstd', '-d', '-q', image, '-o', str(raw)])
+    filesystem(raw, 'before')
+    raw.unlink()
+    remote_dir = remote(['mktemp', '-d', '/var/tmp/ww-lifecycle.XXXXXXXX']).stdout.decode().strip()
+    if not re.fullmatch(r'/var/tmp/ww-lifecycle\.[A-Za-z0-9]+', remote_dir):
+        raise AssertionError('invalid temporary directory')
+    (work / 'remote.json').write_text(json.dumps(dict(host=host, directory=remote_dir, name=name)))
+    machine = remote_dir + '/build/machines/' + name
+    assets = work / 'assets.tar'
+    with tarfile.open(assets, 'w') as archive:
+        for directory in ('forms',):
+            archive.add(directory, arcname=directory)
+        for path, data in {
+            'build/machines/' + name + '/form': b'playground\n',
+            'build/machines/' + name + '/engine': b'bhyve\n',
+            'test-config/authorized_keys': Path(key + '.pub').read_bytes(),
+        }.items():
+            entry = tarfile.TarInfo(path)
+            entry.size, entry.mode = len(data), 0o600
+            archive.addfile(entry, io.BytesIO(data))
+    run(['scp', '-q', str(binary), str(assets), image, host + ':' + remote_dir + '/'])
+    remote(['tar', '-xf', remote_dir + '/assets.tar', '-C', remote_dir])
+    remote(['zstd', '-d', '-q', remote_dir + '/' + Path(image).name,
+            '-o', machine + '/disk.img'])
+    if remote(['kldstat', '-q', '-m', 'vmm'], check=False).returncode:
+        remote(['doas', '-n', 'kldload', 'vmm'])
+        loaded_vmm = True
+    create = ['create', name, '--with', 'playground', '--build', '--on', 'bhyve',
+              '--disable=secureboot,tpm,ipe', '--network', mode, '--config', 'test-config']
+    if os.environ.get('BHYVE_BRIDGE'):
+        create += ['--bridge', os.environ['BHYVE_BRIDGE']]
+    if os.environ.get('BHYVE_TEST_IP'):
+        create += ['--ip', os.environ['BHYVE_TEST_IP'], '--gw', os.environ['BHYVE_TEST_GW'],
+                   '--dns', os.environ['BHYVE_TEST_GW']]
+    started = True
+    howl(*create)
+    record = remote(['cat', machine + '/machine']).stdout.decode()
+    settings = dict(line.split(' ', 1) for line in record.splitlines())
+    address, port = settings['host'], settings['ssh']
+    boot = ready()
+    guest_time = int(guest('date +%s').stdout.strip())
+    if abs(guest_time - time.time()) > 300:
+        raise AssertionError('guest clock differs by more than 300 seconds')
+    report('guest clock verified', unix_time=guest_time)
+    report('howl create and SSH ready', boot_id=boot, address=address, port=port)
+    guest('dd if=/dev/urandom of=/data/lifecycle.bin bs=1048576 count=64', timeout=120)
+    guest('sync')
+    expected = guest('sha256sum /data/lifecycle.bin').stdout.split()[0].decode()
+    until = time.monotonic() + seconds
+    transfers = 0
+    while time.monotonic() < until:
+        data = guest('cat /data/lifecycle.bin', timeout=120).stdout
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise AssertionError('SSH transfer checksum differs')
+        transfers += 1
+        (work / 'transfers.json').write_text(json.dumps(dict(
+            completed=transfers, bytes=transfers * (64 << 20))))
+        console()
+        time.sleep(1)
+    report('sustained network and storage checks passed', seconds=seconds,
+           transfers=transfers, bytes=transfers * (64 << 20), sha256=expected)
+    for iteration in range(3):
+        guest('sync')
+        guest('reboot', check=False, timeout=20)
+        boot = ready(previous=boot)
+        actual = guest('sha256sum /data/lifecycle.bin').stdout.split()[0].decode()
+        if actual != expected:
+            raise AssertionError('persistent file changed across reboot')
+        report('guest reboot and persistent checksum passed', iteration=iteration + 1, boot_id=boot)
+    guest('sync')
+    howl('stop', name, '--on', 'bhyve')
+    if remote(['test', '-e', '/dev/vmm/' + name], check=False).returncode == 0:
+        raise AssertionError('VM survived howl stop')
+    report('howl stop removed VM')
+    remote(['zstd', '-q', machine + '/disk.img', '-o', remote_dir + '/after.img.zst'])
+    run(['scp', '-q', host + ':' + remote_dir + '/after.img.zst', str(work)])
+    run(['zstd', '-d', '-q', str(work / 'after.img.zst'), '-o', str(work / 'after.img')])
+    filesystem(work / 'after.img', 'after')
+    (work / 'after.img').unlink()
+    howl(*create)
+    record = remote(['cat', machine + '/machine']).stdout.decode()
+    settings = dict(line.split(' ', 1) for line in record.splitlines())
+    address, port = settings['host'], settings['ssh']
+    boot = ready(previous=boot)
+    if guest('sha256sum /data/lifecycle.bin').stdout.split()[0].decode() != expected:
+        raise AssertionError('persistent file changed across stop/start')
+    report('howl restart preserves data', boot_id=boot)
+    console()
+    howl('delete', name, '--on', 'bhyve')
+    started = False
+    report('howl delete completed')
+    passed = True
+finally:
+    if started:
+        # Stop through the root supervisor, not kill -0 from an unprivileged shell.
+        try:
+            howl('stop', name, '--on', 'bhyve')
+        finally:
+            data = remote(['cat', machine + '/console.log'], check=False).stdout
+            (work / 'console.log').write_bytes(data)
+    if loaded_vmm:
+        remote(['doas', '-n', 'kldunload', 'vmm'], check=False)
+    if passed:
+        remote(['doas', '-n', 'rm', '-rf', remote_dir])
+    elif remote_dir:
+        print('Retained failed test evidence on ' + host + ':' + remote_dir, file=sys.stderr)
+    print('Evidence: ' + str(work), flush=True)

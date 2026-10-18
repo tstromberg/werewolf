@@ -1,0 +1,145 @@
+version: 1
+packages:
+  - mariadb-12.3-client
+suites:
+  - name: mariadb-admin
+    policy:
+      run:
+        - /usr/bin/mariadb
+    fixtures:
+      account: /run/config/tests/mariadb-account
+    cases:
+      - name: mariadb-tcp
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT 1;
+              env:
+                LC_ALL: C
+              readonly: true
+            expect:
+              exit: 0
+              stdout: '1
+
+                '
+            await: 60s
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT @@skip_networking; SELECT @@port;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '0
+
+                3306
+
+                '
+          - listeners: tcp
+            expect:
+              contains:
+                - port: 3306
+      - name: mariadb-tcp-account
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin:
+                fixture: account
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: ''
+        phases:
+          - seed
+  - name: mariadb-network
+    user: nobody
+    policy:
+      pledge: stdio rpath wpath proc inet connect exec
+      connect:
+        - tcp/3306
+      run:
+        - /usr/bin/mariadb
+    fixtures:
+      password: /run/config/tests/mariadb-password
+      write: /run/config/tests/mariadb-write
+      marker: /run/config/tests/mariadb-marker
+    cases:
+      - name: mariadb-tcp-roundtrip
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --protocol=TCP, --host=127.0.0.1, --user=network_check]
+              stdin:
+                fixture: write
+              env:
+                LC_ALL: C
+                MYSQL_PWD:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  fixture: marker
+        phases:
+          - seed
+      - name: mariadb-tcp-kept
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --protocol=TCP, --host=127.0.0.1, --user=network_check]
+              stdin: SELECT value FROM integration.items WHERE id=1;
+              env:
+                LC_ALL: C
+                MYSQL_PWD:
+                  fixture: password
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  fixture: marker
+      - name: mariadb-tcp-wrong-password
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --protocol=TCP, --host=127.0.0.1, --user=network_check]
+              stdin: SELECT 1;
+              env:
+                LC_ALL: C
+                MYSQL_PWD: wrong-password
+            expect:
+              exit: 1
+              stdout: ''
+              stderr:
+                matches: ERROR 1045
+      - name: mariadb-tcp-root-refused
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --protocol=TCP, --host=127.0.0.1, --user=root]
+              stdin: SELECT 1;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 1
+              stdout: ''
+              stderr:
+                matches: ERROR (1045|1698)
+      - name: mariadb-tcp-role
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --protocol=TCP, --host=127.0.0.1, --user=network_check]
+              stdin: SELECT * FROM mysql.user;
+              env:
+                LC_ALL: C
+                MYSQL_PWD:
+                  fixture: password
+            expect:
+              exit: 1
+              stdout: ''
+              stderr:
+                matches: ERROR 1142

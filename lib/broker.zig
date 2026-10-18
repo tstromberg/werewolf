@@ -529,7 +529,15 @@ fn receiveOwnerChannel(fd: i32) !?i32 {
     var bytes: [128]u8 = undefined;
     var ancillary: [1040]u8 align(8) = undefined;
     var iov = [_]std.posix.iovec{.{ .base = &bytes, .len = bytes.len }};
-    var msg: linux.msghdr = .{ .name = null, .namelen = 0, .iov = &iov, .iovlen = 1, .control = &ancillary, .controllen = ancillary.len, .flags = 0 };
+    var msg: linux.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &ancillary,
+        .controllen = ancillary.len,
+        .flags = 0,
+    };
     const n = linux.recvmsg(fd, &msg, linux.MSG.CMSG_CLOEXEC);
     if (linux.errno(n) != .SUCCESS) return error.OwnerChannelReceive;
     var received: ?i32 = null;
@@ -541,12 +549,18 @@ fn receiveOwnerChannel(fd: i32) !?i32 {
             valid = false;
             break;
         }
-        if (header.level != linux.SOL.SOCKET or header.type != linux.SCM.RIGHTS or (header.len - 16) % 4 != 0) {
+        if (header.level != linux.SOL.SOCKET or header.type != linux.SCM.RIGHTS or
+            (header.len - 16) % 4 != 0)
+        {
             valid = false;
         } else {
             var pos = at + 16;
             while (pos < at + header.len) : (pos += 4) {
-                const value = std.mem.readInt(i32, ancillary[pos..][0..4], @import("builtin").cpu.arch.endian());
+                const value = std.mem.readInt(
+                    i32,
+                    ancillary[pos..][0..4],
+                    @import("builtin").cpu.arch.endian(),
+                );
                 if (received == null) received = value else {
                     _ = linux.close(value);
                     valid = false;
@@ -582,14 +596,30 @@ pub fn sendOwnerChannel(socket: i32, fd: ?i32) !void {
     std.mem.writeInt(i32, ancillary[16..20], fd.?, endian);
     const text = "ok\n";
     const iov = [_]std.posix.iovec_const{.{ .base = text, .len = text.len }};
-    const message: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = &iov, .iovlen = 1, .control = &ancillary, .controllen = ancillary.len, .flags = 0 };
-    if (linux.sendmsg(socket, &message, linux.MSG.NOSIGNAL) != text.len) return error.OwnerChannelSend;
+    const message: linux.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &ancillary,
+        .controllen = ancillary.len,
+        .flags = 0,
+    };
+    if (linux.sendmsg(
+        socket,
+        &message,
+        linux.MSG.NOSIGNAL,
+    ) != text.len) return error.OwnerChannelSend;
 }
 
 /// Called by the broker before it confines itself; kernel sysfs chooses the
 /// device, one uniquely named virtio port. No guest path is accepted as input.
 pub fn openOwnerPort(io: std.Io, gpa: std.mem.Allocator) !?i32 {
-    var dir = std.Io.Dir.cwd().openDir(io, "/sys/class/virtio-ports", .{ .iterate = true }) catch |err|
+    var dir = std.Io.Dir.cwd().openDir(
+        io,
+        "/sys/class/virtio-ports",
+        .{ .iterate = true },
+    ) catch |err|
         return if (err == error.FileNotFound) null else err;
     defer dir.close(io);
     var entries = dir.iterate();
@@ -612,14 +642,25 @@ pub fn openOwnerPort(io: std.Io, gpa: std.mem.Allocator) !?i32 {
         if (!std.mem.eql(u8, std.mem.trim(u8, buffer[0..length], "\n"), "werewolf.owner")) continue;
         if (found != null) return error.AmbiguousOwnerPort;
         const path = try gpa.printSentinel("/dev/{s}", .{entry.name}, 0);
-        const raw = linux.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+        const raw = linux.open(
+            path,
+            .{ .ACCMODE = .RDWR, .NONBLOCK = true, .NOFOLLOW = true, .CLOEXEC = true },
+            0,
+        );
         if (linux.errno(raw) != .SUCCESS) return error.OpenOwnerPort;
         const fd: i32 = @intCast(raw);
         found = fd;
         var st: linux.Statx = undefined;
-        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS or
+        if (linux.errno(linux.statx(
+            fd,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .TYPE = true },
+            &st,
+        )) != .SUCCESS or
             st.mode & linux.S.IFMT != linux.S.IFCHR) return error.BadOwnerPort;
-        if (linux.errno(linux.fchown(fd, 0, 0)) != .SUCCESS or linux.errno(linux.fchmod(fd, 0o600)) != .SUCCESS)
+        if (linux.errno(linux.fchown(fd, 0, 0)) != .SUCCESS or
+            linux.errno(linux.fchmod(fd, 0o600)) != .SUCCESS)
             return error.UnsafeOwnerPort;
     }
     return found;
@@ -646,7 +687,15 @@ test "owner port names cannot select arbitrary device paths" {
 test "coordinator owner channel carries only one close-on-exec descriptor" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var sockets: [2]i32 = undefined;
-    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &sockets)));
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.socketpair(
+            linux.AF.UNIX,
+            linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC,
+            0,
+            &sockets,
+        )),
+    );
     defer for (sockets) |fd| {
         _ = linux.close(fd);
     };

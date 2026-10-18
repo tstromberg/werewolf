@@ -717,9 +717,25 @@ pub fn createBhyve(
     why: *Why,
 ) !void {
     if (!bhyve.installed(io))
-        return why.refuse("--on bhyve: FreeBSD on x86_64, with vmm loaded (kldload vmm)", .{});
-    Dir.cwd().access(io, bhyve.firmware, .{}) catch
-        return why.refuse("no {s}: pkg install bhyve-firmware", .{bhyve.firmware});
+        return why.refuse(
+            "--on bhyve: FreeBSD on x86_64 or arm64, with vmm loaded (kldload vmm)",
+            .{},
+        );
+    const runtime = bhyve.Runtime.fromEnvironment(howl.environ) catch
+        return why.refuse(
+            "BHYVE_BINARY and BHYVE_ARM64_FIRMWARE must be absolute paths without commas or " ++
+                "newlines",
+            .{},
+        );
+    const firmware_path = runtime.firmwarePath(@import("builtin").cpu.arch);
+    Dir.cwd().access(io, firmware_path, .{}) catch
+        return why.refuse(
+            "cannot read bhyve firmware {s} (default package: {s})",
+            .{ firmware_path, bhyve.firmware_package },
+        );
+    if (!std.mem.eql(u8, runtime.binary, "bhyve"))
+        Dir.cwd().access(io, runtime.binary, .{}) catch
+            return why.refuse("cannot access BHYVE_BINARY: {s}", .{runtime.binary});
     const root = bhyve.asRoot(io) catch
         return why.refuse("bhyve needs root, and there is no doas or sudo: pkg install doas", .{});
     const mode = o.network orelse .tap;
@@ -801,7 +817,7 @@ pub fn createBhyve(
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(gpa, root);
     try argv.appendSlice(gpa, &.{ "daemon", "-f", "-o", log, self, "_bhyve", name, config });
-    try argv.appendSlice(gpa, try bhyve.argv(
+    try argv.appendSlice(gpa, try bhyve.commandWith(
         gpa,
         name,
         disk,
@@ -814,6 +830,8 @@ pub fn createBhyve(
             try gpa.print("{s}/{s}", .{ cwd, dir }),
             why,
         ),
+        null,
+        runtime,
     ));
     try run(io, why, argv.items);
     say(io, "{s}: waiting for it to boot", .{name});

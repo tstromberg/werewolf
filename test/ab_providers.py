@@ -1,6 +1,7 @@
 """Disposable provider lifecycle adapters for the A/B regression runner."""
 import hashlib
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,32 @@ class Provider:
         (self.config / 'hostname').write_text(self.name + '\n')
         (self.config / 'authorized_keys').write_text(Path(fixture['ssh_key'] + '.pub').read_text())
         if kind == 'bhyve':
-            (self.config / 'network').write_text('werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3\n')
+            self.bhyve_howl = self.env.get('BHYVE_LAUNCH') == 'howl'
+            if self.env.get('BHYVE_LAUNCH', 'direct') not in ('direct', 'howl'):
+                raise RuntimeError('BHYVE_LAUNCH must be direct or howl')
+            if self.bhyve_howl and (fixture['mode'] != 'plain' or not self.env.get('BHYVE_BRIDGE')):
+                raise RuntimeError('BHYVE_LAUNCH=howl requires plain mode and BHYVE_BRIDGE')
+            self.bhyve_binary = self.env.get('BHYVE_BINARY', 'bhyve')
+            if self.bhyve_binary != 'bhyve' and not self.bhyve_binary.startswith('/'):
+                raise RuntimeError('BHYVE_BINARY must be an absolute remote path')
+            self.bhyve_arm64_firmware = self.env.get(
+                'BHYVE_ARM64_FIRMWARE', '/usr/local/share/u-boot/u-boot-bhyve-arm64/u-boot.bin')
+            if (not self.bhyve_arm64_firmware.startswith('/') or
+                    any(c in self.bhyve_arm64_firmware for c in ',\n\r')):
+                raise RuntimeError('BHYVE_ARM64_FIRMWARE must be an absolute remote path without commas or newlines')
+            self.bhyve_tap = self.env.get('BHYVE_TAP')
+            if self.bhyve_tap or self.bhyve_howl:
+                if self.bhyve_howl and self.bhyve_tap:
+                    raise RuntimeError('howl owns its TAP; omit BHYVE_TAP with BHYVE_LAUNCH=howl')
+                if self.bhyve_tap and not re.fullmatch(r'tap[0-9]+', self.bhyve_tap):
+                    raise RuntimeError('BHYVE_TAP must name an existing tap interface')
+                ip = ipaddress.IPv4Interface(self.env['BHYVE_TEST_IP'])
+                gateway = ipaddress.IPv4Address(self.env['BHYVE_TEST_GW'])
+                self.address = str(ip.ip)
+                network = f'werewolf.ip={ip} werewolf.gw={gateway} werewolf.dns={gateway}\n'
+            else:
+                network = 'werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3\n'
+            (self.config / 'network').write_text(network)
         self.write_config()
         self.env.update(WEREWOLF_IPE_KERNEL=fixture['kernel'], WEREWOLF_IPE_KEY=fixture['key'],
                         WEREWOLF_IPE_CRT=fixture['cert'], IPE_UPDATES=fixture['channel'],
@@ -252,6 +278,8 @@ class Provider:
         raise RuntimeError('Proxmox guest did not report its DHCP address')
 
     def start_remote(self):
+        if self.kind == 'bhyve' and self.fixture['arch'] == 'aarch64' and self.fixture['mode'] == 'secure':
+            raise RuntimeError('arm64 bhyve Secure Boot enrollment is unsupported')
         if self.kind == 'bhyve' and self.fixture['mode'] == 'secure' and not self.env.get('SECUREBOOT_DIR'):
             raise RuntimeError('signed bhyve tests require SECUREBOOT_DIR with bhyve code.fd and vars.fd')
         self.remote = self.env.get('BHYVE_HOST', 'bilbo') if self.kind == 'bhyve' else self.env.get('FIRECRACKER_HOST', 'galadriel')
@@ -261,31 +289,61 @@ class Provider:
         if not re.fullmatch(r'/tmp/ww-ab\.[A-Za-z0-9]+', directory):
             raise RuntimeError('invalid remote private directory')
         self.remote_dir = directory
-        self.run(['scp', '-q', self.fixture['disk'], self.remote + ':' + self.remote_dir + '/disk.qcow2'])
-        self.remote_command(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw',
-                             self.remote_dir + '/disk.qcow2', self.remote_dir + '/disk.img'])
+        if self.kind == 'bhyve':
+            # Convert on the builder: the FreeBSD host needs only base zstd,
+            # not a QEMU installation to test another hypervisor.
+            raw = self.work / 'disk.img'
+            packed = self.work / 'disk.img.zst'
+            self.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw', self.fixture['disk'], raw])
+            self.run(['zstd', '-q', str(raw), '-o', str(packed)])
+            self.run(['scp', '-q', str(packed), self.remote + ':' + self.remote_dir + '/disk.img.zst'])
+            self.remote_command(['zstd', '-d', '-q', self.remote_dir + '/disk.img.zst',
+                                 '-o', self.remote_dir + '/disk.img'])
+        else:
+            self.run(['scp', '-q', self.fixture['disk'], self.remote + ':' + self.remote_dir + '/disk.qcow2'])
+            self.remote_command(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw',
+                                 self.remote_dir + '/disk.qcow2', self.remote_dir + '/disk.img'])
         if self.kind == 'bhyve':
             self.ssh_port = 20000 + int.from_bytes(hashlib.sha256(self.name.encode()).digest()[:2], 'big') % 400 * 100
-            binary = Path('build/x86_64/tools/howl-freebsd').resolve()
+            arch = self.fixture['arch']
+            binary = Path('build') / arch / 'tools/howl-freebsd'
+            binary = binary.resolve()
             self.run(['make', str(binary.relative_to(Path.cwd()))])
             self.run(['scp', '-q', str(self.work / 'config.tar'), str(binary), self.remote + ':' + self.remote_dir + '/'])
-            args = ['bhyve', '-H', '-w', '-u', '-c', '2', '-m', '3072M',
-                    '-s', '0,hostbridge', '-s', '1,lpc', '-s',
-                    f'2,virtio-net,slirp,open,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22',
+            if self.bhyve_howl:
+                self.start_bhyve_howl()
+                return
+            args = [self.bhyve_binary]
+            if arch == 'x86_64':
+                args += ['-H', '-w', '-u']
+            args += ['-c', '2', '-m', '3072M', '-s', '0,hostbridge']
+            if arch == 'x86_64':
+                args += ['-s', '1,lpc']
+            network = (f'2,virtio-net,{self.bhyve_tap}' if self.bhyve_tap else
+                       f'2,virtio-net,slirp,open,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22')
+            args += ['-s', network,
                     '-s', '3,virtio-blk,' + self.remote_dir + '/disk.img',
                     '-s', '4,virtio-blk,' + self.remote_dir + '/config.tar,ro',
-                    '-s', '5,virtio-rnd', '-l', 'com1,stdio']
+                    '-s', '5,virtio-rnd']
+            if arch == 'aarch64':
+                if self.fixture['mode'] == 'secure':
+                    raise RuntimeError('arm64 bhyve Secure Boot enrollment is unsupported')
+                args += ['-o', 'console=stdio', '-o',
+                         'bootrom=' + self.bhyve_arm64_firmware]
+            else:
+                args += ['-l', 'com1,stdio']
             if self.fixture['mode'] == 'secure':
                 firmware = self.work / 'enrolled'
                 self.enroll(firmware)
                 self.run(['scp', '-q', str(firmware / 'code.fd'), str(firmware / 'vars.fd'), self.remote + ':' + self.remote_dir + '/'])
                 args += ['-l', f'bootrom,{self.remote_dir}/code.fd,{self.remote_dir}/vars.fd']
-            else:
+            elif arch == 'x86_64':
                 args += ['-l', 'bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd']
             args += [self.name]
             launch = ['doas', '-n', self.remote_dir + '/howl-freebsd', '_bhyve', self.name,
                       self.remote_dir + '/config.tar', *args]
-            self.proxy = shlex.join(['ssh', '-o', 'BatchMode=yes', '-W', '127.0.0.1:' + str(self.ssh_port), self.remote])
+            target = self.address + ':22' if self.bhyve_tap else '127.0.0.1:' + str(self.ssh_port)
+            self.proxy = shlex.join(['ssh', '-o', 'BatchMode=yes', '-W', target, self.remote])
             self.ssh_port = 22
         else:
             h = hashlib.sha256(Path(self.remote_dir).name.encode()).digest()
@@ -316,6 +374,36 @@ class Provider:
         result = self.run(['ssh', '-o', 'BatchMode=yes', self.remote, 'sh', '-s'], input=script)
         self.remote_pid = result.stdout.strip()
 
+    def remote_howl(self, *args):
+        overrides = ['BHYVE_BINARY=' + self.bhyve_binary] if self.bhyve_binary != 'bhyve' else []
+        command = ['env', *overrides, 'BHYVE_ARM64_FIRMWARE=' + self.bhyve_arm64_firmware,
+                   './howl-freebsd', *args]
+        return self.remote_command(['sh', '-c', 'cd ' + shlex.quote(self.remote_dir) +
+                                    ' && ' + shlex.join(command)])
+
+    def start_bhyve_howl(self):
+        # Seed the existing-machine record to boot the immutable signed fixture
+        # through normal create, without rebuilding it on the FreeBSD host.
+        machine = 'build/machines/' + self.name
+        assets = self.work / 'launch.tar'
+        with tarfile.open(assets, 'w') as archive:
+            archive.add('forms', arcname='forms')
+            archive.add(self.config, arcname='test-config')
+            for path, data in [(machine + '/form', b'playground\n'),
+                               (machine + '/engine', b'bhyve\n')]:
+                entry = tarfile.TarInfo(path)
+                entry.size, entry.mode = len(data), 0o600
+                archive.addfile(entry, io.BytesIO(data))
+        self.run(['scp', '-q', assets, self.remote + ':' + self.remote_dir + '/launch.tar'])
+        self.remote_command(['tar', '-xf', self.remote_dir + '/launch.tar', '-C', self.remote_dir])
+        self.remote_command(['mv', self.remote_dir + '/disk.img', self.remote_dir + '/' + machine + '/disk.img'])
+        self.bhyve_machine = self.remote_dir + '/' + machine
+        self.remote_howl('create', self.name, '--with', 'playground', '--build', '--on', 'bhyve',
+                         '--disable=secureboot,tpm,ipe', '--network', 'tap',
+                         '--bridge', self.env['BHYVE_BRIDGE'], '--config', 'test-config')
+        self.proxy = shlex.join(['ssh', '-o', 'BatchMode=yes', '-W', self.address + ':22', self.remote])
+        self.ssh_port = 22
+
     def ssh(self, command, check=True, timeout=120):
         return self.run(self.ssh_args(command), check=check, timeout=timeout)
 
@@ -345,7 +433,7 @@ class Provider:
             text = b''.join(p.read_bytes() for p in (Path(self.env['LIMA_HOME']) / self.name).glob('serial*.log'))
             self.log.write_bytes(text)
         elif self.remote_dir:
-            args = ['cat', self.remote_dir + '/console.log']
+            args = ['cat', getattr(self, 'bhyve_machine', self.remote_dir) + '/console.log']
             if self.kind != 'proxmox':
                 args = ['doas', '-n', *args]
             result = self.remote_command(args, check=False)
@@ -386,7 +474,12 @@ class Provider:
                         self.remote_command(['doas', '-n', 'kill', child], check=False)
                 attempt(kill_child)
             if self.kind == 'bhyve':
-                attempt(lambda: self.remote_command(['doas', '-n', 'bhyvectl', '--vm=' + self.name, '--destroy'], check=False))
+                if getattr(self, 'bhyve_machine', None):
+                    attempt(lambda: self.remote_howl('delete', self.name, '--on', 'bhyve'))
+                    if errors:
+                        raise RuntimeError('howl cleanup failed; retained ' + self.remote_dir + ': ' + '; '.join(errors))
+                else:
+                    attempt(lambda: self.remote_command(['doas', '-n', 'bhyvectl', '--vm=' + self.name, '--destroy'], check=False))
             if getattr(self, 'remote_pid', '').isdigit():
                 attempt(lambda: self.remote_command(['doas', '-n', 'kill', self.remote_pid], check=False))
             if self.kind == 'firecracker' and getattr(self, 'tap_created', False):

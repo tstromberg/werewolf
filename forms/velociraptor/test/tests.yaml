@@ -1,0 +1,58 @@
+version: 1
+suites:
+  - name: velociraptor
+    fixtures:
+      authorization: /run/config/tests/velociraptor-authorization
+    cases:
+      - name: vr-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {type: file}
+            await: 60s
+          - fetch:
+              url: https://localhost/api/v1/GetUsers
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 401}
+            await: 180s
+      - name: vr-user
+        steps:
+          - service: velociraptor
+            expect:
+              user: velociraptor
+              uid: {min: 65536}
+              capabilities: []
+              no_new_privileges: true
+      - name: vr-config
+        steps:
+          - file: /data/svc/velociraptor/server.config.yaml
+            expect:
+              uid: velociraptor
+              mode: '600'
+              body: {absent: werewolf-check-pass-1}
+      - name: vr-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/GetUsers
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 401}
+      - name: vr-wrong
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/GetUsers
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers: {Authorization: Basic YWRtaW46YWRtaW4=}
+            expect: {status: 401}
+      - name: vr-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/GetUsers
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: {fixture: authorization}
+            expect: {status: 200}
+      - name: vr-frontend
+        steps:
+          - fetch: {url: 'http://127.0.0.1:8000/'}
+            expect:
+              status: 400
+              body: {contains: Client sent an HTTP request to an HTTPS server}
