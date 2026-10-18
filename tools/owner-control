@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Fixed update operations over a VM's host-private werewolf.owner serial port."""
+import json
+from pathlib import Path
+import secrets
+import socket
+import sys
+import time
+
+COMMANDS = {'status', 'pause', 'resume', 'check', 'outcome', 'try'}
+LIMIT = 64 << 10
+
+
+def request(path, command, timeout=240):
+    fields = command.split(' ')
+    if fields[0] not in COMMANDS or len(fields) > 2 or (len(fields) == 2 and
+            (fields[0] != 'try' or len(fields[1]) != 64 or
+             any(c not in '0123456789abcdef' for c in fields[1]))):
+        raise ValueError('expected status, pause, resume, check, outcome, or try [DECLARATION-HASH]')
+    identity = secrets.token_hex(8)
+    deadline = time.monotonic() + timeout
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        client.sendall((identity + ' ' + command + '\n').encode())
+        buffer = bytearray()
+        while True:
+            client.settimeout(max(0.001, deadline - time.monotonic()))
+            block = client.recv(4096)
+            if not block:
+                raise EOFError('VM owner channel disconnected')
+            buffer.extend(block)
+            if len(buffer) > LIMIT:
+                raise ValueError('oversized owner response')
+            while b'\n' in buffer:
+                line, _, tail = buffer.partition(b'\n')
+                buffer = bytearray(tail)
+                try:
+                    result = json.loads(line)
+                except (UnicodeDecodeError, ValueError):
+                    continue  # Discard a partial response left by a prior client.
+                if not isinstance(result, dict) or result.get('id') != identity:
+                    continue
+                if result.get('ok') is not True:
+                    raise ValueError('owner operation refused: ' + str(result.get('error')))
+                return result
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) not in (3, 4):
+            raise ValueError('usage: owner-control OWNER_SOCKET COMMAND [DECLARATION-HASH]')
+        operation = ' '.join(sys.argv[2:])
+        timeout = 240 if sys.argv[2] in ('check', 'try') else 15
+        print(json.dumps(request(Path(sys.argv[1]), operation, timeout)))
+    except (OSError, EOFError, ValueError) as error:
+        sys.exit('owner-control: ' + json.dumps(str(error), ensure_ascii=True))

@@ -19,7 +19,8 @@ four core forms**, contingent on the gaps below; shell-suite ports and export ar
 playground in secure-boot and legacy-boot profiles, compares independent builds, runs
 coverage and `howl test`, and keeps inventories, notes and a signed R2 catalog. It
 publishes a target only once its exact bundle passes the [lifecycle
-test](../../test/check-published-lifecycle), which needs ssh: today playground.
+test](../../test/check-published-lifecycle). QEMU uses the production owner channel
+for all three forms; Lima currently uses SSH for playground.
 Compatibility images have separate exact-disk and direct-boot checks. The earlier
 stock-disk publisher is retired; both profiles share one release flow.
 
@@ -88,11 +89,12 @@ feed cache and 8 GiB RAM.
 
 ## Remaining lifecycle gaps
 
-**Shell-free control:** autonomous checks and the update policy over an authenticated
-mirror; the root-only update socket is not bridged for tests. **Rollback and health:**
-minimal and prod need a supported owner rollback; a power cut before commit proves
-interrupted-trial recovery, not failed health, so that gate stays blocked unless a real
-dependency fault prevents commitment. **Distinct releases:** test P → C and a real
+**QEMU control and health:** the production host-private virtio owner port exposes
+only fixed updater operations and status through the existing updater broker role.
+It adds no shell or network listener. Storage write errors prevent commitment; the
+real deadman and loader must recover the retained signed release. Owner rollback uses
+the normal authenticated `try` operation. Lima still needs this driver for forms
+without ordinary SSH. **Distinct releases:** test P → C and a real
 successor where C's updater or retirement must run; renamed serials do not count;
 fixture-only successors are never promoted; power-cut runs keep real TPM state.
 
@@ -111,10 +113,7 @@ commits; missing history holds publication.
 
 ## Staged delivery
 
-Inventory (2–4 days: gates mapped, shell-free boot and update prototyped); harness and
-evidence (4–7: driver contract and launcher, bad evidence rejected); core targets (4–8:
-four forms, both architectures, every lifecycle assertion); publication and notes (3–5:
-one writer, package/PR history, retry tests); cutover (2–4: shadow run, fresh-consumer
-fetch/run/update, old writers retired). Start on native Linux QEMU, then Lima. Where an
+Next: complete native drivers and evidence, expand lifecycle coverage to Lima, then
+run fresh-consumer publication checks. Where an
 exact-image assertion cannot be observed safely, keep the previous image and scope the
 gap; a dormant runner in every image or an unsigned test disk would add attack surface.

@@ -18,6 +18,7 @@ packages. Enrolled IPE machines fetch signed slots; unenrolled IPE holds updates
 | File | Holds |
 | --- | --- |
 | `control.zig` | root-only operator requests delegated to the supervised service |
+| `owner.zig` | [host-private operations](../../docs/owner-control.md), using the same coordinator |
 | `workers.zig` | chrooted construction and worker launcher; inherited private channel |
 | `slot-update.zig` | daemon, `check`, `outcome`, the plans, the log |
 | `stage.zig` | settings, tiers feed, `attempt`, `pending`, lock, reboot |
@@ -47,7 +48,6 @@ grace and every configured interval (default an hour). Each update writes a repo
 `/data/svc/autoupdate/reports` (changes, CVEs, the sha256 of every source) and logs JSON
 lines to `log` there and the console. Manual commands send bounded requests through the
 service's root-only control socket; nothing mounts without the supervised updater.
-Invariants to keep:
 
 - **Staged means armed.** `attempt` holds `SLOT BUILD BOOT_ID`. Only a slot this boot
   armed is rebooted into, and `outcome` does not judge it yet.

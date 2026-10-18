@@ -41,6 +41,7 @@ pub const usage =
     \\       howl pack --with FORM -h   the flags FORM takes
     \\       howl run [--with FORM,...] [--on TARGET] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME
+    \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
@@ -89,6 +90,7 @@ pub fn main(init: std.process.Init) void {
             console,
             stop,
             ssh,
+            owner,
             upload,
             @"build-apk",
             form,
@@ -122,6 +124,7 @@ pub fn main(init: std.process.Init) void {
         .console => verbs.console(io, gpa, args[2..], &why),
         .stop => verbs.stopHere(io, gpa, args[2..], &why),
         .ssh => verbs.sshTo(io, gpa, args[2..], &why),
+        .owner => @import("owner.zig").command(io, gpa, args[2..], &why),
         .upload => cloud.upload(io, gpa, args[2..], &why),
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
         .form => adhoc.form(io, gpa, args[2..], &why),

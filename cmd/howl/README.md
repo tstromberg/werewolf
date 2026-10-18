@@ -17,6 +17,7 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--version SERIAL\|TAG` selects the initial download; `--build` builds this checkout's bundle and enrolls it as a download, a rerun offering the next as an update |
 | `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
 | `run` | secure `create` of `werewolf-run`, reusing an unchanged protected VM; default playground downloads a protected image; `--build` uses local sources |
+| `owner [NAME] status\|check\|try\|outcome\|pause\|resume` | fixed host-private QEMU operations without guest SSH; [details](../../docs/owner-control.md) |
 | `ssh`, `console`, `stop`, `delete` | reach or read a machine; stop keeps protected local state, delete removes it; without NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
@@ -35,9 +36,8 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 
 ## Detailed design
 
-**Forms.** A name is NAME-form, from werewolf's repository by its signed index
-(`published.zig`), which the machine updates; one not published yet is `./forms/NAME`,
-with a warning. A path is the caller's own, never updated.
+**Forms.** A name uses NAME-form from the signed index (`published.zig`);
+unpublished names use `./forms/NAME` with a warning. Path forms are never updated.
 
 **Config tar.** Each service's `config`, `setting` and `render` lines declare a flag
 (`lib/service.zig`); howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,

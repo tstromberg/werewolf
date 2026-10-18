@@ -18,7 +18,7 @@ FORMAT = 'werewolf-form-catalog/1'
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 NAME = re.compile(r'[a-z][a-z0-9-]{0,63}\Z')
 PUBLISHED = 'published'
-UNGATED = 'passed; not published: no lifecycle gates for this form'
+UNGATED = 'passed; not published: no lifecycle gates for this target'
 NO_RUNNER = 'passed; not published: no gate runner for this target'
 # Unchanged inputs in these states need no rebuild; failures retry every run.
 SETTLED = {PUBLISHED, UNGATED, NO_RUNNER}

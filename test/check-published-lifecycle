@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from tpm_proxy import Proxy
+from owner_qmp import StorageFault
 
 if len(sys.argv) != 6:
     sys.exit('usage: check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT')
@@ -26,11 +27,16 @@ bundles = [initial, update_bundle, later]
 manifests = [json.loads((bundle / 'boot.json').read_text()) for bundle in bundles]
 provider = {'192.168.5.2': 'lima', '10.0.2.2': 'qemu'}.get(manifests[0]['permit_host'])
 arch = manifests[0]['image']['arch']
+form = manifests[0]['form']
+permit_port = manifests[0]['permit_port']
+shellfree = provider == 'qemu'
 if provider is None or arch not in ('aarch64', 'x86_64') or (provider == 'lima' and arch != 'aarch64'):
     sys.exit('unsupported published lifecycle target')
-if any(m['form'] != 'playground' or m['image']['arch'] != arch or
-       m['permit_host'] != manifests[0]['permit_host'] or m['permit_port'] != 9443 for m in manifests):
-    sys.exit('published lifecycle requires three playground bundles for the same target')
+if form not in ('minimal', 'prod-ssh', 'playground') or (not shellfree and form != 'playground'):
+    sys.exit('this form requires the QEMU owner-control lifecycle')
+if any(m['form'] != form or m['image']['arch'] != arch or
+       m['permit_host'] != manifests[0]['permit_host'] or m['permit_port'] != permit_port for m in manifests):
+    sys.exit('published lifecycle requires three bundles of one form for the same target')
 releases = [(bundle / 'slot/release.id').read_bytes().hex() for bundle in bundles]
 if len(set(releases)) != 3 or sorted(m['image']['serial'] for m in manifests) != [m['image']['serial'] for m in manifests]:
     sys.exit('lifecycle requires distinct, ordered signed releases')
@@ -39,7 +45,7 @@ if len(set(releases)) != 3 or sorted(m['image']['serial'] for m in manifests) !=
 consumer_work = tempfile.TemporaryDirectory(prefix='ww-consumer-', dir='/tmp')
 consumer = Path(consumer_work.name)
 mirror = work / 'mirror'
-base = mirror / 'playground' / provider / arch
+base = mirror / form / provider / arch
 latest = base / 'latest'
 latest.mkdir(parents=True)
 for bundle in bundles:
@@ -63,6 +69,7 @@ def promote(bundle):
 promote(initial)
 identity, ca, key = [work / name for name in ('ssh.key', 'mirror.crt', 'mirror.key')]
 subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', identity], check=True)
+root_keys = [] if shellfree else ['--root-keys', str(identity) + '.pub']
 subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256', '-days', '2',
     '-subj', '/CN=werewolf-lifecycle-mirror', '-addext', 'subjectAltName=IP:127.0.0.1',
     '-keyout', key, '-out', ca], check=True, capture_output=True)
@@ -120,6 +127,9 @@ for i,arg in enumerate(args):
             (root/'backend.json').write_text(json.dumps(backend))
             while not (root/'ready').exists(): time.sleep(.05)
             args[i]=','.join('path='+str(root/'proxy.sock') if part.startswith('path=') else part for part in parts)
+            if '-qmp' not in args:
+                (root/'qmp.sock').unlink(missing_ok=True)
+                args += ['-qmp', 'unix:'+str(root/'qmp.sock')+',server=on,wait=off']
 os.execv(''' + repr(qemu_binary) + ''',[''' + repr(qemu_binary) + ''',*args])
 ''')
 qemu_wrapper.chmod(0o755)
@@ -173,6 +183,19 @@ def ssh(name, command, label, **kwargs):
     return result
 
 
+def owner(name, command, label, check=True, timeout=300):
+    result = run([howl, 'owner', name, *command.split(' ')], label, check=check, timeout=timeout)
+    if result.returncode:
+        return None
+    return json.loads(result.stdout)
+
+
+def update(name, operation, label, **kwargs):
+    if shellfree:
+        return owner(name, operation, label, **kwargs)
+    return ssh(name, '/usr/lib/werewolf/slot-update ' + operation, label, **kwargs)
+
+
 def launch(args, label):
     global proxy
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -198,25 +221,46 @@ def status(name):
     # refusal probe on each poll floods audit while the startup scan is running.
     # /run is fresh per boot; boot ID and the actual TPM measurements below
     # still bind this evidence to the currently running signed release.
-    command = ('cat /run/werewolf/posture.json || exit 1; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
-               'printf "CMDLINE "; cat /proc/cmdline; printf "COMMITTED "; '
-               'if test -e /run/werewolf/committed; then echo yes; else echo no; fi')
-    reply = ssh(name, command, name + '-status', check=False, timeout=15)
-    if reply.returncode:
-        return None
-    text = reply.stdout.decode()
-    end = text.index('\nBOOT-ID ')
-    report = json.loads(text[:end])
-    checks = {entry['id']: entry['result'] for entry in report['checks']}
-    required = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-protected', 'files-root-verity')
-    if any(checks.get(key) != 'pass' for key in required):
-        raise RuntimeError('guest protection missing: ' + repr(checks))
-    values = dict(line.split(' ', 1) for line in text[end + 1:].splitlines())
-    release = re.search(r'(?:^| )werewolf.release=([0-9a-f]{64})(?: |$)', values['CMDLINE'])
-    if not release:
-        raise RuntimeError('running signed release is missing')
-    value = dict(machine=name, release=release.group(1), boot_id=values['BOOT-ID'],
-                 committed=values['COMMITTED'] == 'yes')
+    if shellfree:
+        value = owner(name, 'status', name + '-status', check=False, timeout=15)
+        if not value or not value['ready']:
+            return None
+        if not value['paused']:
+            owner(name, 'pause', name + '-pause')
+        checks = {entry['id']: entry['result'] for entry in value['checks']}
+        # These are native probes already run by the exact production image:
+        # unsigned copies fail to execute and root cannot write system devices.
+        required = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-protected',
+                    'files-root-verity', 'files-root-readonly', 'files-exec-refused', 'files-system-writes')
+        if not checks:
+            return None
+        if any(checks.get(key) != 'pass' for key in required):
+            raise RuntimeError('guest protection or native tamper probe missing: ' + repr(checks))
+        release = re.search(r'(?:^| )werewolf.release=([0-9a-f]{64})(?: |$)', value['cmdline'])
+        if not release:
+            raise RuntimeError('running signed release is missing')
+        value = dict(machine=name, release=release.group(1), boot_id=value['boot_id'],
+                     committed=value['committed'], checks=checks, other_cmdline=value['other_cmdline'])
+    else:
+        command = ('cat /run/werewolf/posture.json || exit 1; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
+                   'printf "CMDLINE "; cat /proc/cmdline; printf "COMMITTED "; '
+                   'if test -e /run/werewolf/committed; then echo yes; else echo no; fi')
+        reply = ssh(name, command, name + '-status', check=False, timeout=15)
+        if reply.returncode:
+            return None
+        text = reply.stdout.decode()
+        end = text.index('\nBOOT-ID ')
+        report = json.loads(text[:end])
+        checks = {entry['id']: entry['result'] for entry in report['checks']}
+        required = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-protected', 'files-root-verity')
+        if any(checks.get(key) != 'pass' for key in required):
+            raise RuntimeError('guest protection missing: ' + repr(checks))
+        values = dict(line.split(' ', 1) for line in text[end + 1:].splitlines())
+        release = re.search(r'(?:^| )werewolf.release=([0-9a-f]{64})(?: |$)', values['CMDLINE'])
+        if not release:
+            raise RuntimeError('running signed release is missing')
+        value = dict(machine=name, release=release.group(1), boot_id=values['BOOT-ID'],
+                     committed=values['COMMITTED'] == 'yes')
     if name == names[0]:
         anchor, pcr = observed['anchor'], observed['pcr11']
         authority = machines[0] / 'authority'
@@ -237,7 +281,7 @@ def wait(name, release, previous=None, anchor=None, committed=True, fault=False)
         try:
             value = status(name)
             if value and value['release'] == release and value['boot_id'] != previous:
-                if fault and not value['committed']:
+                if fault and not shellfree and not value['committed']:
                     # Inject a host-controlled keeper failure into the exact production
                     # image, before its minute-long health check can commit the trial.
                     ssh(name, 'sv pause /etc/sv/slot-keep', 'fail-trial-keeper')
@@ -245,7 +289,7 @@ def wait(name, release, previous=None, anchor=None, committed=True, fault=False)
                 if value['committed'] is committed:
                     if anchor is not None and value['anchor'] != anchor:
                         raise RuntimeError('recovery replaced protected TPM authorization')
-                    if committed:
+                    if committed and not shellfree:
                         ready = ssh(name, 'test -e /run/werewolf/updater-ready && sv pause /etc/sv/autoupdate',
                                     'pause-updater', check=False, timeout=15)
                         if ready.returncode:
@@ -275,21 +319,20 @@ def refresh(bundle):
         current = json.loads(path.read_text())
         current['checked'] = 0
         path.write_text(json.dumps(current))
-    run([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'accept-head')
+    run([howl, 'run', '--with', form, '--on', provider, *root_keys], 'accept-head')
 
 
 try:
-    launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'first-run')
+    launch([howl, 'run', '--with', form, '--on', provider, *root_keys], 'first-run')
     a = wait(names[0], releases[0])
     before = credentials(machines[0])
     downloaded = len(requests)
     began = time.monotonic()
-    run([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'repeat-run')
+    run([howl, 'run', '--with', form, '--on', provider, *root_keys], 'repeat-run')
     elapsed = time.monotonic() - began
     if status(names[0])['boot_id'] != a['boot_id'] or len(requests) != downloaded or credentials(machines[0]) != before:
         raise RuntimeError('unchanged run rebooted, downloaded or rotated authority')
-    run([howl, 'create', names[1], '--with', 'playground', '--on', provider,
-         '--root-keys', str(identity) + '.pub'], 'second-owner', timeout=600)
+    run([howl, 'create', names[1], '--with', form, '--on', provider, *root_keys], 'second-owner', timeout=600)
     other = wait(names[1], releases[0])
     owner2 = credentials(machines[1])
     if any(owner2[name] == before[name] for name in before):
@@ -302,30 +345,33 @@ try:
                    machines[0] / 'authority/factory.permit'], 'foreign-owner', check=False)
     if foreign.returncode == 0:
         raise RuntimeError('another owner authenticated this machine permit')
-    for command, label in [('cp /usr/bin/true /data/unsigned-probe && /data/unsigned-probe', 'unsigned'),
-                           ('echo tamper >> /usr/bin/true', 'root-write')]:
+    for command, label in ([] if shellfree else [('cp /usr/bin/true /data/unsigned-probe && /data/unsigned-probe', 'unsigned'),
+                           ('echo tamper >> /usr/bin/true', 'root-write')]):
         if ssh(names[0], command, label, check=False).returncode == 0:
             raise RuntimeError(label + ' was accepted')
     refresh(update_bundle)
     run([howl, '_local-refresh', machines[1]], 'second-refresh')
     states = []
     for name, previous in zip(names, [a, other]):
-        ssh(name, '/usr/lib/werewolf/slot-update check', name + '-check-update')
-        ssh(name, '/usr/lib/werewolf/slot-update try', name + '-try-update', check=False, timeout=30)
+        update(name, 'check', name + '-check-update')
+        update(name, 'try', name + '-try-update', check=False, timeout=30)
         states.append(wait(name, releases[1], previous['boot_id']))
     b = states[0]
-    installed = ssh(names[0], 'cat /boot/slot/b/cmdline', 'signed-cmdline-bytes')
-    if installed.stdout != (update_bundle / 'slot/cmdline').read_bytes():
-        raise RuntimeError('installer changed authenticated command line bytes')
+    if not shellfree:
+        installed = ssh(names[0], 'cat /boot/slot/b/cmdline', 'signed-cmdline-bytes')
+        if installed.stdout != (update_bundle / 'slot/cmdline').read_bytes():
+            raise RuntimeError('installer changed authenticated command line bytes')
     if b['anchor'] == a['anchor']:
         raise RuntimeError('upgrade did not extend the actual TPM pair')
     raw = (machines[0] / 'authority/records' / (b['anchor'] + '.permit')).read_bytes()
     if raw[80:112].hex() != releases[0] or raw[112:144].hex() != releases[1] or raw[144:176].hex() != a['pcr11']:
         raise RuntimeError('upgrade permit failed to bind retained and candidate releases and PCR')
-    ssh(names[0], '/usr/lib/werewolf/slot-update try', 'operator-rollback', check=False, timeout=30)
+    update(names[0], 'try', 'operator-rollback', check=False, timeout=30)
     recovered = wait(names[0], releases[0], b['boot_id'], b['anchor'])
+    if shellfree and recovered['other_cmdline'].encode() != (update_bundle / 'slot/cmdline').read_bytes():
+        raise RuntimeError('installer changed authenticated command line bytes')
     run([howl, 'stop'], 'stop')
-    launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'resume')
+    launch([howl, 'run', '--with', form, '--on', provider, *root_keys], 'resume')
     recovered = wait(names[0], releases[0], recovered['boot_id'], recovered['anchor'])
     if credentials(machines[0]) != before:
         raise RuntimeError('stop/resume changed machine custody')
@@ -334,7 +380,7 @@ try:
     for cut in ('before', 'after'):
         proxy.arm(cut)
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            checking = pool.submit(ssh, names[0], '/usr/lib/werewolf/slot-update check', 'cut-' + cut,
+            checking = pool.submit(update, names[0], 'check', 'cut-' + cut,
                                    check=False, timeout=240)
             try:
                 if not proxy.hit.wait(180) or proxy.failures:
@@ -358,7 +404,7 @@ try:
             run(['limactl', 'stop', '--force', names[0]], 'force-stop-' + cut)
         else:
             run([howl, 'stop'], 'force-stop-' + cut)
-        launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'recover-' + cut)
+        launch([howl, 'run', '--with', form, '--on', provider, *root_keys], 'recover-' + cut)
         following = wait(names[0], releases[0], recovered['boot_id'],
                          recovered['anchor'] if cut == 'before' else None)
         if cut == 'after':
@@ -367,20 +413,54 @@ try:
                 raise RuntimeError('completed retirement was lost across the power cut')
         recovered = following
         print('pass: ' + cut + ' retirement cut recovered the retained release', flush=True)
-    ssh(names[0], '/usr/lib/werewolf/slot-update check', 'resume-later-install')
-    ssh(names[0], '/usr/lib/werewolf/slot-update try', 'try-unhealthy', check=False, timeout=30)
-    trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False, fault=True)
-    time.sleep(5)
-    if status(names[0])['committed']:
-        raise RuntimeError('failed keeper committed a trial')
-    ssh(names[0], '/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=30)
-    wait(names[0], releases[0], trial['boot_id'], trial['anchor'])
+    update(names[0], 'check', 'resume-later-install')
+    update(names[0], 'try', 'try-unhealthy', check=False, timeout=30)
+    if shellfree:
+        # Fail a real storage dependency after boot-counter consumption and
+        # updater readiness, before the keeper can commit the exact candidate.
+        until = time.monotonic() + 180
+        while True:
+            candidate = owner(names[0], 'status', 'trial-ready', check=False, timeout=15)
+            if candidate and candidate['ready'] and releases[2] in candidate['cmdline']:
+                if candidate['committed']:
+                    raise RuntimeError('trial committed before the disk fault was injected')
+                owner(names[0], 'pause', 'pause-trial-updater')
+                break
+            if time.monotonic() > until:
+                raise RuntimeError('trial did not reach updater readiness')
+            time.sleep(1)
+        fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
+        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', node=fault.root)))
+        trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
+        # The production deadman gets its real 600 seconds. No guest process is
+        # paused, no image is edited and no reboot is substituted for the failure.
+        began_fault = time.monotonic()
+        while observed.get('pcr11') != manifests[0]['pcr11']:
+            if time.monotonic() - began_fault > 780:
+                raise RuntimeError('storage-failed trial did not fall back through its deadman')
+            time.sleep(2)
+        fault.restore()
+        console = (machines[0] / 'console.log').read_text(errors='replace')
+        if 'did not commit in 600s; rebooting into the last good slot' not in console:
+            raise RuntimeError('missing actual unhealthy-slot deadman evidence')
+        wait(names[0], releases[0], trial['boot_id'], trial['anchor'])
+        update(names[0], 'outcome', 'record-failed-trial')
+        refused = run([howl, 'owner', names[0], 'try'], 'failed-trial-refused', check=False)
+        if refused.returncode == 0 or b'ImageRolledBack' not in refused.stderr:
+            raise RuntimeError('failed candidate was not refused')
+    else:
+        trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False, fault=True)
+        time.sleep(5)
+        if status(names[0])['committed']:
+            raise RuntimeError('failed keeper committed a trial')
+        ssh(names[0], '/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=30)
+        wait(names[0], releases[0], trial['boot_id'], trial['anchor'])
     if credentials(machines[0]) != before or credentials(machines[1]) != owner2:
         raise RuntimeError('lifecycle replaced owner or TPM custody')
     run([howl, 'delete', names[0], '--on', provider], 'delete-first')
     wait(names[1], releases[1])
     run([howl, '_local-refresh', machines[1]], 'surviving-owner-refresh')
-    ssh(names[1], '/usr/lib/werewolf/slot-update check', 'shared-issuer-survives')
+    update(names[1], 'check', 'shared-issuer-survives')
     gates = {'secure_boot', 'ipe', 'verified_root', 'rollback_protected', 'ab_upgrade',
              'operator_rollback', 'unhealthy_fallback', 'retirement_cuts', 'tamper_refused',
              'no_consumer_builds', 'no_vendor_private_keys', 'shared_issuer', 'fresh_download', 'independent_owners'}
@@ -392,6 +472,9 @@ try:
     print('pass: exact production default download, independent owners, A/B, rollback, retirement cuts and failed-trial fallback', flush=True)
 finally:
     for name, machine in zip(names, machines):
+        creation_log = machine / 'create.log'
+        if creation_log.exists():
+            shutil.copyfile(creation_log, work / (name + '-create.log'))
         console = lima_home / name / 'serial.log' if provider == 'lima' else machine / 'console.log'
         if console.exists():
             shutil.copyfile(console, work / (name + '-console.log'))

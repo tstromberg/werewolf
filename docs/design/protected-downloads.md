@@ -88,10 +88,10 @@ share prerequisites between forms, never compiled output between copies, and the
 comparison covers complete signed disks and slots. A target is skipped only when its
 digest of source, package bytes, tools and trust matches a passed signed catalog row,
 unless `force`d. Public candidates omit `boot.json.sig`. Each gate job authorizes three
-playground candidates and tests them where they boot: hosted Linux with KVM, OVMF and
-swtpm for QEMU/x86_64, self-hosted runners for arm64 QEMU and Lima. Evidence never
-crosses providers or architectures; only tested bundles publish. Pull requests run the
-QEMU lifecycle with disposable trust (`protected-images.yml`).
+candidates for its form and tests them where they boot: hosted Linux with KVM and
+swtpm for QEMU/x86_64, self-hosted arm64 QEMU and Lima runners. QEMU covers minimal,
+prod-ssh and playground through the owner channel; Lima currently covers playground.
+Tested bundles publish; PRs run QEMU with disposable trust (`protected-images.yml`).
 
 `release/prepare-protected` requires committed trust, evidence for the exact artifact,
 provider and architecture, and native admission: all fourteen evidence checks must be

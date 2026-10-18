@@ -74,6 +74,8 @@ def build(form, provider, arch, serial, output):
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     disk = work / 'disk.raw'
     disk_args = 'console=ttyAMA0' if arch == 'aarch64' else 'console=ttyS0'
+    if provider == 'qemu':
+        disk_args += ' werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3'
     if provider == 'lima':
         disk_args += ' werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.3'
     howl = str(Path('build/host/howl').resolve())

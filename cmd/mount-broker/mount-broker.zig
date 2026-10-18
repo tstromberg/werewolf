@@ -16,6 +16,7 @@ const cap_sys_admin = 21;
 const roles = [_]broker.Role{ .updater, .keeper, .stage };
 var reboot_flag: i32 = -1;
 var stop_flag: i32 = -1;
+var owner_device: ?i32 = null;
 
 pub fn main() !void {
     var log: Log = .{};
@@ -48,6 +49,12 @@ fn setUp() !void {
     );
     reboot_flag = try runitFlag("/run/runit/reboot");
     stop_flag = try runitFlag("/run/runit/stopit");
+    {
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        owner_device = try broker.openOwnerPort(threaded.io(), arena.allocator());
+    }
     var updater_group: linux.gid_t = 77;
     _ = try sandbox.sys(
         linux.setgroups(1, @ptrCast(&updater_group)),
@@ -56,11 +63,11 @@ fn setUp() !void {
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
-        "recvfrom",      "sendto",    "read",       "write",           "close",    "poll",
-        "ppoll",         "openat",    "openat2",    "fstat",           "statx",    "pread64",
-        "getdents64",    "fsopen",    "fsconfig",   "fsmount",         "sync",     "mmap",
-        "munmap",        "mremap",    "fsync",      "mkdirat",         "unlinkat", "renameat",
-        "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
+        "recvfrom",        "sendto",   "sendmsg",  "read",     "write",         "close",     "poll",
+        "ppoll",           "openat",   "openat2",  "fstat",    "statx",         "pread64",   "getdents64",
+        "fsopen",          "fsconfig", "fsmount",  "sync",     "mmap",          "munmap",    "mremap",
+        "fsync",           "mkdirat",  "unlinkat", "renameat", "clock_gettime", "nanosleep", "exit_group",
+        "restart_syscall",
     }) |name| f.allow(name);
     f.allowArg("fchmod", 1, 0o640);
     f.allowArg("fchmod", 1, 0o750);
@@ -153,7 +160,11 @@ fn heard(log: *Log, fd: i32, role: broker.Role) void {
         });
         break :failed std.mem.print(&out_buf, "no {s}\n", .{@errorName(err)}) catch "no\n";
     };
-    reply(fd, text);
+    if (role == .updater and std.mem.eql(u8, request, "owner-channel") and
+        std.mem.eql(u8, text, "ok\n"))
+    {
+        broker.sendOwnerChannel(fd, owner_device) catch reply(fd, "no OwnerChannelSend\n");
+    } else reply(fd, text);
 }
 
 fn reply(fd: i32, text: []const u8) void {
@@ -321,7 +332,7 @@ fn roleForOp(op: []const u8) !broker.Role {
         std.mem.eql(u8, op, "slot-root") or std.mem.eql(u8, op, "slot-decl") or
         std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state") or
         std.mem.eql(u8, op, "installer-runtime") or std.mem.eql(u8, op, "reboot") or
-        std.mem.eql(u8, op, "updater-ready"))
+        std.mem.eql(u8, op, "updater-ready") or std.mem.eql(u8, op, "owner-channel"))
         return .updater;
     return error.UnknownEspOperation;
 }
@@ -336,6 +347,10 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
             .service = @tagName(want_role),
         });
         return if (want_role == .stage) error.NotStageThree else error.NotSlotService;
+    }
+    if (std.mem.eql(u8, op, "owner-channel")) {
+        if (!std.mem.eql(u8, request, "owner-channel")) return error.BadRequest;
+        return "ok\n";
     }
     if (std.mem.eql(u8, op, "shutdown")) {
         if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
@@ -1248,6 +1263,7 @@ test "installer runtime accepts no paths and belongs only to the updater" {
 }
 
 test "each broker operation belongs to one socketpair role" {
+    try std.testing.expectEqual(broker.Role.updater, try roleForOp("owner-channel"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("installer-runtime"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("reboot"));
     try std.testing.expectEqual(broker.Role.keeper, try roleForOp("esp-status"));
