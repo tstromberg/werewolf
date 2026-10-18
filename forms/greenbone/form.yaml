@@ -9,9 +9,12 @@
 # See forms/greenbone/README.md.
 base: prod
 
+recipes:
+  - ../../../packages/greenbone/pg-gvm.yaml
+
 with: [postgresql, caddy, valkey]
 
-# The extension is built by melange/pg-gvm.yaml against this PostgreSQL.
+# The extension is built by ../packages/greenbone/pg-gvm.yaml against this PostgreSQL.
 packages: [postgresql-17-contrib, glib, libical~3.0]
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles

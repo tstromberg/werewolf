@@ -4,7 +4,7 @@ A form says what a werewolf machine is for. Each is a directory,
 `forms/<name>/`: `form.yaml` (the Wolfi packages and accounts apko installs,
 and what apko cannot say: the form it is built on, its services, its network
 policy, the posture checks it fails and why), `rootfs/` (files laid over the
-packages) and, where needed, `cmd/`, `test/`, `melange/` and a `README.md`.
+packages) and, where needed, `cmd/`, `test/`, distro-specific `melange/` and a README.
 A form gets the parts of the form it is built on, and of that form's base.
 [forms/README.md](../forms/README.md) lists every file and key,
 [design/forms.md](design/forms.md) how forms compose; `make list-forms`
@@ -86,14 +86,15 @@ path. Two users or groups with the same name or id fail the build.
 
 ## Packages Wolfi does not ship
 
-When Wolfi does not package a form's application, the form keeps a melange
-recipe in `forms/<name>/melange/`, in Wolfi's style (`vaultwarden` has one).
-The build runs melange in Wolfi's environment, on macOS in QEMU and on Linux
-in bubblewrap ([cmd/howl/melange.zig](../cmd/howl/melange.zig)), unpacks
-the packages over the image, and fails if they link a library that is not
-one of the form's packages, so Wolfi's fixes reach the machine through its
-updater. `howl build-apk RECIPE` builds one alone and reports what it links.
-A recipe Wolfi would accept doubles as the pull request that retires it.
+Third-party Melange contexts live in `../packages/NAME`; explicit hardening ports
+live in `../hardened-packages`. A form declares recipe paths relative to itself:
+`recipes: [../../../packages/vaultwarden/vaultwarden.yaml]`
+
+Distro-specific recipes stay beside their source, as in `forms/vuln-demo/melange`
+and `boot/tpm-stub.melange.yaml`. Without `recipes`, a form discovers `melange/*.yaml`.
+Melange builds in QEMU on macOS or bubblewrap on Linux, overlays the packages and
+checks shared-library dependencies. Missing declared recipes fail the build.
+See [package source setup](../CONTRIBUTING.md#package-sources) for checkout and CI pins.
 
 ## Private configuration files
 

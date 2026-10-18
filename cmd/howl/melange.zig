@@ -1,5 +1,5 @@
-//! melange builds the packages Wolfi does not ship from a form's melange
-//! recipes, forms/NAME/melange/*.yaml, and lays them over the image. See
+//! melange builds the packages Wolfi does not ship from a form's declared
+//! recipes in ../packages, and lays them over the image. See
 //! docs/forms.md.
 
 const std = @import("std");
@@ -41,23 +41,18 @@ fn runner(b: *B) !Runner {
     return .qemu;
 }
 
-/// recipes returns the chain's recipes, base form's first, each form's sorted.
+/// recipes returns declared recipes base first, once each. Opening each here
+/// catches a missing package checkout before any image build begins.
 pub fn recipes(io: Io, gpa: Allocator, chain: []const forms.Form) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
+    var out: std.array_hash_map.String(void) = .empty;
     for (chain) |c| {
-        const dir = try gpa.print("{s}/melange", .{c.dir});
-        var d = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch continue;
-        defer d.close(io);
-        const first = out.items.len;
-        var it = d.iterate();
-        while (try it.next(io)) |e| {
-            if (e.kind == .directory or e.name[0] == '.' or !mem.endsWith(u8, e.name, ".yaml"))
-                continue;
-            try out.append(gpa, try gpa.print("{s}/{s}", .{ dir, e.name }));
+        for (try c.recipes(io, gpa, Dir.cwd())) |path| {
+            const file = try Dir.cwd().openFile(io, path, .{});
+            file.close(io);
+            try out.put(gpa, path, {});
         }
-        mem.sortUnstable([]const u8, out.items[first..], {}, native.lessThan);
     }
-    return out.items;
+    return out.keys();
 }
 
 /// stampName returns recipe's path made a file name, ../ as up_ and / as _,
@@ -332,8 +327,8 @@ test stampName {
     defer arena.deinit();
     const a = arena.allocator();
     try testing.expectEqualStrings(
-        "forms_vaultwarden_melange_vaultwarden.yaml",
-        try stampName(a, "forms/vaultwarden/melange/vaultwarden.yaml"),
+        "up_packages_vaultwarden_vaultwarden.yaml",
+        try stampName(a, "../packages/vaultwarden/vaultwarden.yaml"),
     );
     try testing.expectEqualStrings(
         "up_up_apps_myapp_melange_x.yaml",

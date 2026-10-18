@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"golang.org/x/crypto/ssh"
 	"io"
@@ -74,7 +76,7 @@ func TestAppliance(t *testing.T) {
 		return ssh.Dial("tcp", sshAddress, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.Password(password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
 	}
 	command := func(password, argv string) ([]byte, error) {
-		c, err := dial("demo", password)
+		c, err := dial("root", password)
 		if err != nil {
 			return nil, err
 		}
@@ -86,20 +88,38 @@ func TestAppliance(t *testing.T) {
 		defer s.Close()
 		return s.CombinedOutput(argv)
 	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offeredKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(offered.PublicKey())))
+	offeredFingerprint := ssh.FingerprintSHA256(offered.PublicKey())
+	keyClient, err := ssh.Dial("tcp", sshAddress, &ssh.ClientConfig{User: "root", Auth: []ssh.AuthMethod{ssh.PublicKeys(offered)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+	if keyClient != nil {
+		keyClient.Close()
+	}
+	if err == nil {
+		t.Fatal("SSH accepted public key authentication")
+	}
 	for _, password := range []string{"werewolf-check-one", "werewolf-check-two"} {
 		output, err := command(password, "id")
-		if err != nil || !strings.Contains(string(output), "uid=") {
-			t.Fatalf("demo password login/direct id failed: %v", err)
+		if err != nil || !strings.Contains(string(output), "uid=") || strings.Contains(string(output), "uid=0(") {
+			t.Fatalf("root password login/direct id failed: %v", err)
 		}
 	}
 	t.Log("two arbitrary passwords and direct id passed")
-	if c, err := dial("root", "werewolf-check-one"); err == nil {
+	if c, err := dial("demo", "werewolf-check-one"); err == nil {
 		c.Close()
-		t.Fatal("SSH admitted root")
+		t.Fatal("SSH admitted a non-root username")
 	}
 	output, err := command("werewolf-check-one", "uname -s")
-	if err != nil || strings.TrimSpace(string(output)) != "Linux" {
-		t.Fatalf("direct uname failed: %v", err)
+	if err != nil || !strings.Contains(string(output), `"event":"narrow"`) ||
+		!strings.Contains(string(output), "\nLinux\n") {
+		t.Fatalf("direct uname failed: %v; output %q", err, output)
 	}
 	if _, err := command("werewolf-check-one", "sh -c id"); err == nil {
 		t.Fatal("SSH admitted a shell command")
@@ -108,7 +128,7 @@ func TestAppliance(t *testing.T) {
 	if err == nil || strings.Contains(string(output), "PRIVATE KEY") {
 		t.Fatal("SSH command could read the private host key")
 	}
-	c, err := dial("demo", "werewolf-check-one")
+	c, err := dial("root", "werewolf-check-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +144,7 @@ func TestAppliance(t *testing.T) {
 	}
 	s.Close()
 	c.Close()
-	c, err = dial("demo", "werewolf-check-one")
+	c, err = dial("root", "werewolf-check-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +153,7 @@ func TestAppliance(t *testing.T) {
 		t.Fatal("SSH admitted TCP forwarding")
 	}
 	c.Close()
-	t.Log("root, shell, PTY, forwarding and private-key reads refused")
+	t.Log("non-root users, shell, PTY, forwarding and private-key reads refused")
 	marker := fmt.Sprintf("appliance-%d", time.Now().UnixNano())
 	if status, _, err := get(urls["solr"]+"/solr/", map[string]string{"X-Demo-Check": marker}); err != nil || status >= 500 {
 		t.Fatalf("logged request failed: %v", err)
@@ -141,11 +161,11 @@ func TestAppliance(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		_, body, err := get(dashboardURL+"/events.json", nil)
-		if err == nil && strings.Contains(body, marker) && strings.Contains(body, `"kind":"exec"`) && strings.Contains(body, `"kind":"violation"`) && strings.Contains(body, `"kind":"ssh"`) {
+		if err == nil && strings.Contains(body, marker) && strings.Contains(body, `"kind":"exec"`) && strings.Contains(body, `"kind":"violation"`) && strings.Contains(body, `"kind":"ssh"`) && strings.Contains(body, offeredKey) && strings.Contains(body, offeredFingerprint) && strings.Contains(body, `SSH_USER=\"root\"`) && strings.Contains(body, `SSH_CLIENT=\"SSH-2.0-Go`) {
 			if strings.Contains(body, "werewolf-check-one") || strings.Contains(body, "werewolf-check-two") {
 				t.Fatal("SSH password leaked into journal")
 			}
-			t.Log("request, exec, SSH and violation records visible")
+			t.Log("request, exec, offered SSH key, authentication and violation records visible")
 			break
 		}
 		if time.Now().After(deadline) {

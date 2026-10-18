@@ -52,6 +52,32 @@ pub fn main(init: std.process.Init) !void {
         "",
     );
     try ctx.result(io, suite, "home-confined", refused.status >= 400);
+    const log4j = try Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar",
+        gpa,
+        .limited(3 << 20),
+    );
+    const log_config = try Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/lib/solr/log4j2.xml",
+        gpa,
+        .limited(16384),
+    );
+    // The hardened JDK and no-connect service policy contain Log4Shell's
+    // impact. Keep the vulnerable lookup implementation and message layout
+    // present so an application/package update cannot silently fix the demo.
+    try ctx.result(
+        io,
+        suite,
+        "cve-2021-44228-present-contained",
+        std.mem.indexOf(
+            u8,
+            log4j,
+            "org/apache/logging/log4j/core/lookup/JndiLookup.class",
+        ) != null and
+            std.mem.indexOf(u8, log_config, "%m") != null,
+    );
     const service = try Io.Dir.cwd().readFileAlloc(
         io,
         "/etc/sv/solr/service",
@@ -63,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         service,
         "exec /usr/bin/java ",
     ) and
+        std.mem.indexOf(u8, service, "formatMsgNoLookups") == null and
         std.mem.indexOf(u8, service, "run /bin/sh") == null and
         absent(io, "/usr/bin/bash") and absent(io, "/usr/bin/busybox"));
     const packages = try Io.Dir.cwd().readFileAlloc(

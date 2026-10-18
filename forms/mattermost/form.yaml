@@ -5,9 +5,12 @@
 # signs up without an invitation, and plugins, which are code, are off.
 # Mattermost keeps its tables and its configuration in a schema of its
 # own, and its files in /data/svc/mattermost. melange packages upstream's
-# release (forms/mattermost/melange/mattermost-team.yaml). See
+# release (../packages/mattermost/mattermost-team.yaml). See
 # forms/mattermost/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/mattermost/mattermost-team.yaml
 
 with: [postgresql, caddy]
 

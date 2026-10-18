@@ -67,7 +67,11 @@ elif [ -z "$native_tool" ]; then
 		vars=/usr/share/AAVMF/AAVMF_VARS.fd ;;
 	x86_64)
 		code=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
-		vars=/usr/share/OVMF/OVMF_VARS_4M.fd ;;
+		vars=/usr/share/OVMF/OVMF_VARS_4M.fd
+        if [ "$(uname -s)" = FreeBSD ]; then
+            code=/usr/local/share/uefi-firmware/BHYVE_UEFI_CODE.fd
+            vars=/usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd
+        fi ;;
 	esac
     # Arch packages use edk2's dotted 4m names; keep code/vars from the same pair.
     if [ "$arch" = x86_64 ] && [ ! -f "$code" ] &&

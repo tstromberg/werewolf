@@ -27,6 +27,7 @@
           "persisted-workflow",
           "run-workflow",
           "code-runner",
+          "cve-2025-68613-present-contained",
           "direct-node",
           "hardened-node",
           "owner-setup",
@@ -41,6 +42,7 @@
           "persisted-workflow",
           "run-workflow",
           "code-runner",
+          "cve-2025-68613-present-contained",
           "direct-node",
           "hardened-node"
         ]

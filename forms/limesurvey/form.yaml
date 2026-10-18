@@ -3,13 +3,16 @@
 # system user, reaches by MariaDB's socket with no password (unix_socket).
 # Wolfi does not ship LimeSurvey: melange lays the project's release,
 # pinned by sha256, in /usr/share/limesurvey, read-only, with its tmp/ and
-# upload/ links to /data (forms/limesurvey/melange/limesurvey.yaml). The
+# upload/ links to /data (../packages/limesurvey/limesurvey.yaml). The
 # form brings its config.php, which turns the web installer off, and the
 # installer that sets the site up from the machine's settings before
 # php-fpm serves it (usr/share/werewolf-limesurvey/install.php). Plugins
 # come with the image alone. TLS is in front of it: a caddy machine or the
 # cloud's load balancer. See forms/limesurvey/README.md.
 base: php
+
+recipes:
+  - ../../../packages/limesurvey/limesurvey.yaml
 
 with: [mariadb-local]
 

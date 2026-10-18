@@ -5,10 +5,13 @@
 # port for them. Every route but /_/health wants the bearer token from
 # the config. Operators reach the machine by security key (the sshd
 # form). Wolfi does not ship postdoc: melange builds it
-# (forms/postdoc-server/melange/postdoc.yaml). Its rules and model are
+# (../packages/postdoc-server/postdoc.yaml). Its rules and model are
 # downloaded at start into /data/svc/postdoc. See
 # forms/postdoc-server/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/postdoc-server/postdoc.yaml
 
 with: [cloudflared, sshd]
 

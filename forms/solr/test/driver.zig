@@ -52,6 +52,13 @@ pub fn main(init: std.process.Init) !void {
         "",
     );
     try ctx.result(io, suite, "home-confined", refused.status >= 400);
+    try ctx.result(
+        io,
+        suite,
+        "cve-2021-44228-fixed",
+        absent(io, "/usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar") and
+            !absent(io, "/usr/lib/solr/server/lib/ext/log4j-core-2.25.3.jar"),
+    );
     const service = try Io.Dir.cwd().readFileAlloc(
         io,
         "/etc/sv/solr/service",

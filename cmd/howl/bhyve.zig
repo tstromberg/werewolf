@@ -16,6 +16,121 @@ pub const user_ip = "10.0.2.15/24";
 pub const user_gw = "10.0.2.2";
 pub const user_dns = "10.0.2.3";
 
+pub const Mode = enum { tap, slirp };
+pub const Backend = union(Mode) { tap: []const u8, slirp: []const Forward };
+pub const Network = struct {
+    mode: Mode = .tap,
+    tap: ?[]const u8 = null,
+    bridge: ?[]const u8 = null,
+    owner: ?[]const u8 = null,
+
+    pub fn backend(n: Network, fwds: []const Forward) Backend {
+        return if (n.mode == .slirp) .{ .slirp = fwds } else .{ .tap = n.tap.? };
+    }
+};
+
+/// TAP is the default; never silently fall back to SLIRP after setup fails.
+pub fn prepareNetwork(
+    io: Io,
+    gpa: Allocator,
+    at: []const u8,
+    mode: Mode,
+    bridge: ?[]const u8,
+    why: *howl.Why,
+) !Network {
+    if (mode == .slirp) {
+        try downNetwork(io, gpa, at, null);
+        return .{ .mode = .slirp };
+    }
+    const result = try networkHelper(io, gpa, "up", at, bridge);
+    if (result.term != .exited or result.term.exited != 0)
+        return why.refuse("TAP setup failed: {s}", .{std.mem.trim(u8, result.stderr, " \n")});
+    return std.json.parseFromSliceLeaky(Network, gpa, result.stdout, .{});
+}
+
+fn networkHelper(
+    io: Io,
+    gpa: Allocator,
+    operation: []const u8,
+    at: []const u8,
+    argument: ?[]const u8,
+) !std.process.RunResult {
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(gpa, &.{ "python3", "-c", @import("files").bhyve_network, operation, at });
+    if (argument) |value| try args.append(gpa, value);
+    return std.process.run(
+        gpa,
+        io,
+        .{ .argv = args.items, .stdout_limit = .limited(8192), .stderr_limit = .limited(8192) },
+    );
+}
+
+/// An old supervisor may remove only the TAP it started, not its successor's.
+pub fn downNetwork(io: Io, gpa: Allocator, at: []const u8, owner: ?[]const u8) !void {
+    Dir.cwd().access(
+        io,
+        try gpa.print("{s}/bhyve-network.json", .{at}),
+        .{},
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    const result = try networkHelper(io, gpa, "down", at, owner);
+    if (result.term != .exited or result.term.exited != 0) {
+        howl.say(io, "TAP cleanup failed: {s}", .{std.mem.trim(u8, result.stderr, " \n")});
+        return error.BhyveNetworkCleanupFailed;
+    }
+}
+
+fn networkOwner(io: Io, gpa: Allocator, at: []const u8) !?[]const u8 {
+    const text = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/bhyve-network.json", .{at}),
+        gpa,
+        .limited(8192),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return (try std.json.parseFromSliceLeaky(Network, gpa, text, .{})).owner;
+}
+
+pub fn staticAddress(gpa: Allocator, tar: []const u8) !?[]const u8 {
+    var reader: Io.Reader = .fixed(tar);
+    var names: [Dir.max_path_bytes]u8 = undefined;
+    var links: [Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(
+        &reader,
+        .{ .file_name_buffer = &names, .link_name_buffer = &links },
+    );
+    while (try it.next()) |entry| if (std.mem.eql(u8, entry.name, "network")) {
+        if (entry.kind != .file or reader.seek > tar.len or entry.size > tar.len - reader.seek)
+            return error.BadNetwork;
+        var reason: []const u8 = "";
+        const n = @import("network").parse(
+            tar[reader.seek..][0..@intCast(entry.size)],
+            &reason,
+        ) orelse return error.BadNetwork;
+        return try gpa.dupe(u8, n.ip[0..std.mem.findScalar(u8, n.ip, '/').?]);
+    };
+    return null;
+}
+
+/// Read only this boot's DHCP announcements, never a previous lease.
+pub fn awaitAddress(io: Io, gpa: Allocator, log: []const u8, seen: u64) !?[]const u8 {
+    const buf = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(buf);
+    for (0..600) |_| {
+        if (Dir.cwd().openFile(io, log, .{})) |file| {
+            defer file.close(io);
+            const n = try file.readPositionalAll(io, buf, seen);
+            if (@import("proxmox.zig").address(buf[0..n])) |ip| return try gpa.dupe(u8, ip);
+        } else |_| {}
+        try io.sleep(.fromMilliseconds(50), .awake);
+    }
+    return null;
+}
+
 /// installed reports whether this is FreeBSD on x86_64 with vmm loaded
 /// (/dev/vmmctl exists; kldload vmm). bhyve on arm64 needs other firmware
 /// and flags, which howl does not support yet.
@@ -62,8 +177,8 @@ pub fn forwards(gpa: Allocator, name: []const u8, ports: []const u16) ![]const F
 }
 
 /// argv returns bhyve's command line: the disk and a read-only config tar
-/// on virtio, slirp with fwds, an RNG, the serial console on stdout, and
-/// UEFI firmware. slirp is "open" so updates can reach out, and so that
+/// on virtio, TAP or explicitly selected SLIRP, an RNG, the serial console
+/// on stdout, and UEFI firmware. slirp is "open" so updates can reach out, and so that
 /// FreeBSD 15.1's slirp helper skips capability mode, where, as root,
 /// getpwnam(nobody) fails and the helper dies, killing bhyve with SIGPIPE.
 /// -w: Linux reads MSRs bhyve lacks. -H: yield the CPU when idle. -u: UTC
@@ -73,16 +188,41 @@ pub fn argv(
     name: []const u8,
     disk: []const u8,
     config: []const u8,
-    fwds: []const Forward,
+    net: Backend,
     import_disk: ?[]const u8,
 ) ![]const []const u8 {
+    return command(gpa, name, disk, config, net, import_disk, null);
+}
+
+pub const Protection = struct {
+    code: []const u8,
+    vars: []const u8,
+    tpm_socket: []const u8,
+};
+
+pub fn command(
+    gpa: Allocator,
+    name: []const u8,
+    disk: []const u8,
+    config: []const u8,
+    backend: Backend,
+    import_disk: ?[]const u8,
+    protection: ?Protection,
+) ![]const []const u8 {
     var net: std.ArrayList(u8) = .empty;
-    try net.appendSlice(gpa, "virtio-net,slirp,open");
-    for (fwds, 0..) |f, i| try net.print(
-        gpa,
-        "{s}tcp:127.0.0.1:{d}-:{d}",
-        .{ if (i == 0) ",hostfwd=" else ";", f.host, f.guest },
-    );
+    switch (backend) {
+        .tap => |tap| {
+            if (tap.len < 4 or !std.mem.startsWith(u8, tap, "tap")) return error.BadTapName;
+            for (tap[3..]) |c| if (!std.ascii.isDigit(c)) return error.BadTapName;
+            try net.print(gpa, "virtio-net,{s}", .{tap});
+        },
+        .slirp => |fwds| {
+            try net.appendSlice(gpa, "virtio-net,slirp,open");
+            for (fwds, 0..) |f, i| try net.print(gpa, "{s}tcp:127.0.0.1:{d}-:{d}", .{
+                if (i == 0) ",hostfwd=" else ";", f.host, f.guest,
+            });
+        },
+    }
     var out: std.ArrayList([]const u8) = .empty;
     try out.appendSlice(gpa, &.{
         "bhyve",
@@ -110,13 +250,16 @@ pub fn argv(
         "-s",
         try gpa.print("6,virtio-blk,{s},ro", .{p}),
     });
-    try out.appendSlice(gpa, &.{
-        "-l",
-        "com1,stdio",
-        "-l",
-        "bootrom," ++ firmware,
-        name,
-    });
+    try out.appendSlice(gpa, &.{ "-l", "com1,stdio", "-l" });
+    if (protection) |p| {
+        try out.append(gpa, try gpa.print("bootrom,{s},{s}", .{ p.code, p.vars }));
+        // The TPM's ACPI table and event log are delivered through fw_cfg.
+        try out.appendSlice(gpa, &.{
+            "-o", "lpc.fwcfg=qemu",
+            "-l", try gpa.print("tpm,swtpm,{s}", .{p.tpm_socket}),
+        });
+    } else try out.append(gpa, "bootrom," ++ firmware);
+    try out.append(gpa, name);
     return out.items;
 }
 
@@ -143,7 +286,62 @@ pub fn keep(
     config: []const u8,
     bhyve: []const []const u8,
 ) !void {
+    return keepWith(io, gpa, name, config, bhyve, null);
+}
+
+/// Keep the TPM under the invoking user's custody, elevating only bhyve.
+/// A new emulator on every boot resets PCRs while retaining enrolled NV.
+pub fn keepProtected(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    at: []const u8,
+    bhyve: []const []const u8,
+) !void {
+    return keepWith(io, gpa, name, try gpa.print("{s}/config.tar", .{at}), bhyve, at);
+}
+
+/// prepareSupervisor creates the lifetime lock as the invoking user before
+/// daemon elevates the supervisor. The root supervisor then opens the same
+/// 0600 file, while later create and stop calls by that user can inspect it.
+pub fn prepareSupervisor(io: Io, gpa: Allocator, at: []const u8) !void {
+    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/bhyve.lock", .{at}), .{
+        .truncate = false,
+        .permissions = .fromMode(0o600),
+    });
+    guard.close(io);
+}
+
+fn keepWith(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    config: []const u8,
+    bhyve: []const []const u8,
+    protected_at: ?[]const u8,
+) !void {
+    const at = std.fs.path.dirname(config) orelse return error.BadConfigPath;
+    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/bhyve.lock", .{at}), .{
+        .truncate = false,
+        .permissions = .fromMode(0o600),
+    });
+    defer guard.close(io);
+    if (!try guard.tryLock(io, .exclusive)) return error.BhyveAlreadyRunning;
+    defer guard.unlock(io);
+    defer if (protected_at) |secured| @import("local-secure.zig").stopTpmAt(
+        io,
+        gpa,
+        secured,
+    ) catch {};
+    const owner = try networkOwner(io, gpa, at);
+    defer if (owner) |token| downNetwork(io, gpa, at, token) catch {};
     while (true) {
+        if (Dir.cwd().access(io, try gpa.print("{s}/bhyve.stop", .{at}), .{})) |_|
+            return
+        else |err| {
+            if (err != error.FileNotFound) return err;
+        }
+        if (protected_at) |secured| try @import("local-secure.zig").restartTpmAt(io, gpa, secured);
         var child = try std.process.spawn(io, .{
             .argv = bhyve,
             .stdin = .pipe,
@@ -160,10 +358,77 @@ pub fn keep(
             else => "an error, or the VM was destroyed",
         } });
         if (code == 4) return;
-        _ = std.process.run(gpa, io, .{ .argv = try destroy(gpa, name) }) catch {};
+        const root = if (protected_at != null) try asRoot(io) else &.{};
+        _ = std.process.run(gpa, io, .{
+            .argv = try std.mem.concat(gpa, []const u8, &.{ root, try destroy(gpa, name) }),
+        }) catch {};
         if (code != 0) return;
         Dir.cwd().access(io, config, .{}) catch return;
     }
+}
+
+test "protected bhyve keeps enrolled firmware and uses the TPM command socket" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const line = try std.mem.join(gpa, " ", try command(gpa, "edge", "/m/disk.im" ++
+        "g", "/m/config.tar", .{
+        .tap = "tap7",
+    }, null, .{
+        .code = "/m/code.fd",
+        .vars = "/m/vars.fd",
+        .tpm_socket = "/private-tpm/data.sock",
+    }));
+    try testing.expect(std.mem.find(u8, line, "bootrom,/m/code.fd,/m/vars.fd") != null);
+    try testing.expect(std.mem.find(u8, line, "-o lpc.fwcfg=qemu") != null);
+    try testing.expect(std.mem.find(u8, line, "tpm,swtpm,/private-tpm/data.sock") != null);
+    try testing.expect(std.mem.find(u8, line, firmware) == null);
+}
+
+pub fn supervised(io: Io, gpa: Allocator, at: []const u8) !bool {
+    const guard = Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/bhyve.lock", .{at}),
+        .{ .mode = .read_write },
+    ) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer guard.close(io);
+    if (try guard.tryLock(io, .exclusive)) {
+        guard.unlock(io);
+        return false;
+    }
+    return true;
+}
+
+/// Wait for the supervisor and its child before stopping TPM custody.
+pub fn stop(io: Io, gpa: Allocator, name: []const u8, at: []const u8) !void {
+    const owner = try networkOwner(io, gpa, at);
+    const marker = try Dir.cwd().createFile(io, try gpa.print("{s}/bhyve.stop", .{at}), .{
+        .permissions = .fromMode(0o600),
+    });
+    marker.close(io);
+    const root = try asRoot(io);
+    for (0..100) |_| {
+        if (try exists(io, gpa, name)) {
+            const result = try std.process.run(gpa, io, .{
+                .argv = try std.mem.concat(gpa, []const u8, &.{ root, try destroy(gpa, name) }),
+            });
+            if (result.term != .exited or result.term.exited != 0) return error.BhyveStopFailed;
+        }
+        if (!try supervised(io, gpa, at)) {
+            if (owner) |token| try downNetwork(io, gpa, at, token);
+            return;
+        }
+        try io.sleep(.fromMilliseconds(100), .awake);
+    }
+    return error.BhyveStopTimeout;
+}
+
+pub fn stopProtected(io: Io, gpa: Allocator, name: []const u8, at: []const u8) !void {
+    try stop(io, gpa, name, at);
+    try @import("local-secure.zig").stopTpmAt(io, gpa, at);
 }
 
 const testing = std.testing;
@@ -185,10 +450,10 @@ test argv {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const a = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", &.{
+    const a = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", .{ .slirp = &.{
         .{ .host = 23400, .guest = 22 },
         .{ .host = 23401, .guest = 443 },
-    }, null);
+    } }, null);
     try testing.expectEqualStrings("bhyve", a[0]);
     try testing.expectEqualStrings("edge", a[a.len - 1]);
     try testing.expectEqualStrings(
@@ -196,10 +461,46 @@ test argv {
         a[13],
     );
     try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[17]);
-    const brought = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", &.{}, "/m/import.img");
+    const brought = try argv(
+        gpa,
+        "edge",
+        "/m/disk.img",
+        "/m/config.tar",
+        .{ .tap = "tap7" },
+        "/m/import.img",
+    );
+    try testing.expectEqualStrings("2,virtio-net,tap7", brought[13]);
     try testing.expectEqualStrings("6,virtio-blk,/m/import.img,ro", brought[21]);
-    const none = try argv(gpa, "m", "/d", "/c", &.{}, null);
+    const none = try argv(gpa, "m", "/d", "/c", .{ .slirp = &.{} }, null);
     try testing.expectEqualStrings("2,virtio-net,slirp,open", none[13]);
     const d = try destroy(gpa, "edge");
     try testing.expectEqualStrings("--vm=edge", d[1]);
+}
+
+test "bhyve TAP names cannot inject backend options" {
+    for ([_][]const u8{ "", "tap", "tap1,slirp", "tap1;bad", "re0" }) |tap|
+        try testing.expectError(
+            error.BadTapName,
+            argv(testing.allocator, "m", "/d", "/c", .{ .tap = tap }, null),
+        );
+    try testing.expectEqual(Mode.tap, (Network{}).mode);
+}
+
+test "bhyve TAP reads explicit static addresses, not SLIRP defaults" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const empty = try howl.writeTar(gpa, &.{});
+    try testing.expectEqual(null, try staticAddress(gpa, empty));
+    const tar = try howl.writeTar(gpa, &.{.{
+        .path = "network",
+        .data = "werewolf.ip=10.9.8.50/24 werewolf.gw=10.9.8.1\n",
+        .from = "test",
+    }});
+    try testing.expectEqualStrings("10.9.8.50", (try staticAddress(gpa, tar)).?);
+    const invalid = try howl.writeTar(
+        gpa,
+        &.{.{ .path = "network", .data = "werewolf.ip=not-an-ip", .from = "test" }},
+    );
+    try testing.expectError(error.BadNetwork, staticAddress(gpa, invalid));
 }

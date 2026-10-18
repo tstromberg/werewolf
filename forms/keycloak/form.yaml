@@ -5,9 +5,12 @@
 # by PostgreSQL's socket. Its links name the base URL alone, whatever a
 # request's Host says. Its first administrator comes from the config
 # before it serves. Wolfi's Keycloak is old and brings bash: melange
-# builds upstream's release (forms/keycloak/melange/keycloak.yaml), and
+# builds upstream's release (../packages/keycloak/keycloak.yaml), and
 # java starts it, without kc.sh. See forms/keycloak/README.md.
 base: jre
+
+recipes:
+  - ../../../packages/keycloak/keycloak.yaml
 
 with: [postgresql, caddy]
 

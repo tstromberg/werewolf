@@ -1,2 +1,5 @@
 # Optional read-only model assets; CPU execution comes from the ONNX runtime.
 base: app
+
+recipes:
+  - ../../../packages/onnx-minilm/minilm.yaml

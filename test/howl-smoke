@@ -33,6 +33,10 @@ out=$("$howl" upload missing.qcow2 --on aws 2>&1)
 "$howl" create --build web --with python-app --app ./myapp -h >/dev/null 2>&1 ||
 	fail "README: howl create web --with python-app --app ./myapp"
 "$howl" run --build --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"
+out=$("$howl" run --build --with vuln-demo -n 2>&1) || fail "README: howl run --with vuln-demo --build: $out"
+echo "$out" | grep -q 'as it is' || fail "vuln-demo should run without config: $out"
+help=$("$howl" pack --build --with vuln-demo -h 2>&1) || fail "vuln-demo config help: $help"
+! echo "$help" | grep -q -- '--n8n-runners-auth-token' || fail "vuln-demo exposed its internal runner token as required config"
 "$howl" run --build --with go-example -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with go-example"
 "$howl" create --build web --with python-example --on gcp -h >/dev/null 2>&1 ||
 	fail "examples: howl create web --with python-example --on gcp"

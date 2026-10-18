@@ -48,6 +48,7 @@ pub const usage =
     "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] " ++
     "[--size TYPE] " ++
     "[--allow-from me|CIDR] " ++
+    "[--network tap|slirp] [--bridge NAME] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -98,6 +99,7 @@ pub fn main(init: std.process.Init) void {
             versions,
             _build,
             _bhyve,
+            @"_bhyve-secure",
             _firecracker,
             _unpack,
             @"_boot-permit",
@@ -144,6 +146,10 @@ pub fn main(init: std.process.Init) void {
             why.refuse("_bhyve NAME CONFIG BHYVE...", .{})
         else
             bhyve.keep(io, gpa, args[2], args[3], args[4..]),
+        .@"_bhyve-secure" => if (args.len < 5)
+            why.refuse("_bhyve-secure NAME DIR BHYVE...", .{})
+        else
+            bhyve.keepProtected(io, gpa, args[2], args[3], args[4..]),
         ._firecracker => if (args.len != 3)
             why.refuse("_firecracker DIR", .{})
         else
@@ -290,6 +296,8 @@ const reserved = [_][]const u8{
     "app",
     "allow-from",
     "disable",
+    "network",
+    "bridge",
 };
 
 /// chain returns form's chain, base first, as the build lays it out
@@ -566,6 +574,9 @@ pub const Options = struct {
     ip: ?[]const u8 = null,
     gw: ?[]const u8 = null,
     dns: ?[]const u8 = null,
+    /// bhyve defaults to TAP on an existing bridge; SLIRP is explicit.
+    network: ?bhyve.Mode = null,
+    bridge: ?[]const u8 = null,
     data_key: ?[]const u8 = null,
     update_policy: ?[]const u8 = null,
     root_keys: ?[]const u8 = null,
@@ -650,6 +661,8 @@ pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.gw
         else if (std.mem.eql(u8, flag, "dns"))
             &o.dns
+        else if (std.mem.eql(u8, flag, "bridge"))
+            &o.bridge
         else if (std.mem.eql(u8, flag, "data-key"))
             &o.data_key
         else if (std.mem.eql(u8, flag, "update-policy"))
@@ -669,6 +682,10 @@ pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
         if (slot) |s| {
             if (s.* != null) return why.refuse("--{s} given twice", .{flag});
             s.* = v;
+        } else if (std.mem.eql(u8, flag, "network")) {
+            if (o.network != null) return why.refuse("--network given twice", .{});
+            o.network = std.meta.stringToEnum(bhyve.Mode, v) orelse
+                return why.refuse("--network {s}: tap or slirp, for --on bhyve", .{v});
         } else if (std.mem.eql(u8, flag, "on")) {
             if (o.on != null) return why.refuse("--on given twice", .{});
             o.on = std.meta.stringToEnum(Platform, v) orelse
@@ -1118,6 +1135,8 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
     // --build, which reads forms from this checkout, main has taken.
     _, const args = try takeFlag(gpa, taken, &.{"--build"});
     const o = try options(gpa, args, why);
+    if (o.network != null or
+        o.bridge != null) return why.refuse("--network and --bridge are run's and create's", .{});
     if (o.name) |n| return why.refuse("{s}: pack takes one form, and no name", .{n});
     if (o.arch != null or o.size != null) return why.refuse("{s}, create's", .{sized_only});
     if (o.allow_from != null) return why.refuse(
@@ -1198,6 +1217,12 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try row(w, "--ip CIDR", "network: an address, where no DHCP gives one");
     try row(w, "--gw ADDR", "network: the default route");
     try row(w, "--dns ADDR", "network: the resolver");
+    try row(w, "--network tap|slirp", "bhyve: TAP by default; SLIRP keeps localhost port forwards");
+    try row(
+        w,
+        "--bridge NAME",
+        "bhyve TAP: existing bridge; auto-detected when there is exactly one",
+    );
     try row(w, "--data-key FILE", "data.key: /data in LUKS2");
     try row(w, "--root-keys FILE", "authorized_keys: root's, where the form runs sshd");
     try row(
@@ -1771,6 +1796,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const eng = engineFor(io, gpa, o.on, o.protected());
     const on = eng.on;
+    try bhyveNetworkOptions(o, on, why);
     if (!o.help) try requireProtection(on, launch, why);
     o.on = on;
     milestones.enabled = !o.help and !verbose;
@@ -1819,6 +1845,31 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     if (on == .lima) {
         try @import("local-secure.zig").reconcileLima(io, gpa, name, why);
     }
+    // `howl run` owns one disposable machine. Older howl releases made it
+    // without the protected enrollment profile, so replace that legacy VM
+    // before a source build instead of building for an instance we cannot
+    // resume and refusing it only at launch time.
+    if (replacing and o.protected() and std.mem.eql(u8, name, run_name)) {
+        if (madeOn(io, gpa, name)) |previous| {
+            const profile = try gpa.print(
+                "{s}/authority/profile.json",
+                .{try machineDir(gpa, name)},
+            );
+            const enrolled = if (Dir.cwd().access(io, profile, .{}))
+                true
+            else |err| switch (err) {
+                error.FileNotFound => false,
+                else => return err,
+            };
+            if (!enrolled) {
+                milestones.enter(.{
+                    .name = "Replacing the previous unenrolled run VM",
+                    .short = "replace",
+                });
+                try verbs.remove(io, gpa, name, previous, why);
+            }
+        }
+    }
     if (o.boot_image != null) try @import("local-secure.zig").resumeDownload(
         io,
         gpa,
@@ -1855,7 +1906,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     );
     if (on.here() and ((o.arch != null and o.arch != hostArch()) or o.size != null))
         return why.refuse("{s}: {t} runs this machine's arch", .{ sized_only, on });
-    // On Lima or bhyve, a form with no DHCP client gets the hypervisor's
+    // On Lima or explicitly selected SLIRP, a form with no DHCP client gets the hypervisor's
     // user network in its tar (Lima's, as a Lima-managed machine's command
     // line sets it, or bhyve's slirp), unless the flags or --config DIR
     // give one.
@@ -1871,7 +1922,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         fc_dns = o.dns;
         o.dns = null;
     }
-    const dhcp = dev or !(on_lima or on == .bhyve) or try hasDhcp(io, gpa, o.form, why);
+    const on_slirp = on == .bhyve and o.network == .slirp;
+    const dhcp = dev or !(on_lima or on_slirp) or try hasDhcp(io, gpa, o.form, why);
     if (!dhcp and o.ip == null and o.gw == null and o.dns == null) {
         const given = if (o.config) |d|
             if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "network" }), .{}))
@@ -1982,6 +2034,41 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .disk => unreachable,
     }
     try @import("apply.zig").enroll(io, gpa, name, o, on, why);
+}
+
+fn bhyveNetworkOptions(o: Options, on: Platform, why: *Why) !void {
+    if ((o.network != null or o.bridge != null) and on != .bhyve)
+        return why.refuse("--network and --bridge are for --on bhyve", .{});
+    if (o.network == .slirp and o.bridge != null)
+        return why.refuse("--bridge goes with TAP, not --network slirp", .{});
+}
+
+test "bhyve network selection defaults to TAP and retains explicit SLIRP" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const tap = try options(
+        gpa,
+        &.{ "playground", "--on", "bhyve", "--bridge", "re0bridge" },
+        &why,
+    );
+    try testing.expectEqual(bhyve.Mode.tap, tap.network orelse .tap);
+    try bhyveNetworkOptions(tap, .bhyve, &why);
+    const slirp = try options(gpa, &.{ "playground", "--network=slirp" }, &why);
+    try testing.expectEqual(bhyve.Mode.slirp, slirp.network.?);
+    try testing.expectError(error.Refused, bhyveNetworkOptions(slirp, .qemu, &why));
+    var bad = slirp;
+    bad.bridge = "re0bridge";
+    try testing.expectError(error.Refused, bhyveNetworkOptions(bad, .bhyve, &why));
+    try testing.expectError(
+        error.Refused,
+        options(gpa, &.{ "playground", "--network=other" }, &why),
+    );
+    try testing.expectError(
+        error.Refused,
+        options(gpa, &.{ "playground", "--network=tap", "--network=slirp" }, &why),
+    );
 }
 
 /// listens returns the TCP ports form serves, as its chain's net lines

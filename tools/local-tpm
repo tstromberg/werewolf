@@ -27,7 +27,7 @@ def request(directory, message):
         return client.recv(64) == b'OK'
 
 
-def serve(authority, directory):
+def serve(authority, directory, backend):
     os.umask(0o077)
     with (authority / 'tpm-service.lock').open('a+b') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -37,15 +37,19 @@ def serve(authority, directory):
             raise ValueError('missing enrolled TPM state')
         directory.mkdir(mode=0o700, exist_ok=True)
         check(directory)
-        for name in ['service.sock', 'tpm.sock']:
+        for name in ['service.sock', 'tpm.sock', 'data.sock']:
             (directory / name).unlink(missing_ok=True)
-        process = subprocess.Popen(['swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(state),
-                                    '--ctrl', 'type=unixio,path=' + str(directory / 'tpm.sock'),
-                                    '--flags', 'not-need-init'], stdin=subprocess.DEVNULL)
+        args = ['swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(state),
+                '--ctrl', 'type=unixio,path=' + str(directory / 'tpm.sock'),
+                '--flags', 'not-need-init']
+        if backend == 'bhyve':
+            args += ['--server', 'type=unixio,path=' + str(directory / 'data.sock')]
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL)
         (authority / 'tpm.pid').write_text(str(process.pid) + '\n')
         try:
             until = time.monotonic() + 5
-            while not (directory / 'tpm.sock').exists():
+            while not (directory / 'tpm.sock').exists() or (backend == 'bhyve' and
+                                                          not (directory / 'data.sock').exists()):
                 if process.poll() is not None or time.monotonic() > until:
                     raise RuntimeError('swtpm failed to start')
                 time.sleep(0.05)
@@ -66,7 +70,7 @@ def serve(authority, directory):
                             process.wait(timeout=10)
                             connection.sendall(b'OK')
                             return
-                        if command == b'STATUS':
+                        if command == b'STATUS ' + backend.encode():
                             connection.sendall(b'OK')
                 raise RuntimeError('swtpm exited unexpectedly')
         finally:
@@ -78,16 +82,19 @@ def serve(authority, directory):
                     process.kill()
                     process.wait()
             (authority / 'tpm.pid').unlink(missing_ok=True)
-            for name in ['service.sock', 'tpm.sock']:
+            for name in ['service.sock', 'tpm.sock', 'data.sock']:
                 (directory / name).unlink(missing_ok=True)
             directory.rmdir()
 
 
 def main():
-    operation, source, sockets = sys.argv[1:]
+    operation, source, sockets = sys.argv[1:4]
+    backend = sys.argv[4] if len(sys.argv) == 5 else 'qemu'
+    if backend not in ('qemu', 'bhyve'):
+        raise ValueError('unknown TPM backend')
     authority, directory = Path(source).resolve(), Path(sockets)
     if operation == 'serve':
-        serve(authority, directory)
+        serve(authority, directory, backend)
         return
     if operation == 'stop':
         deadline = time.monotonic() + 12
@@ -110,18 +117,18 @@ def main():
     if operation != 'start':
         raise ValueError('unknown operation')
     try:
-        if request(directory, 'STATUS'):
+        if request(directory, 'STATUS ' + backend):
             return
     except (FileNotFoundError, ConnectionRefusedError):
         pass
     with (authority / 'tpm-service.log').open('ab') as log:
         child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve',
-                                  str(authority), str(directory)], stdin=subprocess.DEVNULL,
+                                  str(authority), str(directory), backend], stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=log, start_new_session=True)
     until = time.monotonic() + 8
     while child.poll() is None and time.monotonic() < until:
         try:
-            if request(directory, 'STATUS'):
+            if request(directory, 'STATUS ' + backend):
                 return
         except (FileNotFoundError, ConnectionRefusedError):
             time.sleep(0.05)

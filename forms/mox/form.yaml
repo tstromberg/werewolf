@@ -2,11 +2,14 @@
 # :465 and :587, IMAP over TLS on :993, and on :443 its webmail, account
 # and admin pages, MTA-STS and autoconfig, with certificates it gets
 # itself. Wolfi does not ship Mox: melange builds it from a pinned release
-# (forms/mox/melange/mox.yaml), with one patch so it starts as its own
+# (../packages/mox/mox.yaml), with one patch so it starts as its own
 # user. leash starts it (etc/sv/mox/service) as the mox user, after
 # mox-setup (forms/mox/cmd/mox-setup) writes its configuration from the
 # machine's settings. See forms/mox/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/mox/mox.yaml
 
 # No packages beyond prod's: melange's mox is laid over the image
 # (cmd/howl/melange.zig), and, static, it links nothing.
@@ -53,5 +56,5 @@ services:
     env:
       - GOMEMLIMIT=768MiB
       # Its control socket, which `mox` commands reach, in /run: fence lets
-      # sockets be made nowhere else (forms/mox/melange/mox.yaml).
+      # sockets be made nowhere else (../packages/mox/mox.yaml).
       - MOX_CTL=/run/svc/mox/ctl

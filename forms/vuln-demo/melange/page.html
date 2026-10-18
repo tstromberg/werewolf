@@ -11,12 +11,12 @@
 <a data-port="5678" data-path="/">n8n<small>Node.js · :5678 · expression injection</small></a>
 <a data-port="7860" data-path="/">Langflow<small>Python · :7860 · code injection</small></a>
 </div>
-<p class="intro">SSH: <code id="ssh"></code> · any password for <code>demo</code> · direct commands; no interactive shell.</p>
+<p class="intro">SSH: <code id="ssh"></code> · any password for <code>root</code> · direct commands; no interactive shell.</p>
 <input id="search" aria-label="Filter events" placeholder="Filter events…"><select id="kind" aria-label="Event type"><option value="">All events</option><option>request</option><option>exec</option><option>violation</option><option>ssh</option><option>error</option></select><span id="state">Connecting…</span>
 <div id="log" role="log" aria-live="polite"></div>
 <script>
 for(const a of document.querySelectorAll('[data-port]')){const u=new URL(location.href);u.port=a.dataset.port;u.pathname=a.dataset.path;u.search='';u.hash='';a.href=u}
-document.querySelector('#ssh').textContent='ssh demo@'+location.hostname+' id';
+document.querySelector('#ssh').textContent='ssh root@'+location.hostname+' id';
 const log=document.querySelector('#log'),search=document.querySelector('#search'),kind=document.querySelector('#kind'),state=document.querySelector('#state');
 let events=[];
 function render(){log.replaceChildren();for(const e of events.filter(e=>(!kind.value||e.kind===kind.value)&&JSON.stringify(e).toLowerCase().includes(search.value.toLowerCase())).slice(-300).reverse()){const row=document.createElement('div');row.className='event '+e.kind;const meta=document.createElement('div');meta.className='meta';meta.textContent=e.time+'  '+e.kind+' / '+e.service;const text=document.createElement('pre');text.textContent=e.message;row.append(meta,text);log.append(row)}}

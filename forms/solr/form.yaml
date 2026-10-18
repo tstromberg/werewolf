@@ -1,6 +1,9 @@
 # Solr's JVM is the hardened package; the application package has no shell or JVM.
 base: jre
 
+recipes:
+  - ../../../packages/solr/solr.yaml
+
 weaknesses:
   programs-no-interpreters: hardened OpenJDK 27 runs Solr
   kernel-write-xor-execute: the JVM compiles Solr as it runs

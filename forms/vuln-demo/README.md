@@ -21,10 +21,12 @@ See [image availability](../../docs/forms-catalog.md#images-and-downloads).
 The combined image needs about 12 GiB for builds and test boots.
 
 ```sh
-mkdir -p config/n8n
-openssl rand -hex 32 > config/n8n/task-token
-howl create vuln-demo --with vuln-demo --build --config config
+howl run --with vuln-demo --build
 ```
+
+The demo supplies its own internal n8n runner coordination token. It needs no
+configuration files. The broker listens only on loopback, and the service
+network policy permits only the isolated runner to connect to it.
 
 Open port 8080 for the live journal. Application ports preserve upstream paths:
 
@@ -42,8 +44,18 @@ account. Langflow deliberately enables auto-login. Both retain the full editor
 and API; Langflow includes CPU ONNX inference. Current versions have their own
 `solr`, `n8n` and `langflow` forms.
 
-SSH accepts any password for `demo` on port 22. It runs argv directly: for example,
-`ssh demo@HOST /usr/bin/id`. Shells, PTYs, forwarding and subsystems are refused.
+SSH accepts any password for `root` on port 22. It runs argv directly: for example,
+`ssh root@HOST /usr/bin/id`. The protocol username does not grant OS root: commands
+run as the confined `vuln-sshd` service UID. Shells, PTYs, forwarding and subsystems
+are refused.
+Offered public keys are rejected and recorded in authorized-keys form with their
+algorithm and SHA-256 fingerprint. The record also identifies the requested SSH
+user, remote and local addresses, client and server version strings, and session ID;
+submitted passwords are never recorded.
+
+Those values use searchable `SSH_USER`, `SSH_REMOTE`, `SSH_LOCAL`, `SSH_CLIENT`,
+`SSH_SERVER`, `SSH_SESSION`, `SSH_KEY_ALGORITHM`, `SSH_KEY_FINGERPRINT` and
+`SSH_PUBLIC_KEY` fields.
 Only `id`, `uname`, and `cat` are exposed, each through a narrower leash that
 cannot read the daemon's host key or private data.
 
@@ -70,4 +82,5 @@ The host-side appliance check exercises the shipping image without adding guest
 programs or permissions. After building with `BUILD=build/vuln-demo-check`, run
 `forms/vuln-demo/test/appliance --build build/vuln-demo-check`. It checks the
 normal HTTP endpoints, two arbitrary SSH passwords, direct commands, refusal
-of root/shell/PTY/forwarding/private-key reads, and request/exec/violation logs.
+refusal of non-root users, shell/PTY/forwarding/private-key reads, and
+request/exec/violation logs.
