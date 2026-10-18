@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+from consumer_trust import mirror_roots
 
 public = len(sys.argv) == 5 and sys.argv[-1] == '--public'
 if len(sys.argv) != 4 and not public:
@@ -82,8 +83,7 @@ env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(ca), XDG_DATA
            WEREWOLF_BOOT_MIRROR='https://127.0.0.1:%d' % server.server_port,
            PATH=str(wrappers) + os.pathsep + os.environ['PATH'], PYTHONDONTWRITEBYTECODE='1')
 roots = work / 'mirror-roots.pem'
-system_ca = ssl.get_default_verify_paths().cafile
-roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
+roots.write_bytes(mirror_roots(ca))
 env['SSL_CERT_FILE'] = str(roots)
 if public:
     env.pop('WEREWOLF_BOOT_MIRROR', None)

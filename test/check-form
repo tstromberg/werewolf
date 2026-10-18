@@ -65,7 +65,7 @@ boot "$name-again" "$c-checks-again" "$@"
 # Production and developer SSH can start in either order. Compare every
 # persistent key by its service path, rather than whichever logs first.
 host_keys() {
-	grep -a '"event":"host-key"' "$1" | grep -a 'kept in /data' |
+	python3 test/cloud-console <"$1" | grep -a '"event":"host-key"' | grep -a 'kept in /data' |
 		sed -n 's/.*"key":"\([^"]*\)".*"fingerprint":"\([^"]*\)".*/\1 \2/p' | LC_ALL=C sort -u
 }
 a=$(host_keys "$c.log")

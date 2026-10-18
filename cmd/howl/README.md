@@ -61,15 +61,8 @@ architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve uses the only bridge or `--bridge NAME`, with DHCP or `--ip CIDR --gw ADDR
---dns ADDR`. howl owns only its TAP: retained across reboots, removed on stop,
-delete or final exit; existing host networking is unchanged. Missing/ambiguous
-bridges fail without SLIRP fallback. ARM64 needs legacy virtio (kernel 7.2.11-r6+);
-its full signed A/B test passed, but a longer TAP soak hit a virtio TX panic.
-It remains experimental without a protected profile. For unprotected launches,
-`BHYVE_BINARY` and `BHYVE_ARM64_FIRMWARE` select absolute host paths; set them on
-each create/reconfigure. See [live tests](../../docs/testing-live.md#bhyve) and the
-[private runtime recipe](../../tools/bhyve-arm64/README.md) for limits and validation.
+bhyve's ARM64 runtime remains experimental; its TAP soak hit a virtio TX panic.
+See [live tests](../../docs/testing-live.md#bhyve) for networking and runtime limits.
 
 Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
 their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and

@@ -568,13 +568,16 @@ test "runtime overrides are explicit paths and preserve protection gates" {
     const line = try std.mem.join(gpa, " ", args);
     try testing.expect(std.mem.find(u8, line, "bootrom=/private build/u-boot.bin") != null);
     try testing.expectEqualStrings(firmwareFor(.x86_64), runtime.firmwarePath(.x86_64));
-    try testing.expectError(error.UnsupportedProtection, commandForWith(.aarch64, gpa, "test", "/disk", "/config", .{
-        .tap = "tap0",
-    }, null, .{
-        .code = "/code",
-        .vars = "/vars",
-        .tpm_socket = "/tpm",
-    }, runtime));
+    try testing.expectError(
+        error.UnsupportedProtection,
+        commandForWith(.aarch64, gpa, "test", "/disk", "/config", .{
+            .tap = "tap0",
+        }, null, .{
+            .code = "/code",
+            .vars = "/vars",
+            .tpm_socket = "/tpm",
+        }, runtime),
+    );
 }
 
 test forwards {

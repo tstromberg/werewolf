@@ -336,6 +336,13 @@ jobs:
           name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}
           path: lifecycle
       # Self-hosted runners keep these tools installed (docs/releases.md).
+      - name: Ensure supported macOS firmware Python
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          brew list --versions python@3.14 >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install python@3.14
+          echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"
+          echo "$(brew --prefix python@3.14)/libexec/bin" >>"$GITHUB_PATH"
       - name: Install pinned runtime and host tools
         if: runner.environment == 'github-hosted'
         run: sudo test/ci-setup
