@@ -130,7 +130,7 @@ class Images(unittest.TestCase):
             shutil.rmtree(work / 'gated')
         listing = work / 'exported.json'
         images.export(work / 'snapshots', work / 'verified', work / 'gated', self.store, work / 'assets', listing)
-        failed = images.publish(work / 'snapshots', work / 'verified', {('qemu', 'x86_64')}, listing, self.store,
+        failed = images.publish(work / 'snapshots', work / 'verified', {('playground', 'qemu', 'x86_64')}, listing, self.store,
                                 focused=focused)
         return failed, json.loads(listing.read_text())
 
@@ -283,7 +283,7 @@ class Images(unittest.TestCase):
         work = self.root / ('run-' + self.serial)
         with patch.object(self.store, 'upload') as upload:
             with self.assertRaisesRegex(ValueError, 'unrelated target'):
-                images.publish(work / 'snapshots', work / 'verified', {('qemu', 'x86_64')},
+                images.publish(work / 'snapshots', work / 'verified', {('playground', 'qemu', 'x86_64')},
                                work / 'exported.json', self.store, focused=True)
             upload.assert_not_called()
 
@@ -342,6 +342,11 @@ class Images(unittest.TestCase):
         self.assertTrue(descriptions['caddy']['guide'].endswith('/forms/caddy/README.md'))
 
     def test_gated_forms_build_their_lifecycle_updates_for_each_provider(self):
+        for form in ('minimal', 'prod-ssh'):
+            targets = [(name, provider) for name, provider, _ in images.bundles(
+                dict(form=form, arch='aarch64', serial='20261015T120000Z'))]
+            self.assertEqual([('lima', 'lima'), ('qemu', 'qemu'), ('qemu-update-1', 'qemu'),
+                              ('qemu-update-2', 'qemu')], targets)
         names = [(name, provider) for name, provider, _ in
                  images.bundles(dict(form='playground', arch='aarch64', serial='20261015T120000Z'))]
         self.assertEqual([('lima', 'lima'), ('lima-update-1', 'lima'), ('lima-update-2', 'lima'),
@@ -353,9 +358,12 @@ class Images(unittest.TestCase):
                                                                          serial='20261015T120000Z'))])
 
     def test_gate_runners_are_label_lists_and_x86_needs_none(self):
-        self.assertEqual([('qemu', 'x86_64')], [(g['provider'], g['arch']) for g in images.gates({})['include']])
+        self.assertEqual(set(images.profiles.FORMS), {g['form'] for g in images.gates({})['include']})
+        self.assertTrue(all((g['provider'], g['arch']) == ('qemu', 'x86_64') for g in images.gates({})['include']))
         matrix = images.gates(dict(ARM64_KVM_RUNNER='["self-hosted", "linux", "arm64"]',
                                    LIMA_RUNNER='["self-hosted", "macOS"]'))
+        self.assertEqual(7, len(matrix['include']))
+        self.assertEqual(['playground'], [g['form'] for g in matrix['include'] if g['provider'] == 'lima'])
         self.assertEqual({('qemu', 'x86_64'), ('qemu', 'aarch64'), ('lima', 'aarch64')},
                          {(g['provider'], g['arch']) for g in matrix['include']})
         for bad in ('self-hosted', '[]', '[""]', '{"a": 1}'):
@@ -372,7 +380,7 @@ class Images(unittest.TestCase):
                          images.matrix(8, focused=True))
         self.assertEqual(16, len(images.matrix(8)['include']))
         # A broken or absent self-hosted runner must not affect this lane.
-        self.assertEqual(dict(include=[dict(provider='qemu', arch='x86_64', runner=['ubuntu-26.04'])]),
+        self.assertEqual(dict(include=[dict(form='playground', provider='qemu', arch='x86_64', runner=['ubuntu-26.04'])]),
                          images.gates(dict(ARM64_KVM_RUNNER='invalid', LIMA_RUNNER='invalid'), focused=True))
 
     def test_cli_selects_the_same_scope_for_builds_and_gates(self):

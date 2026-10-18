@@ -13,6 +13,7 @@ pub const native_firmware = @embedFile("tools/native-firmware");
 pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
 pub const local_tpm = @embedFile("tools/local-tpm");
 pub const local_publisher = @embedFile("tools/local-publisher");
+pub const owner_control = @embedFile("tools/owner-control");
 pub const boot_download = @embedFile("tools/boot-download");
 pub const protected_trust = @embedFile("release/protected/trust.json");
 pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");

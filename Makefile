@@ -301,6 +301,7 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/protected-inputs
 	python3 test/form-images
 	python3 test/legacy-images
+	python3 test/owner-control $(HOWL)
 	python3 test/publishing-health
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)

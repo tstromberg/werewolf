@@ -27,6 +27,8 @@ pub const Machine = struct {
     import_disk: ?[]const u8 = null,
     /// Host-private swtpm control socket; only its emulated device enters the guest.
     tpm_socket: ?[]const u8 = null,
+    /// Optional host-private fixed operator channel, never a TCP listener.
+    owner: bool = false,
 };
 
 /// Firmware is edk2's code and optional variables copied to vars.fd.
@@ -169,7 +171,7 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
             .{ m.ssh_port, m.guest_ssh, m.web_port, m.guest_web },
         ),
         "-device",
-        "virtio-net-pci,netdev=n0",
+        "virtio-net-pci,netdev=n0,romfile=",
         "-device",
         "virtio-rng-pci",
         "-drive",
@@ -188,9 +190,14 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
         "-device",
         if (m.arch == .aarch64) "tpm-tis-device,tpmdev=tpm0" else "tpm-tis,tpmdev=tpm0",
     } }) else base;
-    const imp = m.import_disk orelse return attached;
+    const managed = if (m.owner) try std.mem.concat(gpa, []const u8, &.{ attached, &.{
+        "-device",  "virtio-serial-pci",
+        "-chardev", try gpa.print("socket,id=owner,path={s}/owner.sock,server=on,wait=off", .{d}),
+        "-device",  "virtserialport,chardev=owner,name=werewolf.owner",
+    } }) else attached;
+    const imp = m.import_disk orelse return managed;
     const p = try std.mem.replaceOwned(u8, gpa, imp, ",", ",,");
-    return std.mem.concat(gpa, []const u8, &.{ attached, &.{
+    return std.mem.concat(gpa, []const u8, &.{ managed, &.{
         "-drive",
         try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{p}),
     } });
@@ -382,10 +389,14 @@ test argv {
     try std.testing.expect(std.mem.find(u8, xl, "unit=1,file=/m/vars.fd") != null);
     try std.testing.expectEqualStrings("console=ttyS0", bootArgs(.x86_64)[0]);
     var secure = m;
+    secure.owner = true;
     secure.firmware.vars = "/q/vars.fd";
     secure.firmware.secure = true;
     const sl = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), secure, .hvf));
     try std.testing.expect(std.mem.find(u8, sl, "-bios") == null);
+    try std.testing.expect(std.mem.find(u8, sl, "name=werewolf.owner") != null);
+    try std.testing.expect(std.mem.find(u8, sl, "path=/w,,x/m/owner.sock,server=on,wait=off") != null);
+    try std.testing.expect(std.mem.find(u8, line, "werewolf.owner") == null);
     try std.testing.expect(std.mem.find(
         u8,
         sl,

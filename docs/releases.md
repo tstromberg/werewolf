@@ -17,9 +17,10 @@ A signed download authenticates its files, not the platform's boot environment.
 `howl run` defaults to secure boot and never substitutes a legacy image.
 
 Secure targets publish only after their exact bundles pass all fourteen protected
-lifecycle gates. Today that harness supports only `playground`; `minimal` and
-`prod-ssh` secure targets remain unpublished until their lifecycle control is
-implemented. Legacy targets require reproducibility, coverage, integration,
+lifecycle gates. QEMU covers all three forms through a host-private owner channel;
+Lima currently covers `playground` through SSH. Each target requires a configured
+gate runner and passing evidence. Legacy targets require reproducibility, coverage,
+integration,
 package-updater tests, raw/qcow2 parity and boots of the exact qcow2 and direct
 image without Secure Boot or a TPM.
 

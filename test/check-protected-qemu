@@ -37,22 +37,22 @@ def check():
             kernel = work / 'test-kernel.tar'
             run(['sh', 'tools/test-kernel', 'x86_64', trust / 'image.crt', kernel], env)
             env['WEREWOLF_PROTECTED_TEST_KERNEL'] = str(kernel)
-            start = datetime.datetime.now(datetime.timezone.utc)
-            bundles = []
-            for offset in range(3):
-                serial = (start + datetime.timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')
-                bundle = Path('build/qemu-validation-candidates') / str(offset)
-                run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/build-protected',
-                     'playground', 'qemu', 'x86_64', serial, bundle], env)
-                bundles.append(bundle)
-            run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/authorize-protected',
-                 'build/host/howl', 'qemu', *bundles], env)
-            output = Path('build/protected-qemu-validation')
-            run([sys.executable, 'test/check-published-lifecycle', 'build/host/howl', *bundles, output], env)
-            # Also exercise export admission, the qcow2 conversion and its real
-            # signatures with this exact runtime-tested bundle. No uploads occur.
-            run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/export-protected',
-                 'build/host/howl', bundles[0], output / 'gates.json', 'qemu', work / 'assets'], env)
+            for form in ('minimal', 'prod-ssh', 'playground'):
+                start = datetime.datetime.now(datetime.timezone.utc)
+                bundles = []
+                for offset in range(3):
+                    serial = (start + datetime.timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')
+                    bundle = Path('build/qemu-validation-candidates') / form / str(offset)
+                    run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/build-protected',
+                         form, 'qemu', 'x86_64', serial, bundle], env)
+                    bundles.append(bundle)
+                run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/authorize-protected',
+                     'build/host/howl', 'qemu', *bundles], env)
+                output = Path('build/protected-qemu-validation') / form
+                run([sys.executable, 'test/check-published-lifecycle', 'build/host/howl', *bundles, output], env)
+                # Exercise the actual signatures, export admission and qcow2 too.
+                run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/export-protected',
+                     'build/host/howl', bundles[0], output / 'gates.json', 'qemu', work / ('assets-' + form)], env)
         finally:
             for name, data in saved.items():
                 (trust / name).write_bytes(data)

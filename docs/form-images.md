@@ -40,9 +40,10 @@ signature that admits a bundle.
 The gate job authorizes three candidates of a target with the image key,
 on the runner that boots them, and runs all fourteen
 [lifecycle gates](design/protected-downloads.md) on the exact files
-(`test/check-published-lifecycle`). That harness drives a shell over ssh,
-so only `playground` has gates today; other forms are built and tested
-but read `not published: no lifecycle gates for this form`.
+(`test/check-published-lifecycle`). QEMU drives all three forms through the
+production host-private owner channel, with no guest SSH or added test code. Its
+unhealthy trial receives real disk write errors and must fall back through the
+production 600-second deadman. Lima retains the `playground` SSH driver.
 
 `legacy-build` uses the same resolved form/package snapshots on independent
 runners, without code-signing or TPM credentials. `legacy-check` compares the

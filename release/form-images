@@ -24,9 +24,8 @@ import legacy_images
 HOWL = Path('build/host/howl').resolve()
 FORM = Path('build/host/form').resolve()
 TRUST = Path('release/protected').resolve()
-# check-published-lifecycle drives a shell over ssh. Forms without one have
-# no lifecycle gates yet (docs/design/image-release-testing.md).
-GATED = ('playground',)
+# QEMU uses the production owner channel; Lima retains its existing SSH driver.
+GATED = profiles.FORMS
 CHECKS = {'coverage', 'integration', 'reproducible'}
 FOCUSED_TARGET = ('playground', 'qemu', 'x86_64')
 
@@ -195,10 +194,14 @@ def bundles(target):
     start = datetime.datetime.strptime(target['serial'], '%Y%m%dT%H%M%SZ')
     for provider in catalog.PROVIDERS[target['arch']]:
         yield provider, provider, target['serial']
-        if target['form'] in GATED:
+        if supports_gate(target['form'], provider):
             for n in (1, 2):
                 later = (start + datetime.timedelta(seconds=n)).strftime('%Y%m%dT%H%M%SZ')
                 yield '%s-update-%d' % (provider, n), provider, later
+
+
+def supports_gate(form, provider):
+    return form in GATED and (provider == 'qemu' or form == 'playground')
 
 
 def install_locks(snapshot):
@@ -419,7 +422,8 @@ def gates(environ, focused=False):
         labels = json.loads(value)
         if not isinstance(labels, list) or not labels or not all(isinstance(v, str) and v for v in labels):
             raise ValueError('a gate runner is a JSON list of labels')
-        include.append(dict(provider=provider, arch=arch, runner=labels))
+        for form in (('playground',) if focused or provider == 'lima' else GATED):
+            include.append(dict(form=form, provider=provider, arch=arch, runner=labels))
     return dict(include=include)
 
 
@@ -612,9 +616,9 @@ def publish(snapshots, verified, gated_targets, listing, store, focused=False):
                         row.update(status=catalog.PUBLISHED, latest=published[name])
                     elif name in exported:
                         row['status'] = 'publication failed'
-                    elif form not in GATED:
+                    elif not supports_gate(form, provider):
                         row['status'] = catalog.UNGATED
-                    elif (provider, arch) not in gated_targets:
+                    elif (form, provider, arch) not in gated_targets:
                         row['status'] = catalog.NO_RUNNER
                     else:
                         row['status'] = 'lifecycle gates or export failed'
@@ -690,7 +694,7 @@ def main():
     elif args.command == 'export':
         export(args.snapshots, args.verified, args.gated, store, args.assets, args.listing, args.legacy_verified)
     elif args.command == 'publish':
-        gated = {(t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']}
+        gated = {(t['form'], t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']}
         return publish(args.snapshots, args.verified, gated, args.listing, store, focused)
     return False
 

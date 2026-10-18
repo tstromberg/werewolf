@@ -1766,7 +1766,7 @@ fn startQemu(
         why,
     );
     const guest_web = try qemuWebPort(profile);
-    for ([_][]const u8{ "console.log", "console.sock", "monitor.sock" }) |file|
+    for ([_][]const u8{ "console.log", "console.sock", "monitor.sock", "owner.sock" }) |file|
         Dir.cwd().deleteFile(io, try gpa.print("{s}/{s}", .{ at, file })) catch {};
     const args = try qemu.argv(gpa, .{
         .arch = spec.arch,
@@ -1783,6 +1783,7 @@ fn startQemu(
         .web_port = web,
         .guest_web = guest_web,
         .tpm_socket = try gpa.print("{s}/tpm.sock", .{try sockets(gpa, at)}),
+        .owner = true,
     }, qemu.accel(io));
     if (!(try steps.exec(
         &.{.{ .argv = args }},

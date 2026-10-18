@@ -29,6 +29,8 @@ const slot = @import("slot.zig");
 const installer = @import("installer.zig");
 const workers = @import("workers.zig");
 const control = @import("control.zig");
+const owner = @import("owner.zig");
+var owner_paused = false;
 const broker = @import("broker");
 const Pending = stage.Pending;
 
@@ -144,6 +146,7 @@ fn operator(io: Io, request: control.Request) !void {
 }
 
 fn requested(io: Io, listener: i32) bool {
+    if (ownerRequested(io)) return true;
     var buf: [control.limit + 1]u8 = undefined;
     const next = control.accept(listener, &buf) orelse return false;
     operator(io, next.request) catch |err| {
@@ -151,6 +154,74 @@ fn requested(io: Io, listener: i32) bool {
         return true;
     };
     control.reply(next.fd, null);
+    return true;
+}
+
+/// Host operators use the same supervised, unprivileged coordinator and broker
+/// as root's local socket. This channel accepts no executable or filesystem path.
+fn ownerRequested(io: Io) bool {
+    const request = workers.owner_channel.receive() orelse return false;
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    if (request.command == .status) {
+        ownerStatus(io, gpa, request.id) catch |err| ownerReply(gpa, request.id, err);
+        return true;
+    }
+    switch (request.command) {
+        .pause => owner_paused = true,
+        .@"resume" => owner_paused = false,
+        .check, .outcome, .@"try" => operator(io, .{
+            .command = std.meta.stringToEnum(control.Command, @tagName(request.command)).?,
+            .declaration = request.declaration,
+        }) catch |err| {
+            ownerReply(gpa, request.id, err);
+            return true;
+        },
+        .status => unreachable,
+    }
+    ownerReply(gpa, request.id, null);
+    return true;
+}
+
+fn ownerReply(gpa: Allocator, id: []const u8, err: ?anyerror) void {
+    const response = std.json.Stringify.valueAlloc(gpa, .{
+        .id = id,
+        .ok = err == null,
+        .@"error" = if (err) |e| @errorName(e) else null,
+    }, .{}) catch return;
+    workers.owner_channel.send(std.mem.concat(gpa, u8, &.{ response, "\n" }) catch return);
+}
+
+fn ownerStatus(io: Io, gpa: Allocator, id: []const u8) !void {
+    const Check = struct { id: []const u8, result: enum { pass, fail, skip } };
+    const OwnerPosture = struct { checks: []const Check };
+    const raw = Dir.cwd().readFileAlloc(io, "/run/werewolf/posture.json", gpa, .limited(4 << 20)) catch |err|
+        if (err == error.FileNotFound) null else return err;
+    const report = if (raw) |text| try std.json.parseFromSliceLeaky(OwnerPosture, gpa, text, .{ .ignore_unknown_fields = true }) else null;
+    var u: Update = .{ .io = io, .gpa = gpa };
+    const boot_id = try u.bootId();
+    var refused: cmdline.Failure = .{};
+    const cmd = cmdline.parse(workers.boot_line, &refused) orelse return error.BadCommandLine;
+    const other_cmdline = if (cmd.slot) |boot_slot| Dir.cwd().readFileAlloc(io, try gpa.print("/boot/slot/{s}/cmdline", .{@tagName(boot_slot.other())}), gpa, .limited(4096)) catch |err|
+        if (err == error.FileNotFound) null else return err else null;
+    const response = try std.json.Stringify.valueAlloc(gpa, .{
+        .format = "werewolf-owner-status/1",
+        .id = id,
+        .ok = true,
+        .boot_id = boot_id,
+        .cmdline = workers.boot_line,
+        .committed = fileExists(io, "/run/werewolf/committed"),
+        .ready = fileExists(io, ready_path),
+        .paused = owner_paused,
+        .checks = if (report) |r| r.checks else &.{},
+        .other_cmdline = other_cmdline,
+    }, .{});
+    workers.owner_channel.send(try std.mem.concat(gpa, u8, &.{ response, "\n" }));
+}
+
+fn fileExists(io: Io, path: []const u8) bool {
+    Dir.cwd().access(io, path, .{}) catch return false;
     return true;
 }
 
@@ -232,6 +303,10 @@ fn daemon() noreturn {
     while (true) {
         if (!workers.alive()) linux.exit_group(1);
         if (requested(io, listener)) continue;
+        if (owner_paused) {
+            io.sleep(.fromSeconds(1), .awake) catch {};
+            continue;
+        }
         if (nowSecs(io) >= next_check) {
             if (pass(io, .check, &ctx) == .ok) {
                 boot_checked = true;
@@ -1637,6 +1712,9 @@ test "a rebuild of Wolfi's glibc counts as the Wolfi glibc it rebuilds" {
 }
 
 test {
+    _ = broker;
+    _ = control;
+    _ = owner;
     _ = sandbox;
     _ = cve;
     _ = tiers;
