@@ -3,6 +3,7 @@
 const std = @import("std");
 const Io = std.Io;
 const linux = std.os.linux;
+const driver = @import("driver.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -19,6 +20,14 @@ pub fn main(init: std.process.Init) !void {
     const directory = try gpa.print("/usr/share/werewolf/tests/{s}", .{name});
     // Descriptors come from the immutable image, never from an upload.
     try Io.Dir.cwd().access(io, try gpa.print("{s}/service", .{directory}), .{});
+    const Launch = struct { root: bool, mode: []const u8, probes: bool };
+    const launch_raw = try Io.Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/launch.json", .{directory}),
+        gpa,
+        .limited(4096),
+    );
+    const launch = try std.json.parseFromSliceLeaky(Launch, gpa, launch_raw, .{});
     if (std.mem.eql(u8, args[1], "install")) {
         const temporary = try gpa.print("/run/howl-dev/.{s}.new", .{name});
         const file = try Io.Dir.cwd().openFile(io, temporary, .{});
@@ -28,6 +37,12 @@ pub fn main(init: std.process.Init) !void {
             temporary,
             Io.Dir.cwd(),
             try gpa.print("/run/howl-dev/{s}", .{name}),
+            io,
+        );
+        if (launch.probes) try Io.Dir.cwd().rename(
+            try gpa.print("/run/howl-dev/.{s}.json.new", .{name}),
+            Io.Dir.cwd(),
+            try gpa.print("/run/howl-dev/{s}.json", .{name}),
             io,
         );
         try Io.Dir.cwd().rename(
@@ -41,7 +56,24 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, args[1], "run")) return error.Usage;
     if (linux.errno(linux.chdir(try gpa.dupeSentinel(u8, directory, 0))) != .SUCCESS)
         return error.ChangeDirectory;
-    return std.process.replace(io, .{ .argv = &.{"/usr/lib/werewolf/leash"} });
+    const result = try std.process.run(gpa, io, .{
+        .argv = if (launch.root) &.{
+            try gpa.print(
+                "/usr/lib/werewolf/{s}",
+                .{name},
+            ),
+            name,
+            launch.mode,
+            "/run/config/native-iterate-context",
+        } else &.{"/usr/lib/werewolf/leash"},
+        .stdout_limit = .limited(64 << 10),
+        .stderr_limit = .limited(16 << 10),
+        .timeout = driver.deadline(io, 180),
+    });
+    try Io.File.stdout().writeStreamingAll(io, result.stdout);
+    try Io.File.stderr().writeStreamingAll(io, result.stderr);
+    if (result.term != .exited or result.term.exited != 0)
+        std.process.exit(if (result.term == .exited) result.term.exited else 1);
 }
 
 fn driverName(name: []const u8) bool {

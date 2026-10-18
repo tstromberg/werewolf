@@ -1,0 +1,162 @@
+version: 1
+packages:
+  - mariadb-12.3-client
+suites:
+  - name: mariadb-local
+    policy:
+      run:
+        - /usr/bin/mariadb
+    fixtures:
+      migration: /run/config/tests/mariadb-migration
+      marker: /run/config/tests/mariadb-marker
+    cases:
+      - name: mariadb-socket
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT 1;
+              env:
+                LC_ALL: C
+              readonly: true
+            expect:
+              exit: 0
+              stdout: '1
+
+                '
+            await: 60s
+      - name: mariadb-no-tcp
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT @@skip_networking;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '1
+
+                '
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 3306
+      - name: mariadb-no-files
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT @@local_infile; SELECT @@secure_file_priv;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '0
+
+                /var/empty/
+
+                '
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT 1 INTO OUTFILE '/tmp/werewolf-check';
+              env:
+                LC_ALL: C
+            expect:
+              exit: 1
+              stdout: ''
+              stderr:
+                matches: ERROR 1290
+          - file: /tmp/werewolf-check
+            expect:
+              exists: false
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT load_file('/etc/passwd') IS NULL;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '1
+
+                '
+      - name: mariadb-data
+        steps:
+          - file: /data/svc/mariadb/data/mysql
+            expect:
+              type: directory
+          - file: /data/svc/mariadb/data-made
+            expect:
+              type: file
+          - file: /data/svc/mariadb/data
+            expect:
+              uid: mariadb
+              mode: '700'
+              type: directory
+      - name: mariadb-migrate
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin:
+                fixture: migration
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: ''
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin:
+                fixture: migration
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: ''
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT count(*) FROM shop.items; SELECT name FROM shop.items WHERE
+                sku='bolt';
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '2
+
+                M8 bolt
+
+                '
+        phases:
+          - seed
+      - name: mariadb-kept
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT count(*) FROM shop.items; SELECT name FROM shop.items WHERE
+                sku='bolt';
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: '2
+
+                M8 bolt
+
+                '
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT value FROM shop.test_marker;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  fixture: marker

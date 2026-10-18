@@ -1,0 +1,29 @@
+version: 1
+packages: []
+suites:
+  - name: test-onnx
+    source: driver.zig
+    mode: inference
+    user: nobody
+    cases:
+      seed:
+        - python-version
+        - cpu-provider
+        - inference
+        - invalid-shape
+        - unknown-input
+      verify:
+        - python-version
+        - cpu-provider
+        - inference
+        - invalid-shape
+        - unknown-input
+    memory: 256
+    allow:
+      - python:native
+    policy:
+      pledge: stdio rpath wpath proc exec
+      read: []
+      connect: []
+      run:
+        - /usr/bin/python3.15

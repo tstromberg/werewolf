@@ -1,0 +1,174 @@
+version: 1
+suites:
+  - name: otel-collector
+    fixtures:
+      token: /run/config/otel-collector/token
+      export-token: /run/config/otel-collector/export-token
+      grpc-request: /run/config/otel-collector/grpc-request
+    cases:
+      - name: otel-http-span
+        steps:
+          - fetch:
+              url: https://localhost:4318/v1/traces
+              ca: /run/config/otel-collector/tls-cert
+              bearer:
+                fixture: token
+            expect:
+              status: 405
+            await: 90s
+          - fetch:
+              url: https://localhost:4318/v1/traces
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              bearer:
+                fixture: token
+              json:
+                resourceSpans:
+                  - resource:
+                      attributes:
+                        - key: service.name
+                          value:
+                            stringValue: werewolf-check
+                    scopeSpans:
+                      - spans:
+                          - traceId: 5b8efff798038103d269b633813fc60c
+                            spanId: eee19b7ec3c1b174
+                            name: check
+                            kind: 1
+                            startTimeUnixNano: '1'
+                            endTimeUnixNano: '2'
+            expect:
+              status: 200
+              json:
+                /partialSuccess:
+                  equals: {}
+      - name: otel-grpc-span
+        steps:
+          - fetch:
+              url: https://localhost:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              headers:
+                Content-Type: application/grpc
+                TE: trailers
+              body:
+                fixture: grpc-request
+                raw: true
+              bearer:
+                fixture: token
+            expect:
+              status: 200
+              headers:
+                grpc-status: '0'
+      - name: otel-config
+        steps:
+          - file: /run/svc/otel-collector/config.json
+            expect:
+              json:
+                /exporters/otlp_grpc/endpoint: 127.0.0.1:443
+          - file: /run/svc/otel-collector/config.json
+            expect:
+              body:
+                absent: debug
+          - file: /run/svc/otel-collector/config.json
+            expect:
+              body:
+                absent: zpages
+          - file: /run/svc/otel-collector/config.json
+            expect:
+              body:
+                absent: pprof
+          - file: /run/svc/otel-collector/config.json
+            expect:
+              body:
+                absent: health_check
+          - listeners: tcp
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 0.0.0.0
+                  port: 4317
+                - protocol: tcp
+                  address: 0.0.0.0
+                  port: 4318
+          - file: /run/svc/otel-collector/tls-key
+            expect:
+              uid: otelcol
+              mode: '600'
+          - file: /run/svc/otel-collector/token
+            expect:
+              uid: otelcol
+              mode: '600'
+          - file: /run/svc/otel-collector/export-token
+            expect:
+              uid: otelcol
+              mode: '600'
+      - name: otel-no-token
+        steps:
+          - fetch:
+              url: https://localhost:4318/v1/traces
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              json: {}
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost:4318/v1/traces
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              json: {}
+              bearer: werewolf-check-wrong
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost:4318/v1/traces
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              json: {}
+              bearer:
+                fixture: export-token
+            expect:
+              status: 401
+      - name: otel-grpc-no-token
+        steps:
+          - fetch:
+              url: https://localhost:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              headers:
+                Content-Type: application/grpc
+                TE: trailers
+              body:
+                fixture: grpc-request
+                raw: true
+            expect:
+              status: 200
+              headers:
+                grpc-status: '16'
+          - fetch:
+              url: https://localhost:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export
+              ca: /run/config/otel-collector/tls-cert
+              method: POST
+              headers:
+                Content-Type: application/grpc
+                TE: trailers
+              body:
+                fixture: grpc-request
+                raw: true
+              bearer: werewolf-check-wrong
+            expect:
+              status: 200
+              headers:
+                grpc-status: '16'
+      - name: otel-tls-only
+        steps:
+          - fetch:
+              url: http://localhost:4318/v1/traces
+              method: POST
+              json: {}
+              bearer:
+                fixture: token
+            expect:
+              status: 400
+              body:
+                contains: Client sent an HTTP request to an HTTPS server

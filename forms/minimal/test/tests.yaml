@@ -1,0 +1,3 @@
+# This foundation has no application; the mandatory platform suite tests its boot.
+version: 1
+suites: []

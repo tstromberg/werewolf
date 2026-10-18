@@ -1,0 +1,146 @@
+version: 1
+suites:
+  - name: syncthing
+    fixtures:
+      authorization: /run/config/tests/syncthing-authorization
+    cases:
+      - name: st-user
+        steps:
+          - service: syncthing
+            expect:
+              user: _oci-syncthing
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+              processes: 1
+            await: 60s
+      - name: st-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8384/rest/noauth/health
+            expect:
+              status: 200
+              json:
+                /status: OK
+            await: 90s
+      - name: st-keys
+        steps:
+          - file: /data/svc/syncthing/var/syncthing/config/cert.pem
+            expect:
+              type: file
+              size:
+                min: 1
+          - file: /data/svc/syncthing/var/syncthing/config/key.pem
+            expect:
+              type: file
+              size:
+                min: 1
+          - file: /data/svc/syncthing/var/syncthing/config/config.xml
+            expect:
+              type: file
+              size:
+                min: 1
+      - name: st-options
+        steps:
+          - file: /data/svc/syncthing/var/syncthing/config/config.xml
+            expect:
+              body:
+                occurrences:
+                  <localAnnounceEnabled>false<: 1
+                  <natEnabled>false<: 1
+                  <urAccepted>-1<: 1
+                  <crashReportingEnabled>false<: 1
+                  <autoUpgradeIntervalH>0<: 1
+                  <relaysEnabled>true<: 1
+                  <globalAnnounceEnabled>false<: 1
+                  <listenAddress>tcp://0.0.0.0:22000<: 1
+                  <listenAddress>quic://0.0.0.0:22000<: 1
+                  <listenAddress>dynamic+https://relays.syncthing.net/endpoint<: 1
+                  <listenAddress>: 3
+      - name: st-gui-loopback
+        steps:
+          - file: /usr/share/werewolf/net
+            expect:
+              body:
+                contains: 'listen tcp 8384 loopback
+
+                  '
+          - file: /usr/share/werewolf/net
+            expect:
+              body:
+                contains: 'listen tcp 22000
+
+                  '
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 8384
+              absent:
+                - address: 0.0.0.0
+                  port: 8384
+                - address: '::'
+                  port: 8384
+      - name: st-gui
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/rest/noauth/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /status: OK
+            await: 60s
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              body:
+                matches: '[Ss]yncthing'
+      - name: st-auth-file
+        steps:
+          - file: /run/svc/caddy/syncthing-auth.caddy
+            expect:
+              body:
+                contains: admin $2b$10$
+                absent: werewolf-check-pass-1
+          - file: /run/svc/caddy/gui-password
+            expect:
+              exists: false
+      - name: st-no-password
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost/rest/system/status
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost/rest/noauth/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d3JvbmctcGFzc3dvcmQtMQ==
+            expect:
+              status: 401
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/

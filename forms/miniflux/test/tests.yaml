@@ -1,0 +1,138 @@
+version: 1
+suites:
+  - name: miniflux
+    fixtures:
+      authorization: /run/config/tests/miniflux-authorization
+    cases:
+      - name: miniflux-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/healthcheck
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                matches: '^OK
+
+                  ?$'
+            await: 120s
+      - name: miniflux-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: miniflux-admin
+        steps:
+          - fetch:
+              url: https://localhost/v1/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /username: admin
+      - name: miniflux-ssrf
+        steps:
+          - fetch:
+              url: https://localhost/v1/feeds
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                feed_url: http://127.0.0.1:8080/
+                category_id: 1
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 500
+              json:
+                /error_message:
+                  contains: refusing to access private network host
+          - fetch:
+              url: https://localhost/v1/feeds
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              body:
+                absent: 127.0.0.1
+          - service: miniflux
+            expect:
+              user: miniflux
+              connect_rules:
+                - tcp/443 public
+                - tcp/53
+                - tcp/80 public
+                - udp/53
+      - name: miniflux-unauth
+        steps:
+          - fetch:
+              url: https://localhost/v1/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: miniflux-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/v1/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d3JvbmctcGFzc3dvcmQ=
+            expect:
+              status: 401
+      - name: miniflux-category
+        steps:
+          - fetch:
+              url: https://localhost/v1/categories
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                title:
+                  run: true
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 201
+              json:
+                /title:
+                  run: true
+          - fetch:
+              url: https://localhost/v1/categories
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              body:
+                contains:
+                  run: true
+        phases:
+          - seed
+      - name: miniflux-category-kept
+        steps:
+          - fetch:
+              url: https://localhost/v1/categories
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              body:
+                contains:
+                  run: true
+        phases:
+          - verify

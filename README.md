@@ -83,7 +83,7 @@ Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
 | Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
-| bhyve | Manual enrollment verified, x86_64 | Bilbo firmware test; `howl` enrollment and arm64 backend remain unfinished |
+| bhyve | Manual enrollment verified on bilbo, x86_64; unsupported on arm64 | Protected howl deployment remains gated; ARM64 runs experimentally but has an unresolved virtio TX soak failure ([status](docs/testing-live.md#bhyve)) |
 | Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
 
 A/B updates retain the previous good slot after commit. The secured local profile uses

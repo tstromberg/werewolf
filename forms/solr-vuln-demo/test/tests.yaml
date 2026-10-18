@@ -1,0 +1,38 @@
+version: 1
+packages: []
+suites:
+  - name: test-solr
+    source: driver.zig
+    mode: http
+    user: solr
+    cases:
+      seed:
+        - ready
+        - version
+        - public-listener
+        - create-core
+        - index-document
+        - persisted-document
+        - home-confined
+        - cve-2021-44228-present-contained
+        - no-shell-launcher
+        - hardened-java
+      verify:
+        - ready
+        - version
+        - public-listener
+        - persisted-document
+        - home-confined
+        - cve-2021-44228-present-contained
+        - no-shell-launcher
+        - hardened-java
+    policy:
+      pledge: stdio rpath wpath inet connect
+      read:
+        - /etc/sv/solr/service
+        - /usr/lib/apk/db/installed
+        - /usr/lib/solr/log4j2.xml
+        - /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar
+      connect:
+        - tcp/8983
+      run: []

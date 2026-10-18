@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Pinned build refusals must happen before creating or modifying output."""
+import importlib.machinery
+import importlib.util
+import contextlib
+import io
+from pathlib import Path
+import sys
+import tempfile
+from unittest.mock import patch
+
+loader = importlib.machinery.SourceFileLoader('bhyve_runtime', 'tools/bhyve-arm64/build')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+recipe = importlib.util.module_from_spec(spec)
+loader.exec_module(recipe)
+
+
+def refused(arguments):
+    with patch.object(sys, 'argv', ['build', *map(str, arguments)]), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            recipe.main()
+        except SystemExit as error:
+            assert error.code == 2
+        else:
+            raise AssertionError('accepted unsupported build inputs')
+
+
+with tempfile.TemporaryDirectory(prefix='ww-runtime-unit-') as directory:
+    root = Path(directory)
+    output = root / 'output'
+    packages = root / 'packages'
+    packages.mkdir()
+    with patch.object(recipe.platform, 'system', return_value='Linux'):
+        refused([output, '--packages', packages])
+    assert not output.exists()
+    with patch.object(recipe.platform, 'system', return_value='FreeBSD'), \
+         patch.object(recipe.platform, 'machine', return_value='arm64'), \
+         patch.object(recipe.platform, 'release', return_value=recipe.RELEASE):
+        refused([output, '--packages', packages])
+        assert not output.exists()
+        refused([output, '--packages', packages, '--jobs', '0'])
+        assert not output.exists()
+        # A matching name is insufficient: only the locked digest is accepted.
+        (packages / 'bison-3.8.2_2,1.pkg').write_bytes(b'not the pinned package')
+        refused([output, '--packages', packages])
+        assert not output.exists()
+    with patch.object(recipe, 'run') as run, patch.object(recipe.subprocess, 'check_output', return_value=recipe.FREEBSD + '\n'):
+        dest = recipe.checkout(root, 'freebsd/freebsd-src', recipe.FREEBSD, '/cached/repository')
+        assert run.call_args_list[0].args[0] == ['git', 'init', dest]
+        archive_call = run.call_args_list[1].args[0]
+        assert archive_call[:5] == ['git', '-C', '/cached/repository', 'archive', recipe.FREEBSD]
+        assert dest == root / 'freebsd/freebsd-src'
+        assert not (dest / 'source.tar').exists()
+
+print('pass   bhyve runtime: host gate, pinned-package refusal, committed source export')

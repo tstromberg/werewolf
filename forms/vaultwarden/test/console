@@ -1,0 +1,3 @@
+# Without its administrator token, the shipping service must stay parked.
+seen    vault-needs-token  leash: \{"event":"down","service":"vaultwarden","why":"config admin-token: FileNotFound"\}
+unseen  vault-serving      Rocket has launched

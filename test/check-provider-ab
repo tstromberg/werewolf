@@ -20,8 +20,10 @@ if provider not in supported:
 mode = os.environ.get('AB_MODE', 'plain' if provider in ['lima-vz', 'bhyve', 'firecracker', 'proxmox'] else 'secure')
 if provider in ['lima-vz', 'firecracker'] and mode == 'secure':
     sys.exit('this backend has no Secure Boot enrollment; run its explicit refusal test')
-if provider in ['bhyve', 'firecracker', 'proxmox'] and arch != 'x86_64':
+if provider in ['firecracker', 'proxmox'] and arch != 'x86_64':
     sys.exit('this remote backend currently requires x86_64')
+if provider == 'bhyve' and arch == 'aarch64' and mode == 'secure':
+    sys.exit('arm64 bhyve has no validated Secure Boot enrollment; use AB_MODE=plain')
 if provider == 'proxmox' and not os.environ.get('PROXMOX_HOST'):
     sys.exit('Proxmox is untested: set PROXMOX_HOST when a test node is available')
 logs = Path(os.environ.get('CHECK', 'build/' + arch + '/check')) / ('provider-ab-' + provider)
@@ -118,6 +120,11 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-', dir='/tmp') as temporary:
         machine.start()
         initial = wait_boot(machine, 'A', 'a')
         report('initial A verified and committed', initial)
+        clock = machine.ssh('date +%s').stdout.strip()
+        (machine.work / 'clock.log').write_text(clock + '\n')
+        if abs(int(clock) - time.time()) > 300:
+            raise AssertionError('guest clock differs from host by over five minutes; '
+                                 'fix timekeeping before testing HTTPS signed updates')
         machine.ssh('cp -r /usr/share/ab/seed/. /data/svc/ab-https/; chown -R ab-https:ab-https /data/svc/ab-https; chmod -R a+rX /data/svc/ab-https')
         select(machine, 'B')
         machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)

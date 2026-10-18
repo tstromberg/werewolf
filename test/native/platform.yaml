@@ -1,0 +1,29 @@
+version: 1
+packages: [libcurl-openssl4]
+suites:
+  - name: test-platform
+    source: platform.zig
+    mode: platform
+    user: root
+    policy: {pledge: stdio rpath}
+    cases:
+      seed:
+        - network
+        - services-up
+        - boot-quiet
+        - listeners
+        - answering
+        - http-answering
+        - data-usable
+        - data-encrypted
+        - slot-commits
+        - root-unlinked
+        - root-verified
+        - cgrouped
+        - reaped
+        - sealed
+        - power-separated
+        - data-mark
+      verify:
+        - data-usable
+        - data-kept

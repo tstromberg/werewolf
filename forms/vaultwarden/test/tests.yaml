@@ -1,0 +1,232 @@
+version: 1
+suites:
+  - name: vaultwarden
+    fixtures:
+      cipher-name: /run/config/tests/vaultwarden-cipher-name
+    cases:
+      - name: vw-user
+        steps:
+          - service: vaultwarden
+            expect:
+              user: vaultwarden
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: vw-alive
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/alive
+            expect:
+              status: 200
+            await: 60s
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              status: 200
+              body:
+                matches: '[Vv]aultwarden|[Bb]itwarden'
+      - name: vw-signup-closed
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/identity/accounts/register/send-verification-email
+              method: POST
+              json:
+                email: stranger@example.test
+                name: x
+            expect:
+              status: 400
+      - name: vw-admin-locked
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              form:
+                token: wrong-admin-token
+            expect:
+              status: 200
+              cookies:
+                VW_ADMIN: null
+              body:
+                contains: Invalid admin token
+      - name: vw-account
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              form:
+                token: werewolf-check-admin
+              session: admin
+            expect:
+              status: 302
+              cookies:
+                VW_ADMIN:
+                  matches: .+
+          - fetch:
+              url: http://127.0.0.1:8080/admin/invite
+              method: POST
+              json:
+                email: check@example.test
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: check@example.test
+          - fetch:
+              url: http://127.0.0.1:8080/identity/accounts/register/send-verification-email
+              method: POST
+              json:
+                email: check@example.test
+                name: check
+            expect:
+              status: 200
+              body:
+                matches: .+
+            name: verification
+          - fetch:
+              url: http://127.0.0.1:8080/identity/accounts/register/finish
+              method: POST
+              json:
+                email: check@example.test
+                emailVerificationToken:
+                  step: verification
+                  body: true
+                kdf: 0
+                kdfIterations: 600000
+                masterPasswordHash: d2VyZXdvbGYtY2hlY2staGFzaA==
+                key: 2.YWJjZA==|ZWZnaA==|aWprbA==
+                keys:
+                  publicKey: cHVibGlj
+                  encryptedPrivateKey: 2.YWJjZA==|ZWZnaA==|aWprbA==
+            expect:
+              status: 200
+          - fetch:
+              url: http://127.0.0.1:8080/identity/connect/token
+              method: POST
+              form:
+                grant_type: password
+                username: check@example.test
+                password: d2VyZXdvbGYtY2hlY2staGFzaA==
+                scope: api offline_access
+                client_id: web
+                deviceType: '10'
+                deviceIdentifier: 4b2c3d4e-0000-4000-8000-000000000001
+                deviceName: check
+            expect:
+              status: 200
+              json:
+                /access_token:
+                  matches: .+
+            name: login
+          - fetch:
+              url: http://127.0.0.1:8080/api/accounts/profile
+              bearer:
+                step: login
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /id:
+                  matches: ^[0-9a-f-]+$
+            name: profile
+          - fetch:
+              url: http://127.0.0.1:8080/api/ciphers
+              method: POST
+              bearer:
+                step: login
+                json: /access_token
+              json:
+                type: 2
+                name:
+                  fixture: cipher-name
+                notes: null
+                secureNote:
+                  type: 0
+                favorite: false
+                folderId: null
+                organizationId: null
+                encryptedFor:
+                  step: profile
+                  json: /id
+            expect:
+              status: 200
+          - fetch:
+              url: http://127.0.0.1:8080/api/sync
+              bearer:
+                step: login
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /ciphers:
+                  count: 1
+                /ciphers/0/name:
+                  fixture: cipher-name
+        phases:
+          - seed
+      - name: vw-kept
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/identity/connect/token
+              method: POST
+              form:
+                grant_type: password
+                username: check@example.test
+                password: d2VyZXdvbGYtY2hlY2staGFzaA==
+                scope: api offline_access
+                client_id: web
+                deviceType: '10'
+                deviceIdentifier: 4b2c3d4e-0000-4000-8000-000000000001
+                deviceName: check
+            expect:
+              status: 200
+              json:
+                /access_token:
+                  matches: .+
+            name: login
+          - fetch:
+              url: http://127.0.0.1:8080/api/sync
+              bearer:
+                step: login
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /ciphers:
+                  count: 1
+                /ciphers/0/name:
+                  fixture: cipher-name
+        phases:
+          - verify
+      - name: vw-wrong-password
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/identity/connect/token
+              method: POST
+              form:
+                grant_type: password
+                username: check@example.test
+                password: d3Jvbmc=
+                scope: api offline_access
+                client_id: web
+                deviceType: '10'
+                deviceIdentifier: 4b2c3d4e-0000-4000-8000-000000000001
+                deviceName: check
+            expect:
+              status: 400
+              json:
+                /error: invalid_grant
+      - name: vw-private
+        steps:
+          - file: /run/svc/vaultwarden/admin-token
+            expect:
+              uid: vaultwarden
+              mode: '600'
+          - file: /data/svc/vaultwarden/db.sqlite3
+            expect:
+              uid: vaultwarden
+              type: file
+          - file: /data/svc/vaultwarden/config.json
+            expect:
+              exists: false

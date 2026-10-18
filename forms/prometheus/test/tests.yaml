@@ -1,0 +1,109 @@
+version: 1
+suites:
+  - name: prometheus
+    cases:
+      - name: prom-auth
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9090/-/healthy
+            expect:
+              status: 401
+            await: 60s
+          - fetch:
+              url: http://127.0.0.1:9090/-/healthy
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status: 200
+              body:
+                contains: Healthy
+      - name: prom-scrapes
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22prometheus%22%7D%3D%3D1
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status: 200
+              json:
+                /data/result/0/metric/job: prometheus
+                /data/result/0/value/1: '1'
+            await: 90s
+          - fetch:
+              url: http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22targets%22%7D%3D%3D0
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status: 200
+              json:
+                /data/result/0/metric/instance: 127.0.0.1:9100
+                /data/result/0/value/1: '0'
+            await: 90s
+      - name: prom-no-admin
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9090/api/v1/admin/tsdb/snapshot
+              method: POST
+              body: ''
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status: 500
+              body:
+                contains: admin APIs disabled
+          - fetch:
+              url: http://127.0.0.1:9090/-/quit
+              method: POST
+              body: ''
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status:
+                min: 400
+                max: 499
+              body:
+                contains: Lifecycle API is not enabled
+          - fetch:
+              url: http://127.0.0.1:9090/api/v1/write
+              method: POST
+              body: ''
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status:
+                min: 400
+                max: 499
+              body:
+                contains: remote write receiver needs to be enabled
+      - name: prom-setup
+        steps:
+          - file: /run/svc/prometheus/web.yml
+            expect:
+              uid: prometheus
+              mode: '600'
+              body:
+                contains: '  ops: ''$2b$10$'
+                absent: werewolf-check-pass-1
+          - file: /run/svc/prometheus/prometheus.yml
+            expect:
+              body:
+                contains: '''127.0.0.1:9100'''
+          - file: /data/svc/prometheus/data/wal
+            expect:
+              type: directory
+      - name: prom-wrong-password
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9090/-/healthy
+              headers:
+                Authorization: Basic b3BzOndyb25nLXBhc3N3b3Jk
+            expect:
+              status: 401
+      - name: prom-invalid-query
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9090/api/v1/query?query=%7B
+              headers:
+                Authorization: Basic b3BzOndlcmV3b2xmLWNoZWNrLXBhc3MtMQ==
+            expect:
+              status: 400

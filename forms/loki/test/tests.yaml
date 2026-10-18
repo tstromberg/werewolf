@@ -1,0 +1,118 @@
+version: 1
+suites:
+  - name: loki
+    fixtures:
+      authorization: /run/config/tests/loki-authorization
+      push: /run/config/tests/loki-push
+      marker: /run/config/tests/loki-marker
+    cases:
+      - name: loki-ready
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3100/ready
+            expect:
+              status: 200
+              body:
+                matches: ^ready
+            await: 120s
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+      - name: loki-auth
+        steps:
+          - fetch:
+              url: https://localhost/loki/api/v1/labels
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+            await: 60s
+          - fetch:
+              url: https://localhost/loki/api/v1/push
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json: {}
+            expect:
+              status: 401
+      - name: loki-roundtrip
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3100/loki/api/v1/push
+              method: POST
+              headers:
+                Content-Type: application/json
+              body:
+                fixture: push
+            expect:
+              status: 204
+          - fetch:
+              url: https://localhost/loki/api/v1/query_range?query=%7Bjob%3D%22check%22%7D&since=1h
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /status: success
+              body:
+                contains:
+                  fixture: marker
+            await: 30s
+        phases:
+          - seed
+      - name: loki-kept
+        steps:
+          - fetch:
+              url: https://localhost/loki/api/v1/query_range?query=%7Bjob%3D%22check%22%7D&since=1h
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /status: success
+              body:
+                contains:
+                  fixture: marker
+            await: 30s
+        phases:
+          - verify
+      - name: loki-alone
+        steps:
+          - service: loki
+            expect:
+              user: loki
+              connect_rules:
+                - tcp/9095
+          - file: /run/svc/caddy/loki-auth.caddy
+            expect:
+              body:
+                contains: alloy $2b$10$
+                absent: werewolf-check-pass-1
+          - file: /run/svc/caddy/loki-password
+            expect:
+              exists: false
+      - name: loki-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/loki/api/v1/labels
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWxsb3k6d3JvbmctcGFzc3dvcmQ=
+            expect:
+              status: 401
+      - name: loki-invalid-push
+        steps:
+          - fetch:
+              url: https://localhost/loki/api/v1/push
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              body: not-json
+              headers:
+                Content-Type: application/json
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 400

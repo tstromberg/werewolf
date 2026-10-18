@@ -1,0 +1,43 @@
+From a554906ea44c26925730a25263e64890d48d2b36 Mon Sep 17 00:00:00 2001
+From: Kajetan Puchalski <kajetan.puchalski@arm.com>
+Date: Fri, 7 Aug 2026 11:57:02 +0000
+Subject: [PATCH] bhyve: rtc_pl031: Fix PeriphID and CellID values
+
+PeriphID and CellID values are determined by macros which take an
+index. They currently receive a bus offset which has a stride of 4 bytes.
+This causes the ID1-3 registers to report incorrect values.
+Scale the offset before passing it to the macro to fix this.
+
+Tested with kvm-unit-tests/arm/pl031.
+
+Signed-off-by: Kajetan Puchalski <kajetan.puchalski@arm.com>
+
+Reviewed by:	jrtc27
+Fixes:		014d7082a239 ("bhyve: Implement a PL031 RTC on arm64")
+MFC after:	1 week
+Pull Request:	https://github.com/freebsd/freebsd-src/pull/2358
+Closes:		https://github.com/freebsd/freebsd-src/pull/2358
+---
+ usr.sbin/bhyve/rtc_pl031.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/usr.sbin/bhyve/rtc_pl031.c b/usr.sbin/bhyve/rtc_pl031.c
+index e334de6f92bb43..74d392e5c023b8 100644
+--- a/usr.sbin/bhyve/rtc_pl031.c
++++ b/usr.sbin/bhyve/rtc_pl031.c
+@@ -236,13 +236,13 @@ rtc_pl031_read(struct rtc_pl031_softc *sc, int offset)
+ 	case RTCPeriphID1:
+ 	case RTCPeriphID2:
+ 	case RTCPeriphID3:
+-		reg = RTCPeriphID_VAL(offset - RTCPeriphID0);
++		reg = RTCPeriphID_VAL((offset - RTCPeriphID0) >> 2);
+ 		break;
+ 	case RTCCellID0:
+ 	case RTCCellID1:
+ 	case RTCCellID2:
+ 	case RTCCellID3:
+-		reg = RTCCellID_VAL(offset - RTCCellID0);
++		reg = RTCCellID_VAL((offset - RTCCellID0) >> 2);
+ 		break;
+ 	default:
+ 		/* Return 0 in reads from unasigned registers */

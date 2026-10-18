@@ -1,0 +1,51 @@
+version: 1
+suites:
+  - name: test-gatus
+    cases:
+      - name: gatus-user
+        steps:
+          - service: gatus
+            await: 60s
+            expect:
+              user: gatus
+              capabilities: []
+      - name: gatus-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/health
+            expect:
+              status: 200
+              json:
+                /status: UP
+            await: 60s
+      - name: gatus-target
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/api/v1/endpoints/statuses
+            expect:
+              status: 200
+              json:
+                /0/name: target
+            await: 60s
+      - name: gatus-readonly
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/api/v1/endpoints/statuses
+              method: POST
+              body: x
+            expect:
+              status:
+                min: 400
+                max: 499
+      - name: gatus-no-metrics
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/metrics
+            expect:
+              status: 404
+      - name: gatus-history
+        steps:
+          - file: /data/svc/gatus/data.db
+            expect:
+              type: file
+              uid: gatus

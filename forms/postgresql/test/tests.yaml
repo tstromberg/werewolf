@@ -1,0 +1,166 @@
+version: 1
+packages:
+  - postgresql-17-client
+suites:
+  - name: test-postgres
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: ready
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT 1\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "1\n"
+            await: 90s
+      - name: locale
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT current_setting('server_encoding') || '/' || datcollate || '/'\
+                \ || datctype FROM pg_database WHERE datname=current_database()\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "UTF8/C/C\n"
+      - name: write
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "CREATE TABLE native_test(value text PRIMARY KEY); INSERT INTO native_test\
+                \ VALUES (current_setting('application_name')), ('h' || chr(233) || 'llo');\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: ''
+        phases:
+          - seed
+      - name: persisted-row
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT count(*) FROM native_test WHERE value=current_setting('application_name')\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "1\n"
+      - name: utf8
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT encode(convert_to(value, 'UTF8'),'hex') FROM native_test WHERE\
+                \ value LIKE 'h%'\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "68c3a96c6c6f\n"
+      - name: rollback
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "BEGIN; INSERT INTO native_test VALUES ('rolled-back'); ROLLBACK; SELECT\
+                \ count(*) FROM native_test WHERE value='rolled-back'\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "0\n"
+  - name: test-postgres-denied
+    user: nobody
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: peer-refused
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT 1\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 2
+              stderr:
+                contains: Peer authentication failed
+  - name: test-postgres-policy
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath inet proc exec
+      read:
+        - /etc/sv/postgres/service
+        - /run/svc/postgres
+      connect: []
+      run:
+        - /usr/lib/werewolf/sh-shim
+        - /usr/lib/werewolf/test-postgres-policy
+    source: driver.zig
+    mode: policy
+    cases:
+      seed:
+        - shim-policy
+        - shim-output
+        - shim-discard
+        - shim-file-refused
+        - no-tcp-listener
+      verify:
+        - shim-policy
+        - shim-output
+        - shim-discard
+        - shim-file-refused
+        - no-tcp-listener

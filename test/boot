@@ -67,12 +67,14 @@ if {$checks ne "-"} {
 
 proc say {status what {detail ""}} {
 	global name
-	send_user [format "%-6s %-18s %s\n" $status $name $what]
+	# send_user also writes the serial log, possibly inside a guest record.
+	puts [format "%-6s %-18s %s" $status $name $what]
 	if {$detail ne ""} {
 		foreach line [split [string trim $detail] "\n"] {
-			send_user "         | [string trimright $line]\n"
+			puts "         | [string trimright $line]"
 		}
 	}
+	flush stdout
 }
 
 proc check_shutdown {} {
@@ -457,11 +459,10 @@ if {[llength $console]} {
 		# above, so judge the console as it came and with its kernel records
 		# removed: a line counts if it is in either.
 		regsub -all {\[ *[0-9]+\.[0-9]+\] [^\n]*\n} $text {} clean
-		set text "$text\n$clean"
 		set missing 0
 		foreach c $console {
 			lassign $c kind check re
-			if {$kind eq "seen" && ![regexp -- $re $text]} { incr missing }
+			if {$kind eq "seen" && ![regexp -- $re $text] && ![regexp -- $re $clean]} { incr missing }
 		}
 		if {!$missing || [clock seconds] > $deadline} { break }
 		expect {
@@ -473,7 +474,7 @@ if {[llength $console]} {
 	}
 	foreach c $console {
 		lassign $c kind check re
-		set found [regexp -- $re $text]
+		set found [expr {[regexp -- $re $text] || [regexp -- $re $clean]}]
 		if {$kind eq "seen" && $found} {
 			say ok $check
 		} elseif {$kind eq "unseen" && !$found} {
@@ -482,7 +483,7 @@ if {[llength $console]} {
 			say FAIL $check "not on the console in 300 s: $re"
 			incr failed
 		} else {
-			regexp -- "\[^\n\]*(?:$re)\[^\n\]*" $text line
+			regexp -- "\[^\n\]*(?:$re)\[^\n\]*" "$text\n$clean" line
 			say FAIL $check "on the console: $line"
 			incr failed
 		}

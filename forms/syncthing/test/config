@@ -1,11 +1,14 @@
 #!/bin/sh
 # forms/syncthing/test/config DIR: the syncthing form's config for make
-# check, in DIR: the GUI's user and password, which test/checks signs in
+# check, in DIR: the GUI's user and password, which the YAML probes signs in
 # with; its base URL, https://localhost, for which Caddy's own CA signs;
-# and global discovery off, which test/checks finds in Syncthing's config.
+# and global discovery off, which the YAML probes finds in Syncthing's config.
 set -eu
 mkdir -p "$1/caddy" "$1/syncthing"
 umask 077
 printf '%s' werewolf-check-pass-1 >"$1/caddy/gui-password"
 echo '{"base-url":"https://localhost","gui-user":"admin"}' >"$1/caddy/settings.json"
 echo '{"global-discovery":false}' >"$1/syncthing/settings.json"
+mkdir -p "$1/tests"
+printf 'Basic %s' "$(printf %s admin:werewolf-check-pass-1 | openssl base64 -A)" \
+	>"$1/tests/syncthing-authorization"

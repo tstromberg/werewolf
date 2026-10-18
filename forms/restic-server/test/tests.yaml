@@ -1,0 +1,228 @@
+version: 1
+packages:
+  - restic
+suites:
+  - name: restic
+    policy:
+      run:
+        - /usr/bin/restic
+    fixtures:
+      alice-repo: /run/config/tests/restic-alice-repo
+      bob-repo: /run/config/tests/restic-bob-repo
+      repo-password: /run/config/tests/restic-repo-password
+    cases:
+      - name: rs-user
+        steps:
+          - service: restic-server
+            expect:
+              user: _oci-restic-server
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: rs-stranger
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/alice/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+            await: 60s
+      - name: rs-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/alice/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWxpY2U6d3Jvbmc=
+            expect:
+              status: 401
+      - name: rs-backup
+        steps:
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     init]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     backup, --tag, {run: true}, /etc/hostname, /run/werewolf/hostname]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     snapshots, --json]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              json:
+                '': {count: 1}
+                /0/tags/0:
+                  run: true
+          - file: /data/svc/restic-server/alice/config
+            expect:
+              type: file
+              uid: _oci-restic-server
+          - name: hostname
+            file: /run/werewolf/hostname
+            expect:
+              type: file
+              body:
+                matches: .+
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     dump, latest, /run/werewolf/hostname]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              stdout:
+                step: hostname
+                body: true
+        phases:
+          - seed
+      - name: rs-kept
+        steps:
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     snapshots, --json]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              json:
+                '': {count: 1}
+                /0/tags/0:
+                  run: true
+          - name: hostname
+            file: /run/werewolf/hostname
+            expect:
+              type: file
+              body:
+                matches: .+
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     dump, latest, /run/werewolf/hostname]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              stdout:
+                step: hostname
+                body: true
+        phases:
+          - verify
+      - name: rs-private
+        steps:
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     snapshots, --json]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: bob-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 1
+              stderr:
+                matches: 401|403|Unauthorized|Forbidden
+          - fetch:
+              url: https://localhost/alice/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic Ym9iOndlcmV3b2xmLWNoZWNrLWJvYg==
+            expect:
+              status:
+                one_of:
+                  - 401
+                  - 403
+      - name: rs-alone
+        steps:
+          - service: restic-server
+            expect:
+              user: _oci-restic-server
+              connect_rules: []
+      - name: rs-append-only
+        steps:
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     snapshots, --json]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              json:
+                '': {count: 1}
+                /0/tags/0:
+                  run: true
+            name: before
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     forget, {step: before, json: /0/id}]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 3
+              stderr:
+                matches: 403|Forbidden|forbidden
+          - exec:
+              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
+                     snapshots, --json]
+              env:
+                HOME: /tmp
+                RESTIC_REPOSITORY:
+                  fixture: alice-repo
+                RESTIC_PASSWORD:
+                  fixture: repo-password
+            expect:
+              exit: 0
+              json:
+                '': {count: 1}
+                /0/id:
+                  step: before
+                  json: /0/id
+                /0/tags/0:
+                  run: true

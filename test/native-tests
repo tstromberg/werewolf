@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build and run declared shell-free integration clients; never alter production services."""
 import hashlib
+import fcntl
+import tempfile
 import importlib.machinery
 import importlib.util
 import json
@@ -16,6 +18,8 @@ import tarfile
 IDENT = re.compile(r'[a-z][a-z0-9-]*\Z')
 ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]*\Z')
 RUNTIME_GRANTS = {'python:native', 'node:native', 'java:native'}
+COMPILED_EXAMPLES = {'go-example', 'rust-example', 'aspnet-example'}
+PLATFORM = Path(__file__).resolve().parent / 'native/platform.yaml'
 # Wait for the whole record before Expect prints its own result on this console.
 COMPLETION = r'werewolf-test: [^\r\n]*"event":"complete"[^\r\n]*\}\r*\n'
 loader = importlib.machinery.SourceFileLoader('werewolf_console', str(Path(__file__).with_name('cloud-console')))
@@ -37,19 +41,39 @@ def digest(path):
     return result.hexdigest()
 
 
+def plan_path(form, root=Path('.')):
+    directory = root / 'forms' / form / 'test'
+    paths = [p for p in (directory / 'tests.yaml', directory / 'native.json') if p.exists()]
+    if len(paths) != 1:
+        raise ValueError('expected exactly one tests.yaml or native.json for ' + form)
+    return paths[0]
+
+
 def read_plan(form):
-    path = Path('forms') / form / 'test/native.json'
-    plan = json.loads(path.read_text())
+    path = plan_path(form)
+    if path.suffix == '.yaml':
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from probe_plan import load
+        plan = load(path)
+    else:
+        plan = json.loads(path.read_text())
     if set(plan) - {'format', 'packages', 'drivers', 'legacy'} or plan.get('format') != 'werewolf-native-tests/1':
         raise ValueError('invalid native test plan')
     if not isinstance(plan.get('legacy', False), bool):
         raise ValueError('legacy must be a boolean')
-    if not plan['drivers'] or len(plan['drivers']) > 32:
-        raise ValueError('expected 1..32 drivers')
+    # Retaining a shell suite must not silently stop running its assertions.
+    plan['legacy'] = plan.get('legacy', False) or (path.parent / 'checks').is_file() or (path.parent / 'checks-again').is_file()
+    if not isinstance(plan['drivers'], list) or len(plan['drivers']) > 32:
+        raise ValueError('expected 0..32 drivers')
+    if not plan['drivers']:
+        exceptions = (PLATFORM.parent.parent / 'form-coverage-exceptions').read_text().splitlines()
+        foundations = {fields[0] for line in exceptions if len(fields := line.split()) >= 2 and fields[1] == '0'}
+        if form not in foundations:
+            raise ValueError('service forms require their own test suites')
     names = set()
     for d in plan['drivers']:
         required = {'name', 'source', 'mode', 'user', 'pledge', 'read', 'connect', 'run', 'cases'}
-        if not required <= set(d) or set(d) - required - {'config', 'groups', 'memory', 'allow'}:
+        if not required <= set(d) or set(d) - required - {'config', 'groups', 'memory', 'allow', 'probes'}:
             raise ValueError('invalid driver fields')
         if type(d.get('memory', 128)) is not int or not 16 <= d.get('memory', 128) <= 8192:
             raise ValueError('driver memory must be 16..8192 MiB')
@@ -61,16 +85,20 @@ def read_plan(form):
                 raise ValueError('invalid driver identity')
         if not ACCOUNT.fullmatch(d['user']):
             raise ValueError('invalid driver account')
-        if d['user'] == 'root' or not d['name'].startswith('test-') or d['name'] in names:
-            raise ValueError('driver needs a unique test name and non-root identity')
+        if not d['name'].startswith('test-') or d['name'] in names:
+            raise ValueError('driver needs a unique test name')
+        if d['name'] == 'test-platform':
+            raise ValueError('test-platform is reserved for shared boot checks')
         names.add(d['name'])
         groups = d.get('groups', [])
         if not isinstance(groups, list) or len(groups) > 16 or any(
                 not isinstance(group, str) or not ACCOUNT.fullmatch(group) or group == 'root'
                 for group in groups) or len(set(groups)) != len(groups):
             raise ValueError('invalid test groups')
+        if 'probes' in d and path.suffix != '.yaml':
+            raise ValueError('probe data must come from validated tests.yaml')
         source = Path(d['source'])
-        if source.name != d['source'] or source.suffix != '.zig' or not (path.parent / source).is_file():
+        if 'probes' not in d and (source.name != d['source'] or source.suffix != '.zig' or not (path.parent / source).is_file()):
             raise ValueError('driver source must be adjacent Zig source')
         if set(d['cases']) != {'seed', 'verify'}:
             raise ValueError('declare seed and verify cases')
@@ -97,6 +125,22 @@ def read_plan(form):
     return plan
 
 
+def boot_plan(form):
+    """Clean boots always include the shared suite; SSH iteration uses read_plan."""
+    from probe_plan import load
+    plan = read_plan(form)
+    common = load(PLATFORM)
+    shared = common['drivers'][0]
+    skip = set(call('build/host/form', 'check', form, 'skip', capture_output=True, text=True).stdout.split())
+    known = set(shared['cases']['seed']) | set(shared['cases']['verify'])
+    if skip - known:
+        raise ValueError('unknown shared check exclusions: ' + ', '.join(sorted(skip - known)))
+    shared['cases'] = {phase: [case for case in cases if case not in skip]
+                       for phase, cases in shared['cases'].items()}
+    return {**plan, 'packages': sorted(set(plan['packages'] + common['packages'])),
+            'drivers': [shared, *plan['drivers']]}
+
+
 def write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(data, (dict, list)):
@@ -110,6 +154,24 @@ def runtime_grants(root, drivers):
         for grant in driver.get('allow', []):
             runtime, name = grant.split(':')
             write(root / 'etc/runtime-hardening/allow' / driver['name'] / runtime / name, '')
+
+
+def application_overlay(form, baseline, root):
+    # The generated form has a different name, so the builder deliberately
+    # does not compile a tutorial for it. Reuse the baseline's exact bytes;
+    # compiling again could change .NET metadata or lose the application.
+    if form in COMPILED_EXAMPLES:
+        application = baseline / 'application'
+        if not application.is_dir():
+            raise ValueError('missing compiled production application: ' + str(application))
+        shutil.copytree(application, root, dirs_exist_ok=True)
+
+
+def wait_paths(driver):
+    # Landlock binds inodes before the client starts. These paths are created
+    # by production startup, unlike image paths that already exist at boot.
+    return sorted({p for p in driver['read'] + driver['connect']
+                   if p.startswith(('/run/svc/', '/run/cgroup/svc/', '/data/share/', '/data/svc/'))})
 
 
 def production_pins(root):
@@ -156,8 +218,28 @@ def form_config(form, plan, pins=()):
     return yaml
 
 
+def probe_binary(arch):
+    target = arch + '-linux-gnu' if arch in ('aarch64', 'x86_64') else None
+    sources = sorted(Path('test/native').glob('*.zig')) + [Path('test/native/regex.c')]
+    identity = hashlib.sha256((str(target) + call('zig', 'version', capture_output=True, text=True).stdout +
+                               ''.join(digest(p) for p in sources)).encode()).hexdigest()
+    cache = Path('build/test-probes') / (arch + '-' + identity[:20])
+    binary = cache / 'test-probes'
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / 'lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if binary.exists(): return binary
+        flags = ['-target', target] if target else []
+        with tempfile.TemporaryDirectory(dir=cache) as directory:
+            temporary = Path(directory) / 'test-probes'
+            call('zig', 'build-exe', '-lc', '-O', 'ReleaseSafe', '-fstrip', *flags,
+                 'test/native/probes.zig', 'test/native/regex.c', '-femit-bin=' + str(temporary))
+            temporary.replace(binary)
+    return binary
+
+
 def prepare(form, arch):
-    plan = read_plan(form)
+    plan = boot_plan(form)
     work = Path('build/native-tests') / arch / form
     generated = work / ('native-test-' + form)
     root = generated / 'rootfs'
@@ -166,17 +248,23 @@ def prepare(form, arch):
         shutil.rmtree(generated)
     baseline = os.environ.get('PRODUCTION_OUT')
     pins = production_pins(Path(baseline)) if baseline else ()
+    if form in COMPILED_EXAMPLES and not baseline:
+        raise ValueError('compiled native tests need PRODUCTION_OUT')
+    if baseline:
+        application_overlay(form, Path(baseline), root)
     write(generated / 'form.yaml', form_config(form, plan, pins))
     write(root / 'usr/share/werewolf/test-image', 'werewolf-native-tests/1\n')
     runtime_grants(root, plan['drivers'])
     compile_dir = work / 'compile'
     write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
-    write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], wait=sorted({
-        p for p in d['read'] + d['connect'] if p.startswith(('/run/svc/', '/data/share/'))})) for d in plan['drivers']]})
+    write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], mode=d['mode'], root=d['user'] == 'root', wait=wait_paths(d))
+                                               for d in plan['drivers']]})
 
-    def compile(source, binary):
+    def compile(source, binary, transport=False):
         binary.parent.mkdir(parents=True, exist_ok=True)
-        call('zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target', arch + '-linux-musl',
+        flags = ['-lc'] if transport else []
+        target = arch + ('-linux-gnu' if transport else '-linux-musl')
+        call('zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target', target, *flags,
              '--dep', 'test-driver', '-Mroot=' + str(source), '-Mtest-driver=test/native/driver.zig',
              '-femit-bin=' + str(binary))
 
@@ -185,7 +273,18 @@ def prepare(form, arch):
     (root / 'etc/runit/2').symlink_to('/usr/lib/werewolf/test-stage')
     for d in plan['drivers']:
         binary = '/usr/lib/werewolf/' + d['name']
-        compile(Path('forms') / form / 'test' / d['source'], root / binary.lstrip('/'))
+        if 'probes' in d:
+            shutil.copyfile(probe_binary(arch), root / binary.lstrip('/'))
+            (root / binary.lstrip('/')).chmod(0o755)
+            write(root / 'usr/share/werewolf/tests' / d['name'] / 'probes.json', d['probes'])
+        else:
+            source = Path('forms') / form / 'test' / d['source']
+            if d['name'] == 'test-platform':
+                source = compile_dir / 'platform.zig'
+                write(source, PLATFORM.with_suffix('.zig').read_text())
+                write(compile_dir / 'platform.json', d['cases'])
+            compile(source, root / binary.lstrip('/'),
+                    'libcurl-openssl4' in plan['packages'])
         service = [f'exec {binary} {d["name"]} {d["mode"]} /run/svc/{d["name"]}/context',
                    'user ' + d['user'], 'pledge ' + d['pledge'],
                    'config context /run/config/tests/context', f'memory {d.get("memory", 128)}', 'nofile 128']
@@ -288,11 +387,13 @@ def compare(form, arch):
             raise ValueError('native instrumentation changed runtime overlay: ' + name)
     # New configuration can change a service just as replacing a file can.
     # Permit only the declared clients, their launcher and inert form metadata.
-    plan = read_plan(form)
+    plan = boot_plan(form)
     additions = {'usr/lib/werewolf/test-stage', 'usr/share/werewolf/test-image'}
     for driver in plan['drivers']:
         additions.add('usr/lib/werewolf/' + driver['name'])
         additions.add('usr/share/werewolf/tests/' + driver['name'] + '/service')
+        if 'probes' in driver:
+            additions.add('usr/share/werewolf/tests/' + driver['name'] + '/probes.json')
         for grant in driver.get('allow', []):
             runtime, name = grant.split(':')
             allowance = 'etc/runtime-hardening/allow/' + driver['name'] + '/' + runtime + '/' + name
@@ -308,11 +409,11 @@ def compare(form, arch):
 
 
 def run(form, arch, qemu):
-    plan = read_plan(form)
+    plan = boot_plan(form)
     output = Path(os.environ['OUT'])
     inputs = dict(kernel=Path(os.environ['KERNEL']), image=output / 'initramfs.zst',
                   production_image=Path(os.environ.get('PRODUCTION_OUT', output.parent / form)) / 'initramfs.zst',
-                  plan=Path('forms') / form / 'test/native.json')
+                  plan=plan_path(form), platform_plan=PLATFORM, platform_driver=PLATFORM.with_suffix('.zig'))
     identity = {name: digest(path) for name, path in inputs.items()}
     check = Path(os.environ['CHECK'])
     work = check / (form + '-native')
@@ -350,6 +451,8 @@ def run(form, arch, qemu):
             raise ValueError('native test inputs changed during the run; rebuild and retry')
         # Preserve serial CRs until console_clean removes interleaved kernel lines.
         count = validate(log.read_bytes().decode(errors='replace'), plan, context)
+        if phase == 'verify' and re.search(r'werewolf: (formatting|making LUKS2) ', log.read_text(errors='replace')):
+            raise ValueError('data was reformatted during verify boot')
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
@@ -362,7 +465,9 @@ if __name__ == '__main__':
         action, form, arch, *args = sys.argv[1:]
         if not IDENT.fullmatch(form) or arch not in ('aarch64', 'x86_64'):
             raise ValueError('invalid form or architecture')
-        if action == 'prepare' and not args:
+        if action == 'describe' and not args:
+            print(json.dumps(dict(legacy=read_plan(form).get('legacy', False))))
+        elif action == 'prepare' and not args:
             prepare(form, arch)
         elif action == 'compare' and not args:
             compare(form, arch)

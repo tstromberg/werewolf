@@ -313,7 +313,7 @@ fn admit(
 ) !howl.Arch {
     if (dev) return why.refuse("the secured local profile refuses --dev", .{});
     if (provider == .bhyve) {
-        if (!bhyve.installed(io)) return why.refuse(
+        if (!bhyve.installed(io) or @import("builtin").cpu.arch != .x86_64) return why.refuse(
             "protected bhyve requires FreeBSD x86_64 with vmm loaded",
             .{},
         );

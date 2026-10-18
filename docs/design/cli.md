@@ -4,6 +4,11 @@ Built, 2026-10-07 (cmd/howl, [README](../../cmd/howl/README.md)). Run end
 to end on Lima, GCP, AWS and Azure; bhyve, Firecracker and Proxmox are
 experimental, Proxmox never run on a node. `pack --image` is not built.
 
+bhyve update, 2026-10-18: x86_64 and ARM64 are integrated, with TAP by default and
+explicit SLIRP retained. ARM64 passed signed A/B recovery with private runtime fixes,
+but failed a sustained-transfer soak in virtio TX; Secure Boot remains unsupported
+on ARM64. See [live testing](../testing-live.md#bhyve) for current limits.
+
 ## Summary
 
 `howl` builds a form's image, packs a machine's config tar, and puts both

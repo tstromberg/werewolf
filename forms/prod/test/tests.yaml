@@ -1,0 +1,3 @@
+# Shared platform checks cover this foundation, including LUKS and reboot persistence.
+version: 1
+suites: []

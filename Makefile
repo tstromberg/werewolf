@@ -269,16 +269,25 @@ $(TEST_SK): tools/test-sk.zig
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = test/native/iterate.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: _test/package-sources _test/package-pins $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/ci-forms: ; python3 test/ci-forms-test
 _test/cloud-console: ; python3 test/cloud-console --test
-_test/form-coverage: ; python3 test/form-coverage
+_test/probes:
+	@mkdir -p build/test-probes
+	zig test -lc test/native/match.zig test/native/regex.c
+	zig test -lc test/native/probes.zig test/native/regex.c
+	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
+	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
+	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
+
+_test/form-coverage: ; python3 test/form-coverage --probes
 _test/bhyve-network: ; python3 test/check-bhyve-network
+_test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
 _test/package-sources: ; python3 test/package-sources
 _test/package-pins: ; go -C tools/package-pins test ./...
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
@@ -286,7 +295,7 @@ _test/release-signing:
 	python3 test/release-signing
 	python3 test/native-firmware
 _test/azure-security: ; python3 test/azure-security --test
-_test/provider-ab:
+_test/provider-ab: _test/bhyve-runtime
 	python3 test/ab_checks.py
 	python3 test/ab-provider-tests
 _test/local-prerequisites: $(HOWL)
@@ -503,7 +512,7 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
-NATIVE_TEST_FORMS := $(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json)))
+NATIVE_TEST_FORMS := $(filter $(FORMS_FOR_ARCH),$(sort $(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json)) $(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
@@ -608,15 +617,17 @@ seal-learn: | _check-shared
 	@test/seal-learn $(BUILD)/check-learn
 
 REPEAT ?= 10
-check-one: | _check-shared
-	@$(call built,$(FORM),$(CHECK_MAKE) FORM=$(FORM) image)
-	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(CHECK_MAKE) FORM=$(FORM) _check-form
+check-one:
+	@mkdir -p $(CHECK)
+	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(MAKE) --no-print-directory check-$(FORM)
 
 # Repeated and overlapping posture scans, stale fixtures and log evidence.
 check-posture: | _check-shared
 	@$(CHECK_MAKE) FORM=minimal CHECK_NAME=posture FORM_CHECKS=test/checks-posture _check-form
 
-check-%: | _check-shared
+check-%: _check-legacy-%
+
+_check-legacy-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
 	@$(CHECK_MAKE) FORM=$* _check-form
 
@@ -635,8 +646,13 @@ _check-native-tests:
 	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(NATIVE_FORM)$(if $(IPE),-ipe) \
 		python3 test/native-tests run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
-# Keep legacy checks until all their security assertions have native equivalents.
+# Shared checks run natively; retained form checks still run during migration.
 $(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
+	@case "$$(python3 test/native-tests describe $* $(ARCH))" in \
+		'{"legacy": false}') ;; \
+		'{"legacy": true}') $(MAKE) --no-print-directory _check-legacy-$* ;; \
+		*) echo 'native-tests: could not resolve remaining legacy coverage' >&2; exit 1 ;; \
+	esac
 
 # Test the actual application-carrier form with code in its verified image,
 # as well as its ordinary boot without code. A separate name avoids sharing
@@ -714,8 +730,11 @@ check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordi
 check-lan: $(call program_bin,fence)
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
 
-# These boot what a form's check built; prod supplies DHCP, metadata and /data.
-check-lease check-nodata check-metadata: | _check-shared check-prod
+# These remaining console checks need their own debug image; check-prod is clean.
+.PHONY: _check-prod-console-image
+_check-prod-console-image: | _check-shared check-prod
+	@$(call built,prod-console,$(CHECK_MAKE) FORM=prod image)
+check-lease check-nodata check-metadata: | _check-prod-console-image
 	@$(CHECK_MAKE) FORM=prod _$@
 check-static check-verity: | _check-shared check-minimal
 	@$(CHECK_MAKE) FORM=minimal _$@
@@ -836,9 +855,9 @@ _check-provider-ab: $(HOWL)
 build/x86_64/tools/howl-linux: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
-build/x86_64/tools/howl-freebsd: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
+build/x86_64/tools/howl-freebsd build/aarch64/tools/howl-freebsd: build/%/tools/howl-freebsd: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe -target x86_64-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
+	zig build-exe -O ReleaseSafe -target $*-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
 
 # A form README's fences (docs/design/examples.md). Not part of make check:
 # the console checks stay, and a README with no Getting Started is skipped.

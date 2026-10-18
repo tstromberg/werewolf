@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/valkey-tcp/test/config DIR: the password and a 64 MiB cap, which
-# forms/valkey-tcp/test/checks reads back. The password has no newline.
+# forms/valkey-tcp/test/tests.yaml reads back. The password has no newline.
 set -eu
 mkdir -p "$1/valkey"
 umask 077

@@ -67,16 +67,20 @@ an existing kernel archive ([test/check-provider-ab](../test/check-provider-ab),
 | `check-ab-lima-vz` | signed updates | arm64 Mac; `AB_MODE=plain` |
 | `check-ab-aws`, `check-ab-gcp` | Secure Boot | a logged-in cloud CLI; optional `CLOUD_SIZE`, `GCP_PROJECT`, `GCP_ZONE` |
 | `check-ab-azure` | Secure Boot | a logged-in az; a temporary group in West US 2 by default |
-| `check-ab-bhyve` | signed updates | x86_64; `BHYVE_HOST=bilbo`, passwordless `doas`, bhyve firmware and mtools |
+| `check-ab-bhyve` | signed updates | `BHYVE_HOST=bilbo` (x86_64) or `smaug` (aarch64); passwordless `doas`, loaded vmm, firmware; libslirp only for SLIRP, or [TAP setup](testing-live.md#bhyve) |
 | `check-ab-firecracker` | signed updates | x86_64; `FIRECRACKER_HOST=galadriel`, KVM and passwordless `doas` |
 | `check-ab-proxmox` | signed updates | untested; `PROXMOX_HOST`, optional `PROXMOX_STORAGE` and `PROXMOX_BRIDGE` |
 
 Lima VZ, Firecracker, bhyve and Proxmox default to `AB_MODE=plain`: signed
-updates, with no firmware to enforce them. bhyve also takes `AB_MODE=secure`
+updates without Secure Boot enforcement. bhyve also takes `AB_MODE=secure`
 with `SECUREBOOT_DIR` holding its `code.fd` and `vars.fd`, and `make
 check-bhyve-secureboot AB_FIXTURE=...` checks that it refuses a tampered
-UKI; howl does not enroll bhyve itself yet, and supports it on x86_64 only.
-On 2026-10-12 every target passed but two: Azure's firmware reported
+UKI; bhyve Secure Boot testing remains x86_64-only. ARM64 uses U-Boot and plain
+mode; passing it requires the same IPE, signed-update and rollback assertions.
+On 2026-10-18 smaug passed with the private RTC/firmware fixes through normal howl
+launches, but a longer TAP soak panicked in virtio TX. Secure Boot and TPM were off;
+see [current limits and evidence](testing-live.md#bhyve), not a reliability guarantee.
+On 2026-10-12 every target (bhyve: x86_64 only) passed but two: Azure reported
 SecureBoot=1 with SetupMode=1 and was blocked before handover, a failing
 deployment rather than a passing recovery, and Proxmox has no node
 ([audit](audit/astra-2026-10-11.md#provider-ab-follow-up-2026-10-12)). The

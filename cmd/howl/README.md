@@ -53,7 +53,7 @@ architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 | `--on` | How | Needs |
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
-| bhyve | under `howl _bhyve` via daemon(8); TAP on an existing bridge by default; `--network slirp` retains loopback forwards | doas/sudo, vmm, bhyve-firmware; Python 3 for TAP |
+| bhyve | FreeBSD x86_64 or arm64, supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm, Python 3; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
@@ -61,18 +61,25 @@ architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve TAP uses an existing bridge (`--bridge NAME` if ambiguous), DHCP or static
-`--ip/--gw/--dns`. Only Howl's TAP is created and removed; reboots retain it.
-`howl ssh` follows the current boot address. Missing bridges fail without SLIRP
-fallback. Protected TAP updates remain gated; SLIRP is experimental.
+bhyve uses the only bridge or `--bridge NAME`, with DHCP or `--ip CIDR --gw ADDR
+--dns ADDR`. howl owns only its TAP: retained across reboots, removed on stop,
+delete or final exit; existing host networking is unchanged. Missing/ambiguous
+bridges fail without SLIRP fallback. ARM64 needs legacy virtio (kernel 7.2.11-r6+);
+its full signed A/B test passed, but a longer TAP soak hit a virtio TX panic.
+It remains experimental without a protected profile. For unprotected launches,
+`BHYVE_BINARY` and `BHYVE_ARM64_FIRMWARE` select absolute host paths; set them on
+each create/reconfigure. See [live tests](../../docs/testing-live.md#bhyve) and the
+[private runtime recipe](../../tools/bhyve-arm64/README.md) for limits and validation.
 
-Local engines and Proxmox attach config read-only; clouds use base64 user data. Cloud
-images are content-named and retained by delete; `--allow-from me|CIDR` opens ports.
+Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
+their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
+delete keeps the image. Nothing gets in until `--allow-from me|CIDR` opens the ports.
 
-**Reuse.** Create retains the disk and applies config; form/app/import changes fail.
-Run reuses matching protected inputs, resumes stopped VMs and replaces changed inputs.
-`--import DIR` is a read-only disk used on first boot ([data.md](../../docs/data.md)),
-local only. Progress goes to stderr; machine records go to stdout.
+**Second create.** The machine keeps its disk and takes the new config; another form,
+`--app`, or `--import` is refused. `howl run` reuses matching protected inputs and
+resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only disk the
+form reads once, while its data is first made ([data.md](../../docs/data.md)); a cloud
+cannot attach it. Progress goes to stderr and the machine record to stdout.
 
 ## Drawbacks
 

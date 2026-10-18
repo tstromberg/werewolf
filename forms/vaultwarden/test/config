@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/vaultwarden/test/config DIR: the vaultwarden form's config for make check, in
 # DIR: the site's address and the admin token, an Argon2id PHC string of
-# werewolf-check-admin, which forms/vaultwarden/test/checks logs in with
+# werewolf-check-admin, which the YAML probes logs in with
 # (vaultwarden hash makes the same on a machine that has it).
 set -eu
 d=$1/vaultwarden
@@ -16,3 +16,6 @@ salt=$(openssl base64 -A -in "$d/.salt" | tr -d '=')
 rm "$d/.salt"
 printf '$argon2id$v=19$m=65536,t=3,p=4$%s$%s' "$salt" "$hash" >"$d/admin-token"
 echo '{"domain":"http://127.0.0.1:8080"}' >"$d/settings.json"
+mkdir -p "$1/tests"
+printf '2.%s|Y2hlY2s=|aXRlbQ==' "$(openssl rand -base64 16)" \
+	>"$1/tests/vaultwarden-cipher-name"

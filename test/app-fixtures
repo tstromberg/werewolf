@@ -1,6 +1,6 @@
 # Form             Verified root overlay                    Guest checks
-node-app           forms/node-example/rootfs                forms/node-example/test/checks
-python-app         forms/python-example/rootfs              forms/python-example/test/checks
+node-app           forms/node-example/rootfs                test/checks-node-app
+python-app         forms/python-example/rootfs              test/checks-python-app
 ruby-app           forms/ruby-example/rootfs                forms/ruby-example/test/checks
 jre-app            java                                     test/checks-app-http
 php                forms/php-example/rootfs                 test/checks-php-security

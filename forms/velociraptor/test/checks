@@ -1,9 +1,0 @@
-# The GUI answers through Caddy once the server config exists and the
-# administrator is the config's. The frontend is not a web page.
-ok  vr-health    i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/v1/GetUsers 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no GUI in 180 s"; exit 1; }; sleep 1; done
-ok  vr-user      p=$(head -n 1 /run/cgroup/svc/velociraptor/cgroup.procs); u=$(grep '^velociraptor:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  vr-config    c=/data/svc/velociraptor/server.config.yaml; [ "$(stat -c '%u:%a' $c)" = "$(grep '^velociraptor:' /etc/passwd | cut -d: -f3):600" ] && ! grep -q 'werewolf-check-pass-1' $c
-ok  vr-anon      wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/v1/GetUsers 2>&1 | grep -q 'HTTP/1.1 401'
-ok  vr-wrong     wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s admin:admin | base64)" https://localhost/api/v1/GetUsers 2>&1 | grep -q 'HTTP/1.1 401'
-ok  vr-admin     wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)" https://localhost/api/v1/GetUsers 2>&1 | grep -q 'HTTP/1.1 200'
-ok  vr-frontend  ! wget -q -T 5 -O /dev/null http://127.0.0.1:8000/ 2>/dev/null

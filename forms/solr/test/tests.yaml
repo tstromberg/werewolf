@@ -1,0 +1,37 @@
+version: 1
+packages: []
+suites:
+  - name: test-solr
+    source: driver.zig
+    mode: http
+    user: solr
+    cases:
+      seed:
+        - ready
+        - version
+        - private-listener
+        - create-core
+        - index-document
+        - persisted-document
+        - home-confined
+        - cve-2021-44228-fixed
+        - no-shell-launcher
+        - hardened-java
+      verify:
+        - ready
+        - version
+        - private-listener
+        - persisted-document
+        - home-confined
+        - cve-2021-44228-fixed
+        - no-shell-launcher
+        - hardened-java
+    policy:
+      pledge: stdio rpath wpath inet connect
+      read:
+        - /etc/sv/solr/service
+        - /usr/lib/apk/db/installed
+        - /usr/lib/solr/server/lib/ext
+      connect:
+        - tcp/8983
+      run: []

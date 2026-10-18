@@ -1,0 +1,213 @@
+version: 1
+suites:
+  - name: valkey-policy
+    cases:
+      - name: valkey-user
+        steps:
+          - service: valkey
+            await: 60s
+            expect:
+              user: valkey
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: valkey-socket
+        steps:
+          - file: /run/svc/valkey/valkey.sock
+            expect:
+              type: socket
+              uid: valkey
+              gid: valkey
+              mode: '660'
+      - name: valkey-no-tcp
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 6379
+  - name: valkey-client
+    user: nobody
+    groups:
+      - valkey
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/valkey
+      connect:
+        - /run/svc/valkey/valkey.sock
+      run:
+        - /usr/bin/valkey-cli
+    cases:
+      - name: valkey-ping
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, ping]
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "PONG\n"
+            await: 60s
+      - name: valkey-kept
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, get,
+                     werewolf]
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+        phases:
+          - verify
+      - name: valkey-works
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, set,
+                     werewolf, {run: true}]
+            expect:
+              exit: 0
+              stdout: "OK\n"
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, get,
+                     werewolf]
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, eval,
+                     return 1, '0']
+            expect:
+              exit: 0
+              stdout: "1\n"
+        phases:
+          - seed
+      - name: valkey-no-admin
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, config,
+                     set, dir, /run/svc/valkey]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, config,
+                     get, dir]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, save]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, bgsave]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, debug,
+                     sleep, '0']
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, module,
+                     list]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, replicaof,
+                     10.0.2.2, '6379']
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, acl,
+                     list]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, acl,
+                     setuser, x, 'on', nopass]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, shutdown,
+                     nosave]
+            expect:
+              exit: 1
+              stderr:
+                matches: NOPERM|not allowed
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, ping]
+            expect:
+              exit: 0
+              stdout: "PONG\n"
+  - name: valkey-denied
+    user: nobody
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/valkey
+      connect:
+        - /run/svc/valkey/valkey.sock
+      run:
+        - /usr/bin/valkey-cli
+    cases:
+      - name: valkey-socket-refused
+        steps:
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, ping]
+            expect:
+              exit: 1
+              stderr:
+                contains: Permission denied
+              stdout:
+                absent: PONG
+  - name: valkey-restart
+    policy:
+      run:
+        - /usr/bin/valkey-cli
+        - /usr/bin/sv
+    cases:
+      - name: valkey-snapshots
+        steps:
+          - exec:
+              argv: [/usr/bin/sv, -w, '30', down, /etc/sv/valkey]
+            expect:
+              exit: 0
+          - file: /data/svc/valkey/dump.rdb
+            expect:
+              type: file
+              size:
+                min: 1
+          - exec:
+              argv: [/usr/bin/sv, up, /etc/sv/valkey]
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, get,
+                     werewolf]
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+            await: 30s
