@@ -41,7 +41,7 @@ if [ "${4:-}" = aws ]; then
 	exit
 fi
 native_tool=
-if [ "$(uname -s)" = Darwin ] && [ -z "${WEREWOLF_BUILD_VM:-}" ] &&
+if { [ "$(uname -s)" = Darwin ] || [ "$arch" = aarch64 ]; } && [ -z "${WEREWOLF_BUILD_VM:-}" ] &&
     { [ -z "${SECUREBOOT_DIR:-}" ] || ! command -v virt-fw-vars >/dev/null; }; then
     native=${WEREWOLF_FIRMWARE_SETUP:-$(dirname "$0")/native-firmware}
     requirements=${WEREWOLF_FIRMWARE_REQUIREMENTS:-$(dirname "$0")/../boot/firmware-requirements.txt}
