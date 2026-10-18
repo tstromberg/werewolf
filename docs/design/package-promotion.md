@@ -48,6 +48,7 @@ the scheduler leaves an existing PR and its CI results alone. The ordinary check
 workflow merges only after unit tests, all x86_64 form boots and any configured
 arm64 checks pass. It requires the PR to change only the source lock and merges
 with `--match-head-commit` so a newer untested head cannot slip through.
+Other CI workflows must also pass before the merge job requests an App token.
 
 The App token lets the PR trigger ordinary CI and its merge trigger publication
 workflows. Install a GitHub App on Werewolf with Contents and Pull requests write

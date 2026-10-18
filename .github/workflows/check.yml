@@ -327,8 +327,28 @@ jobs:
       needs.check.result == 'success' &&
       contains(fromJSON('["success", "skipped"]'), needs.vm-arm64.result)
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
     steps:
+      - name: Require the other CI workflows to pass too
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          for attempt in $(seq 1 10); do
+            if [ "$(gh pr checks "$PR" --json name,bucket --jq \
+              '[.[] | select(.name != "merge-package-pins")] | length > 0 and all(.bucket == "pass" or .bucket == "skipping")' || true)" = true ]; then
+              exit 0
+            fi
+            echo "Waiting for other CI checks ($attempt/10)."
+            sleep 30
+          done
+          echo 'Other CI checks have not passed; keep the previous package pins.' >&2
+          exit 1
       - id: app
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
