@@ -164,19 +164,17 @@ def observe(command, response):
     if int.from_bytes(response[6:10], 'big'):
         return
     code = int.from_bytes(command[6:10], 'big')
+    if code == 0x144 and storage_fault is not None:
+        # Hold the next boot's TPM startup reply until writes work again,
+        # before its retained filesystem may need journal recovery.
+        storage_fault.restore()
+        storage_fault = None
+        storage_restored.set()
     if code == 0x14e and int.from_bytes(command[10:14], 'big') == 0x01500021:
         if response[:2] == b'\x80\x02' and response[14:16] == b'\x00\x20':
             observed['anchor'] = response[16:48].hex()
     elif code == 0x17e and response[-34:-32] == b'\x00\x20':
-        pcr = response[-32:].hex()
-        if storage_fault is not None and pcr == manifests[0]['pcr11']:
-            # Hold the real TPM reply until writes work again. Polling the
-            # measurement can lose a race with the retained boot mounting data.
-            # The failed trial has already exhausted its production deadman.
-            storage_fault.restore()
-            storage_fault = None
-            storage_restored.set()
-        observed['pcr11'] = pcr
+        observed['pcr11'] = response[-32:].hex()
 
 
 def run(args, label, check=True, timeout=300):
@@ -437,7 +435,7 @@ try:
         # The normal waiter also retries unavailable owner requests during boot.
         trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
         storage_fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
-        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', node=storage_fault.root)))
+        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', iotype='write', node=storage_fault.root)))
         trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
         # The production deadman gets its real 600 seconds. No guest process is
         # paused, no image is edited and no reboot is substituted for the failure.

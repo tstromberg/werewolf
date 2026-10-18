@@ -46,7 +46,7 @@ class StorageFault:
         self.filter = 'werewolf-storage-fault'
         command(path, 'blockdev-add', dict(driver='blkdebug', image=self.file, **{
             'node-name': self.filter,
-            'inject-error': [dict(event='write_aio', errno=5, once=False, immediately=True)],
+            'inject-error': [dict(event='write_aio', iotype='write', errno=5, once=False, immediately=True)],
         }))
         self.attach(self.filter)
 

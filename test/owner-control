@@ -138,6 +138,7 @@ class OwnerControl(unittest.TestCase):
                 fault = StorageFault(qmp, disk)
                 command(qmp, 'human-monitor-command', {'command-line': 'qemu-io disk-root "write -P 0x5a 0 512"'})
                 self.assertEqual(bytes(512), disk.read_bytes()[:512])
+                command(qmp, 'human-monitor-command', {'command-line': 'qemu-io disk-root "read -P 0x00 0 512"'})
                 fault.restore()
                 command(qmp, 'human-monitor-command', {'command-line': 'qemu-io disk-root "write -P 0xa5 0 512"'})
                 self.assertEqual(bytes([0xa5]) * 512, disk.read_bytes()[:512])
@@ -145,7 +146,9 @@ class OwnerControl(unittest.TestCase):
                 if process.poll() is None:
                     command(qmp, 'quit')
                 process.wait(timeout=10)
-        self.assertIn('Input/output error', (self.root / 'qemu.log').read_text())
+        output = (self.root / 'qemu.log').read_text()
+        self.assertEqual(1, output.count('Input/output error'))
+        self.assertIn('read 512/512 bytes', output)
 
 
 if __name__ == '__main__':
