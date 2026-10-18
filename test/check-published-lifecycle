@@ -150,9 +150,12 @@ names = ['werewolf-run', 'ww-published-second']
 machines = [consumer / 'build/machines' / name for name in names]
 proxy = None
 observed = {}
+storage_fault = None
+storage_restored = threading.Event()
 
 
 def observe(command, response):
+    global storage_fault
     if int.from_bytes(response[6:10], 'big'):
         return
     code = int.from_bytes(command[6:10], 'big')
@@ -160,7 +163,15 @@ def observe(command, response):
         if response[:2] == b'\x80\x02' and response[14:16] == b'\x00\x20':
             observed['anchor'] = response[16:48].hex()
     elif code == 0x17e and response[-34:-32] == b'\x00\x20':
-        observed['pcr11'] = response[-32:].hex()
+        pcr = response[-32:].hex()
+        if storage_fault is not None and pcr == manifests[0]['pcr11']:
+            # Hold the real TPM reply until writes work again. Polling the
+            # measurement can lose a race with the retained boot mounting data.
+            # The failed trial has already exhausted its production deadman.
+            storage_fault.restore()
+            storage_fault = None
+            storage_restored.set()
+        observed['pcr11'] = pcr
 
 
 def run(args, label, check=True, timeout=300):
@@ -429,17 +440,17 @@ try:
             if time.monotonic() > until:
                 raise RuntimeError('trial did not reach updater readiness')
             time.sleep(1)
-        fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
-        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', node=fault.root)))
+        storage_fault = StorageFault(proxy_dir / 'qmp.sock', machines[0] / 'disk.img')
+        (work / 'storage-fault.json').write_text(json.dumps(dict(error='EIO', event='write_aio', node=storage_fault.root)))
         trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False)
         # The production deadman gets its real 600 seconds. No guest process is
         # paused, no image is edited and no reboot is substituted for the failure.
         began_fault = time.monotonic()
-        while observed.get('pcr11') != manifests[0]['pcr11']:
+        while not storage_restored.wait(2):
+            if proxy.failures:
+                raise RuntimeError('storage recovery failed: ' + repr(proxy.failures))
             if time.monotonic() - began_fault > 780:
                 raise RuntimeError('storage-failed trial did not fall back through its deadman')
-            time.sleep(2)
-        fault.restore()
         console = (machines[0] / 'console.log').read_text(errors='replace')
         if 'did not commit in 600s; rebooting into the last good slot' not in console:
             raise RuntimeError('missing actual unhealthy-slot deadman evidence')
