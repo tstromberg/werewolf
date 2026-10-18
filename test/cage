@@ -84,10 +84,11 @@ sudo umount "$mnt"
 # posture service through init and runit, so it attacks the machine
 # (posture --attack) as a descendant of PID 1, under the seal, the leash and
 # fence's Landlock, as a real machine with werewolf.check=1 does.
-# shellcheck disable=SC2024 # the log is the caller's; only nspawn needs root
+# OCI services give stdout to their user so /dev/stdout can be reopened.
+# Keep it a pipe; only the caller opens the host log.
 sudo systemd-nspawn --quiet --directory="$work" --machine="cage-$name" \
 	--console=pipe --capability=all --private-network \
-	--setenv=WEREWOLF_CHECK=1 /init >>"$log" 2>&1 </dev/null &
+	--setenv=WEREWOLF_CHECK=1 /init 2>&1 </dev/null | cat >>"$log" &
 pid=$!
 
 # Wait for the posture line, which the posture service prints once services
@@ -123,7 +124,7 @@ for id in $got; do
 	new="$new $id"
 done
 
-echo "--- cage $name: pass=$passed fail=[$got]" >>"$log"
+echo "--- cage $name: pass=$passed fail=[$got]" >>"$log" || fail "cannot append $log"
 [ "$passed" -ge 20 ] || fail "only $passed checks passed; did posture run? see $log"
 [ -z "$new" ] || fail "failing, not expected natively:$new; see $log"
 say ok posture
