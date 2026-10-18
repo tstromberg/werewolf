@@ -1,9 +1,7 @@
 # wordpress: php, with WordPress in the image, on SQLite: one machine, no
 # second server. Wolfi installs WordPress in /usr/src/wordpress, which is
-# nginx's root; the form brings wp-config.php, the SQLite drop-in
-# (wp-content/db.php) and WordPress's own SQLite plugin
-# (wp-content/plugins/sqlite-database-integration, from
-# wordpress.org/plugins/sqlite-database-integration, GPL-2.0), a must-use
+# nginx's root. The SQLite plugin and db.php drop-in are built from the
+# tracked package recipe. The form brings wp-config.php, a must-use
 # plugin for its mail and hardening, and the installer that sets the site
 # up from the machine's settings before php-fpm serves it
 # (usr/share/werewolf-wordpress/install.php). Plugins, themes and updates
@@ -14,6 +12,9 @@
 # Wolfi's wordpress package carries its .git checkout (58 MB) beside the
 # site; nginx refuses every dotfile, and the image is larger for it.
 base: php
+
+recipes:
+  - ../../../packages/wordpress-sqlite/wordpress-sqlite.yaml
 
 packages:
   - wordpress

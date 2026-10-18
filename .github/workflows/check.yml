@@ -38,6 +38,13 @@ jobs:
         run: tools/checkout-packages
       - name: Install tools
         run: sudo test/ci-setup
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Recheck publication for the proposed package pin
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'auto/package-pins'
+        run: go -C tools/package-pins run . --root ../.. --packages ../../../packages
       - name: Unit tests
         run: make -j"$(nproc)" test
       - name: Updater construction and coordinator isolation
@@ -217,7 +224,9 @@ jobs:
   vm-arm64:
     if: >-
       vars.WEREWOLF_ARM64_CHECK_RUNNER != '' && (github.event_name == 'push' ||
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'auto/package-pins'))
     # The fallback is never used (the if needs the variable); it keeps an unset
     # variable from failing the workflow should runs-on be evaluated anyway.
     runs-on: ${{ fromJSON(vars.WEREWOLF_ARM64_CHECK_RUNNER || '["ubuntu-26.04-arm"]') }}
@@ -307,3 +316,53 @@ jobs:
             build/*/check/ci-forms-*.json
             build/*/check/**/*.log
           retention-days: 3
+
+  merge-package-pins:
+    needs: [test, check, vm-arm64]
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'auto/package-pins' &&
+      vars.PACKAGE_UPDATE_APP_ID != '' && needs.test.result == 'success' &&
+      needs.check.result == 'success' &&
+      contains(fromJSON('["success", "skipped"]'), needs.vm-arm64.result)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Require the other CI workflows to pass too
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          for attempt in $(seq 1 10); do
+            if [ "$(gh pr checks "$PR" --json name,bucket --jq \
+              '[.[] | select(.name != "merge-package-pins")] | length > 0 and all(.bucket == "pass" or .bucket == "skipping")' || true)" = true ]; then
+              exit 0
+            fi
+            echo "Waiting for other CI checks ($attempt/10)."
+            sleep 30
+          done
+          echo 'Other CI checks have not passed; keep the previous package pins.' >&2
+          exit 1
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.PACKAGE_UPDATE_APP_ID }}
+          private-key: ${{ secrets.PACKAGE_UPDATE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Merge only the tested source lock
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          files=$(gh pr view "$PR" --json files --jq '[.files[].path] | sort | join("\n")')
+          test "$files" = release/package-sources.json
+          gh pr merge "$PR" --merge --match-head-commit "$PR_HEAD_SHA"
