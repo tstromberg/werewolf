@@ -7,6 +7,7 @@ const enrollment = @import("enrollment.zig");
 const secureboot = @import("secureboot.zig");
 const progress = @import("progress.zig");
 const qemu = @import("qemu.zig");
+const bhyve = @import("bhyve.zig");
 const booting = @import("boot.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -311,7 +312,17 @@ fn admit(
     why: *howl.Why,
 ) !howl.Arch {
     if (dev) return why.refuse("the secured local profile refuses --dev", .{});
-    if (provider != .lima and @import("builtin").os.tag != .linux)
+    if (provider == .bhyve) {
+        if (!bhyve.installed(io)) return why.refuse(
+            "protected bhyve requires FreeBSD x86_64 with vmm loaded",
+            .{},
+        );
+        if (o.network != .slirp) return why.refuse(
+            "protected bhyve TAP update transport is not ready; experimental enrollment " ++
+                "requires explicit SLIRP",
+            .{},
+        );
+    } else if (provider != .lima and @import("builtin").os.tag != .linux)
         return why.refuse("secured QEMU currently requires Linux", .{});
     if (provider == .lima and !lima.installed(io, gpa))
         return why.refuse("protected deployment requires Lima on macOS", .{});
@@ -461,9 +472,11 @@ fn writeProfile(io: Io, gpa: Allocator, path: []const u8, profile: Profile) !voi
 
 /// Explicit pins are supplied by the future download consumer, never by the image itself.
 pub fn enrollImage(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
-    if (args.len != 7 or !howl.isMachineName(args[0])) return error.BadArguments;
+    if ((args.len != 7 and args.len != 8) or
+        !howl.isMachineName(args[0])) return error.BadArguments;
     const provider = std.meta.stringToEnum(howl.Platform, args[6]) orelse return error.BadArguments;
-    if (provider != .lima and provider != .qemu) return error.BadSecuredProvider;
+    if (provider != .lima and provider != .qemu and
+        provider != .bhyve) return error.BadSecuredProvider;
     const request: @import("boot-image.zig").Request = .{
         .directory = args[1],
         .boot_certificate = args[2],
@@ -498,6 +511,10 @@ pub fn enrollImage(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.
             .on = provider,
             .local = true,
             .boot_image = request,
+            .network = if (args.len == 8)
+                std.meta.stringToEnum(bhyve.Mode, args[7]) orelse return error.BadArguments
+            else
+                null,
         },
         args[0],
         try Dir.cwd().readFileAlloc(io, args[5], gpa, .limited(16 << 20)),
@@ -877,6 +894,7 @@ pub fn stop(
             _ = try qemu.stop(io, gpa, dir);
             try stopTpm(io, gpa, dir);
         },
+        .bhyve => try bhyve.stopProtected(io, gpa, name, dir),
         else => return error.BadSecuredProvider,
     }
     stopPublisher(io, gpa, dir);
@@ -947,6 +965,11 @@ pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []c
         const connection = monitor.connect(io) catch return .configure;
         connection.close(io);
         return .running;
+    } else if (profile.provider == .bhyve) {
+        return if (try bhyve.supervised(io, gpa, dir) and try bhyve.exists(io, gpa, name))
+            .running
+        else
+            .configure;
     }
     return .miss;
 }
@@ -1250,8 +1273,12 @@ pub fn create(
                 why,
             );
         } else if (changed) {
-            _ = try qemu.stop(io, gpa, dir);
-            try tpmService(io, gpa, at, "stop");
+            if (provider == .bhyve) {
+                try bhyve.stopProtected(io, gpa, name, at);
+            } else {
+                _ = try qemu.stop(io, gpa, dir);
+                try tpmService(io, gpa, at, "stop");
+            }
             try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), configured, why);
         }
     } else if (o.boot_image) |request| {
@@ -1285,6 +1312,8 @@ pub fn create(
     try steps.enter(.{
         .name = if (on_lima)
             "Starting Lima VM and waiting for guest init"
+        else if (provider == .bhyve)
+            "Starting bhyve and waiting for guest init"
         else
             "Starting QEMU and waiting for guest init",
         .short = "launch",
@@ -1292,7 +1321,10 @@ pub fn create(
     if (!(try steps.exec(&.{.{ .argv = &.{ "python3", script, "start", config } }}, .{})).ok)
         return steps.fail("the host image publisher did not start");
     if (!on_lima) {
-        if (qemu.running(io, gpa, at) == null)
+        if (provider == .bhyve) {
+            if (!try bhyve.supervised(io, gpa, at))
+                try startBhyve(io, gpa, profile, name, at, &steps, why);
+        } else if (qemu.running(io, gpa, at) == null)
             try startQemu(io, gpa, profile, name, at, &steps, why);
         try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
         _ = try steps.finish();
@@ -1602,12 +1634,15 @@ fn programInputs(io: Io, gpa: Allocator, form: []const u8) ![32]u8 {
             }
         }
         try sourceTree(io, gpa, &hash, try gpa.print("{s}/cmd", .{part.dir}));
-        hash.update(&try @import("lock.zig").tree(
-            io,
-            gpa,
-            Dir.cwd(),
-            try gpa.print("{s}/melange", .{part.dir}),
-        ));
+        for (try part.recipes(io, gpa, Dir.cwd())) |recipe| {
+            hash.update(recipe);
+            hash.update(&try @import("lock.zig").tree(
+                io,
+                gpa,
+                Dir.cwd(),
+                std.fs.path.dirname(recipe) orelse ".",
+            ));
+        }
     }
     if (@import("app.zig").example(chain[chain.len - 1].name)) |example| {
         const sources: []const []const u8 = switch (example) {
@@ -1702,6 +1737,14 @@ fn tpmService(io: Io, gpa: Allocator, at: []const u8, operation: []const u8) !vo
         operation,
         try gpa.print("{s}/authority", .{at}),
         try sockets(gpa, at),
+        if (Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/authority/profile.json", .{at}),
+            gpa,
+            .limited(64 << 10),
+        )) |data|
+            @tagName((try parseProfile(gpa, data)).provider)
+        else |err| if (err == error.FileNotFound) "qemu" else return err,
     } });
     if (result.term != .exited or result.term.exited != 0) return error.TpmServiceFailed;
 }
@@ -1730,6 +1773,10 @@ test "TPM service upgrades an existing helper without creating enrolled state" {
 pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
+    return stopTpmAt(io, gpa, at);
+}
+
+pub fn stopTpmAt(io: Io, gpa: Allocator, at: []const u8) !void {
     Dir.cwd().access(
         io,
         try gpa.print("{s}/authority/local-tpm", .{at}),
@@ -1738,7 +1785,93 @@ pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
         error.FileNotFound => return,
         else => return err,
     };
+    const absolute = if (std.fs.path.isAbsolute(at))
+        at
+    else
+        try gpa.print("{s}/{s}", .{ try std.process.currentPathAlloc(io, gpa), at });
+    try tpmService(io, gpa, absolute, "stop");
+}
+
+pub fn restartTpmAt(io: Io, gpa: Allocator, at: []const u8) !void {
     try tpmService(io, gpa, at, "stop");
+    try tpmService(io, gpa, at, "start");
+}
+
+fn startBhyve(
+    io: Io,
+    gpa: Allocator,
+    profile: Profile,
+    name: []const u8,
+    at: []const u8,
+    steps: *progress.Steps,
+    why: *howl.Why,
+) !void {
+    if (try bhyve.exists(
+        io,
+        gpa,
+        name,
+    )) return why.refuse("{s}: bhyve exists without its protected supervisor", .{name});
+    try bhyve.prepareSupervisor(io, gpa, at);
+    const definition = profile.configuration orelse return error.MissingBootConfiguration;
+    const fwds = try bhyve.forwards(gpa, name, definition.ports);
+    var ssh: u16 = 0;
+    for (fwds) |f| if (f.guest == 22) {
+        ssh = f.host;
+    };
+    try howl.writePrivate(
+        io,
+        gpa,
+        try gpa.print("{s}/machine", .{at}),
+        try gpa.print("form {s}\nssh {d}\n", .{ profile.spec.form, ssh }),
+        why,
+    );
+    const log = try gpa.print("{s}/console.log", .{at});
+    const file = try Dir.cwd().createFile(io, log, .{ .permissions = .fromMode(0o600) });
+    file.close(io);
+    Dir.cwd().deleteFile(
+        io,
+        try gpa.print("{s}/bhyve.stop", .{at}),
+    ) catch |err| if (err != error.FileNotFound) return err;
+    const args = try bhyve.command(gpa, name, try gpa.print(
+        "{s}/disk.img",
+        .{at},
+    ), try gpa.print("{s}/config.tar", .{at}), .{ .slirp = fwds }, null, .{
+        .code = try gpa.print("{s}/code.fd", .{at}),
+        .vars = try gpa.print("{s}/vars.fd", .{at}),
+        .tpm_socket = try gpa.print("{s}/data.sock", .{try sockets(gpa, at)}),
+    });
+    const launch = try std.mem.concat(
+        gpa,
+        []const u8,
+        &.{
+            &.{
+                "daemon",
+                "-f",
+                "-o",
+                log,
+                try std.process.executablePathAlloc(io, gpa),
+                "_bhyve-secure",
+                name,
+                at,
+            },
+            try bhyve.asRoot(io),
+            args,
+        },
+    );
+    if (!(try steps.exec(
+        &.{.{ .argv = launch }},
+        .{},
+    )).ok) return steps.fail("protected bhyve did not start");
+    errdefer bhyve.stopProtected(io, gpa, name, at) catch {};
+    var spin: progress.Spinner = .init(io);
+    defer spin.clear();
+    const boot = try booting.watch(io, gpa, log, 0, null, 0, &spin);
+    if (!boot.up) return why.refuse(
+        "{s}: protected bhyve boot did not finish; see {s}",
+        .{ name, log },
+    );
+    if (ssh != 0 and !booting.awaitSsh(io, "127.0.0.1", ssh, &spin))
+        return why.refuse("{s}: protected bhyve SSH did not become ready", .{name});
 }
 
 fn startQemu(

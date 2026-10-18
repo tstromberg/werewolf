@@ -6,6 +6,9 @@
 # may run only its own binary. See forms/velociraptor/README.md.
 base: prod
 
+recipes:
+  - ../../../packages/velociraptor/velociraptor.yaml
+
 packages:
   - caddy
 

@@ -60,5 +60,49 @@ class LimaState(unittest.TestCase):
         self.assertIn(b'cannot query Lima', self.result.stderr)
         self.assertEqual((self.directory / 'authority/profile.json').read_bytes(), b'old enrollment')
 
+    def test_run_replaces_legacy_vm_before_build(self):
+        with tempfile.TemporaryDirectory(prefix='ww-lima-run-state-') as temporary:
+            root = Path(temporary)
+            (root / 'forms').symlink_to(FORMS, target_is_directory=True)
+            machine = root / 'build/machines/werewolf-run'
+            machine.mkdir(parents=True)
+            (machine / 'engine').write_text('lima')
+            lima_dir = root / 'fake-lima/werewolf-run'
+            lima_dir.mkdir(parents=True)
+            (lima_dir / 'lima.yaml').write_text('# werewolf-form: playground\n')
+            deleted = root / 'deleted'
+            tools = root / 'bin'
+            tools.mkdir()
+            lima = tools / 'limactl'
+            lima.write_text('''#!/bin/sh
+if [ "$1" = list ]; then
+  case "$*" in
+    *'{{.Dir}}'*) printf '%s\n' "$FAKE_LIMA_DIR" ;;
+    *) printf '%s\n' werewolf-run ;;
+  esac
+  exit 0
+fi
+if [ "$1" = delete ]; then
+  : >"$FAKE_LIMA_DELETED"
+  exit 0
+fi
+if [ "$1" = disk ]; then exit 0; fi
+exit 1
+''')
+            lima.chmod(0o755)
+            env = dict(os.environ,
+                       PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                       FAKE_LIMA_DIR=str(lima_dir),
+                       FAKE_LIMA_DELETED=str(deleted))
+            result = subprocess.run(
+                [HOWL, 'run', '--with', 'minimal', '--build', '--yes', '--on', 'lima',
+                 '--config', 'missing-config'],
+                cwd=root, env=env, capture_output=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(deleted.exists(), result.stderr)
+            self.assertFalse(machine.exists())
+            self.assertIn(b'missing-config', result.stderr)
+            self.assertNotIn(b'Building the protected image', result.stderr)
+
 
 unittest.main()

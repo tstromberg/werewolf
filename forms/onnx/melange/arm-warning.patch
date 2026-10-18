@@ -1,5 +1,0 @@
---- a/onnxruntime/core/mlas/lib/kleidiai/halfgemm_kleidiai.cpp
-+++ b/onnxruntime/core/mlas/lib/kleidiai/halfgemm_kleidiai.cpp
-@@ -25 +25 @@
--constexpr const char* Sve2p1HalfGemmKernelName =
-+[[maybe_unused]] constexpr const char* Sve2p1HalfGemmKernelName =

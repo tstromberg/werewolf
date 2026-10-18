@@ -5,13 +5,16 @@
 # secrets come from the config before it serves; nobody signs up, and
 # nothing is reachable without a rule. Wolfi does not ship Authelia:
 # melange builds it from a pinned release
-# (forms/authelia/melange/authelia.yaml). See forms/authelia/README.md.
+# (../packages/authelia/authelia.yaml). See forms/authelia/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/authelia/authelia.yaml
 
 with: [caddy]
 
 packages:
-  # What forms/authelia/melange/authelia.yaml's build links, from Wolfi.
+  # What ../packages/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 
 # The check signs in with curl, which keeps cookies.

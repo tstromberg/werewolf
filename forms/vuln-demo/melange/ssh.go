@@ -93,15 +93,42 @@ func sshConfig(key ssh.Signer, user string) *ssh.ServerConfig {
 	config := &ssh.ServerConfig{MaxAuthTries: 3,
 		PasswordCallback: func(c ssh.ConnMetadata, _ []byte) (*ssh.Permissions, error) {
 			if c.User() != user {
-				sshEvent(fmt.Sprintf("auth refused remote=%s user=%q", c.RemoteAddr(), c.User()))
-				return nil, errors.New("unknown demo user")
+				sshEvent("auth refused " + sshIdentity(c))
+				return nil, errors.New("unknown SSH user")
 			}
-			sshEvent(fmt.Sprintf("auth accepted remote=%s user=%q (any password)", c.RemoteAddr(), c.User()))
+			sshEvent("auth accepted " + sshIdentity(c) + " (any password)")
 			return nil, nil
+		},
+		PublicKeyCallback: func(c ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			sshEvent(offeredPublicKey(c, key))
+			return nil, errors.New("public key authentication disabled")
 		},
 	}
 	config.AddHostKey(key)
 	return config
+}
+
+func sshIdentity(c ssh.ConnMetadata) string {
+	return fmt.Sprintf(
+		"SSH_REMOTE=%q SSH_LOCAL=%q SSH_USER=%q SSH_CLIENT=%q SSH_SERVER=%q SSH_SESSION=%x",
+		c.RemoteAddr(),
+		c.LocalAddr(),
+		c.User(),
+		c.ClientVersion(),
+		c.ServerVersion(),
+		c.SessionID(),
+	)
+}
+
+func offeredPublicKey(c ssh.ConnMetadata, key ssh.PublicKey) string {
+	authorized := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+	return fmt.Sprintf(
+		"public key refused %s SSH_KEY_ALGORITHM=%q SSH_KEY_FINGERPRINT=%q SSH_PUBLIC_KEY=%q",
+		sshIdentity(c),
+		key.Type(),
+		ssh.FingerprintSHA256(key),
+		authorized,
+	)
 }
 
 type commandFunc func(context.Context, string, ...string) *exec.Cmd

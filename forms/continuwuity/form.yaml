@@ -4,9 +4,12 @@
 # time the database is made, and registration stays closed. Federation is
 # on, so other servers can reach this one at port 443. URL previews are
 # compiled in and allowlisted to nothing. Wolfi does not ship it: melange builds a pinned
-# release (forms/continuwuity/melange/continuwuity.yaml). The database is
+# release (../packages/continuwuity/continuwuity.yaml). The database is
 # RocksDB in /data/svc/continuwuity. See forms/continuwuity/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/continuwuity/continuwuity.yaml
 
 with: [caddy]
 

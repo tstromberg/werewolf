@@ -669,7 +669,8 @@ fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !booting.Outcome 
 /// createBhyve builds the machine's disk and writes its config tar and
 /// form name beside it, then starts bhyve (bhyve.zig) as root under howl's
 /// supervisor, detached by daemon(8), with the console in console.log. It
-/// waits for the console to say up and prints the port forwards. A machine
+/// waits for the console to say up and reports its TAP address or explicit
+/// SLIRP forwards. A machine
 /// of the same form gets a new config with a hard stop, since nothing can
 /// ask a werewolf machine to shut down; its boot disk and /data stay.
 pub fn createBhyve(
@@ -688,12 +689,31 @@ pub fn createBhyve(
         return why.refuse("no {s}: pkg install bhyve-firmware", .{bhyve.firmware});
     const root = bhyve.asRoot(io) catch
         return why.refuse("bhyve needs root, and there is no doas or sudo: pkg install doas", .{});
+    const mode = o.network orelse .tap;
+    const static_addr = try bhyve.staticAddress(gpa, tar);
+    if (mode == .tap and static_addr == null and !try howl.hasDhcp(io, gpa, o.form, why))
+        return why.refuse(
+            "bhyve TAP needs a LAN address: this form has no DHCP client; give --ip, --gw and " ++
+                "--dns (or --config DIR/network)",
+            .{},
+        );
     const arch = try localArch(why);
     const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
     const config = try gpa.print("{s}/{s}/config.tar", .{ cwd, dir });
     const log = try gpa.print("{s}/{s}/console.log", .{ cwd, dir });
+    const at = try gpa.print("{s}/{s}", .{ cwd, dir });
+    try Dir.cwd().createDirPath(io, dir);
+    const guard = try Dir.cwd().createFile(
+        io,
+        try gpa.print("{s}/bhyve-create.lock", .{dir}),
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    );
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    try bhyve.prepareSupervisor(io, gpa, at);
     const form_file = try gpa.print("{s}/form", .{dir});
     const was = std.mem.trim(
         u8,
@@ -701,17 +721,14 @@ pub fn createBhyve(
         " \n",
     );
     if (was.len > 0) try reconfigurable(o, name, was, .bhyve, why);
-    if (try bhyve.exists(io, gpa, name)) {
+    if (was.len == 0 and try bhyve.exists(io, gpa, name)) return howl.notMade(name, .bhyve, why);
+    if (try bhyve.exists(io, gpa, name) or try bhyve.supervised(io, gpa, at)) {
         say(
             io,
             "{s}: replacing its config, with a hard stop: bhyve cannot ask it to shut down",
             .{name},
         );
-        try run(
-            io,
-            why,
-            try std.mem.concat(gpa, []const u8, &.{ root, try bhyve.destroy(gpa, name) }),
-        );
+        try bhyve.stop(io, gpa, name, at);
     }
     if (was.len == 0) {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
@@ -730,7 +747,14 @@ pub fn createBhyve(
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, config, tar, why);
-    const fwds = try bhyve.forwards(gpa, name, try howl.listensDev(io, gpa, o.form, tell.dev, why));
+    const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
+    const fwds = try bhyve.forwards(gpa, name, ports);
+    const n = try bhyve.prepareNetwork(io, gpa, at, mode, o.bridge, why);
+    errdefer bhyve.stop(io, gpa, name, at) catch {};
+    Dir.cwd().deleteFile(
+        io,
+        try gpa.print("{s}/bhyve.stop", .{at}),
+    ) catch |err| if (err != error.FileNotFound) return err;
     // Create the log as this user, so daemon appends to it as root and
     // delete can still remove it.
     const f = Dir.cwd().createFile(
@@ -749,7 +773,7 @@ pub fn createBhyve(
         name,
         disk,
         config,
-        fwds,
+        n.backend(fwds),
         try attachImport(
             io,
             gpa,
@@ -768,12 +792,29 @@ pub fn createBhyve(
             .{ name, name },
         ),
     }
-    for (fwds) |fw| say(
+    const addr = if (mode == .slirp) "127.0.0.1" else static_addr orelse
+        (try bhyve.awaitAddress(io, gpa, log, seen)) orelse return why.refuse(
+        "{s}: TAP booted but reported no DHCP address; inspect howl console {s}",
+        .{ name, name },
+    );
+    var ssh_port: u16 = if (tell.dev) howl.dev_ssh_port else 22;
+    if (mode == .slirp) {
+        const guest_ssh = ssh_port;
+        ssh_port = 0;
+        for (fwds) |fw| if (fw.guest == guest_ssh) {
+            ssh_port = fw.host;
+        };
+    }
+    try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), try gpa.print(
+        "form {s}\nhost {s}\nssh {d}\nnetwork {t}\n",
+        .{ o.form, addr, ssh_port, mode },
+    ), why);
+    if (mode == .slirp) for (fwds) |fw| say(
         io,
         "{s}: 127.0.0.1:{d} reaches its port {d}",
         .{ name, fw.host, fw.guest },
     );
-    if (fwds.len == 0) say(
+    if (ports.len == 0) say(
         io,
         "{s} listens on no port, so nothing reaches it; its console: howl console {s} --on " ++
             "bhyve",
@@ -781,9 +822,19 @@ pub fn createBhyve(
     );
     try w.print("{s}\t{s}\t{s}\n", .{
         name,
-        if (fwds.len > 0) try gpa.print("127.0.0.1:{d}", .{fwds[0].host}) else "-",
+        if (mode == .tap)
+            addr
+        else if (fwds.len > 0)
+            try gpa.print("127.0.0.1:{d}", .{fwds[0].host})
+        else
+            "-",
         o.form,
     });
+    if (mode == .tap) say(
+        io,
+        "{s}: TAP on {s}, at {s} · {s}",
+        .{ name, n.bridge.?, addr, try reachAt(gpa, addr, ports, name, tell.dev) },
+    );
 }
 
 /// createFirecracker builds the form's boot disk for the machine, as

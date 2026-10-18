@@ -273,10 +273,12 @@ TEST_SOURCES = test/native/iterate.zig lib/sandbox.zig lib/seal.zig lib/dm.zig l
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/bhyve-network _test/package-sources
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/form-coverage: ; python3 test/form-coverage
+_test/bhyve-network: ; python3 test/check-bhyve-network
+_test/package-sources: ; python3 test/package-sources
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing

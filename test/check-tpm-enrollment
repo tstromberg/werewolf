@@ -2,6 +2,7 @@
 """Verify native host enrollment, private credentials, restart and reset refusal."""
 import hashlib
 import signal
+import socket
 import os
 from pathlib import Path
 import subprocess
@@ -98,8 +99,8 @@ def main():
         (work / 'enrolled').write_bytes(expected)
         service = Path('tools/local-tpm').resolve()
         sockets = work / 'service'
-        def supervise(operation, success=True):
-            result = subprocess.run([sys.executable, str(service), operation, str(work), str(sockets)],
+        def supervise(operation, success=True, backend='qemu'):
+            result = subprocess.run([sys.executable, str(service), operation, str(work), str(sockets), backend],
                                     capture_output=True, timeout=20)
             if (result.returncode == 0) != success:
                 raise RuntimeError('unexpected supervisor result: ' + result.stderr.decode()[-1000:])
@@ -118,6 +119,20 @@ def main():
                 supervise('stop')
                 if sockets.exists() or (work / 'tpm.pid').exists():
                     raise RuntimeError('TPM shutdown returned before removing its sockets')
+            # bhyve sends raw TPM commands, without QEMU's control/FD handshake.
+            # Every boot must reset volatile TPM state but preserve enrolled NV.
+            for _ in range(2):
+                supervise('start', backend='bhyve')
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(5)
+                    client.connect(str(sockets / 'data.sock'))
+                    client.sendall(bytes.fromhex('80010000000c000001440000'))  # Startup(CLEAR)
+                    if client.recv(10) != bytes.fromhex('80010000000a00000000'):
+                        raise RuntimeError('bhyve TPM did not start with fresh volatile state')
+                command('read-pair', public, 'unix:' + str(sockets / 'data.sock'), work / 'bhyve-anchor')
+                if (work / 'bhyve-anchor').read_bytes() != expected:
+                    raise RuntimeError('bhyve reboot lost enrollment')
+                supervise('stop', backend='bhyve')
             saved = work / 'saved-nv'
             (work / 'swtpm').rename(saved)
             supervise('start', success=False)

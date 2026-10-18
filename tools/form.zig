@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const form = @import("form");
 const compose = @import("compose");
 
-const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
+const usage = "usage: form names|dirs|recipes|listens|weaknesses|excuses FORM, " ++
     "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
@@ -137,6 +137,10 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         for (forms) |c| try w.print("{s}\n", .{c.name});
     } else if (is(verb, "dirs") and args.len == 2) {
         for (forms) |c| try w.print("{s}\n", .{c.dir});
+    } else if (is(verb, "recipes") and args.len == 2) {
+        var seen: std.array_hash_map.String(void) = .empty;
+        for (forms) |c| for (try c.recipes(io, gpa, root)) |path| try seen.put(gpa, path, {});
+        for (seen.keys()) |path| try w.print("{s}\n", .{path});
     } else if (is(verb, "list") and args.len == 3) {
         for (forms) |c| for (try c.items(gpa, args[2])) |line| try w.print("{s}\n", .{line});
     } else if (is(verb, "check") and args.len == 3) {

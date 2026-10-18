@@ -33,6 +33,13 @@ inference does not require a hosted provider. The default MiniLM embedding model
 and tokenizer are packaged in read-only storage; the demo needs no model download. See
 [Langflow documentation](https://docs.langflow.org/).
 
+The native test exercises
+[CVE-2026-33017](https://github.com/langflow-ai/langflow/security/advisories/GHSA-vwmf-pq79-vjvx)
+through the unauthenticated public-flow build endpoint. Its injected component returns a
+fixed canary in the direct build response. It writes no file, starts no process and
+opens no network connection; the current `langflow` form sends the same data and asserts
+that it is ignored.
+
 ### Known Quirks
 
 - A direct single-process ASGI launcher avoids the CLI's multiprocessing supervisor.

@@ -27,28 +27,13 @@ pub const Options = struct {
 pub const Phase = struct {
     name: []const u8,
     short: []const u8,
-
-    /// Moons mark image construction; wolves mark VM startup.
-    pub fn icon(p: Phase) []const u8 {
-        const eql = std.mem.eql;
-        const has = std.mem.find;
-        if (eql(u8, p.short, "boot") or eql(u8, p.short, "ready") or
-            eql(u8, p.short, "launch")) return "🐺";
-        if (has(u8, p.short, "sign") != null or has(u8, p.short, "identity") != null or
-            eql(u8, p.short, "seal") or eql(u8, p.short, "firmware") or
-            eql(u8, p.short, "verify")) return if (eql(u8, p.short, "verify")) "🌒" else "🌔";
-        if (has(u8, p.short, "compile") != null or eql(u8, p.short, "programs") or
-            eql(u8, p.short, "stage0") or eql(u8, p.short, "melange")) return "🌓";
-        if (eql(u8, p.short, "disk") or eql(u8, p.short, "release") or
-            eql(u8, p.short, "reuse") or has(u8, p.short, "collect") != null) return "🌕";
-        if (has(u8, p.short, "pack") != null or has(u8, p.short, "install") != null or
-            has(u8, p.short, "configure") != null or eql(u8, p.short, "config") or
-            eql(u8, p.short, "files") or
-            eql(u8, p.short, "metadata") or eql(u8, p.short, "boot image")) return "🌔";
-        if (eql(u8, p.short, "start") or eql(u8, p.short, "prepare")) return "🌑";
-        return "🌒";
-    }
+    /// extraordinary phases remain in history even when they finish quickly.
+    extraordinary: bool = false,
 };
+
+/// Short work disappears with the live line. This keeps cache hits and
+/// parallel make chatter out of the completed history.
+const history_after_ns = 5 * std.time.ns_per_s;
 
 /// Completed phases retain their individual durations on stderr.
 pub const Milestones = struct {
@@ -58,6 +43,8 @@ pub const Milestones = struct {
     start: Io.Timestamp,
     since: Io.Timestamp,
     phase: ?Phase = null,
+    frame: usize = 0,
+    redraw: Redraw = .{},
 
     pub fn init(io: Io, enabled: bool) Milestones {
         const now = Io.Clock.awake.now(io);
@@ -74,17 +61,7 @@ pub const Milestones = struct {
         m.finishAt(now);
         m.phase = p;
         m.since = now;
-        // Until completion, a terminal keeps a single active line.
-        const err = m.output;
-        if (err.isTty(m.io) catch false) {
-            var buf: [1024]u8 = undefined;
-            const line = std.mem.print(
-                &buf,
-                "\r\x1b[2K  {s} {s}",
-                .{ p.icon(), p.name },
-            ) catch return;
-            err.writeStreamingAll(m.io, line) catch {};
-        }
+        m.redraw.last = null;
     }
 
     pub fn finish(m: *Milestones) void {
@@ -94,8 +71,30 @@ pub const Milestones = struct {
     fn finishAt(m: *Milestones, now: Io.Timestamp) void {
         if (!m.enabled) return;
         const p = m.phase orelse return;
-        phaseLine(m.io, m.output, p, m.since.durationTo(now));
+        const elapsed = m.since.durationTo(now);
+        clearLine(m.io, m.output);
+        if (p.extraordinary or elapsed.toNanoseconds() >= history_after_ns)
+            phaseLine(m.io, m.output, p, elapsed);
         m.phase = null;
+    }
+
+    fn draw(m: *Milestones, look: Look) void {
+        if (!m.enabled or !look.tty) return;
+        const p = m.phase orelse return;
+        const now = Io.Clock.awake.now(m.io);
+        const elapsed = m.since.durationTo(now);
+        if (!p.extraordinary and elapsed.toNanoseconds() < history_after_ns) return;
+        if (!m.redraw.due(now)) return;
+        m.frame += 1;
+        look.draw(
+            m.io,
+            m.output,
+            frames[m.frame % frames.len],
+            "",
+            p.name,
+            elapsed,
+            "",
+        );
     }
 
     /// The last line reports VM state and total command time, not a synthetic phase.
@@ -105,12 +104,17 @@ pub const Milestones = struct {
     }
 };
 
-fn phaseLine(io: Io, err: Io.File, p: Phase, elapsed: Io.Duration) void {
+fn clearLine(io: Io, err: Io.File) void {
     if (err.isTty(io) catch false) err.writeStreamingAll(io, "\r\x1b[2K") catch {};
+}
+
+fn phaseLine(io: Io, err: Io.File, p: Phase, elapsed: Io.Duration) void {
+    clearLine(io, err);
     var buf: [1024]u8 = undefined;
-    // Two columns match the live spinner, so every phase name starts in the same column.
     const line = std.mem.print(&buf, "  {s} {s}  {f}\n", .{
-        p.icon(), p.name, PhaseTime{ .ns = elapsed.toNanoseconds() },
+        "✓",
+        p.name,
+        PhaseTime{ .ns = elapsed.toNanoseconds() },
     }) catch return;
     err.writeStreamingAll(io, line) catch {};
 }
@@ -214,8 +218,6 @@ pub const Steps = struct {
     log: ?Io.File,
     start: Io.Timestamp,
     said: Said,
-    frame: usize = 0,
-    redraw: Redraw = .{},
     history: ?Milestones = null,
 
     pub fn init(io: Io, gpa: Allocator, why: *howl.Why, o: Options) !Steps {
@@ -254,7 +256,6 @@ pub const Steps = struct {
     /// phase before it.
     pub fn enter(s: *Steps, p: Phase) !void {
         if (s.reporter()) |m| m.enter(p);
-        if (!std.mem.eql(u8, s.said.phase.name, p.name)) s.redraw.last = null;
         try s.said.enter(s.io, p);
         s.draw();
     }
@@ -381,19 +382,8 @@ pub const Steps = struct {
     }
 
     fn draw(s: *Steps) void {
-        if (!s.look.tty or s.o.verbose) return;
-        const now = Io.Clock.awake.now(s.io);
-        if (!s.redraw.due(now)) return;
-        s.frame += 1;
-        s.look.draw(
-            s.io,
-            Io.File.stderr(),
-            frames[s.frame % frames.len],
-            s.said.phase.icon(),
-            s.said.phase.name,
-            s.said.since.durationTo(now),
-            "",
-        );
+        if (s.o.verbose) return;
+        if (s.reporter()) |m| m.draw(s.look);
     }
 
     /// finish ends a run that succeeded and returns its time and phases.
@@ -659,10 +649,12 @@ pub const Look = struct {
             "{f}",
             .{Clock{ .seconds = ran.toSeconds() }},
         ) catch "";
-        w.print("\r\x1b[2K{s} {s} {s}  {s}", .{ spin, icon, phase, time }) catch return;
+        w.print("\r\x1b[2K{s}", .{spin}) catch return;
+        if (icon.len > 0) w.print(" {s}", .{icon}) catch return;
+        w.print(" {s}  {s}", .{ phase, time }) catch return;
         // The spinner takes one column, the emoji two, and phase and time one per byte;
         // detail may hold multibyte characters, so fitColumns counts those.
-        const used = 2 + 3 + phase.len + 2 + time.len;
+        const used = 2 + (if (icon.len > 0) icon.len + 1 else 0) + phase.len + 2 + time.len;
         const room = l.cols -| (used + 5);
         if (detail.len > 0 and room > 8) {
             const d = fitColumns(detail, room);
@@ -692,13 +684,14 @@ pub const Spinner = struct {
     pub fn tick(s: *Spinner, phase: []const u8, _: []const u8) void {
         if (!s.look.tty) return;
         const now = Io.Clock.awake.now(s.io);
+        if (s.start.durationTo(now).toNanoseconds() < history_after_ns) return;
         if (!s.redraw.due(now)) return;
         s.frame += 1;
         s.look.draw(
             s.io,
             Io.File.stderr(),
             frames[s.frame % frames.len],
-            "🐺",
+            "",
             s.phase orelse phase,
             s.start.durationTo(now),
             "",
@@ -741,7 +734,7 @@ fn columns(f: Io.File) usize {
 
 const testing = std.testing;
 
-test "phase history measures each transition once and keeps fast phases" {
+test "phase history omits fast work and keeps long or extraordinary phases" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const output = try tmp.dir.createFile(testing.io, "phases", .{});
@@ -755,8 +748,12 @@ test "phase history measures each transition once and keeps fast phases" {
         .{ .name = "Compiling Linux", .short = "kernel-compile" },
         .fromNanoseconds(120 * std.time.ns_per_ms),
     );
-    m.finishAt(.fromNanoseconds(1500 * std.time.ns_per_ms));
-    m.finishAt(.fromNanoseconds(2000 * std.time.ns_per_ms));
+    m.enterAt(
+        .{ .name = "Pinned trust accepted", .short = "verify", .extraordinary = true },
+        .fromNanoseconds(6200 * std.time.ns_per_ms),
+    );
+    m.finishAt(.fromNanoseconds(6250 * std.time.ns_per_ms));
+    m.finishAt(.fromNanoseconds(7000 * std.time.ns_per_ms));
     const lines = try tmp.dir.readFileAlloc(
         testing.io,
         "phases",
@@ -765,7 +762,7 @@ test "phase history measures each transition once and keeps fast phases" {
     );
     defer testing.allocator.free(lines);
     try testing.expectEqualStrings(
-        "  🌒 Checking image inputs  120ms\n  🌓 Compiling Linux  1.3s\n",
+        "  ✓ Compiling Linux  6.0s\n  ✓ Pinned trust accepted  50ms\n",
         lines,
     );
 }

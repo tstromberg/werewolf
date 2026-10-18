@@ -26,13 +26,19 @@ pub fn main(init: std.process.Init) !void {
         try io.sleep(.fromSeconds(1), .awake);
     }
     try ctx.result(io, suite, "ready", ready);
-    const editor = try http(gpa, "GET", "/", "", "");
-    try ctx.result(
-        io,
-        suite,
-        "editor",
-        editor.status == 200 and std.mem.indexOf(u8, editor.body, "n8n") != null,
-    );
+    var editor_ready = false;
+    for (0..60) |_| {
+        const editor = http(gpa, "GET", "/", "", "") catch {
+            try io.sleep(.fromSeconds(1), .awake);
+            continue;
+        };
+        if (editor.status == 200 and std.mem.indexOf(u8, editor.body, "n8n") != null) {
+            editor_ready = true;
+            break;
+        }
+        try io.sleep(.fromSeconds(1), .awake);
+    }
+    try ctx.result(io, suite, "editor", editor_ready);
     const anonymous = try http(gpa, "GET", "/rest/workflows", "", "");
     try ctx.result(io, suite, "auth-required", anonymous.status == 401 or anonymous.status == 403);
     const json_header = "Content-Type: application/json\r\n";
@@ -81,15 +87,20 @@ pub fn main(init: std.process.Init) !void {
         "manualTrigger\",\"typeVersion\":1,\"position\":[0,0],\"parameters\":{}},{\"id\":\"set\"" ++
         ",\"name\":\"Expression\",\"type\":\"n8n-nodes-base.set\",\"typeVersion\":3.4,\"position" ++
         "\":[240,0],\"parameters\":{\"assignments\":{\"assignments\":[{\"id\":\"answer\",\"name" ++
-        "\":\"answer\",\"type\":\"number\",\"value\":\"={{ 6 * 7 }}\"}]},\"options\":{}}},{\"id" ++
+        "\":\"answer\",\"type\":\"number\",\"value\":\"={{ 6 * 7 }}\"},{\"id\":\"sandbox\",\"nam" ++
+        "e" ++
+        "\":\"sandbox\",\"type\":\"string\",\"value\":\"={{ (function(){ return " ++
+        "'werewolf-cve-2025" ++
+        "-68613:' + this.process.version; })() }}\"}]},\"options\":{}}},{\"id" ++
         "\":\"code\",\"name\":\"Code\",\"type\":\"n8n-nodes-base.code\",\"typeVersion\":2,\"posi" ++
         "tion\":[480,0],\"parameters\":{\"jsCode\":\"if ($input.first().json.answer !== 42) " ++
-        "throw new Error('expression result'); return [{json:{marker:'native-code-ok',answer:42}" ++
+        "throw new Error('expression result'); return [{json:{marker:'native-code-ok',answer:42," ++
+        "sandbox:$input.first().json.sandbox}" ++
         "}];\"}}],\"connections\":{\"Manual\":{\"main\":[[{\"node\":\"Expression\",\"type\":\"ma" ++
         "in\",\"index\":0}]]},\"Expression\":{\"main\":[[{\"node\":\"Code\",\"type\":\"main\",\"" ++
         "index\":0}]]}},\"settings\":{\"executionOrder\":\"v1\"}";
     if (std.mem.eql(u8, ctx.phase, "seed")) {
-        const body = try gpa.print("{{\"name\":\"{s}\",{s}}}", .{ name, graph });
+        const body = try gpa.print("{{\"name\":\"{s}\",\"active\":false,{s}}}", .{ name, graph });
         const created = try http(gpa, "POST", "/rest/workflows", auth, body);
         if (created.status != 200) try Io.File.stderr().writeStreamingAll(io, created.body);
         try ctx.result(io, suite, "create-workflow", created.status == 200);
@@ -137,6 +148,12 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!ran_code) try Io.File.stderr().writeStreamingAll(io, last_execution);
     try ctx.result(io, suite, "code-runner", ran_code);
+    try ctx.result(
+        io,
+        suite,
+        "cve-2025-68613-fixed",
+        std.mem.indexOf(u8, last_execution, "werewolf-cve-2025-68613:v26.") == null,
+    );
     const service = try Io.Dir.cwd().readFileAlloc(io, "/etc/sv/n8n/service", gpa, .limited(16384));
     try ctx.result(
         io,

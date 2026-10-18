@@ -526,6 +526,7 @@ fn formPrograms(gpa: Allocator, fm: Form, names: *std.array_hash_map.String(void
 /// packaged reports whether CI publishes fm as NAME-form. A form with
 /// melange recipes is not: its packages exist only where it is built.
 pub fn packaged(io: Io, gpa: Allocator, root: Dir, fm: Form) !bool {
+    if ((try fm.items(gpa, "recipes")).len > 0) return false;
     root.access(io, try gpa.print("{s}/melange", .{fm.dir}), .{}) catch return true;
     return false;
 }

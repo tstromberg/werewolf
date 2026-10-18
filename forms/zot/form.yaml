@@ -5,8 +5,11 @@
 # user pulls; only those the settings name push or delete. zot keeps the
 # images in /data/svc/zot, deduplicated, and collects what no tag holds.
 # Wolfi does not ship zot: melange builds the registry alone, with no
-# extensions (forms/zot/melange/zot.yaml). See forms/zot/README.md.
+# extensions (../packages/zot/zot.yaml). See forms/zot/README.md.
 base: prod
+
+recipes:
+  - ../../../packages/zot/zot.yaml
 
 with: [caddy]
 

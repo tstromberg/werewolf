@@ -54,7 +54,7 @@ func sshTestAddress(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := sshConfig(key, "demo")
+	config := sshConfig(key, "root")
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -82,10 +82,10 @@ func sshTestClient(t *testing.T, address, user, password string) (*ssh.Client, e
 	return ssh.Dial("tcp", address, &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.Password(password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
 }
 
-func TestSSHAnyPasswordOnlyForDemo(t *testing.T) {
+func TestSSHAnyPasswordOnlyForRoot(t *testing.T) {
 	address := sshTestAddress(t)
 	for _, password := range []string{"", "arbitrary password"} {
-		c, err := sshTestClient(t, address, "demo", password)
+		c, err := sshTestClient(t, address, "root", password)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestSSHAnyPasswordOnlyForDemo(t *testing.T) {
 			t.Fatal(string(out), err)
 		}
 	}
-	c, err := sshTestClient(t, address, "root", "arbitrary password")
+	c, err := sshTestClient(t, address, "demo", "arbitrary password")
 	if c != nil {
 		c.Close()
 	}
@@ -109,10 +109,55 @@ func TestSSHAnyPasswordOnlyForDemo(t *testing.T) {
 	}
 }
 
+func TestOfferedPublicKeyIsRecordedAndRefused(t *testing.T) {
+	signer, err := hostKey(filepath.Join(t.TempDir(), "client-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := testConnMetadata{
+		user: "root", remote: "192.0.2.10:2222", local: "192.0.2.20:22",
+		client: "SSH-2.0-test-client", server: "SSH-2.0-test-server", session: []byte{0xde, 0xad},
+	}
+	line := offeredPublicKey(metadata, signer.PublicKey())
+	authorized := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	if !strings.Contains(line, `SSH_USER="root"`) || !strings.Contains(line, `SSH_KEY_ALGORITHM="ssh-ed25519"`) ||
+		!strings.Contains(line, `SSH_REMOTE="192.0.2.10:2222"`) || !strings.Contains(line, `SSH_LOCAL="192.0.2.20:22"`) ||
+		!strings.Contains(line, `SSH_CLIENT="SSH-2.0-test-client"`) || !strings.Contains(line, `SSH_SERVER="SSH-2.0-test-server"`) ||
+		!strings.Contains(line, "SSH_SESSION=dead") || !strings.Contains(line, ssh.FingerprintSHA256(signer.PublicKey())) ||
+		!strings.Contains(line, authorized) {
+		t.Fatal(line)
+	}
+	address := sshTestAddress(t)
+	c, err := ssh.Dial("tcp", address, &ssh.ClientConfig{User: "root", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
+	if c != nil {
+		c.Close()
+	}
+	if err == nil {
+		t.Fatal("accepted public key authentication")
+	}
+}
+
+type testConnMetadata struct {
+	user, remote, local, client, server string
+	session                             []byte
+}
+
+func (m testConnMetadata) User() string          { return m.user }
+func (m testConnMetadata) SessionID() []byte     { return m.session }
+func (m testConnMetadata) ClientVersion() []byte { return []byte(m.client) }
+func (m testConnMetadata) ServerVersion() []byte { return []byte(m.server) }
+func (m testConnMetadata) RemoteAddr() net.Addr  { return testAddr(m.remote) }
+func (m testConnMetadata) LocalAddr() net.Addr   { return testAddr(m.local) }
+
+type testAddr string
+
+func (a testAddr) Network() string { return "tcp" }
+func (a testAddr) String() string  { return string(a) }
+
 func TestSSHRefusesShellPTYAndForwarding(t *testing.T) {
 	address := sshTestAddress(t)
 	for _, request := range []string{"shell", "pty-req", "subsystem"} {
-		c, err := sshTestClient(t, address, "demo", "test")
+		c, err := sshTestClient(t, address, "root", "test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +172,7 @@ func TestSSHRefusesShellPTYAndForwarding(t *testing.T) {
 		s.Close()
 		c.Close()
 	}
-	c, err := sshTestClient(t, address, "demo", "test")
+	c, err := sshTestClient(t, address, "root", "test")
 	if err != nil {
 		t.Fatal(err)
 	}

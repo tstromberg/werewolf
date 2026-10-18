@@ -39,7 +39,7 @@ func main() {
 	mode := flag.String("mode", "web", "web or ssh")
 	address := flag.String("listen", ":8080", "dashboard or SSH address")
 	key := flag.String("host-key", "/data/svc/vuln-sshd/host-key", "SSH host key")
-	user := flag.String("user", "demo", "SSH account accepting any password")
+	user := flag.String("user", "root", "SSH account accepting any password")
 	service := flag.String("service", "app", "application log label")
 	flag.Parse()
 	log.SetPrefix("vuln-console: ")
@@ -61,7 +61,7 @@ func main() {
 	for _, t := range targets {
 		go func() { log.Fatal(serveHTTP(t.public, requestLog(t.name, proxy(t.backend, j), j), false, t.name, j)) }()
 	}
-	j.add("start", "dashboard", "HTTP :8080; Solr :8983; n8n :5678; Langflow :7860; SSH demo :22")
+	j.add("start", "dashboard", "HTTP :8080; Solr :8983; n8n :5678; Langflow :7860; SSH root :22")
 	log.Fatal(serveHTTP(*address, requestLog("dashboard", dashboard(j), j), true, "dashboard", j))
 }
 

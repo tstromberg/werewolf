@@ -53,16 +53,6 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     }
     const name, const on = try machineArgs(io, gpa, rest, why);
     const dir = try machineDir(gpa, name);
-    // The guest keeps its host key in /data, so trust it on first use and
-    // pin it by name in the machine's directory, not by an address another
-    // machine may get later. delete removes it with the machine.
-    var pinned: std.ArrayList([]const u8) = .empty;
-    try pinned.appendSlice(gpa, &.{
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", try gpa.print("UserKnownHostsFile={s}/known_hosts", .{dir}),
-        "-o", try gpa.print("HostKeyAlias={s}", .{name}),
-        "-o", "LogLevel=ERROR",
-    });
     const dev_marker = Dir.cwd().readFileAlloc(
         io,
         try gpa.print("{s}/dev", .{dir}),
@@ -70,6 +60,17 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         .limited(32),
     ) catch null;
     const dev_access = dev_marker != null;
+    // The guest keeps its host key in /data, so trust it on first use and
+    // pin it by name in the machine's directory, not by an address another
+    // machine may get later. Developer and ordinary sshd use distinct host
+    // keys, so their aliases are distinct too. delete removes both.
+    var pinned: std.ArrayList([]const u8) = .empty;
+    try pinned.appendSlice(gpa, &.{
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", try gpa.print("UserKnownHostsFile={s}/known_hosts", .{dir}),
+        "-o", try gpa.print("HostKeyAlias={s}", .{try sshAlias(gpa, name, dev_access)}),
+        "-o", "LogLevel=ERROR",
+    });
     if (dev_marker != null and !std.mem.eql(u8, dev_marker.?, "custom\n")) {
         try pinned.appendSlice(gpa, &.{
             "-i", try @import("keys.zig").devPrivatePath(io, gpa),
@@ -92,6 +93,21 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
         try argv.appendSlice(gpa, pinned.items);
         try argv.append(gpa, "root@127.0.0.1");
+    } else if (on == .bhyve) {
+        if (!try bhyve.exists(
+            io,
+            gpa,
+            name,
+        )) return why.refuse("no machine {s} running under bhyve", .{name});
+        const host = qemu.record(io, gpa, dir, "host") orelse "127.0.0.1";
+        if (!howl.isIp4(host)) return why.refuse("{s}: invalid bhyve address on record", .{name});
+        const port = qemu.record(io, gpa, dir, "ssh") orelse
+            return why.refuse("{s}: no SSH address on record; recreate it with this howl", .{name});
+        const number = std.fmt.parseInt(u16, port, 10) catch 0;
+        if (number == 0) return why.refuse("{s}: no SSH listener on record", .{name});
+        try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
+        try argv.appendSlice(gpa, pinned.items);
+        try argv.append(gpa, try gpa.print("root@{s}", .{host}));
     } else if (on == .firecracker) {
         try argv.append(gpa, "ssh");
         if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
@@ -147,12 +163,17 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             command = &.{};
         }
     } else return why.refuse(
-        "ssh reaches machines here (qemu, firecracker, lima); {t}'s address is in create's summary",
+        "ssh reaches machines here (qemu, firecracker, lima, bhyve); {t}'s address is in " ++
+            "create's summary",
         .{on},
     );
     try argv.appendSlice(gpa, command);
     const err = std.process.replace(io, .{ .argv = argv.items });
     return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
+}
+
+fn sshAlias(gpa: Allocator, name: []const u8, developer: bool) ![]const u8 {
+    return gpa.print("{s}{s}", .{ name, if (developer) "-dev" else "" });
 }
 
 /// A developer VM's address comes from its current boot, not an older
@@ -229,11 +250,12 @@ pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !vo
     const secured = try @import("local-secure.zig").stop(io, gpa, name, on, why);
     if (named) {
         if (!secured) {
-            if (on != .qemu) return why.refuse(
-                "stop NAME currently supports a local QEMU machine",
+            if (on == .bhyve) {
+                try bhyve.stop(io, gpa, name, try machineDir(gpa, name));
+            } else if (on != .qemu) return why.refuse(
+                "stop NAME currently supports a local QEMU or bhyve machine",
                 .{},
-            );
-            if (!try qemu.stop(io, gpa, try machineDir(gpa, name)))
+            ) else if (!try qemu.stop(io, gpa, try machineDir(gpa, name)))
                 return why.refuse("no machine {s} running under QEMU", .{name});
         }
         say(io, "{s}: stopped; its disk stays", .{name});
@@ -339,16 +361,9 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
                 say(io, "{s}: no sudo or doas, so its tap device and rules stay", .{name});
         },
         .bhyve => {
-            // Destroying the VM makes bhyve exit, and its supervisor with it.
-            if (try bhyve.exists(io, gpa, name)) {
-                const root = bhyve.asRoot(io) catch
-                    return why.refuse("bhyve needs root, and there is no doas or sudo", .{});
-                try run(
-                    io,
-                    why,
-                    try std.mem.concat(gpa, []const u8, &.{ root, try bhyve.destroy(gpa, name) }),
-                );
-            }
+            // Wait for the supervisor and remove only this VM's owned TAP.
+            if (!try @import("local-secure.zig").stop(io, gpa, name, on, why))
+                try bhyve.stop(io, gpa, name, dir);
         },
         .lima => {
             if (try lima.exists(io, gpa, name)) {
@@ -385,7 +400,8 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
     }
     // Remove what create kept: the disks, and the config tar, which holds
     // secrets.
-    if (on == .lima or on == .qemu) @import("local-secure.zig").stopPublisher(io, gpa, dir);
+    if (on == .lima or on == .qemu or
+        on == .bhyve) @import("local-secure.zig").stopPublisher(io, gpa, dir);
     Dir.cwd().deleteTree(io, dir) catch {};
 }
 
@@ -470,4 +486,14 @@ test inert {
     const raw = try inert(a, "a\x9b2Jb\x88c\xffd\xe2\x88\x91e\xe2\x88");
     defer a.free(raw);
     try testing.expectEqualStrings("a2Jbcd\xe2\x88\x91e", raw);
+}
+
+test "developer and ordinary SSH host keys have distinct aliases" {
+    const a = testing.allocator;
+    const ordinary = try sshAlias(a, "edge", false);
+    defer a.free(ordinary);
+    const developer = try sshAlias(a, "edge", true);
+    defer a.free(developer);
+    try testing.expectEqualStrings("edge", ordinary);
+    try testing.expectEqualStrings("edge-dev", developer);
 }

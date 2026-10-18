@@ -49,6 +49,13 @@ jobs:
           # What packages published, when its run, after check, started this.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       # This job runs every 15 minutes and should take seconds. build/host/form,
       # which every make reads the forms through, is kept by its sources
       # and Zig's pinned version (tools/install-deps), so Zig, ~8 s to
@@ -94,6 +101,13 @@ jobs:
           # What packages published, when its run, after check, started this.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       - name: Install tools
         run: sudo test/ci-setup
       # After the checkout, so the locks are newer than the configs and
@@ -138,6 +152,13 @@ jobs:
           # What packages published, when its run, after check, started this.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: dist-*

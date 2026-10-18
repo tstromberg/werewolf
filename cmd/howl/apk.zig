@@ -1,5 +1,5 @@
 //! build-apk builds a package from a melange recipe the way a form build
-//! would, so an author can try it before adding it to forms/NAME/melange/.
+//! would, so an author can try it before adding it to ../packages/NAME/.
 //! See README.md.
 //!
 //!     howl build-apk RECIPE [--arch ARCH] [--verbose]
@@ -71,8 +71,8 @@ test "build-apk logs distinguish current and vulnerable recipes" {
     defer arena.deinit();
     const gpa = arena.allocator();
     for ([_][]const u8{ "n8n", "langflow" }) |name| {
-        const current = try gpa.print("forms/{s}/melange/{s}.yaml", .{ name, name });
-        const vulnerable = try gpa.print("forms/{s}-vuln-demo/melange/{s}.yaml", .{ name, name });
+        const current = try gpa.print("../packages/{s}/{s}.yaml", .{ name, name });
+        const vulnerable = try gpa.print("../packages/{s}-vuln-demo/{s}.yaml", .{ name, name });
         try std.testing.expect(!std.mem.eql(
             u8,
             try logStem(gpa, current),
@@ -120,7 +120,7 @@ fn isRecipePath(p: []const u8) bool {
 }
 
 test isRecipePath {
-    try std.testing.expect(isRecipePath("forms/vaultwarden/melange/vaultwarden.yaml"));
+    try std.testing.expect(isRecipePath("../packages/vaultwarden/vaultwarden.yaml"));
     try std.testing.expect(isRecipePath("../myapp/myapp.yaml"));
     try std.testing.expect(isRecipePath("/home/me/app.yaml"));
     for ([_][]const u8{

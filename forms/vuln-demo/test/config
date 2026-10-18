@@ -1,5 +1,5 @@
 #!/bin/sh
 set -eu
-umask 077
-mkdir -p "$1/n8n"
-openssl rand -hex 32 >"$1/n8n/task-token"
+# The combined demo has no required operator configuration. Keep this helper
+# so the generic form-test harness can prepare its empty config directory.
+mkdir -p "$1"

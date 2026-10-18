@@ -29,6 +29,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       - name: Install tools
         run: sudo test/ci-setup
       - name: Unit tests
@@ -70,6 +77,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       - name: Install tools
         run: sudo test/ci-setup
       - name: Tool versions
@@ -122,7 +136,7 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**', 'release/package-sources.json') }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
@@ -215,6 +229,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check out reviewed third-party package sources
+        env:
+          WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
+          WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
+          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
+          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
+        run: tools/checkout-packages
       - name: Restore public EFI stubs and check tools
         # checkout cleans out/, so these public build inputs must be restored
         # every run. System tools stay administrator-managed: the second call
@@ -239,7 +260,7 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**', 'release/package-sources.json') }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +

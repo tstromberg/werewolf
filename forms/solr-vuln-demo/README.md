@@ -29,6 +29,13 @@ it reaches command execution. The old Log4j library does not imply a bypass of J
 27's modern JNDI restrictions. Tests verify real indexing and persistence separately
 from the deliberately vulnerable dependency.
 
+The native [CVE-2021-44228](https://logging.apache.org/security.html) regression
+check requires Log4j 2.14.1, its `JndiLookup` class and a
+message layout that performs lookups. It also verifies that no
+`formatMsgNoLookups` mitigation was added. The current `solr` form separately
+asserts Log4j 2.25.3, so dependency updates cannot silently change either side
+of the demonstration.
+
 ### Known Quirks
 
 - Data and private configsets live under `/data/svc/solr/home`.

@@ -407,6 +407,35 @@ pub const Form = struct {
         return out.items;
     }
 
+    /// recipes resolves build recipes relative to this form, keeping sibling
+    /// repositories' paths relative so release snapshots work on another host.
+    pub fn recipes(form: Form, io: Io, gpa: Allocator, root: Dir) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (try form.items(gpa, "recipes")) |path|
+            try out.append(gpa, try std.fs.path.resolveAlloc(gpa, &.{ form.dir, path }));
+        if (form.spec.get("recipes") != null) return out.items;
+        // Distro-specific packages and existing private forms keep their
+        // recipes beside their own source in melange/.
+        const path = try gpa.print("{s}/melange", .{form.dir});
+        var dir = root.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return out.items,
+            else => return err,
+        };
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .file and entry.name[0] != '.' and
+                mem.endsWith(u8, entry.name, ".yaml"))
+                try out.append(gpa, try gpa.print("{s}/{s}", .{ path, entry.name }));
+        }
+        mem.sortUnstable([]const u8, out.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return mem.lessThan(u8, a, b);
+            }
+        }.less);
+        return out.items;
+    }
+
     /// check returns one of this form's check settings. Check settings are
     /// never inherited from the forms it is built on.
     pub fn check(form: Form, key: []const u8) ?Node {
@@ -437,6 +466,7 @@ pub const keys = [_]Key{
     .{ .name = "base", .shape = .scalar },
     .{ .name = "with", .shape = .list },
     .{ .name = "packages", .shape = .list },
+    .{ .name = "recipes", .shape = .list },
     .{ .name = "repositories", .shape = .list },
     .{ .name = "keyring", .shape = .list },
     .{ .name = "archs", .shape = .list },
@@ -1925,6 +1955,37 @@ test "merge: lists joined base first, maps by key, scalars and whole keys the la
         \\  - path: /x
         \\
     , try testWrite(gpa, try merge(gpa, base, over)));
+}
+
+test "recipes resolve sibling contexts and retain distro source discovery" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/demo/melange");
+    for ([_][]const u8{ "z.yaml", "a.yaml", "notes.txt", ".hidden.yaml" }) |name|
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("forms/demo/melange/{s}", .{name}), .data = "" },
+        );
+    var fm: Form = .{ .name = "demo", .dir = "forms/demo", .spec = .{ .map = &.{} } };
+    const local = try fm.recipes(io, gpa, tmp.dir);
+    try testing.expectEqual(2, local.len);
+    try testing.expectEqualStrings("forms/demo/melange/a.yaml", local[0]);
+    try testing.expectEqualStrings("forms/demo/melange/z.yaml", local[1]);
+    fm.spec = try testParse(gpa,
+        \\recipes:
+        \\  - ../../../packages/solr/solr.yaml
+        \\  - ../../../hardened-packages/ports/libffi/libffi.yaml
+    );
+    const declared = try fm.recipes(io, gpa, tmp.dir);
+    try testing.expectEqual(2, declared.len);
+    try testing.expectEqualStrings("../packages/solr/solr.yaml", declared[0]);
+    try testing.expectEqualStrings("../hardened-packages/ports/libffi/libffi.yaml", declared[1]);
+    fm.spec = try testParse(gpa, "recipes: []");
+    try testing.expectEqual(0, (try fm.recipes(io, gpa, tmp.dir)).len);
 }
 
 test "chain: base first, each form after what it takes, itself last" {

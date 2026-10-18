@@ -219,7 +219,8 @@ FreeBSD)
 	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
 	# howl create keeps machines on bhyve, which needs bhyve-firmware (its
 	# UEFI firmware) and libslirp (its user-mode network).
-	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp"
+	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp
+		python3 swtpm virt-firmware osslsigncode"
 	apko_pkgs=''
 	zig_pkgs=curl
 	erofs_deps="autoconf automake libtool pkgconf liblz4 zstd"
@@ -285,11 +286,17 @@ dnf) have=$(rpm -qa --qf '%{NAME}\n') ;;
 pacman) have=$(pacman -Qq) ;;
 pkg) have=$(! pkg -N >/dev/null 2>&1 || pkg query %n) ;;
 pkgin) have=$(pkg_info | sed 's/-[0-9][^ ]* .*//') ;; # name-version  comment
-brew) have=$(brew list --formula -1) ;;
+brew) have='' ;; # Homebrew reports aliases such as python by canonical versioned names.
 esac
 missing=''
 for p in $pkgs; do
-	printf '%s\n' "$have" | grep -qx "$p" || missing="$missing $p"
+	if [ "$pm" = brew ]; then
+		# Alias-aware: `brew list --formula` says python@3.15 even when the
+		# requested `python` formula is installed.
+		brew list --versions "$p" >/dev/null 2>&1 || missing="$missing $p"
+	else
+		printf '%s\n' "$have" | grep -qx "$p" || missing="$missing $p"
+	fi
 done
 
 root=''

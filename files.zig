@@ -12,6 +12,7 @@ pub const build_helper_template = @embedFile("boot/build-helper.yaml");
 pub const native_firmware = @embedFile("tools/native-firmware");
 pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
 pub const local_tpm = @embedFile("tools/local-tpm");
+pub const bhyve_network = @embedFile("tools/bhyve-network");
 pub const local_publisher = @embedFile("tools/local-publisher");
 pub const boot_download = @embedFile("tools/boot-download");
 pub const protected_trust = @embedFile("release/protected/trust.json");
