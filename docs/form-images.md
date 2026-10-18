@@ -1,13 +1,14 @@
 # Form images
 
-Every form is built, with every protection, for each target it can run
-on: QEMU on aarch64 and x86_64, and Lima on aarch64, where the form allows
-the architecture. A target is published, and is what `howl run --with
-FORM` downloads by default, only when its exact bundle has passed the
-protected lifecycle gates. Browse the
+One workflow publishes only `minimal`, `prod-ssh` and `playground`, on aarch64
+and x86_64. Each has two explicit boot profiles: `secure-boot` requires
+Secure Boot, IPE and an enrolled TPM; `legacy-boot` runs without those three
+requirements, retaining sandboxing and the verified root. Download signatures
+and attestations authenticate both profiles. Browse the
 [image catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run
-`howl forms --published`. `minimal`, `prod` and `prod-ssh` are also GitHub
-releases of an older kind ([releases.md](releases.md)).
+`howl forms --published` for protected targets. `howl run` continues to require
+the secure profile; it never falls back to a compatibility disk. Legacy assets
+are explicit downloads from the same GitHub release ([releases.md](releases.md)).
 
 ## The pipeline
 
@@ -18,8 +19,8 @@ digests, melange environments and host tools. An authenticated catalog row with
 matching inputs and a passing attempt skips the build; failures retry every run.
 `force` rebuilds the selected targets.
 
-Manual dispatch defaults to `target=playground/qemu/x86_64`, using the same
-checks on hosted runners; `target=all` selects the full catalog. Focused builds
+Manual dispatch defaults to `target=all`, selecting the three published forms.
+`target=playground/qemu/x86_64` keeps a focused recovery lane. Focused builds
 run alongside full builds. A shared publication lock protects the catalog;
 other targets keep their status, inputs and previous release.
 
@@ -43,6 +44,21 @@ on the runner that boots them, and runs all fourteen
 so only `playground` has gates today; other forms are built and tested
 but read `not published: no lifecycle gates for this form`.
 
+`legacy-build` uses the same resolved form/package snapshots on independent
+runners, without code-signing or TPM credentials. `legacy-check` compares the
+bytes, runs coverage, integration and package-updater checks, checks raw/qcow2
+parity, and boots the exact qcow2 under ordinary UEFI and the exact kernel/initramfs
+directly, without a TPM. Publication
+signs a separate `werewolf-legacy-downloads/1` manifest with
+`boot_profile: legacy-boot`; it cannot be admitted as a protected boot descriptor.
+Its immutable objects and release floor live under `legacy-boot/FORM/ARCH`.
+
+Both profiles enter one `base-images-SERIAL` GitHub release, with attested assets
+and R2 parity checks before the draft becomes public. The old scheduled
+image publisher is retired. `boot-profiles.json` is the signed inventory of both
+profiles; `index.json` preserves the protected catalog used by existing clients.
+The HTML catalog labels the profiles separately.
+
 | Target | Gate runner |
 | --- | --- |
 | qemu/x86_64 | GitHub-hosted `ubuntu-26.04`, with KVM |
@@ -57,7 +73,7 @@ key during the job, so it serves this repository alone (the workflow never
 runs for pull requests). It keeps what `test/ci-setup` installs, and Lima
 on macOS; nothing else on it may listen on port 9443.
 
-A target that fails any of this is not published; the others are, and
+A target that fails its profile's checks is not published; the others are, and
 the catalog keeps the last published release beside the failed attempt.
 [publishing-health.yml](../.github/workflows/publishing-health.yml)
 reports failures and recovery. The scripts are `release/form-images`,
@@ -121,39 +137,19 @@ GitHub releases are tagged `base-images-SERIAL`, with assets named
 files, both signature pairs, the public certificates, the gates and the
 download manifest, each with a build provenance attestation.
 
-### Downloading a protected qcow2
+### Downloading images
 
-Choose a `base-images-SERIAL` release with assets for your form, provider
-and architecture; the x86_64 QEMU playground disk is
-`playground-qemu-x86_64-disk.qcow2`. On a matching Linux host,
-`howl run --on qemu` downloads and authenticates the bundle, enrolls
-firmware and TPM, and starts the host permit service. To inspect or
-archive the disk itself, from a trusted checkout:
+A `base-images-SERIAL` release carries `FORM-PROVIDER-ARCH-secure-boot.qcow2`
+(and its canonical `disk.qcow2` name) for secure targets, and
+`FORM-ARCH-legacy-boot.qcow2` for compatibility targets. Each target has a signed
+`downloads.json` mapping every filename to its size and SHA-256. Verify that
+signature against `release/protected/image.crt`, then verify the file hashes and
+GitHub build attestations before importing a disk.
 
-```sh
-TAG=protected-20261014T232908Z
-mkdir -p downloads
-gh release download "$TAG" --repo werewolf-linux/werewolf --dir downloads \
-  --pattern 'playground-qemu-x86_64-*'
-openssl x509 -in release/protected/image.crt -pubkey -noout > downloads/image.pub
-openssl dgst -sha256 -verify downloads/image.pub \
-  -signature downloads/playground-qemu-x86_64-downloads.json.sig \
-  downloads/playground-qemu-x86_64-downloads.json
-(cd downloads && jq -r '.files["disk.qcow2"] | "\(.sha256)  \(.asset)"' \
-  playground-qemu-x86_64-downloads.json | shasum -a 256 -c -)
-gh attestation verify downloads/playground-qemu-x86_64-disk.qcow2 \
-  --repo werewolf-linux/werewolf
-```
-
-Stop if a signature or digest fails. The qcow2 holds the same protected
-system, but importing it into a hypervisor makes no owner keys, firmware
-enrollment, TPM state or host permit service: use howl for a protected
-deployment. Its host service polls for authenticated vendor bundles every
-five minutes, and the guest applies them under its
-[update policy](updater.md#when-an-update-boots). A/B recovery and
-retirement protection depend on keeping that machine's enrollment and
-host service. A legacy GitHub release disk uses the package updater and gains
-no protected profile by being imported.
+Importing a secure disk creates no firmware enrollment, TPM state or host permit
+service: use `howl` for protected deployment. Its host service polls every five
+minutes, and the guest follows its [update policy](updater.md#when-an-update-boots).
+Legacy boot uses the package updater and carries no protected enrollment.
 
 ### Installing a particular version
 

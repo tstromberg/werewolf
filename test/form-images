@@ -162,6 +162,20 @@ class Images(unittest.TestCase):
                                focused=True)
             upload.assert_not_called()
 
+    def test_unlisted_profiles_forms_and_unrelated_focused_legacy_never_publish(self):
+        listing = self.root / 'exported.json'
+        for target in (dict(form='prod', arch='x86_64', boot_profile='legacy-boot'),
+                       dict(form='playground', arch='x86_64', boot_profile='unknown'),
+                       dict(form='minimal', arch='x86_64', boot_profile='legacy-boot')):
+            images.write(listing, [target])
+            with patch.object(images, 'plans', return_value={('playground', 'x86_64'): {}}), \
+                 patch.object(images, 'verified_results', return_value={}), \
+                 patch.object(images, 'index', return_value={}), \
+                 patch.object(self.store, 'upload') as upload:
+                with self.assertRaises(ValueError):
+                    images.publish(self.root, self.root, set(), listing, self.store, focused=True)
+                upload.assert_not_called()
+
     def test_mixed_artifact_layouts_are_rejected(self):
         images.write(self.root / 'snapshots/plan.json', {})
         images.write(self.root / 'snapshots/inputs-x86_64-1/plan.json', {})
@@ -227,11 +241,11 @@ class Images(unittest.TestCase):
         self.assertEqual('lifecycle gates or export failed', row['status'])
         self.assertEqual(previous, row['latest'])
 
-    def test_focused_publication_preserves_unrelated_rows_and_failures(self):
+    def test_focused_publication_preserves_allowed_rows_and_retires_unlisted_forms(self):
         self.run_pipeline(self.serial)
         previous = self.rows()
-        # Preserve targets outside this checkout as well as other providers and
-        # architectures; a focused publisher knows nothing about their health.
+        # Preserve other targets of allowed forms without relabeling their
+        # health, while removing forms retired from the publication allowlist.
         previous[('retired-form', 'qemu', 'aarch64')] = dict(
             form='retired-form', provider='qemu', arch='aarch64', status='tests failed', inputs='a' * 64)
         arm = previous[('playground', 'lima', 'aarch64')]
@@ -246,9 +260,9 @@ class Images(unittest.TestCase):
         self.assertFalse(failed)  # Existing nginx/retired-form failures are unrelated.
         self.assertEqual(['playground'], [t['form'] for t in listing])
         rows = self.rows()
-        self.assertEqual(set(previous), set(rows))
+        self.assertEqual({target for target in previous if target[0] in images.forms()}, set(rows))
         for target in previous:
-            if target != images.FOCUSED_TARGET:
+            if target != images.FOCUSED_TARGET and target[0] in images.forms():
                 self.assertEqual(previous[target], rows[target])
         self.assertEqual(later, rows[images.FOCUSED_TARGET]['latest']['serial'])
 
@@ -362,7 +376,7 @@ class Images(unittest.TestCase):
                          images.gates(dict(ARM64_KVM_RUNNER='invalid', LIMA_RUNNER='invalid'), focused=True))
 
     def test_cli_selects_the_same_scope_for_builds_and_gates(self):
-        for target, count in [('all', 16), ('playground/qemu/x86_64', 1)]:
+        for target, count in [('all', 6), ('playground/qemu/x86_64', 1)]:
             env = dict(os.environ, FORM_IMAGES_TARGET=target, ARM64_KVM_RUNNER='', LIMA_RUNNER='')
             plan = json.loads(subprocess.check_output([sys.executable, 'release/form-images', 'matrix'], env=env))
             self.assertEqual(count, len(plan['include']))

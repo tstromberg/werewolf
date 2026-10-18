@@ -13,7 +13,8 @@ import tempfile
 downloads = importlib.machinery.SourceFileLoader('export_downloads', 'tools/boot-download').load_module()
 # The form pipeline adds what the bundle was built from and how it changed;
 # the signed manifest covers them like every other asset.
-EXTRAS = {'inputs.tar.gz', 'packages.json', 'tests.json', 'release-notes.json', 'release-notes.html'}
+EXTRAS = {'inputs.tar.gz', 'packages.json', 'tests.json', 'release-notes.json', 'release-notes.html',
+          'secure-boot.qcow2'}
 
 
 def run(args, **kwargs):
@@ -97,7 +98,7 @@ def verify(directory, bundle, report, provider, trust):
             raise ValueError('invalid downloads signature')
         run(['openssl', 'dgst', '-sha256', '-verify', key, '-signature', signature, head], capture_output=True)
         signed = json.loads(downloads.read(head, downloads.HEAD_LIMIT))
-        expected = dict(format='werewolf-downloads/1', descriptor=downloads.sha(bundle / 'boot.json'),
+        expected = dict(format='werewolf-downloads/1', boot_profile='secure-boot', descriptor=downloads.sha(bundle / 'boot.json'),
                         form=manifest['form'], provider=provider, arch=manifest['image']['arch'],
                         serial=manifest['image']['serial'])
         if set(signed) != set(expected) | {'files', 'provenance'} or any(signed[name] != value for name, value in expected.items()):
@@ -114,6 +115,10 @@ def verify(directory, bundle, report, provider, trust):
                 raise ValueError('release asset differs from its signed digest')
             if name in original and downloads.sha(original[name]) != record['sha256']:
                 raise ValueError('GitHub and R2 bundle bytes differ')
+        if 'secure-boot.qcow2' in signed['files'] and any(
+                signed['files']['secure-boot.qcow2'][field] != signed['files']['disk.qcow2'][field]
+                for field in ('size', 'sha256')):
+            raise ValueError('named secure boot disk differs from the admitted disk')
         if json.loads(downloads.read(directory / (prefix + '-gates.json'), 64 << 10)) != report:
             raise ValueError('release carries different lifecycle evidence')
         required_assets = {record['asset'] for record in signed['files'].values()} | {head.name, signature.name}
@@ -154,9 +159,10 @@ def export(howl, bundle, report, provider, output, trust='release/protected', pr
         run(['qemu-img', 'convert', '-f', 'raw', '-O', 'qcow2', '-c', '-o',
              'compat=1.1,cluster_size=65536,lazy_refcounts=off,compression_type=zstd', raw, qcow2])
         compare(raw, qcow2, manifest['raw_size'])
+        shutil.copyfile(qcow2, staging / (prefix + '-secure-boot.qcow2'))
         files = {path.name[len(prefix) + 1:]: dict(asset=path.name, size=path.stat().st_size, sha256=downloads.sha(path))
                  for path in sorted(staging.iterdir())}
-        signed = dict(format='werewolf-downloads/1', descriptor=plan['descriptor'], form=plan['form'],
+        signed = dict(format='werewolf-downloads/1', boot_profile='secure-boot', descriptor=plan['descriptor'], form=plan['form'],
                       provider=provider, arch=plan['arch'], serial=plan['serial'], files=files, provenance=provenance())
         head = staging / (prefix + '-downloads.json')
         downloads.atomic(head, signed)

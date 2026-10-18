@@ -15,13 +15,13 @@ four core forms**, contingent on the gaps below; shell-suite ports and export ar
 ## Current state
 
 `howl test` runs DEV integration tests and a separate production boot. The
-[form-images](../../release/form-images) pipeline builds every form with every
-protection for each provider and architecture, compares independent builds, runs
+[form-images](../../release/form-images) pipeline builds minimal, prod-ssh and
+playground in secure-boot and legacy-boot profiles, compares independent builds, runs
 coverage and `howl test`, and keeps inventories, notes and a signed R2 catalog. It
 publishes a target only once its exact bundle passes the [lifecycle
-test](../../test/check-published-lifecycle), which needs ssh: today playground. Legacy
-release.yml is a second publisher, of stock disks. Success is tested minimal, prod,
-prod-ssh and playground on both architectures, then every supported target.
+test](../../test/check-published-lifecycle), which needs ssh: today playground.
+Compatibility images have separate exact-disk and direct-boot checks. The earlier
+stock-disk publisher is retired; both profiles share one release flow.
 
 ## Coverage contract
 
