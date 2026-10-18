@@ -85,7 +85,8 @@ keeps the gate off unrelated machines. A target with no runner is built
 and tested but not published. A self-hosted gate runner holds the image
 key during the job, so it serves this repository alone (the workflow never
 runs for pull requests). It keeps what `test/ci-setup` installs, and Lima
-on macOS; nothing else on it may listen on port 9443.
+on macOS. New enrollments forward the signed guest endpoint to a private Unix socket;
+no host TCP port is reserved, and separate consumer state can run concurrently.
 
 A target that fails its profile's checks is not published; the others are, and
 the catalog keeps the last published release beside the failed attempt.

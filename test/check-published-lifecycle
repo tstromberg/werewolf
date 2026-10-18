@@ -481,6 +481,10 @@ try:
         unchanged_run_no_network=True, retained_enrollment=True, lifecycle_evidence='evidence.jsonl'), indent=2) + '\n')
     print('pass: exact production default download, independent owners, A/B, rollback, retirement cuts and failed-trial fallback', flush=True)
 finally:
+    if provider == 'lima':
+        for instance in names:
+            for log in (lima_home / instance).glob('*.log'):
+                shutil.copyfile(log, work / (instance + '-' + log.name))
     for name, machine in zip(names, machines):
         creation_log = machine / 'create.log'
         if creation_log.exists():
