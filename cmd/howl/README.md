@@ -2,10 +2,10 @@
 
 ## Summary
 
-howl builds images and manages machines locally or in a cloud
-([cli.md](../../docs/design/cli.md)). A machine combines a [form](../../docs/forms.md),
-its image, and a config tar read by init from a disk or [user
-data](../../docs/cloud.md).
+Howl builds and runs machines ([design](../../docs/design/cli.md)).
+Each combines a [form](../../docs/forms.md), image and init configuration.
+
+## Background
 
 | Verb | Does |
 | --- | --- |
@@ -27,27 +27,28 @@ data](../../docs/cloud.md).
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`).
+- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl`
+  (`~/.local/share/howl`).
 
-Cloud account and network management stay external. Local builds need the checkout
-and build tools; cloud operations need their provider CLIs.
+## Non-Goals
+
+- Managing cloud accounts, IAM or cloud networks.
 
 ## Detailed design
 
 **Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
 Path forms are never updated.
 
-**Config tar.** Services declare flags with `config`, `setting` and `render`
-(`lib/service.zig`). Howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,
-`--data-key`, `--root-keys`, `--update-policy`. FILE flags read a file or stdin; guests
-validate every value. The tar is sorted ustar, root-owned, 0600, dated 1970, within
-metadata limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`;
+`pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
+The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing
-prerequisites fail. Other providers and `--dev` need `--disable=secureboot,tpm,ipe`
-([why](../../docs/security.md#protections-a-machine-can-be-made-without)); a download
-needs its provider's [protected profile](../../docs/design/published-secure-boot.md).
-A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
+**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux). Missing tools fail.
+Other providers and `--dev` require [disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without).
+Downloads require the provider's [protected
+profile](../../docs/design/published-secure-boot.md). Local VMs use the host
+architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -60,22 +61,22 @@ A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-m
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve TAP uses the only existing bridge, or `--bridge NAME`, exposing the guest to
-that LAN. Use DHCP or `--ip CIDR --gw ADDR --dns ADDR` (also `--config DIR/network`).
-`howl ssh` uses the current boot's address. Missing or ambiguous bridges fail.
-Howl owns only its TAP: reboots retain it; exit, failed start, stop and delete remove
-it. Ownership tokens protect newer interfaces; host networking stays intact. Protected
-bhyve remains gated; experimental SLIRP enrollment lacks TAP update transport.
+bhyve TAP uses an existing bridge (`--bridge NAME` if ambiguous), DHCP or static
+`--ip/--gw/--dns`. Only Howl's TAP is created and removed; reboots retain it.
+`howl ssh` follows the current boot address. Missing bridges fail without SLIRP
+fallback. Protected TAP updates remain gated; SLIRP is experimental.
 
-Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
-their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
-delete keeps the image. Nothing gets in until `--allow-from me|CIDR` opens the ports.
+Local engines and Proxmox attach config read-only; clouds use base64 user data. Cloud
+images are content-named and retained by delete; `--allow-from me|CIDR` opens ports.
 
-**Second create.** The machine keeps its disk and takes the new config; another form,
-`--app`, or `--import` is refused. `howl run` reuses matching protected inputs and
-resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only disk the
-form reads once, while its data is first made ([data.md](../../docs/data.md)); a cloud
-cannot attach it. Progress goes to stderr and the machine record to stdout.
+**Reuse.** Create retains the disk and applies config; form/app/import changes fail.
+Run reuses matching protected inputs, resumes stopped VMs and replaces changed inputs.
+`--import DIR` is a read-only disk used on first boot ([data.md](../../docs/data.md)),
+local only. Progress goes to stderr; machine records go to stdout.
+
+## Drawbacks
+
+Local builds need the checkout and build tools; clouds need their provider CLIs.
 
 ## Alternatives Considered
 
@@ -95,6 +96,5 @@ cannot attach it. Progress goes to stderr and the machine record to stdout.
 
 ## Reliability Considerations
 
-- Images are named by content: a retried upload or create finds them; `console` works
-  whether or not the machine came up. create does not roll back: a partial failure
-  leaves named leftovers. Open: Proxmox has never run on a real node.
+Content names make uploads and creates retryable; console works after a failed boot.
+Partial failures leave named resources. Proxmox still needs testing on a real node.
