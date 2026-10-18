@@ -27,6 +27,7 @@ FORM = Path('build/host/form').resolve()
 TRUST = Path('release/protected').resolve()
 # QEMU uses the production owner channel; Lima retains its existing SSH driver.
 GATED = profiles.FORMS
+SHARDS = 16
 CHECKS = {'coverage', 'integration', 'reproducible'}
 FOCUSED_TARGET = ('playground', 'qemu', 'x86_64')
 
@@ -66,13 +67,13 @@ def native(arch):
 
 
 def forms():
-    return list(profiles.FORMS)
+    return list(profiles.BASE_FORMS if os.environ.get('FORM_IMAGES_TARGET') == 'base' else profiles.FORMS)
 
 
 def focused_target(value):
-    if value not in ('all', '/'.join(FOCUSED_TARGET)):
-        raise ValueError('target must be all or ' + '/'.join(FOCUSED_TARGET))
-    return value != 'all'
+    if value not in ('all', 'base', '/'.join(FOCUSED_TARGET)):
+        raise ValueError('target must be all, base or ' + '/'.join(FOCUSED_TARGET))
+    return value not in ('all', 'base')
 
 
 def matrix(shards, focused=False):
@@ -80,6 +81,7 @@ def matrix(shards, focused=False):
         raise ValueError('use between 1 and 32 shards')
     if focused:
         return dict(include=[dict(arch='x86_64', runner='ubuntu-26.04', shard=1, shards=1)])
+    shards = min(shards, len(forms()))
     return dict(include=[dict(arch=arch, runner=runner, shard=shard, shards=shards)
         for arch, runner in [('x86_64', 'ubuntu-26.04'), ('aarch64', 'ubuntu-26.04-arm')]
         for shard in range(1, shards + 1)])
@@ -207,6 +209,13 @@ def resolve(arch, shard, shards, output, focused=False):
             write(snapshot / 'tools.json', versions)
             digest = resolved_identity(form, arch, snapshot, chain)
             target.update(inputs=digest, commit=commit, serial=serial)
+            try:
+                unchanged = legacy_images.settled(form, arch, digest, TRUST / 'image.crt')
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                print('form-images: %s/%s legacy receipt unreadable; rebuilding: %s' % (form, arch, error),
+                      file=sys.stderr, flush=True)
+                unchanged = False
+            target['legacy_status'] = 'unchanged' if unchanged and os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
             rows = [previous.get((form, provider, arch), {}) for provider in catalog.PROVIDERS[arch]]
             settled = all(r.get('inputs') == digest and r.get('status') in catalog.SETTLED for r in rows)
             target['status'] = 'unchanged' if settled and os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
@@ -230,7 +239,7 @@ def bundles(target):
 
 
 def supports_gate(form, provider):
-    return form in GATED and (provider == 'qemu' or form == 'playground')
+    return form in GATED and (provider == 'qemu' or (provider == 'lima' and form == 'playground'))
 
 
 def install_locks(snapshot):
@@ -436,7 +445,7 @@ def check(snapshot, first, second, output, lifecycle):
     return any(t['status'] in ('tests or reproducibility failed', 'resolution failed') for t in results)
 
 
-def gates(environ, focused=False):
+def gates(environ, focused=False, shards=SHARDS):
     """Lifecycle runners by target. Self-hosted ones are repository variables
     holding a JSON list of runner labels; a target without one is not gated."""
     runners = {('qemu', 'x86_64'): '["ubuntu-26.04"]',
@@ -451,9 +460,47 @@ def gates(environ, focused=False):
         labels = json.loads(value)
         if not isinstance(labels, list) or not labels or not all(isinstance(v, str) and v for v in labels):
             raise ValueError('a gate runner is a JSON list of labels')
-        for form in (('playground',) if focused or provider == 'lima' else GATED):
-            include.append(dict(form=form, provider=provider, arch=arch, runner=labels))
+        supported = set(query('for-arch', arch))
+        count = 1 if focused else min(shards, len(forms()))
+        for shard in range(1, count + 1):
+            selected = [FOCUSED_TARGET[0]] if focused else forms()[shard - 1::count]
+            selected = [form for form in selected if form in supported and supports_gate(form, provider)]
+            if selected:
+                include.append(dict(forms=selected, provider=provider, arch=arch, runner=labels,
+                                    shard=shard, shards=count))
     return dict(include=include)
+
+
+def gate(lifecycle, output, provider, arch, selected):
+    """Download a shard once; admit each passing form independently."""
+    if provider == 'qemu':
+        native(arch)
+    if not selected or len(selected) != len(set(selected)) or \
+            any(not supports_gate(form, provider) for form in selected):
+        raise ValueError('invalid lifecycle gate forms')
+    lifecycle, output = Path(lifecycle), Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    failed = False
+    for form in selected:
+        initial = lifecycle / form / provider
+        if not initial.exists():
+            # Unchanged and failed-integration targets have no candidate.
+            continue
+        logs = Path('build/lifecycle') / form
+        try:
+            candidates = [initial, *(initial.with_name(provider + '-update-' + str(n)) for n in (1, 2))]
+            run([sys.executable, 'release/authorize-protected', HOWL, provider, *candidates])
+            run([sys.executable, 'test/check-published-lifecycle', HOWL, *candidates, logs])
+            destination = output / form
+            destination.mkdir()
+            shutil.move(str(initial), destination / 'bundle')
+            shutil.copyfile(logs / 'gates.json', destination / 'gates.json')
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            print('form-images: %s/%s/%s lifecycle failed: %s' % (form, provider, arch, error),
+                  file=sys.stderr, flush=True)
+            shutil.rmtree(output / form, ignore_errors=True)
+            failed = True
+    return failed
 
 
 def artifact_directories(root, pattern, marker):
@@ -559,14 +606,19 @@ def export(snapshots, verified, gated, store, assets, listing, legacy_verified=N
     assets = Path(assets).resolve()
     assets.mkdir(parents=True, exist_ok=False)
     exported = []
-    for directory in artifact_directories(gated, 'gated-*', 'gates.json'):
+    for directory in sorted(path.parent for path in Path(gated).rglob('gates.json')):
         try:
             exported.append(export_one(directory, targets, results, previous, store, assets))
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             print('form-images: %s export failed: %s' % (directory.name, error), file=sys.stderr, flush=True)
     if legacy_verified is not None:
-        exported.extend(legacy_images.export(legacy_verified, assets, exporter.provenance(), targets,
-                                              TRUST / 'image.crt'))
+        for manifest in sorted(Path(legacy_verified).glob('**/manifest.json')):
+            try:
+                exported.extend(legacy_images.export(manifest.parent, assets, exporter.provenance(), targets,
+                                                      TRUST / 'image.crt', store=store))
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                print('form-images: %s legacy export failed: %s' % (manifest.parent.name, error),
+                      file=sys.stderr, flush=True)
     write(listing, exported)
     output(targets=len(exported))
 
@@ -575,6 +627,19 @@ def output(**values):
     if path := os.environ.get('GITHUB_OUTPUT'):
         with Path(path).open('a') as stream:
             stream.writelines('%s=%s\n' % item for item in values.items())
+
+
+def public_matrix(published, groups):
+    include = []
+    for group in groups['include']:
+        if group['provider'] != 'qemu':
+            continue
+        targets = [dict(form=form, provider='qemu', arch=group['arch'], **published[name])
+                   for form in group['forms']
+                   if (name := catalog.namespace(form, 'qemu', group['arch'])) in published]
+        if targets:
+            include.append(dict(runner=group['runner'], targets=targets))
+    return dict(include=include)
 
 
 def publish(snapshots, verified, gated_targets, listing, store, focused=False):
@@ -610,11 +675,15 @@ def publish(snapshots, verified, gated_targets, listing, store, focused=False):
     # The GitHub release carries every exported target, so it follows R2 only
     # when all of them are there.
     legacy_rows = legacy_images.publish(legacy, store, TRUST / 'image.crt')
-    output(released=str(published.keys() == exported.keys()).lower())
     # A focused run has no evidence about other targets. Preserve their signed
     # rows, including failures, inputs and last publications, without relabeling.
-    rows = [row for target, row in previous.items()
-            if target != FOCUSED_TARGET and row['form'] in forms()] if focused else []
+    if focused:
+        rows = [row for target, row in previous.items()
+                if target != FOCUSED_TARGET and row['form'] in profiles.FORMS]
+    elif os.environ.get('FORM_IMAGES_TARGET') == 'base':
+        rows = [row for row in previous.values() if row['form'] not in forms() and row['form'] in profiles.FORMS]
+    else:
+        rows = []
     attempted = []
     descriptions = catalog.descriptions()
     for form in [FOCUSED_TARGET[0]] if focused else forms():
@@ -668,6 +737,9 @@ def publish(snapshots, verified, gated_targets, listing, store, focused=False):
             store.upload(form + '/index.html', work / 'form.html', False)
         (work / 'index.html').write_text(catalog.page(rows, legacy_rows=legacy_rows))
         store.upload('index.html', work / 'index.html', False)
+    smoke = public_matrix(published, json.loads(os.environ.get('FORM_IMAGES_GATES', '{"include":[]}')))
+    output(released=str(published.keys() == exported.keys()).lower(),
+           public_targets=sum(len(group['targets']) for group in smoke['include']), smoke=json.dumps(smoke))
     if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
         with Path(summary).open('a', encoding='utf-8') as stream:
             stream.write('### Form images\n\n| Form | Target | Latest attempt | Latest published |\n'
@@ -685,8 +757,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     matrix_parser = commands.add_parser('matrix')
-    matrix_parser.add_argument('--shards', type=int, default=3)
-    commands.add_parser('gates')
+    matrix_parser.add_argument('--shards', type=int, default=SHARDS)
+    gates_parser = commands.add_parser('gates')
+    gates_parser.add_argument('--shards', type=int, default=SHARDS)
+    gate_parser = commands.add_parser('gate')
+    gate_parser.add_argument('lifecycle')
+    gate_parser.add_argument('output')
+    gate_parser.add_argument('--provider', choices=('qemu', 'lima'), required=True)
+    gate_parser.add_argument('--arch', choices=catalog.ARCHES, required=True)
+    gate_parser.add_argument('--forms', required=True)
     resolve_parser = commands.add_parser('resolve')
     resolve_parser.add_argument('arch', choices=catalog.ARCHES)
     resolve_parser.add_argument('shard', type=int)
@@ -711,7 +790,11 @@ def main():
     if args.command == 'matrix':
         print(json.dumps(matrix(args.shards, focused)))
     elif args.command == 'gates':
-        print(json.dumps(gates(os.environ, focused)))
+        if not 1 <= args.shards <= 32:
+            raise ValueError('invalid lifecycle gate shards')
+        print(json.dumps(gates(os.environ, focused, args.shards)))
+    elif args.command == 'gate':
+        return gate(args.lifecycle, args.output, args.provider, args.arch, args.forms.split(','))
     elif args.command == 'resolve':
         if not 1 <= args.shard <= args.shards <= 32:
             raise ValueError('invalid form image shard')
@@ -723,7 +806,8 @@ def main():
     elif args.command == 'export':
         export(args.snapshots, args.verified, args.gated, store, args.assets, args.listing, args.legacy_verified)
     elif args.command == 'publish':
-        gated = {(t['form'], t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']}
+        gated = {(form, t['provider'], t['arch']) for t in json.loads(os.environ['FORM_IMAGES_GATES'])['include']
+                 for form in t['forms']}
         return publish(args.snapshots, args.verified, gated, args.listing, store, focused)
     return False
 

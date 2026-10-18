@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -38,7 +39,13 @@ def checkout(source, directory):
     repository = os.environ.get(key + '_REPOSITORY') or source['repository']
     ref = os.environ.get(key + '_REF') or source['ref']
     if not directory.exists():
-        subprocess.run(['git', 'clone', '--depth', '1', '--branch', ref, '--', repository, str(directory)], check=True)
+        if re.fullmatch(r'[0-9a-f]{40}', ref):
+            subprocess.run(['git', 'init', '--quiet', str(directory)], check=True)
+            subprocess.run(['git', '-C', directory, 'remote', 'add', 'origin', repository], check=True)
+            subprocess.run(['git', '-C', directory, 'fetch', '--depth', '1', 'origin', ref], check=True)
+            subprocess.run(['git', '-C', directory, 'checkout', '--detach', 'FETCH_HEAD'], check=True)
+        else:
+            subprocess.run(['git', 'clone', '--depth', '1', '--branch', ref, '--', repository, str(directory)], check=True)
         (directory / '.git/howl-package-source').touch()
     elif (directory / '.git/howl-package-source').is_file():
         if subprocess.check_output(['git', '-C', directory, 'status', '--porcelain']):
@@ -65,6 +72,9 @@ def main():
             checkout(source, directory)
         actual = digest(directory, source['contexts'])
         if args.pin:
+            if subprocess.check_output(['git', '-C', directory, 'status', '--porcelain', '--', *source['contexts']]):
+                raise ValueError('commit the reviewed package context changes before pinning: ' + str(directory))
+            source['ref'] = subprocess.check_output(['git', '-C', directory, 'rev-parse', 'HEAD'], text=True).strip()
             source['sha256'] = actual
         elif actual != source['sha256']:
             raise ValueError('package source pin mismatch: %s; review the changes and run tools/checkout-packages --pin' % directory)

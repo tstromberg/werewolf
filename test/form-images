@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise per-target publication, the signed catalog and release notes without network."""
 import copy
+import contextlib
 import datetime
 import hashlib
 import importlib.machinery
@@ -74,9 +75,11 @@ class Images(unittest.TestCase):
         self.environment = dict(WEREWOLF_PROTECTED_IMAGE_KEY=str(self.key), GITHUB_REPOSITORY='werewolf-linux/werewolf',
                                 GITHUB_SHA='b' * 40, GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1')
         for patcher in [patch.object(images, 'TRUST', self.trust), patch.object(downloads, 'native', side_effect=admit),
+                        patch.object(images.legacy_images, 'settled', return_value=False),
                         patch.dict(os.environ, self.environment),
                         patch.object(images, 'forms', return_value=['caddy', 'nginx', 'playground']),
-                        patch.object(images, 'query', return_value=['x86_64'])]:
+                        patch.object(images, 'query', side_effect=lambda verb, *args:
+                                     ['caddy', 'nginx', 'playground'] if verb == 'for-arch' else ['x86_64'])]:
             patcher.start()
             self.addCleanup(patcher.stop)
         self.inventory = dict(format=notes.FORMAT, form='playground', arch='x86_64', packages=[
@@ -99,14 +102,14 @@ class Images(unittest.TestCase):
         (path / 'boot.json.sig').write_bytes(catalog.sign((path / 'boot.json').read_bytes(), self.key))
         return path
 
-    def run_pipeline(self, serial, statuses=None, gated=True, focused=False, flat=False):
+    def run_pipeline(self, serial, statuses=None, gated=True, focused=False, flat=False, only=None):
         """One workflow run: plan, verified evidence, a gated bundle, export and publish."""
         work = self.root / ('run-' + serial)
         statuses = statuses or {}
-        selected = ('playground',) if focused else ('caddy', 'playground')
+        selected = only or (('playground',) if focused else ('caddy', 'playground'))
         targets = [dict(form=form, arch='x86_64', status=statuses.get(form, 'build'), inputs=digest(form),
                         commit='b' * 40, serial=serial) for form in selected]
-        if not focused:
+        if not focused and only is None:
             targets.append(dict(form='nginx', arch='x86_64', status='resolution failed'))
         snapshots = work / ('snapshots' if flat else 'snapshots/inputs-x86_64-1')
         images.write(snapshots / 'plan.json', dict(arch='x86_64', shard=1, targets=targets))
@@ -150,7 +153,8 @@ class Images(unittest.TestCase):
                 with patch.dict(os.environ, GITHUB_OUTPUT=str(outputs)):
                     failed, listing = self.run_pipeline(serial, focused=focused, flat=True)
                 self.assertEqual(not focused, failed)  # The full run includes an unresolved nginx.
-                self.assertEqual('targets=1\nreleased=true\n', outputs.read_text())
+                self.assertTrue(outputs.read_text().startswith('targets=1\nreleased=true\npublic_targets=0\n'))
+                self.assertEqual([], json.loads(outputs.read_text().split('smoke=', 1)[1])['include'])
                 self.assertEqual(['playground'], [target['form'] for target in listing])
                 row = self.rows()[images.FOCUSED_TARGET]
                 self.assertEqual(catalog.PUBLISHED, row['status'])
@@ -191,13 +195,14 @@ class Images(unittest.TestCase):
         with patch.dict(os.environ, GITHUB_OUTPUT=str(outputs)):
             failed, listing = self.run_pipeline(self.serial)
         self.assertTrue(failed)  # nginx did not resolve
-        self.assertEqual('targets=1\nreleased=true\n', outputs.read_text())
+        self.assertTrue(outputs.read_text().startswith('targets=1\nreleased=true\npublic_targets=0\n'))
+        self.assertEqual([], json.loads(outputs.read_text().split('smoke=', 1)[1])['include'])
         self.assertEqual(['playground'], [t['form'] for t in listing])
         rows = self.rows()
         published = rows[('playground', 'qemu', 'x86_64')]
         self.assertEqual(catalog.PUBLISHED, published['status'])
         self.assertEqual(self.serial, published['latest']['serial'])
-        self.assertEqual(catalog.UNGATED, rows[('caddy', 'qemu', 'x86_64')]['status'])
+        self.assertEqual(catalog.NO_RUNNER, rows[('caddy', 'qemu', 'x86_64')]['status'])
         self.assertNotIn('latest', rows[('caddy', 'qemu', 'x86_64')])
         self.assertEqual('resolution failed', rows[('nginx', 'qemu', 'x86_64')]['status'])
         self.assertEqual('unsupported architecture', rows[('caddy', 'lima', 'aarch64')]['status'])
@@ -230,7 +235,7 @@ class Images(unittest.TestCase):
         page = (self.root / 'store' / latest['object'] / 'release-notes.html').read_text()
         self.assertIn('href="../' + previous['descriptor'] + '/release-notes.html"', page)
         # An unchanged target keeps its settled status and the inputs it settled on.
-        self.assertEqual(catalog.UNGATED, rows[('caddy', 'qemu', 'x86_64')]['status'])
+        self.assertEqual(catalog.NO_RUNNER, rows[('caddy', 'qemu', 'x86_64')]['status'])
         self.assertEqual(digest('caddy'), rows[('caddy', 'qemu', 'x86_64')]['inputs'])
 
     def test_a_target_without_gates_keeps_its_previous_release(self):
@@ -346,7 +351,7 @@ class Images(unittest.TestCase):
         self.assertTrue(descriptions['caddy']['guide'].endswith('/forms/caddy/README.md'))
 
     def test_gated_forms_build_their_lifecycle_updates_for_each_provider(self):
-        for form in ('minimal', 'prod-ssh'):
+        for form in ('minimal', 'prod', 'prod-ssh'):
             targets = [(name, provider) for name, provider, _ in images.bundles(
                 dict(form=form, arch='aarch64', serial='20261015T120000Z'))]
             self.assertEqual([('lima', 'lima'), ('qemu', 'qemu'), ('qemu-update-1', 'qemu'),
@@ -358,16 +363,16 @@ class Images(unittest.TestCase):
         serials = [serial for _, _, serial in images.bundles(dict(form='playground', arch='x86_64',
                                                                   serial='20261015T120000Z'))]
         self.assertEqual(['20261015T120000Z', '20261015T120001Z', '20261015T120002Z'], serials)
-        self.assertEqual(['qemu'], [n for n, _, _ in images.bundles(dict(form='caddy', arch='x86_64',
-                                                                         serial='20261015T120000Z'))])
+        self.assertEqual(['qemu', 'qemu-update-1', 'qemu-update-2'],
+                         [n for n, _, _ in images.bundles(dict(form='caddy', arch='x86_64', serial='20261015T120000Z'))])
 
     def test_gate_runners_are_label_lists_and_x86_needs_none(self):
-        self.assertEqual(set(images.profiles.FORMS), {g['form'] for g in images.gates({})['include']})
+        self.assertEqual(set(images.forms()), {form for g in images.gates({})['include'] for form in g['forms']})
         self.assertTrue(all((g['provider'], g['arch']) == ('qemu', 'x86_64') for g in images.gates({})['include']))
         matrix = images.gates(dict(ARM64_KVM_RUNNER='["self-hosted", "linux", "arm64"]',
                                    LIMA_RUNNER='["self-hosted", "macOS"]'))
         self.assertEqual(7, len(matrix['include']))
-        self.assertEqual(['playground'], [g['form'] for g in matrix['include'] if g['provider'] == 'lima'])
+        self.assertEqual(['playground'], [form for g in matrix['include'] if g['provider'] == 'lima' for form in g['forms']])
         self.assertEqual({('qemu', 'x86_64'), ('qemu', 'aarch64'), ('lima', 'aarch64')},
                          {(g['provider'], g['arch']) for g in matrix['include']})
         for bad in ('self-hosted', '[]', '[""]', '{"a": 1}'):
@@ -382,13 +387,13 @@ class Images(unittest.TestCase):
                 images.focused_target(target)
         self.assertEqual(dict(include=[dict(arch='x86_64', runner='ubuntu-26.04', shard=1, shards=1)]),
                          images.matrix(8, focused=True))
-        self.assertEqual(16, len(images.matrix(8)['include']))
+        self.assertEqual(6, len(images.matrix(8)['include']))
         # A broken or absent self-hosted runner must not affect this lane.
-        self.assertEqual(dict(include=[dict(form='playground', provider='qemu', arch='x86_64', runner=['ubuntu-26.04'])]),
+        self.assertEqual(dict(include=[dict(forms=['playground'], provider='qemu', arch='x86_64', runner=['ubuntu-26.04'], shard=1, shards=1)]),
                          images.gates(dict(ARM64_KVM_RUNNER='invalid', LIMA_RUNNER='invalid'), focused=True))
 
     def test_cli_selects_the_same_scope_for_builds_and_gates(self):
-        for target, count in [('all', 6), ('playground/qemu/x86_64', 1)]:
+        for target, count in [('all', 32), ('base', 8), ('playground/qemu/x86_64', 1)]:
             env = dict(os.environ, FORM_IMAGES_TARGET=target, ARM64_KVM_RUNNER='', LIMA_RUNNER='')
             plan = json.loads(subprocess.check_output([sys.executable, 'release/form-images', 'matrix'], env=env))
             self.assertEqual(count, len(plan['include']))
@@ -400,6 +405,80 @@ class Images(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertNotEqual(0, result.returncode)
         self.assertIn('target must be', result.stderr)
+
+    def test_base_lane_preserves_other_forms_heads_and_failures(self):
+        self.run_pipeline(self.serial)
+        previous = self.rows()
+        later = (datetime.datetime.strptime(self.serial, '%Y%m%dT%H%M%SZ') +
+                 datetime.timedelta(seconds=1)).strftime('%Y%m%dT%H%M%SZ')
+        with patch.dict(os.environ, FORM_IMAGES_TARGET='base'), patch.object(images, 'forms', return_value=['playground']):
+            self.run_pipeline(later, only=('playground',))
+        current = self.rows()
+        for key, row in previous.items():
+            if key[0] != 'playground':
+                self.assertEqual(row, current[key])
+        self.assertEqual(later, current[('playground', 'qemu', 'x86_64')]['latest']['serial'])
+
+    def test_gate_groups_cover_supported_forms_without_downloading_other_shards(self):
+        names = ['caddy', 'overleaf', 'playground', 'prod']
+        def supported(verb, arch):
+            self.assertEqual('for-arch', verb)
+            return [name for name in names if arch == 'x86_64' or name != 'overleaf']
+        with patch.object(images, 'forms', return_value=names), patch.object(images, 'query', side_effect=supported):
+            plan = images.gates(dict(ARM64_KVM_RUNNER='["arm"]', LIMA_RUNNER='["mac"]'), shards=2)
+        targets = {(form, group['provider'], group['arch']) for group in plan['include'] for form in group['forms']}
+        self.assertEqual({*( (name, 'qemu', 'x86_64') for name in names),
+                          *( (name, 'qemu', 'aarch64') for name in names if name != 'overleaf'),
+                          ('playground', 'lima', 'aarch64')}, targets)
+        for group in plan['include']:
+            self.assertTrue(set(group['forms']) <= set(names[group['shard'] - 1::group['shards']]))
+
+    def test_public_checks_only_select_newly_published_qemu_targets(self):
+        groups = dict(include=[dict(forms=['caddy', 'prod'], provider='qemu', arch='x86_64', runner=['linux']),
+                               dict(forms=['playground'], provider='lima', arch='aarch64', runner=['mac'])])
+        published = {'caddy/qemu/x86_64': dict(descriptor='a' * 64),
+                     'playground/lima/aarch64': dict(descriptor='b' * 64)}
+        plan = images.public_matrix(published, groups)
+        group, = plan['include']
+        self.assertEqual(['linux'], group['runner'])
+        self.assertEqual([dict(form='caddy', provider='qemu', arch='x86_64', descriptor='a' * 64)], group['targets'])
+
+    def test_github_release_waits_for_the_public_catalog_to_finish(self):
+        upload = self.store.upload
+        def fail_catalog(key, *args):
+            if key == 'index.html':
+                raise OSError('catalog upload failed')
+            return upload(key, *args)
+        with patch.object(self.store, 'upload', side_effect=fail_catalog), patch.object(images, 'output') as output:
+            with self.assertRaisesRegex(OSError, 'catalog upload failed'):
+                self.run_pipeline(self.serial)
+        self.assertFalse(any(call.kwargs.get('released') == 'true' for call in output.call_args_list))
+
+    def test_gate_failure_keeps_other_forms_and_unchanged_targets_need_no_authorization(self):
+        lifecycle = self.root / 'lifecycle'
+        for form in ('minimal', 'prod'):
+            for name in ('qemu', 'qemu-update-1', 'qemu-update-2'):
+                directory = lifecycle / form / name
+                directory.mkdir(parents=True)
+                (directory / 'production').write_text(form)
+        def run(argv):
+            if argv[1] == 'release/authorize-protected' and 'minimal' in str(argv[4]):
+                raise subprocess.CalledProcessError(1, argv)
+            if argv[1] == 'test/check-published-lifecycle':
+                logs = Path(argv[-1])
+                logs.mkdir(parents=True)
+                images.write(logs / 'gates.json', {'passed': True})
+        output = self.root / 'gated'
+        with contextlib.chdir(self.root), patch.object(images, 'native'), patch.object(images, 'run', side_effect=run) as called:
+            self.assertTrue(images.gate(lifecycle, output, 'qemu', 'x86_64', ['minimal', 'prod', 'caddy']))
+        self.assertEqual(3, called.call_count)
+        self.assertEqual({'prod'}, {p.name for p in output.iterdir()})
+        self.assertEqual('prod', (output / 'prod/bundle/production').read_text())
+        self.assertTrue((output / 'prod/gates.json').is_file())
+        self.assertTrue((lifecycle / 'minimal/qemu/production').is_file())
+        with patch.object(images, 'native'), patch.object(images, 'run') as called:
+            self.assertFalse(images.gate(lifecycle, self.root / 'unchanged', 'qemu', 'x86_64', ['caddy']))
+            called.assert_not_called()
 
     def test_focused_resolution_only_locks_playground(self):
         queries = []
@@ -454,8 +533,8 @@ class Images(unittest.TestCase):
             whole = images.digests(output)
             images.keep(target, output)
             self.assertEqual(whole, json.loads((output.parent / (form + '.files.json')).read_text()))
-        self.assertEqual({'qemu/boot.json', 'inputs.tar.gz', 'packages.json'},
-                         set(images.digests(self.root / 'candidates/caddy')))
+        self.assertEqual(json.loads((self.root / 'candidates/caddy.files.json').read_text()),
+                         images.digests(self.root / 'candidates/caddy'))
         playground = self.root / 'candidates/playground'
         self.assertEqual(json.loads((playground.parent / 'playground.files.json').read_text()),
                          images.digests(playground))

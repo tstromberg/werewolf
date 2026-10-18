@@ -2,10 +2,10 @@
 
 ## Summary
 
-howl builds images, packs boot config, and creates, updates, reaches and deletes
-machines here or in a cloud ([docs/design/cli.md](../../docs/design/cli.md)). A machine
-is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a config tar init
-reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
+Howl builds and runs machines ([design](../../docs/design/cli.md)).
+Each combines a [form](../../docs/forms.md), image and init configuration.
+
+## Background
 
 | Verb | Does |
 | --- | --- |
@@ -27,29 +27,28 @@ reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Machine records in `build/machines/NAME`; keys and repositories in
-  `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`.
+- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl`
+  (`~/.local/share/howl`).
 
 ## Non-Goals
 
-- Compiling werewolf's programs, or managing cloud accounts, groups, IAM or networks.
+- Managing cloud accounts, IAM or cloud networks.
 
 ## Detailed design
 
-**Forms.** A name uses NAME-form from the signed index (`published.zig`);
-unpublished names use `./forms/NAME` with a warning. Path forms are never updated.
+**Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
+Path forms are never updated.
 
-**Config tar.** Each service's `config`, `setting` and `render` lines declare a flag
-(`lib/service.zig`); howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`,
-`--data-key`, `--root-keys`, `--update-policy`. A FILE flag reads a file or `-`, never a
-value, and the guest's code checks every value first. The tar is ustar, sorted, root's,
-0600, dated 1970, within init's and cloud-metadata's limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`;
+`pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
+The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing
-prerequisites fail. Other providers and `--dev` need `--disable=secureboot,tpm,ipe`
-([why](../../docs/security.md#protections-a-machine-can-be-made-without)); a download
-needs its provider's [protected profile](../../docs/design/published-secure-boot.md).
-A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
+**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux). Missing tools fail.
+Other providers and `--dev` require [disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without).
+Downloads require the provider's [protected
+profile](../../docs/design/published-secure-boot.md). Local VMs use the host
+architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -62,39 +61,26 @@ A local machine takes the host's arch, 2 GiB and 2 CPUs (4 under QEMU and Lima-m
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve TAP selects the host's only existing bridge, or `--bridge NAME` chooses one.
-For example, `howl create edge --with playground --build --on bhyve
---disable=secureboot,tpm,ipe --bridge re0bridge` uses the LAN bridge; it exposes the
-guest directly to that LAN. The guest uses DHCP, or `--ip CIDR --gw ADDR --dns ADDR`
-(also accepted in `--config DIR/network`). A form without DHCP needs static settings;
-TAP never inherits SLIRP's private addresses. `howl ssh edge` uses the current boot's
-address; SLIRP still uses its localhost forward. There is no silent SLIRP fallback.
+bhyve TAP uses an existing bridge (`--bridge NAME` if ambiguous), DHCP or static
+`--ip/--gw/--dns`. Only Howl's TAP is created and removed; reboots retain it.
+`howl ssh` follows the current boot address. Missing bridges fail without SLIRP
+fallback. Protected TAP updates remain gated; SLIRP is experimental.
 
-howl creates only its own TAP, records its ownership token, and removes it on final
-VM exit, failed startup, stop or delete. Reboots retain the TAP; an old supervisor
-cannot remove a newer VM's interface. Existing bridges, host IPs, routes and firewall
-rules are not changed. Missing or ambiguous bridges fail before launch. Protected
-bhyve deployment remains gated; its experimental SLIRP enrollment does not yet
-provide TAP update transport.
+Local engines and Proxmox attach config read-only; clouds use base64 user data. Cloud
+images are content-named and retained by delete; `--allow-from me|CIDR` opens ports.
 
-Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
-their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
-delete keeps the image. Nothing gets in until `--allow-from me|CIDR` opens the ports.
-
-**Second create.** The machine keeps its disk and takes the new config; another form,
-`--app`, or `--import` is refused. `howl run` reuses matching protected inputs and
-resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only disk the
-form reads once, while its data is first made ([data.md](../../docs/data.md)); a cloud
-cannot attach it. Progress goes to stderr and the machine record to stdout.
+**Reuse.** Create retains the disk and applies config; form/app/import changes fail.
+Run reuses matching protected inputs, resumes stopped VMs and replaces changed inputs.
+`--import DIR` is a read-only disk used on first boot ([data.md](../../docs/data.md)),
+local only. Progress goes to stderr; machine records go to stdout.
 
 ## Drawbacks
 
-- `--build` and path forms need a checkout, make, Zig, melange, compilers, cloud CLIs.
+Local builds need the checkout and build tools; clouds need their provider CLIs.
 
 ## Alternatives Considered
 
-Make alone, SDKs and Terraform:
-[cli.md](../../docs/design/cli.md#alternatives-considered).
+[Make, SDKs and Terraform](../../docs/design/cli.md#alternatives-considered).
 
 ## Security Considerations
 
@@ -110,6 +96,5 @@ Make alone, SDKs and Terraform:
 
 ## Reliability Considerations
 
-- Images are named by content: a retried upload or create finds them; `console` works
-  whether or not the machine came up. create does not roll back: a partial failure
-  leaves named leftovers. Open: Proxmox has never run on a real node.
+Content names make uploads and creates retryable; console works after a failed boot.
+Partial failures leave named resources. Proxmox still needs testing on a real node.

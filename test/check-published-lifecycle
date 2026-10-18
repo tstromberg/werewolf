@@ -17,6 +17,8 @@ import threading
 import time
 from tpm_proxy import Proxy
 from owner_qmp import StorageFault
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'release'))
+import image_profiles
 
 if len(sys.argv) != 6:
     sys.exit('usage: check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT')
@@ -32,7 +34,7 @@ permit_port = manifests[0]['permit_port']
 shellfree = provider == 'qemu'
 if provider is None or arch not in ('aarch64', 'x86_64') or (provider == 'lima' and arch != 'aarch64'):
     sys.exit('unsupported published lifecycle target')
-if form not in ('minimal', 'prod-ssh', 'playground') or (not shellfree and form != 'playground'):
+if form not in image_profiles.FORMS or (not shellfree and form != 'playground'):
     sys.exit('this form requires the QEMU owner-control lifecycle')
 if any(m['form'] != form or m['image']['arch'] != arch or
        m['permit_host'] != manifests[0]['permit_host'] or m['permit_port'] != permit_port for m in manifests):
