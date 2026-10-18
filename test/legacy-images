@@ -83,17 +83,18 @@ class LegacyImages(unittest.TestCase):
                 legacy.export(candidate.parent, self.root / 'foreign-assets', self.provenance, targets, self.cert)
 
     def test_base_forms_and_two_profiles_are_publication_identities(self):
-        self.assertEqual({'minimal', 'prod', 'prod-ssh', 'playground'}, set(profiles.BASE_FORMS))
-        self.assertTrue(set(profiles.BASE_FORMS) | {'caddy', 'postgresql', 'greenbone'} <= set(profiles.FORMS))
+        self.assertEqual({'minimal', 'prod-ssh', 'playground'}, set(profiles.BASE_FORMS))
+        self.assertEqual(profiles.BASE_FORMS, profiles.FORMS)
         for form in profiles.FORMS:
             for profile in profiles.PROFILES:
                 self.assertIn(profile, profiles.prefix(form, 'aarch64', profile))
-        for form in ('missing-form', '../minimal'):
-            with self.assertRaises(ValueError):
-                profiles.identity(form, 'x86_64', 'legacy-boot')
+        for form in ('prod', 'caddy', 'postgresql', 'greenbone', 'missing-form', '../minimal'):
+            for profile in profiles.PROFILES:
+                with self.assertRaises(ValueError):
+                    profiles.identity(form, 'x86_64', profile)
 
     def test_signed_legacy_assets_have_explicit_profile_and_independent_namespace(self):
-        for offset, form in enumerate((*profiles.BASE_FORMS, 'caddy')):
+        for offset, form in enumerate(profiles.FORMS):
             exported, = self.export(self.candidate(form, '20261017T01000%dZ' % offset))
             assets = Path(exported['assets'])
             signed = legacy.verify(assets, self.cert)
@@ -244,7 +245,7 @@ class LegacyImages(unittest.TestCase):
             self.assertTrue(legacy.settled('minimal', 'x86_64', 'b' * 64, self.cert))
             self.assertFalse(legacy.settled('minimal', 'x86_64', 'c' * 64, self.cert))
             with self.assertRaisesRegex(ValueError, 'foreign'):
-                legacy.settled('prod', 'x86_64', 'b' * 64, self.cert)
+                legacy.settled('prod-ssh', 'x86_64', 'b' * 64, self.cert)
         tampered = json.loads(raw)
         tampered['manifest'] = tampered['manifest'].replace('b' * 64, 'c' * 64)
         with patch.object(legacy.urllib.request, 'urlopen', return_value=io.BytesIO(catalog.encode(tampered))):
@@ -255,8 +256,8 @@ class LegacyImages(unittest.TestCase):
         snapshot = self.root / 'snapshot'
         snapshot.mkdir()
         legacy.write(snapshot / 'plan.json', dict(arch='aarch64', targets=[
-            dict(form='overleaf', arch='aarch64', status='unsupported architecture'),
-            dict(form='caddy', arch='aarch64', status='unchanged', legacy_status='unchanged')]))
+            dict(form='minimal', arch='aarch64', status='unsupported architecture'),
+            dict(form='prod-ssh', arch='aarch64', status='unchanged', legacy_status='unchanged')]))
         with patch.object(legacy, 'build_one') as build, patch.object(legacy, 'run') as run:
             images = SimpleNamespace(native=lambda arch: None)
             self.assertFalse(legacy.build(images, snapshot, self.root / 'built'))

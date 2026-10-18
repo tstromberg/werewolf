@@ -1,11 +1,7 @@
 """The public image set and explicit boot profiles of the shared release flow."""
-from pathlib import Path
-import re
-
-BASE_FORMS = ('minimal', 'prod', 'prod-ssh', 'playground')
-FORMS = tuple(sorted(path.parent.name for path in
-                     Path(__file__).resolve().parent.parent.joinpath('forms').glob('*/form.yaml')
-                     if re.fullmatch(r'[a-z][a-z0-9-]{0,63}', path.parent.name)))
+FORMS = ('minimal', 'prod-ssh', 'playground')
+# Keep existing dispatch scopes compatible; both select the same public set.
+BASE_FORMS = FORMS
 PROFILES = ('secure-boot', 'legacy-boot')
 ARCHES = ('aarch64', 'x86_64')
 

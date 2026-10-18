@@ -1,6 +1,6 @@
 # Form images
 
-One workflow publishes every supported form on aarch64
+One workflow publishes only `minimal`, `prod-ssh` and `playground` on aarch64
 and x86_64. Each has two explicit boot profiles: `secure-boot` requires
 Secure Boot, IPE and an enrolled TPM; `legacy-boot` runs without those three
 requirements, retaining sandboxing and the verified root. Download signatures
@@ -8,7 +8,7 @@ and attestations authenticate both profiles. Browse the
 [image catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run
 `howl forms --published` for protected targets. `howl run` continues to require
 the secure profile; it never falls back to a compatibility disk. Legacy assets
-are explicit R2 downloads; base forms are also attached to the GitHub release
+are explicit R2 downloads; all three forms are also attached to the GitHub release
 ([releases.md](releases.md)).
 
 ## The pipeline
@@ -20,9 +20,9 @@ digests, melange environments and host tools. An authenticated catalog row with
 matching inputs and a passing attempt skips the build; failures retry every run.
 `force` rebuilds the selected targets.
 
-Pushes and manual dispatch default to `target=base`, the four base forms; the
-hourly `target=all` run covers the full catalog. These scopes retain each other's
-heads and failure reports.
+Pushes and manual dispatch default to `target=base`; the hourly run uses `target=all`.
+Both scopes select exactly the same three forms. Other forms remain available for
+source builds and are excluded from image publication.
 `target=playground/qemu/x86_64` keeps a focused recovery lane. Focused builds
 run alongside full builds. A shared publication lock protects the catalog;
 other targets keep their status, inputs and previous release.
@@ -45,7 +45,7 @@ retains its evidence while other forms can publish. Unchanged forms need no
 authorization or boot. For each changed target, it authorizes three candidates with the
 image key, on the runner that boots them, and runs all fourteen [lifecycle
 gates](design/protected-downloads.md) on the exact files
-(`test/check-published-lifecycle`). QEMU drives every supported form through the
+(`test/check-published-lifecycle`). QEMU drives all three published forms through the
 production host-private owner channel, with no guest SSH or added test code. Its
 unhealthy trial receives real disk write errors and must fall back through the
 production 600-second deadman. Lima retains the `playground` SSH driver.
@@ -59,9 +59,9 @@ signs a separate `werewolf-legacy-downloads/1` manifest with
 `boot_profile: legacy-boot`; it cannot be admitted as a protected boot descriptor.
 Its immutable objects and release floor live under `legacy-boot/FORM/ARCH`.
 
-Both profiles enter one `base-images-SERIAL` GitHub release. Changed base images
-(`minimal`, `prod`, `prod-ssh`, `playground`) are attached; service images are linked
-in R2. All assets receive attestations and R2 parity checks before the draft becomes
+Both profiles enter one `base-images-SERIAL` GitHub release. Changed images
+(`minimal`, `prod-ssh`, `playground`) are attached and listed in R2.
+All assets receive attestations and R2 parity checks before the draft becomes
 public. Signed package changes compare each target with its own last published
 inventory, and GitHub generates the included PR and contributor notes. The old scheduled
 image publisher is retired. `boot-profiles.json` is the signed inventory of both
