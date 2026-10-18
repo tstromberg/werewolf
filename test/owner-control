@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real host protocol, reply correlation and QEMU storage faults."""
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-owner = importlib.machinery.SourceFileLoader('owner_client', 'tools/owner-control').load_module()
+loader = importlib.machinery.SourceFileLoader('owner_client', 'tools/owner-control')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+owner = importlib.util.module_from_spec(spec)
+loader.exec_module(owner)
 from owner_qmp import StorageFault, command
 HOWL = str(Path(sys.argv.pop(1) if len(sys.argv) > 1 else 'build/host/howl').resolve())
 

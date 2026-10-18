@@ -291,7 +291,7 @@ _test/local-prerequisites: $(HOWL)
 	python3 test/lima-state $(HOWL)
 	python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
-_test/local-publisher: $(HOWL) build/host/tpm-policy
+_test/local-publisher: $(HOWL) build/host/tpm-policy build/host/form
 	python3 test/local-publisher $(HOWL)
 	python3 test/boot-images $(HOWL)
 	python3 test/boot-download $(HOWL)

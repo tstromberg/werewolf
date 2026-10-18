@@ -1,8 +1,9 @@
 # Releases
 
 [form-images.yml](../.github/workflows/form-images.yml) is the single image
-publisher. It builds only `minimal`, `prod-ssh` and `playground`, for aarch64
-and x86_64, from pinned package snapshots on independent runners.
+publisher. It builds every supported form for aarch64 and x86_64 from pinned
+package snapshots on independent runners. GitHub attaches changed `minimal`,
+`prod`, `prod-ssh` and `playground` images; the R2 catalog carries every passing form.
 
 ## Boot profiles
 
@@ -17,7 +18,7 @@ A signed download authenticates its files, not the platform's boot environment.
 `howl run` defaults to secure boot and never substitutes a legacy image.
 
 Secure targets publish only after their exact bundles pass all fourteen protected
-lifecycle gates. QEMU covers all three forms through a host-private owner channel;
+lifecycle gates. QEMU covers every supported form through a host-private owner channel;
 Lima currently covers `playground` through SSH. Each target requires a configured
 gate runner and passing evidence. Legacy targets require reproducibility, coverage,
 integration,
@@ -26,12 +27,16 @@ image without Secure Boot or a TPM.
 
 ## Publication
 
-The workflow runs hourly, after relevant pushes, or by manual dispatch with
-`target=all`. One `base-images-SERIAL` GitHub release holds the verified assets
-for both profiles: disk images, kernel/initramfs or signed slot files, package
-inputs, test evidence and signed download manifests. Unpassed targets are omitted.
-The draft becomes public only after attestation and authenticated R2 parity checks.
-A focused `playground/qemu/x86_64` dispatch remains available for recovery.
+Relevant pushes publish `target=base` so the four base forms can ship promptly. The
+hourly `target=all` run checks the complete catalog; manual dispatch offers both scopes.
+Each scope preserves the other forms' published heads and failures. One
+`base-images-SERIAL` GitHub release holds the verified assets for both profiles: disk
+images, kernel/initramfs or signed slot files, package inputs, test evidence and signed
+download manifests. Unpassed targets are omitted. The draft becomes public only after
+attestation and authenticated R2 parity checks. Each target includes signed package
+changes against its last published inventory. GitHub release notes also list included
+PRs and contributors. A focused `playground/qemu/x86_64` dispatch remains available for
+recovery.
 
 Protected R2 heads keep their existing namespace for installed clients. Legacy
 objects and signed release floors live under `legacy-boot/FORM/ARCH`; they never

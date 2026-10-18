@@ -18,7 +18,11 @@ pub fn parse(raw: []const u8) !Request {
             return .{ .id = raw[0..16], .command = cmd, .declaration = null };
     }
     const operation = control.parse(word) catch return error.BadOwnerRequest;
-    return .{ .id = raw[0..16], .command = std.meta.stringToEnum(Command, @tagName(operation.command)).?, .declaration = operation.declaration };
+    return .{
+        .id = raw[0..16],
+        .command = std.meta.stringToEnum(Command, @tagName(operation.command)).?,
+        .declaration = operation.declaration,
+    };
 }
 
 pub const Channel = struct {
@@ -85,6 +89,14 @@ test "owner requests are correlated, bounded fixed operations without paths or s
     try t.expectEqual(Command.@"try", (try parse(id ++ "try")).command);
     const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     try t.expectEqualStrings(hash, (try parse(id ++ "try " ++ hash)).declaration.?);
-    for ([_][]const u8{ "status", id ++ "status extra", id ++ "check\ntry", id ++ "sh", id ++ "try /data/file", id ++ "try " ++ hash ++ "x", "G123456789abcdef status" }) |bad|
+    for ([_][]const u8{
+        "status",
+        id ++ "status extra",
+        id ++ "check\ntry",
+        id ++ "sh",
+        id ++ "try /data/file",
+        id ++ "try " ++ hash ++ "x",
+        "G123456789abcdef status",
+    }) |bad|
         try t.expectError(error.BadOwnerRequest, parse(bad));
 }

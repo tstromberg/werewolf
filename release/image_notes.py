@@ -122,7 +122,8 @@ def release(candidate, current, previous=None, old_inventory=None):
     form, provider, arch = candidate['form'], candidate['provider'], candidate['arch']
     validate(current, form, arch)
     if previous is not None:
-        if not previous['object'].startswith('/'.join((form, provider, arch, 'objects', ''))) or old_inventory is None:
+        namespace = ('legacy-boot', form, arch) if provider == 'legacy-boot' else (form, provider, arch)
+        if not previous['object'].startswith('/'.join((*namespace, 'objects', ''))) or old_inventory is None:
             raise ValueError('release notes need the matching previous package inventory')
         validate(old_inventory, form, arch)
     elif old_inventory is not None:
@@ -135,7 +136,7 @@ def release(candidate, current, previous=None, old_inventory=None):
                 images=changes(old['images'], current['images'], ('form', 'service')))
 
 
-def page(notes):
+def page(notes, asset_prefix=''):
     escape = html.escape
     title = ' / '.join((notes['form'], notes['provider'], notes['arch'])) + ' — ' + notes['serial']
     body = ['<!doctype html><html lang="en"><meta charset="utf-8">',
@@ -145,13 +146,15 @@ def page(notes):
             'table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.6rem;border-bottom:1px solid #bbb}'
             'code{overflow-wrap:anywhere}a{color:#1265ac}</style>',
             '<h1>' + escape(title) + '</h1>',
-            '<p><a href="../../../../index.html">Form images</a> · <a href="release-notes.json">JSON changes</a> · '
-            '<a href="packages.json">Package inventory</a> · <a href="downloads.json">Signed manifest</a></p>']
+            '<p><a href="../../../../../index.html">Form images</a> · <a href="' + asset_prefix + 'release-notes.json">JSON changes</a> · '
+            '<a href="' + asset_prefix + 'packages.json">Package inventory</a> · '
+            '<a href="' + asset_prefix + 'downloads.json">Signed manifest</a></p>']
     previous = notes['previous']
     if previous:
+        previous_file = asset_prefix + 'downloads.json' if notes['provider'] == 'legacy-boot' else 'release-notes.html'
         body.append('<p>Changes since ' + escape(previous['serial']) +
                     '. <a href="../' + escape(previous['object'].split('/objects/')[1], quote=True) +
-                    '/release-notes.html">Previous release notes</a>.</p>')
+                    '/' + previous_file + '">Previous release</a>.</p>')
         if previous['commit'] != notes['commit']:
             body.append('<p><a href="' + REPOSITORY + '/compare/' + previous['commit'] + '...' + notes['commit'] +
                         '">Source comparison</a>.</p>')

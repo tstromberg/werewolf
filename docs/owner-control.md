@@ -1,8 +1,8 @@
 # Operating a VM without SSH
 
-Current enrolled QEMU images support a host-private control channel through the
-existing updater. It works for `minimal`, `prod-ssh` and `playground`, retaining their
-normal shell and login policies. Both the image and the host `howl` must support it.
+Current enrolled QEMU images support a host-private control channel through the existing
+updater. It works across forms, retaining their normal shell and login policies. Both
+the image and the host `howl` must support it.
 
 ```sh
 howl owner status
