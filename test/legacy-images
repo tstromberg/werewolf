@@ -109,6 +109,33 @@ class LegacyImages(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'incomplete'):
             self.export(candidate)
 
+    def test_public_verification_uses_a_fresh_file_and_allows_retries(self):
+        exported, = self.export(self.candidate())
+        backing = self.store
+        class RemoteStore:
+            bucket = 's3://legacy-tests'
+            fetch = staticmethod(backing.fetch)
+            upload = staticmethod(backing.upload)
+        fetched = []
+        original = importlib.machinery.SourceFileLoader.exec_module
+        def load(loader, module):
+            original(loader, module)
+            if loader.name == 'legacy_public_download':
+                def fetch(url, destination, limit, expected):
+                    key = url.removeprefix(catalog.PUBLIC + '/')
+                    data = (Path(backing.bucket) / key).read_bytes()
+                    self.assertLessEqual(len(data), limit)
+                    self.assertEqual(expected, dict(size=len(data), sha256=hashlib.sha256(data).hexdigest()))
+                    with destination.open('xb') as output:
+                        output.write(data)
+                    fetched.append(key)
+                module.fetch = fetch
+        with patch.object(importlib.machinery.SourceFileLoader, 'exec_module', load):
+            first = legacy.publish([exported], RemoteStore(), self.cert)
+            again = legacy.publish([exported], RemoteStore(), self.cert)
+        self.assertEqual(first, again)
+        self.assertTrue(fetched)
+
     def test_secure_identity_cannot_be_labeled_legacy(self):
         candidate = self.candidate()
         manifest = json.loads((candidate / 'manifest.json').read_text())
