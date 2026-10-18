@@ -7,9 +7,13 @@ set -eu
 dir=$OUT/check-compose
 rm -rf "$dir" && mkdir -p "$dir/image/etc"
 "$FORM_TOOL" base-accounts "$dir/image/etc"
+set --
+if [ -f "$OUT/meta/usr/share/werewolf/dev" ]; then
+	set -- "$(cat "$OUT/meta/usr/share/werewolf/dev")"
+fi
 abs=$(cd "$dir" && pwd)
 (cd "$OUT/meta/usr/share/werewolf" && "$FORM_TOOL" compose "$FORM" "$ARCH" posture-known \
-	"$abs/image" "$abs/ro" "$abs/meta" ${DEV:+dev})
+	"$abs/image" "$abs/ro" "$abs/meta" "$@")
 
 # entries DIR NAMES: the mtree lines of NAMES under DIR, sorted.
 entries() {

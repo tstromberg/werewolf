@@ -149,7 +149,7 @@ reaches init.
 - **Azure only as a specialized VM.** Azure reboots a VM made from a
   generalized image unless an agent reports it ready, and werewolf has
   none; a VM whose OS disk is attached as it is needs no agent
-  ([releases.md](releases.md#deploying)).
+  ([howl's provider table](../cmd/howl/README.md#detailed-design)).
 - Every cloud is tested against stand-ins under QEMU, with the firmware's
   strings and the metadata server faked, on every `make check`
   ([testing.md](testing.md)); GCP, AWS and Azure also for real, by `make

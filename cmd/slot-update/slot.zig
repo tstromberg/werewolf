@@ -816,14 +816,22 @@ fn composeInto(u: *Update, r: Root) !void {
         u.detail = f.text;
     };
     const leaf = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-    const forms = try form.chain(io, u.gpa, staged, leaf, &f);
+    const dev: ?[]const u8 = u.read(meta_dir ++ "/dev") catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    const forms = try compose.stagedChain(io, u.gpa, staged, leaf, dev != null, &f);
     const b: compose.Build = .{
         .arch = switch (@import("builtin").cpu.arch) {
             .aarch64 => .aarch64,
             .x86_64 => .x86_64,
             else => @compileError("werewolf runs on aarch64 and x86_64"),
         },
-        .dev = if (Dir.cwd().access(io, meta_dir ++ "/dev", .{})) true else |_| false,
+        .dev = dev != null,
+        .dev_shell = if (dev) |mode|
+            !std.mem.eql(u8, std.mem.trim(u8, mode, "\n"), "ssh")
+        else
+            true,
         .posture_known = try u.read(meta_dir ++ "/posture-known"),
     };
     const accounts: compose.Accounts = .{

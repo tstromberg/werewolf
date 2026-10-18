@@ -11,7 +11,7 @@ const compose = @import("compose");
 
 const usage = "usage: form names|dirs|recipes|listens|weaknesses|excuses FORM, " ++
     "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
-    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
+    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev|ssh], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
     "stage FORM DIR, depends FORM, archs FORM, for-arch ARCH";
 
@@ -130,7 +130,11 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         return;
     }
     if (args.len < 2) return error.Usage;
-    const forms = try form.chain(io, gpa, root, args[1], f);
+    const development = args.len == 8 and (is(args[7], "dev") or is(args[7], "ssh"));
+    const forms = if (is(verb, "compose"))
+        try compose.stagedChain(io, gpa, root, args[1], development, f)
+    else
+        try form.chain(io, gpa, root, args[1], f);
     if (is(verb, "archs") and args.len == 2) {
         for (try architectures(gpa, forms)) |a| try w.print("{s}\n", .{a});
     } else if (is(verb, "names") and args.len == 2) {
@@ -160,10 +164,11 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     } else if (is(verb, "cmdline") and args.len == 3) {
         const allowed = try compose.allowances(gpa, forms, f);
         try w.print("{s}\n", .{try compose.cmdline(gpa, allowed, try arch(args[2]))});
-    } else if (is(verb, "compose") and (args.len == 7 or (args.len == 8 and is(args[7], "dev")))) {
+    } else if (is(verb, "compose") and (args.len == 7 or development)) {
         const b: compose.Build = .{
             .arch = try arch(args[2]),
-            .dev = args.len == 8,
+            .dev = development,
+            .dev_shell = args.len != 8 or !is(args[7], "ssh"),
             .posture_known = try root.readFileAlloc(io, args[3], gpa, .limited(64 << 10)),
         };
         var image: [3][]const u8 = undefined;

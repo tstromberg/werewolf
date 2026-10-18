@@ -20,6 +20,17 @@ FILES = {
 }
 
 
+def tools_python():
+    """Use an interpreter supported by the pinned binary wheels."""
+    if (3, 10) <= sys.version_info[:2] <= (3, 14):
+        return sys.executable
+    for minor in range(14, 9, -1):
+        python = shutil.which('python3.' + str(minor))
+        if python and python != sys.executable:
+            return python
+    return None
+
+
 def digest(path):
     with Path(path).open('rb') as stream:
         result = hashlib.sha256()
@@ -90,15 +101,14 @@ def provision(arch, requirements, cache):
 
 
 if __name__ == '__main__':
-    # Xcode still supplies Python 3.9. The pinned enrollment dependencies
-    # need 3.10+, even when an older python3 appears first on PATH.
-    if sys.version_info < (3, 10):
-        for minor in range(14, 9, -1):
-            python = shutil.which('python3.' + str(minor))
-            if python:
-                os.execv(python, [python, *sys.argv])
-        print('howl: native firmware tools need Python 3.10+; run make install-deps', file=sys.stderr)
+    # Xcode may be too old and Homebrew's default may be newer than the
+    # pinned wheels. Neither changes the tested firmware tool environment.
+    python = tools_python()
+    if python is None:
+        print('howl: native firmware tools need Python 3.10-3.14; run make install-deps', file=sys.stderr)
         sys.exit(1)
+    if python != sys.executable:
+        os.execv(python, [python, *sys.argv])
     try:
         arch, requirements, report = sys.argv[1:]
         cache = os.environ.get('WEREWOLF_FIRMWARE_CACHE', 'build/secure-cache/firmware')

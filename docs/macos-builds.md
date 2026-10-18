@@ -56,8 +56,9 @@ code/template hashes, then installs native enrollment tools in a private Python
 environment. [firmware-requirements.txt](../boot/firmware-requirements.txt) pins
 dependency versions and hashes; installation requires binary wheels. The unused Linux
 cloud-password dependency is excluded.
-The pinned tools need Python 3.10 or newer (`make install-deps` installs Python).
-If Xcode's Python 3.9 is first on PATH, enrollment uses an installed newer Python.
+The pinned tools use Python 3.10-3.14 (`make install-deps` installs Python 3.14).
+Enrollment selects a compatible installed interpreter when the host default is
+outside that range.
 
 Enrollment uses a machine owner certificate in PK/KEK and the caller's code
 certificate in db. Bundled default certificates

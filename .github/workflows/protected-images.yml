@@ -13,6 +13,9 @@ on:
       - 'test/local-prerequisites'
       - 'test/ci-setup'
       - 'cmd/howl/**'
+      - 'cmd/slot-update/**'
+      - 'tools/owner-control'
+      - 'test/owner*'
       - 'lib/prebuilt.zig'
       - 'lib/cmdline.zig'
       - 'files.zig'
@@ -101,8 +104,9 @@ jobs:
         with:
           name: protected-qemu-validation-evidence
           path: |
-            build/protected-qemu-validation/*.log
-            build/protected-qemu-validation/evidence.jsonl
-            build/protected-qemu-validation/result.json
-            build/protected-qemu-validation/gates.json
+            build/protected-qemu-validation/**/*.log
+            build/protected-qemu-validation/**/evidence.jsonl
+            build/protected-qemu-validation/**/result.json
+            build/protected-qemu-validation/**/gates.json
+            build/protected-qemu-validation/**/storage-fault.json
             build/protected-cache/**/build.log

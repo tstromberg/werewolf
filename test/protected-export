@@ -3,6 +3,7 @@
 import copy
 import datetime
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-publisher = importlib.machinery.SourceFileLoader('export_transport', 'release/publish-protected').load_module()
-exporter = importlib.machinery.SourceFileLoader('export_under_test', 'release/export-protected').load_module()
-github = importlib.machinery.SourceFileLoader('export_github', 'release/github-protected').load_module()
+loader = importlib.machinery.SourceFileLoader('export_transport', 'release/publish-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
+loader = importlib.machinery.SourceFileLoader('export_under_test', 'release/export-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+exporter = importlib.util.module_from_spec(spec)
+loader.exec_module(exporter)
+loader = importlib.machinery.SourceFileLoader('export_github', 'release/github-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+github = importlib.util.module_from_spec(spec)
+loader.exec_module(github)
 
 
 class ProtectedExport(unittest.TestCase):
@@ -94,6 +104,27 @@ class ProtectedExport(unittest.TestCase):
             with self.assertRaises((ValueError, subprocess.CalledProcessError)):
                 exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
             path.write_bytes(original)
+
+    def test_secure_boot_profile_and_named_disk_are_signed(self):
+        signed = exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
+        self.assertEqual('secure-boot', signed['boot_profile'])
+        named = self.copy / (self.prefix + '-secure-boot.qcow2')
+        canonical = self.copy / (self.prefix + '-disk.qcow2')
+        self.assertEqual(named.read_bytes(), canonical.read_bytes())
+        self.assertEqual(exporter.downloads.sha(named), signed['files']['secure-boot.qcow2']['sha256'])
+
+    def test_signing_an_alternate_named_disk_does_not_replace_runtime_evidence(self):
+        name = 'secure-boot.qcow2'
+        named = self.copy / (self.prefix + '-' + name)
+        named.write_bytes(b'an untested alternate disk')
+        head = self.copy / (self.prefix + '-downloads.json')
+        signed = json.loads(head.read_text())
+        signed['files'][name].update(size=named.stat().st_size, sha256=exporter.downloads.sha(named))
+        head.write_text(json.dumps(signed))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', self.key, '-out', str(head) + '.sig', head],
+                       check=True, capture_output=True)
+        with self.assertRaisesRegex(ValueError, 'named secure boot disk'):
+            exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
 
     def test_replaced_boot_signature_cannot_be_mirrored(self):
         path = self.copy / (self.prefix + '-boot.json.sig')

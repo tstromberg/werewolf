@@ -2,13 +2,20 @@
 """Publication deduplication follows source, package bytes and trust, not timestamps."""
 import copy
 import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-inputs = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs').load_module()
-builder = importlib.machinery.SourceFileLoader('protected_builder', 'tools/local-prerequisites').load_module()
+loader = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+inputs = importlib.util.module_from_spec(spec)
+loader.exec_module(inputs)
+loader = importlib.machinery.SourceFileLoader('protected_builder', 'tools/local-prerequisites')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+builder = importlib.util.module_from_spec(spec)
+loader.exec_module(builder)
 
 
 class Inputs(unittest.TestCase):

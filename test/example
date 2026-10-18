@@ -10,7 +10,7 @@
 # machine and the scratch directory.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 say() { printf 'example: %s\n' "$*"; }
@@ -140,10 +140,13 @@ tcp_ports() {
 known_weak() {
 	form=$1
 	hostarch=$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
-	awk -v arch="$hostarch" '
+	# Direct-boot fixtures lack protections that an enrolled howl VM must pass.
+	if [ ! -f "build/machines/$form/authority/enrolled" ]; then
+		awk -v arch="$hostarch" '
 		/^#/ || NF == 0 { next }
 		$1 == "*" || $1 == arch { for (i = 2; i <= NF; i++) print $i }
-	' test/posture-known
+		' test/posture-known
+	fi
 	build/host/form weaknesses "$form"
 }
 
@@ -192,12 +195,11 @@ connect_port() {
 # probe_tcp FORM ADDRESS connects to each documented tcp port.
 probe_tcp() {
 	form=$1 address=$2 readme=$3
-	[ "$address" != "-" ] || die "$form: howl published no address"
 	engine=$(cat "build/machines/$form/engine" 2>/dev/null || echo "?")
 	host=$address
 	case $address in
 	127.0.0.1:*)
-		[ "$engine" = qemu ] || die "$form: $engine published $address, which is not the service"
+		[ "$engine" = qemu ] || [ "$engine" = lima ] || die "$form: $engine published $address, which is not the service"
 		ssh_port=$(awk '$1 == "ssh" { print $2 }' "build/machines/$form/machine")
 		web_port=$(awk '$1 == "web" { print $2 }' "build/machines/$form/machine")
 		guest_web=$(build/host/form listens "$form" | awk '$1 != 22 { p = $1 } END { print p }')
@@ -207,13 +209,17 @@ probe_tcp() {
 	esac
 	for port in $(tcp_ports "$readme"); do
 		[ -n "$port" ] || continue
+		[ "$address" != "-" ] || die "$form: howl published no address for tcp/$port"
 		case $address in
 		127.0.0.1:*)
-			case $port in
+			if [ "$engine" = lima ]; then
+				dest=$(awk -v key="port$port" '$1 == key { print $2 }' "build/machines/$form/machine")
+				[ -n "$dest" ] || die "$form: Lima did not forward tcp/$port"
+			else case $port in
 			22) dest=$ssh_port ;;
 			"$guest_web") dest=$web_port ;;
 			*) die "$form: QEMU forwards ssh and tcp/$guest_web; tcp/$port is not forwarded" ;;
-			esac
+			esac; fi
 			;;
 		*) dest=$port ;;
 		esac
@@ -233,7 +239,11 @@ probe_tcp() {
 run_section() {
 	section=$1 form=$2
 	readme=$root/forms/$form/README.md
-	[ -f "$readme" ] || die "no form $form"
+	[ -f "$root/forms/$form/form.yaml" ] || die "no form $form"
+	if [ ! -f "$readme" ]; then
+		say "skip $form: no README"
+		exit 0
+	fi
 	fence=$(extract "$readme" "$section" "$form") && rc=0 || rc=$?
 	if [ "$rc" -ne 0 ]; then
 		[ "$rc" -eq 2 ] || exit "$rc"
@@ -326,7 +336,7 @@ EOF
 		die "$form: the fence failed"
 	}
 	seconds=$(($(date +%s) - began))
-	address=$(awk -F '\t' -v form="$form" 'NF == 3 && $1 == form { a = $2 } END { print a }' "$work/create.out")
+	address=$(awk -F '\t' -v form="$form" 'NF >= 3 && $1 == form { a = $2 } END { print a }' "$work/create.out")
 	[ -n "$address" ] || die "$form: howl did not print an address"
 	# howl returns at "up in". Posture runs after the services settle.
 	i=0
@@ -405,6 +415,14 @@ EOF
 	printf '# Plain\n\nNo fences.\n' >"$bad"
 	extract "$bad" local blocky >/dev/null 2>&1 && rc=0 || rc=$?
 	[ "$rc" -eq 2 ] || die "selftest: missing heading returned $rc"
+	mkdir -p "$tmp/forms/component"
+	printf 'base: minimal\n' >"$tmp/forms/component/form.yaml"
+	(root=$tmp; mode=check; run_section local component) >"$tmp/out"
+	grep -q 'skip component: no README' "$tmp/out" || die "selftest: component skipped"
+	if (root=$tmp; mode=check; run_section local missing) >"$tmp/out" 2>"$tmp/err"; then
+		die "selftest: unknown form accepted"
+	fi
+	grep -q 'no form missing' "$tmp/err" || die "selftest: unknown form message"
 	say "ok selftest"
 	trap - EXIT
 	rm -rf "$tmp"

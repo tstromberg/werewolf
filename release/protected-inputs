@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 
-FORMS = ('playground', 'prod', 'prod-ssh')
+FORMS = ('minimal', 'prod-ssh', 'playground')
 
 
 def run(args, **kwargs):

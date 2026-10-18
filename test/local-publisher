@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import http.client
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,10 @@ from unittest.mock import patch
 from urllib.request import urlopen
 from urllib.error import HTTPError
 
-publisher = importlib.machinery.SourceFileLoader('publisher', 'tools/local-publisher').load_module()
+loader = importlib.machinery.SourceFileLoader('publisher', 'tools/local-publisher')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
 HOWL = str(Path(sys.argv.pop(1) if len(sys.argv) > 1 else 'build/host/howl').resolve())
 PROBE = str(Path('build/host/tpm-policy').resolve())
 A, B, C = [value * 32 for value in ['aa', 'bb', 'cc']]

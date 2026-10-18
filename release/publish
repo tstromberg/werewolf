@@ -8,8 +8,8 @@
 #
 #   WEREWOLF_IMAGE_KEY=<PEM> release/publish DIST LOCKS
 #
-# .github/workflows/release.yml runs it, with gh logged in. When it makes a
-# draft, it writes tag=SERIAL to $GITHUB_OUTPUT.
+# Retained for historical release reproduction; CI uses form-images.yml.
+# When it makes a draft, it writes tag=SERIAL to $GITHUB_OUTPUT.
 set -eu
 
 [ $# -eq 2 ] || { echo "usage: release/publish DIST LOCKS" >&2; exit 2; }

@@ -9,7 +9,7 @@ import tempfile
 import time
 import traceback
 
-from ab_checks import require_boot
+from ab_checks import require_boot, require_refused_image_retry
 from ab_providers import Provider
 
 howl, provider, arch = sys.argv[1:]
@@ -153,14 +153,16 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-', dir='/tmp') as temporary:
         if mode == 'secure' and text.count('Secure Boot enforced outside setup mode') < 2:
             raise AssertionError('provider console did not independently confirm enforced boots')
         machine.ssh('/usr/lib/werewolf/slot-update outcome')
-        before = machine.console()
+        before = machine.ssh('/bin/cat /data/svc/autoupdate/log').stdout
+        (logs / 'retry-before.jsonl').write_text(before)
         retry = machine.ssh('/usr/lib/werewolf/slot-update check', check=False, timeout=600)
-        until = time.monotonic() + 5
-        while ('ImageRolledBack' not in machine.console()[len(before):] and
-               time.monotonic() < until):
-            time.sleep(0.1)
-        if retry.returncode == 0 or 'ImageRolledBack' not in machine.console()[len(before):]:
-            raise AssertionError('updater did not refuse the failed signed candidate')
+        (logs / 'retry-command.json').write_text(json.dumps(dict(
+            exit=retry.returncode, stdout=retry.stdout, stderr=retry.stderr), indent=2) + '\n')
+        # The updater fsyncs its audit record before replying. Provider consoles
+        # may concatenate several UARTs and cannot be sliced as an append log.
+        after = machine.ssh('/bin/cat /data/svc/autoupdate/log').stdout
+        (logs / 'retry-after.jsonl').write_text(after)
+        require_refused_image_retry(retry.returncode, before, after)
         report('failed candidate is refused on retry', recovered)
     except Exception as error:
         failed = error

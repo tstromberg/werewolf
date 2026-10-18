@@ -12,13 +12,17 @@ import subprocess
 import sys
 import time
 
-from importlib.machinery import SourceFileLoader
+import importlib.machinery
+import importlib.util
 
 
 IDENT = re.compile(r'[a-z][a-z0-9-]*\Z')
 CONTROL = '/usr/lib/werewolf/native-iterate'
 ROOT = Path.cwd()
-NATIVE = SourceFileLoader('werewolf_native_tests', str(ROOT / 'test/native-tests')).load_module()
+loader = importlib.machinery.SourceFileLoader('werewolf_native_tests', str(ROOT / 'test/native-tests'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+NATIVE = importlib.util.module_from_spec(spec)
+loader.exec_module(NATIVE)
 
 
 def call(argv, **kwargs):

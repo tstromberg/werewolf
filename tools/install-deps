@@ -117,7 +117,7 @@ Darwin)
 	system="macOS $(sw_vers -productVersion)"
 	pm=brew
 	install="brew install"
-	pkgs="apko melange crane lima qemu swtpm zstd zig mtools e2fsprogs osslsigncode python"
+	pkgs="apko melange crane lima qemu swtpm zstd zig mtools e2fsprogs osslsigncode python@3.14"
 	apko_pkgs=apko
 	zig_pkgs=zig
 	# Homebrew's erofs-utils has no zstd, so build it into Homebrew's

@@ -3,7 +3,7 @@ name: publishing-health
 
 on:
   workflow_run:
-    workflows: [check, packages, release, form-images]
+    workflows: [check, packages, form-images]
     types: [completed]
     branches: [main]
 

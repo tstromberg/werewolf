@@ -14,6 +14,7 @@ pub var channel: i32 = -1;
 pub var jailed = false;
 pub var console: i32 = -1;
 pub var boot_line: []const u8 = "";
+pub var owner_channel: @import("owner.zig").Channel = .{};
 pub var ipe_policy: ?std.Io.File = null;
 pub var ipe_active: ?std.Io.File = null;
 pub var ipe_enforce: ?std.Io.File = null;
@@ -40,6 +41,7 @@ pub fn start(io: std.Io) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
+    owner_channel = try @import("owner.zig").Channel.open();
     try prepare(io, gpa);
     const command = try Dir.cwd().openFile(io, "/proc/cmdline", .{});
     defer command.close(io);

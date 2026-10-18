@@ -1,5 +1,6 @@
 # Shared CPU inference runtime; applications supply their own service and models.
 base: app
+with: [libffi]
 
 recipes:
   - ../../../packages/onnx/onnxruntime.yaml

@@ -2,13 +2,17 @@
 """Fault-test ordered object uploads and authenticated publication floors; no network or keys."""
 import datetime
 import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-publisher = importlib.machinery.SourceFileLoader('protected_transport', 'release/publish-protected').load_module()
+loader = importlib.machinery.SourceFileLoader('protected_transport', 'release/publish-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
 downloads = publisher.preparation.downloads
 
 

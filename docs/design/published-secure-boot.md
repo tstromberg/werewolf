@@ -14,8 +14,8 @@ New roots take machine authority from firmware and TLS trust from signed config;
 builds use per-machine channels, imported bundles a declared local one. The [download
 design](protected-downloads.md) covers dedicated trust, cache floors and publication
 evidence, the [boot bundle design](boot-images.md) shared artifact enrollment and a
-multiplexed host issuer. The legacy release workflow signs disks without an IPE policy
-or protected release retirement, so it does not publish this profile.
+multiplexed host issuer. The shared release flow also publishes explicit legacy-boot
+images without this protected profile; its manifests and channels remain separate.
 
 ## Goals
 

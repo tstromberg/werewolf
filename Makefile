@@ -94,7 +94,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 # A target named _NAME is a step of another target.
 .PHONY: all install uninstall install-deps install-precommit precommit hooks image slot disk list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
-	check-shellfree check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
+	check-shellfree check-platform check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-dns check-lan check-static check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
@@ -273,8 +273,9 @@ TEST_SOURCES = test/native/iterate.zig lib/sandbox.zig lib/seal.zig lib/dm.zig l
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/bhyve-network _test/package-sources
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
+_test/ci-forms: ; python3 test/ci-forms-test
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/form-coverage: ; python3 test/form-coverage
 _test/bhyve-network: ; python3 test/check-bhyve-network
@@ -301,6 +302,8 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/protected-export
 	python3 test/protected-inputs
 	python3 test/form-images
+	python3 test/legacy-images
+	python3 test/owner-control $(HOWL)
 	python3 test/publishing-health
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
@@ -368,7 +371,7 @@ fuzz-syslog:
 			--fuzz=$(SYSLOG_FUZZ_RUNS) --summary all || exit; \
 	done
 
-check-syslog: $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
+check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
 	@test -r $(BUILD)/vmlinuz || $(HOWL_BUILD) image
 	python3 test/check-syslog --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
 		--daemon $(call program_bin,syslogd) --probe $(SYSLOG_PROBE) \
@@ -586,7 +589,8 @@ check-image-updater-uki: $(HOWL)
 		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static check-people $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
-check: check-forms check-shellfree check-integrity check-cloud check-persist check-syslog
+check-platform: check-integrity check-cloud check-persist check-syslog
+check: check-forms check-shellfree check-platform
 	@echo "check: every form, and a slot, passed"
 
 NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS_FOR_ARCH))
@@ -938,5 +942,7 @@ $(DOC_CHECK): tools/doc-check.zig
 	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/doc-check.zig
 doc-lint: $(DOC_CHECK)
 	$(DOC_CHECK) $(DOC_SOURCES)
+	@test/example selftest
+	@for f in $(FORMS); do test/example check $$f >/dev/null || exit 1; done
 doc-fix: $(DOC_CHECK)
 	$(DOC_CHECK) --fix $(DOC_SOURCES)

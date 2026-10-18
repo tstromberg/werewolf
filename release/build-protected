@@ -2,6 +2,7 @@
 """Build a protected vendor bundle using public-only compile inputs and host signing."""
 import fcntl
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,10 @@ import tempfile
 
 def published_kernel(arch, pins, output):
     """linux-werewolf from werewolf's kernel repository, as apko installs it."""
-    resolver = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs').load_module()
+    loader = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs')
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    resolver = importlib.util.module_from_spec(spec)
+    loader.exec_module(resolver)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         configs = resolver.boot_configs(Path(temporary))
         incoming = Path(temporary) / 'rootfs.tar'
@@ -36,7 +40,9 @@ def build(form, provider, arch, serial, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     os.environ['SOURCE_DATE_EPOCH'] = '0'
     loader = importlib.machinery.SourceFileLoader('protected_builder', 'tools/local-prerequisites')
-    builder = loader.load_module()
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    builder = importlib.util.module_from_spec(spec)
+    loader.exec_module(builder)
     tree, cache = Path.cwd(), Path('build/protected-cache').resolve()
     cache.mkdir(parents=True, exist_ok=True)
     # This command must be called through with-protected-keys. Key files remain
@@ -74,6 +80,8 @@ def build(form, provider, arch, serial, output):
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     disk = work / 'disk.raw'
     disk_args = 'console=ttyAMA0' if arch == 'aarch64' else 'console=ttyS0'
+    if provider == 'qemu':
+        disk_args += ' werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3'
     if provider == 'lima':
         disk_args += ' werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.3'
     howl = str(Path('build/host/howl').resolve())

@@ -2,11 +2,9 @@
 
 ## Summary
 
-mount-broker performs the few filesystem operations root's programs need after boot,
-when fence's Landlock domain forbids everyone in it to mount. Callers ask over three
-inherited `SOCK_SEQPACKET` socketpairs (`updater`, `keeper`, `stage`). Neither the EFI
-partition nor `/boot` is ever lent as a mount: for each fixed operation the broker works
-on a detached mount and closes it.
+mount-broker performs filesystem operations after fence forbids mounts. Callers use
+three inherited socketpairs (`updater`, `keeper`, `stage`). Neither the EFI partition
+nor `/boot` is lent as a mount: fixed operations use detached mounts and close them.
 
 ## Background
 
@@ -61,13 +59,14 @@ Programs ask through `lib/broker.zig`.
 - **Updater runtime**: the updater alone can attach immutable `/usr` and the
   nonrecursive running root read-only at fixed, checked directories in its jail.
   Root-owned boot artifacts grant group 77 read/traverse access; `/boot` stays ro.
-  Fixed `updater-ready` and `reboot` requests publish readiness and wake runit.
+- **Owner port**: opens the unique kernel-named `werewolf.owner` character device
+  before confinement, root-only. Only the updater can request its descriptor.
+  No request selects a path; other processes retain fence’s device restrictions.
 - **Confined**: CAP_SYS_ADMIN only, locked (`lib/sandbox.zig`), and a seccomp allowlist:
-  `recvfrom`, `sendto`, `poll`, the new mount calls, the file calls the ESP and slot
-  operations need (`openat`, `openat2`, `read`, `write`, `renameat`, `unlinkat`,
-  `mkdirat`, `fsync`, `getdents64`), classic `mount(2)` only to remount read-only,
+  `recvfrom`, `sendto`, `sendmsg` (owner descriptor), `poll`, the new mount calls,
+  and ESP/slot file calls (`openat`, `openat2`, `read`, `write`, `renameat`,
+  `unlinkat`, `mkdirat`, `fsync`, `getdents64`), `mount(2)` only to remount read-only,
   `umount2` only without flags, and the one device-mapper ioctl that removes a mapping.
-  It runs nothing.
 
 ## Drawbacks
 
