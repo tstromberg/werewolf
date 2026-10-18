@@ -354,7 +354,7 @@ def publish(exported, store, certificate='release/protected/image.crt'):
                     spec = importlib.util.spec_from_loader(loader.name, loader)
                     downloader = importlib.util.module_from_spec(spec)
                     loader.exec_module(downloader)
-                    downloader.fetch(catalog.PUBLIC + '/' + key, existing, path.stat().st_size,
+                    downloader.fetch(catalog.PUBLIC + '/' + key, Path(temporary) / 'public', path.stat().st_size,
                                      catalog.record(path))
         head = directory / (profiles.prefix(manifest['form'], manifest['arch'], 'legacy-boot') + '-downloads.json')
         with tempfile.TemporaryDirectory(prefix='ww-legacy-receipt-') as temporary:
