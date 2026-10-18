@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         flows.status == 200 and std.mem.indexOf(u8, flows.body, name) != null,
     );
     const listing = try std.json.parseFromSliceLeaky(std.json.Value, gpa, flows.body, .{});
-    const flow_id = findFlowID(listing, name) orelse return error.NoFlow;
+    const flow_id = findFlowId(listing, name) orelse return error.NoFlow;
     try ctx.result(
         io,
         suite,
@@ -170,17 +170,17 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
-fn findFlowID(value: std.json.Value, name: []const u8) ?[]const u8 {
+fn findFlowId(value: std.json.Value, name: []const u8) ?[]const u8 {
     switch (value) {
         .object => |object| {
             if (object.get("name")) |candidate| if (candidate == .string and
                 std.mem.eql(u8, candidate.string, name))
                 if (object.get("id")) |id| if (id == .string) return id.string;
             var it = object.iterator();
-            while (it.next()) |entry| if (findFlowID(entry.value_ptr.*, name)) |id| return id;
+            while (it.next()) |entry| if (findFlowId(entry.value_ptr.*, name)) |id| return id;
         },
         .array => |array| for (array.items) |item| {
-            if (findFlowID(item, name)) |id| return id;
+            if (findFlowId(item, name)) |id| return id;
         },
         else => {},
     }

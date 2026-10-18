@@ -12,6 +12,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import legacy_images
 import image_profiles as profiles
+import image_catalog as catalog
 
 
 def command(args):
@@ -25,6 +26,7 @@ def draft(targets, trust='release/protected', legacy=()):
     exporter = importlib.util.module_from_spec(spec)
     loader.exec_module(exporter)
     manifests, assets = [], []
+    legacy_changes = {}
     for directory, bundle, report, provider in targets:
         directory = Path(directory).resolve()
         manifest = exporter.verify(directory, bundle, report, provider, trust)
@@ -35,14 +37,21 @@ def draft(targets, trust='release/protected', legacy=()):
         if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', manifest['serial']):
             raise ValueError('invalid protected release serial')
         manifests.append(manifest)
-        assets += sorted(directory.iterdir())
+        if manifest['form'] in profiles.BASE_FORMS:
+            assets += sorted(directory.iterdir())
     for directory in legacy:
         manifest = legacy_images.verify(directory, Path(trust) / 'image.crt')
         if manifest['provenance']['commit'] != os.environ['GITHUB_SHA'] or \
                 manifest['provenance']['repository'] != os.environ['GITHUB_REPOSITORY']:
             raise ValueError('legacy release provenance differs from this workflow')
         manifests.append(manifest)
-        assets += sorted(Path(directory).iterdir())
+        if manifest['form'] in profiles.BASE_FORMS:
+            assets += sorted(Path(directory).iterdir())
+        if 'release-notes.html' in manifest['files']:
+            descriptor = catalog.sha(next(Path(directory).glob('*-downloads.json')))
+            legacy_changes[(manifest['form'], manifest['arch'])] = '%s/legacy-boot/%s/%s/objects/%s/%s' % (
+                catalog.PUBLIC, manifest['form'], manifest['arch'], descriptor,
+                manifest['files']['release-notes.html']['asset'])
     if not manifests or len({m['provenance']['run'] for m in manifests}) != 1:
         raise ValueError('a release carries the bundles of one workflow run')
     serial = max(m['serial'] for m in manifests)
@@ -51,16 +60,19 @@ def draft(targets, trust='release/protected', legacy=()):
     lines = []
     for m in manifests:
         if m.get('boot_profile') == 'legacy-boot':
-            lines.append('- `%s-%s-legacy-boot`, serial %s: boots without Secure Boot, TPM or IPE.' % (
-                m['form'], m['arch'], m['serial']))
+            changes = legacy_changes.get((m['form'], m['arch']))
+            lines.append('- `%s-%s-legacy-boot`, serial %s: boots without Secure Boot, TPM or IPE.%s' % (
+                m['form'], m['arch'], m['serial'], ' [Package changes](%s).' % changes if changes else ''))
             continue
         prefix = '%s-%s-%s' % (m['form'], m['provider'], m['arch'])
         mirror = 'https://dist.werewolf-linux.org/boot/v1/%s/%s/%s/objects/%s' % (
             m['form'], m['provider'], m['arch'], m['descriptor'])
-        lines.append('- `%s`, serial %s: [R2 bundle](%s/boot.json), evidence `%s-gates.json`, '
-                     'manifest `%s-downloads.json`.' % (prefix, m['serial'], mirror, prefix, prefix))
+        lines.append('- `%s`, serial %s: [R2 bundle](%s/boot.json), [package changes](%s/release-notes.html), evidence `%s-gates.json`, '
+                     'manifest `%s-downloads.json`.' % (prefix, m['serial'], mirror, mirror, prefix, prefix))
     notes = ('Base images built from %s in [GitHub Actions](%s).\n\n%s\n\n'
-             'Each boot/image manifest and detached signature is byte-identical to its R2 bundle. '
+             'Changed base forms (`minimal`, `prod`, `prod-ssh`, `playground`) are attached here; service-form images and their signed manifests are in '
+             '[the R2 catalog](https://dist.werewolf-linux.org/boot/v1/index.html). '
+             'Each attached boot/image manifest and detached signature is byte-identical to its R2 bundle. '
              'Each standalone qcow2 has the same disk contents as the authenticated compressed raw disk; '
              'its size and SHA-256 are covered by the target\'s downloads manifest and RSA/SHA-256 signature.\n\n'
              'Secure-boot targets passed all fourteen exact-bundle lifecycle gates and require '
@@ -73,7 +85,7 @@ def draft(targets, trust='release/protected', legacy=()):
     with tempfile.TemporaryDirectory(prefix='ww-github-release-') as temporary:
         body = Path(temporary) / 'notes.md'
         body.write_text(notes)
-        command(['gh', 'release', 'create', tag, '--draft', '--target', provenance['commit'],
+        command(['gh', 'release', 'create', tag, '--draft', '--generate-notes', '--target', provenance['commit'],
                  '--title', 'Base images ' + serial, '--notes-file', str(body),
                  *[str(path) for path in assets]])
     with Path(os.environ['GITHUB_OUTPUT']).open('a') as output:

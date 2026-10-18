@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """Check source ownership, pin tampering and external release inputs without network."""
 import importlib.machinery
+import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path('release').resolve()))
-sources = importlib.machinery.SourceFileLoader('package_sources_tested', 'tools/checkout-packages').load_module()
-images = importlib.machinery.SourceFileLoader('package_images_tested', 'release/form-images').load_module()
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+sources = load('package_sources_tested', 'tools/checkout-packages')
+images = load('package_images_tested', 'release/form-images')
 
 
 class Sources(unittest.TestCase):
@@ -58,6 +69,52 @@ class Sources(unittest.TestCase):
             sources.checkout(source, self.root)
         run.assert_not_called()
         self.assertEqual('package: original\n', self.recipe.read_text())
+
+    def test_immutable_commit_checkout_stays_pinned_when_the_branch_advances(self):
+        repository = self.root / 'upstream'
+        repository.mkdir()
+        subprocess.run(['git', 'init', '--quiet', repository], check=True)
+        subprocess.run(['git', '-C', repository, 'config', 'user.name', 'Test'], check=True)
+        subprocess.run(['git', '-C', repository, 'config', 'user.email', 'test@example.invalid'], check=True)
+        recipe = repository / 'recipe.yaml'
+        recipe.write_text('reviewed')
+        subprocess.run(['git', '-C', repository, 'add', 'recipe.yaml'], check=True)
+        subprocess.run(['git', '-C', repository, 'commit', '--quiet', '-m', 'reviewed'], check=True)
+        reviewed = subprocess.check_output(['git', '-C', repository, 'rev-parse', 'HEAD'], text=True).strip()
+        recipe.write_text('new branch content')
+        subprocess.run(['git', '-C', repository, 'commit', '--quiet', '-am', 'advanced'], check=True)
+        source = dict(name='packages', repository=str(repository), ref=reviewed)
+        destination = self.root / 'checkout'
+        sources.checkout(source, destination)
+        self.assertEqual('reviewed', (destination / 'recipe.yaml').read_text())
+        sources.checkout(source, destination)
+        self.assertEqual('reviewed', (destination / 'recipe.yaml').read_text())
+        self.assertEqual(reviewed, subprocess.check_output(['git', '-C', destination, 'rev-parse', 'HEAD'], text=True).strip())
+
+    def test_pinning_records_the_committed_source_and_refuses_uncommitted_contexts(self):
+        repository = self.root / 'packages'
+        context = repository / 'solr'
+        context.mkdir(parents=True)
+        recipe = context / 'recipe.yaml'
+        recipe.write_text('reviewed')
+        subprocess.run(['git', 'init', '--quiet', repository], check=True)
+        subprocess.run(['git', '-C', repository, 'config', 'user.name', 'Test'], check=True)
+        subprocess.run(['git', '-C', repository, 'config', 'user.email', 'test@example.invalid'], check=True)
+        subprocess.run(['git', '-C', repository, 'add', 'solr'], check=True)
+        subprocess.run(['git', '-C', repository, 'commit', '--quiet', '-m', 'reviewed'], check=True)
+        head = subprocess.check_output(['git', '-C', repository, 'rev-parse', 'HEAD'], text=True).strip()
+        lock = self.root / 'lock.json'
+        lock.write_text(json.dumps(dict(format='werewolf-package-sources/1', sources=[
+            dict(name='packages', contexts=['solr'], repository='unused', ref='main', sha256='0' * 64)])))
+        with patch.object(sources, 'ROOT', self.root / 'werewolf'), patch.object(sources, 'LOCK', lock), \
+                patch.object(sys, 'argv', ['checkout-packages', '--pin']):
+            sources.main()
+            recorded = json.loads(lock.read_text())['sources'][0]
+            self.assertEqual(head, recorded['ref'])
+            self.assertEqual(sources.digest(repository, ['solr']), recorded['sha256'])
+            recipe.write_text('uncommitted')
+            with self.assertRaisesRegex(ValueError, 'commit the reviewed'):
+                sources.main()
 
 
 if __name__ == '__main__':

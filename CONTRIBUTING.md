@@ -26,7 +26,9 @@ form needs only this repository; forms with third-party recipes need the sibling
 
 CI runs `tools/checkout-packages` to provision and verify the contexts pinned in
 `release/package-sources.json`. Use `--check` to verify existing local sources
-without fetching; after reviewing a package change, use `--pin` to record it.
+without fetching. Commit reviewed package changes first, then use `--pin` to record
+their immutable commit and content hash. Publish that commit before updating the
+Werewolf lock so CI can fetch exactly the reviewed source.
 Add new context directories to that JSON file before pinning them.
 
 Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,

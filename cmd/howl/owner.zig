@@ -14,7 +14,14 @@ pub fn command(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8, why
         std.meta.stringToEnum(Operation, actions[0]) == null)
         return why.refuse("{s}", .{syntax});
     const path = try gpa.print("{s}/owner.sock", .{try howl.machineDir(gpa, name)});
-    std.Io.Dir.cwd().access(io, path, .{}) catch return why.refuse("{s}: no owner channel; start an enrolled QEMU image with current howl", .{name});
+    std.Io.Dir.cwd().access(
+        io,
+        path,
+        .{},
+    ) catch return why.refuse(
+        "{s}: no owner channel; start an enrolled QEMU image with current howl",
+        .{name},
+    );
     // Resolve the actual interpreter before exec: a wrapper on PATH must not
     // keep the owner connection in a child after the caller kills howl.
     const probe = try std.process.run(gpa, io, .{
@@ -24,7 +31,8 @@ pub fn command(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8, why
     });
     const python = std.mem.trim(u8, probe.stdout, "\r\n");
     if (probe.term != .exited or probe.term.exited != 0 or !std.fs.path.isAbsolute(python) or
-        std.mem.findScalar(u8, python, '\n') != null or std.mem.findScalar(u8, python, '\r') != null)
+        std.mem.findScalar(u8, python, '\n') != null or
+        std.mem.findScalar(u8, python, '\r') != null)
         return why.refuse("cannot resolve the owner-control Python interpreter", .{});
     const argv = try std.mem.concat(gpa, []const u8, &.{
         &.{ python, "-c", @import("files").owner_control, path }, actions,

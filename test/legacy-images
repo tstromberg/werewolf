@@ -3,6 +3,7 @@
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -48,11 +50,14 @@ class LegacyImages(unittest.TestCase):
                                run='https://github.com/werewolf-linux/werewolf/actions/runs/123', attempt='1')
         self.store = publisher.Store(str(self.root / 'store'))
 
-    def candidate(self, form='minimal', serial='20261017T010000Z'):
+    def candidate(self, form='minimal', serial='20261017T010000Z', version='1'):
         directory = self.root / ('verified-' + serial) / form
         directory.mkdir(parents=True)
         for name in legacy.FILES:
             (directory / name).write_bytes((name + serial).encode())
+        legacy.write(directory / 'packages.json', dict(format='werewolf-form-packages/1', form=form,
+            arch='x86_64', packages=[dict(scope='runtime', name='example', version=version,
+            checksum=hashlib.sha256(version.encode()).hexdigest())], images=[]))
         (directory / 'cmdline').write_text('werewolf.disable=secureboot,tpm,ipe\n')
         manifest = dict(format=legacy.FORMAT, **profiles.identity(form, 'x86_64', 'legacy-boot'),
                         disabled=['secureboot', 'tpm', 'ipe'], serial=serial, commit='a' * 40, inputs='b' * 64,
@@ -77,17 +82,18 @@ class LegacyImages(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'resolved target'):
                 legacy.export(candidate.parent, self.root / 'foreign-assets', self.provenance, targets, self.cert)
 
-    def test_only_three_forms_and_two_profiles_are_publication_identities(self):
-        self.assertEqual({'minimal', 'prod-ssh', 'playground'}, set(profiles.FORMS))
+    def test_base_forms_and_two_profiles_are_publication_identities(self):
+        self.assertEqual({'minimal', 'prod', 'prod-ssh', 'playground'}, set(profiles.BASE_FORMS))
+        self.assertTrue(set(profiles.BASE_FORMS) | {'caddy', 'postgresql', 'greenbone'} <= set(profiles.FORMS))
         for form in profiles.FORMS:
             for profile in profiles.PROFILES:
                 self.assertIn(profile, profiles.prefix(form, 'aarch64', profile))
-        for form in ('prod', 'nginx', '../minimal'):
+        for form in ('missing-form', '../minimal'):
             with self.assertRaises(ValueError):
                 profiles.identity(form, 'x86_64', 'legacy-boot')
 
     def test_signed_legacy_assets_have_explicit_profile_and_independent_namespace(self):
-        for offset, form in enumerate(profiles.FORMS):
+        for offset, form in enumerate((*profiles.BASE_FORMS, 'caddy')):
             exported, = self.export(self.candidate(form, '20261017T01000%dZ' % offset))
             assets = Path(exported['assets'])
             signed = legacy.verify(assets, self.cert)
@@ -201,8 +207,11 @@ class LegacyImages(unittest.TestCase):
         spec = importlib.util.spec_from_loader(loader.name, loader)
         exporter = importlib.util.module_from_spec(spec)
         loader.exec_module(exporter)
+        bodies = []
+        def capture(argv):
+            bodies.append(Path(argv[argv.index('--notes-file') + 1]).read_text())
         with patch.object(exporter, 'verify', return_value=manifest), \
-             patch.object(github, 'command') as command, \
+             patch.object(github, 'command', side_effect=capture) as command, \
              patch.dict(os.environ, GITHUB_REPOSITORY='werewolf-linux/werewolf', GITHUB_OUTPUT=str(self.root / 'output')):
             # github.draft reloads its verifier; intercept that loader to keep
             # the secure fixture's native admission in the existing export suite.
@@ -220,6 +229,67 @@ class LegacyImages(unittest.TestCase):
         self.assertIn(str((secure / 'playground-qemu-x86_64-secure-boot.qcow2').resolve()), argv)
         self.assertIn(str(Path(exported['assets']) / 'minimal-x86_64-legacy-boot.qcow2'), argv)
         self.assertEqual(1, command.call_count)
+        self.assertIn('--generate-notes', argv)
+        self.assertIn('/release-notes.html', bodies[0])
+        self.assertIn('-legacy-boot-release-notes.html', bodies[0])
+
+    def test_package_changes_use_the_signed_previous_legacy_release(self):
+        first, = self.export(self.candidate())
+        legacy.publish([first], self.store, self.cert)
+        candidate = self.candidate(serial='20261017T010001Z', version='2')
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        targets = {('minimal', 'x86_64'): dict(manifest, status='build')}
+        second, = legacy.export(candidate.parent, self.root / 'second', self.provenance, targets,
+                                self.cert, store=self.store)
+        signed = legacy.verify(second['assets'], self.cert)
+        path = Path(second['assets']) / signed['files']['release-notes.json']['asset']
+        notes = json.loads(path.read_text())
+        self.assertEqual('20261017T010000Z', notes['previous']['serial'])
+        change, = notes['packages']
+        self.assertEqual(('updated', '1', '2'), (change['kind'], change['before']['version'], change['after']['version']))
+        path.write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'signed bytes'):
+            legacy.verify(second['assets'], self.cert)
+
+    def test_previous_package_inventory_must_match_its_signed_digest(self):
+        first, = self.export(self.candidate())
+        legacy.publish([first], self.store, self.cert)
+        previous = next((self.root / 'store').glob('legacy-boot/minimal/x86_64/objects/*/*-packages.json'))
+        previous.write_text('{}')
+        candidate = self.candidate(serial='20261017T010001Z')
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        with self.assertRaisesRegex(ValueError, 'inventory is missing or changed'):
+            legacy.export(candidate.parent, self.root / 'second', self.provenance,
+                          {('minimal', 'x86_64'): dict(manifest, status='build')}, self.cert, store=self.store)
+
+    def test_only_a_signed_matching_legacy_receipt_can_skip_an_unchanged_build(self):
+        first, = self.export(self.candidate())
+        legacy.publish([first], self.store, self.cert)
+        receipt = self.root / 'store/legacy-boot/minimal/x86_64/latest/accepted.json'
+        raw = receipt.read_bytes()
+        with patch.object(legacy.urllib.request, 'urlopen', side_effect=lambda *a, **k: io.BytesIO(raw)):
+            self.assertTrue(legacy.settled('minimal', 'x86_64', 'b' * 64, self.cert))
+            self.assertFalse(legacy.settled('minimal', 'x86_64', 'c' * 64, self.cert))
+            with self.assertRaisesRegex(ValueError, 'foreign'):
+                legacy.settled('prod', 'x86_64', 'b' * 64, self.cert)
+        tampered = json.loads(raw)
+        tampered['manifest'] = tampered['manifest'].replace('b' * 64, 'c' * 64)
+        with patch.object(legacy.urllib.request, 'urlopen', return_value=io.BytesIO(catalog.encode(tampered))):
+            with self.assertRaises(subprocess.CalledProcessError):
+                legacy.settled('minimal', 'x86_64', 'c' * 64, self.cert)
+
+    def test_unchanged_profiles_and_unsupported_arches_do_not_build_or_boot(self):
+        snapshot = self.root / 'snapshot'
+        snapshot.mkdir()
+        legacy.write(snapshot / 'plan.json', dict(arch='aarch64', targets=[
+            dict(form='overleaf', arch='aarch64', status='unsupported architecture'),
+            dict(form='caddy', arch='aarch64', status='unchanged', legacy_status='unchanged')]))
+        with patch.object(legacy, 'build_one') as build, patch.object(legacy, 'run') as run:
+            images = SimpleNamespace(native=lambda arch: None)
+            self.assertFalse(legacy.build(images, snapshot, self.root / 'built'))
+            self.assertFalse(legacy.check(images, snapshot, self.root / 'first', self.root / 'second', self.root / 'checked'))
+            build.assert_not_called()
+            run.assert_not_called()
 
 
 if __name__ == '__main__':

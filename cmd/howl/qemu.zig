@@ -395,7 +395,11 @@ test argv {
     const sl = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), secure, .hvf));
     try std.testing.expect(std.mem.find(u8, sl, "-bios") == null);
     try std.testing.expect(std.mem.find(u8, sl, "name=werewolf.owner") != null);
-    try std.testing.expect(std.mem.find(u8, sl, "path=/w,,x/m/owner.sock,server=on,wait=off") != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        sl,
+        "path=/w,,x/m/owner.sock,server=on,wait=off",
+    ) != null);
     try std.testing.expect(std.mem.find(u8, line, "werewolf.owner") == null);
     try std.testing.expect(std.mem.find(
         u8,
