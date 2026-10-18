@@ -8,7 +8,7 @@ boots that slot once, and records what changed and which CVEs that fixes.
 Enrolled IPE images fetch signed prebuilt slots instead
 ([prebuilt-images.md](design/prebuilt-images.md)); protected published
 images take them from a host service that polls the vendor channel
-([form-images.md](form-images.md#downloading-a-protected-qcow2)). The policy
+([form-images.md](form-images.md#downloading-images)). The policy
 below decides when any staged slot boots. It is one Zig program,
 `cmd/slot-update/slot-update.zig`, in `minimal` and so every form.
 

@@ -1,5 +1,6 @@
 # Shared CPU inference runtime; applications supply their own service and models.
 base: app
+with: [libffi]
 
 packages:
   - python-3.15>=3.15.0_git20261010-r2000

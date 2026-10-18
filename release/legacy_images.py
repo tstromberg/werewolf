@@ -1,6 +1,7 @@
 """Build, verify and sign explicitly unprotected boot images in the shared flow."""
 import hashlib
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -279,7 +280,10 @@ def publish(exported, store, certificate='release/protected/image.crt'):
                 if not store.fetch(key, existing) or catalog.record(existing) != catalog.record(path):
                     raise ValueError('public legacy object differs from GitHub asset')
                 if store.bucket.startswith('s3://'):
-                    downloader = importlib.machinery.SourceFileLoader('legacy_public_download', 'tools/boot-download').load_module()
+                    loader = importlib.machinery.SourceFileLoader('legacy_public_download', 'tools/boot-download')
+                    spec = importlib.util.spec_from_loader(loader.name, loader)
+                    downloader = importlib.util.module_from_spec(spec)
+                    loader.exec_module(downloader)
                     downloader.fetch(catalog.PUBLIC + '/' + key, existing, path.stat().st_size,
                                      catalog.record(path))
         head = directory / (profiles.prefix(manifest['form'], manifest['arch'], 'legacy-boot') + '-downloads.json')

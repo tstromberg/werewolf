@@ -3,6 +3,7 @@
 import copy
 import contextlib
 import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -14,8 +15,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-native = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests').load_module()
-iteration = importlib.machinery.SourceFileLoader('native_iteration', 'test/native-iterate').load_module()
+loader = importlib.machinery.SourceFileLoader('native_tests', 'test/native-tests')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+native = importlib.util.module_from_spec(spec)
+loader.exec_module(native)
+loader = importlib.machinery.SourceFileLoader('native_iteration', 'test/native-iterate')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+iteration = importlib.util.module_from_spec(spec)
+loader.exec_module(iteration)
 
 
 class ConsoleTransport(unittest.TestCase):

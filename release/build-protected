@@ -2,6 +2,7 @@
 """Build a protected vendor bundle using public-only compile inputs and host signing."""
 import fcntl
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,10 @@ import tempfile
 
 def published_kernel(arch, pins, output):
     """linux-werewolf from werewolf's kernel repository, as apko installs it."""
-    resolver = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs').load_module()
+    loader = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs')
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    resolver = importlib.util.module_from_spec(spec)
+    loader.exec_module(resolver)
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         configs = resolver.boot_configs(Path(temporary))
         incoming = Path(temporary) / 'rootfs.tar'
@@ -36,7 +40,9 @@ def build(form, provider, arch, serial, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     os.environ['SOURCE_DATE_EPOCH'] = '0'
     loader = importlib.machinery.SourceFileLoader('protected_builder', 'tools/local-prerequisites')
-    builder = loader.load_module()
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    builder = importlib.util.module_from_spec(spec)
+    loader.exec_module(builder)
     tree, cache = Path.cwd(), Path('build/protected-cache').resolve()
     cache.mkdir(parents=True, exist_ok=True)
     # This command must be called through with-protected-keys. Key files remain

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Verify the actual public mirror serves the exact newly published protected bundle."""
 import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
 
-downloads = importlib.machinery.SourceFileLoader('protected_download_check', 'tools/boot-download').load_module()
+loader = importlib.machinery.SourceFileLoader('protected_download_check', 'tools/boot-download')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+downloads = importlib.util.module_from_spec(spec)
+loader.exec_module(downloads)
 
 
 def check(howl, expected, provider, assets):
@@ -22,7 +26,10 @@ def check(howl, expected, provider, assets):
             lambda path: downloads.native(howl, 'verify', path, request), dict(validator='public-mirror-check'))
         if downloads.sha(bundle / 'boot.json') != downloads.sha(expected / 'boot.json'):
             raise ValueError('public mirror serves a different signed release')
-        exporter = importlib.machinery.SourceFileLoader('public_export_check', 'release/export-protected').load_module()
+        loader = importlib.machinery.SourceFileLoader('public_export_check', 'release/export-protected')
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        exporter = importlib.util.module_from_spec(spec)
+        loader.exec_module(exporter)
         assets = Path(assets).resolve()
         prefix = '%s-%s-%s' % (image['form'], provider, image['image']['arch'])
         report = json.loads(downloads.read(assets / (prefix + '-gates.json'), 64 << 10))

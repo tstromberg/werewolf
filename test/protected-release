@@ -3,6 +3,7 @@
 import copy
 import datetime
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-signer = importlib.machinery.SourceFileLoader('protected_signer', 'release/with-protected-keys').load_module()
-creator = importlib.machinery.SourceFileLoader('protected_creator', 'release/create-protected-trust').load_module()
-publisher = importlib.machinery.SourceFileLoader('protected_prepare', 'release/prepare-protected').load_module()
+loader = importlib.machinery.SourceFileLoader('protected_signer', 'release/with-protected-keys')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+signer = importlib.util.module_from_spec(spec)
+loader.exec_module(signer)
+loader = importlib.machinery.SourceFileLoader('protected_creator', 'release/create-protected-trust')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+creator = importlib.util.module_from_spec(spec)
+loader.exec_module(creator)
+loader = importlib.machinery.SourceFileLoader('protected_prepare', 'release/prepare-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
 
 
 class ProtectedRelease(unittest.TestCase):

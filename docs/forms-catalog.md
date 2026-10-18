@@ -45,7 +45,7 @@ are listed: Overleaf's upstream image is x86_64 only.
 protection, and why only gated targets are published.
 
 `howl run` and `howl create` download a published target, today `playground`
-([form-images.md](form-images.md#downloading-a-protected-qcow2)), and enroll
+([form-images.md](form-images.md#downloading-images)), and enroll
 its firmware and TPM. For any other form, run `howl run --build --with FORM`
 from the checkout and follow its guide: the same protections, signed with
 your own keys.

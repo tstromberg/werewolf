@@ -4,6 +4,7 @@ import copy
 import datetime
 import hashlib
 import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -21,7 +22,10 @@ sys.path.insert(0, str(Path('release').resolve()))
 import image_catalog as catalog
 import image_notes as notes
 
-images = importlib.machinery.SourceFileLoader('form_images_under_test', 'release/form-images').load_module()
+loader = importlib.machinery.SourceFileLoader('form_images_under_test', 'release/form-images')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+images = importlib.util.module_from_spec(spec)
+loader.exec_module(images)
 downloads = images.publisher.preparation.downloads
 
 

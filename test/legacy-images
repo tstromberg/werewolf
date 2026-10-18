@@ -2,6 +2,7 @@
 """Exercise signed boot-profile separation, exact candidate evidence and release floors."""
 import hashlib
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,10 @@ import image_catalog as catalog
 import image_profiles as profiles
 import legacy_images as legacy
 
-publisher = importlib.machinery.SourceFileLoader('legacy_test_store', 'release/publish-protected').load_module()
+loader = importlib.machinery.SourceFileLoader('legacy_test_store', 'release/publish-protected')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+publisher = importlib.util.module_from_spec(spec)
+loader.exec_module(publisher)
 
 
 class LegacyImages(unittest.TestCase):
@@ -157,13 +161,19 @@ class LegacyImages(unittest.TestCase):
 
     def test_one_github_release_contains_both_profiles(self):
         exported, = self.export(self.candidate())
-        github = importlib.machinery.SourceFileLoader('legacy_github_test', 'release/github-protected').load_module()
+        loader = importlib.machinery.SourceFileLoader('legacy_github_test', 'release/github-protected')
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        github = importlib.util.module_from_spec(spec)
+        loader.exec_module(github)
         secure = self.root / 'secure'
         secure.mkdir()
         (secure / 'playground-qemu-x86_64-secure-boot.qcow2').write_bytes(b'protected disk')
         manifest = dict(form='playground', provider='qemu', arch='x86_64', serial='20261017T010000Z',
                         descriptor='d' * 64, provenance=self.provenance, boot_profile='secure-boot')
-        exporter = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected').load_module()
+        loader = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected')
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        exporter = importlib.util.module_from_spec(spec)
+        loader.exec_module(exporter)
         with patch.object(exporter, 'verify', return_value=manifest), \
              patch.object(github, 'command') as command, \
              patch.dict(os.environ, GITHUB_REPOSITORY='werewolf-linux/werewolf', GITHUB_OUTPUT=str(self.root / 'output')):
@@ -172,8 +182,9 @@ class LegacyImages(unittest.TestCase):
             original = github.importlib.machinery.SourceFileLoader
             def loader(name, path):
                 if name == 'github_export':
-                    from unittest.mock import Mock
-                    return Mock(load_module=lambda: exporter)
+                    from types import SimpleNamespace
+                    return SimpleNamespace(name=name, create_module=lambda spec: exporter,
+                                           exec_module=lambda module: None)
                 return original(name, path)
             with patch.object(github.importlib.machinery, 'SourceFileLoader', side_effect=loader):
                 github.draft([(secure, self.root / 'bundle', {}, 'qemu')],

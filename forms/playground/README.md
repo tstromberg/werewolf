@@ -23,7 +23,7 @@ Use `howl ssh` to connect, `howl stop` to stop it, and `howl run` to resume it.
 
 The x86_64 QEMU qcow2 is available on [GitHub
 Releases](https://github.com/werewolf-linux/werewolf/releases). Follow the [download and
-verification instructions](../../docs/form-images.md#downloading-a-protected-qcow2)
+verification instructions](../../docs/form-images.md#downloading-images)
 before using a standalone disk. Other forms and hosts have different [image
 availability](../../docs/forms-catalog.md#images-and-downloads).
 

@@ -3,6 +3,7 @@
 import datetime
 import hashlib
 import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -15,7 +16,9 @@ from unittest.mock import patch
 
 HOWL = str(Path(sys.argv.pop(1)).resolve())
 loader = importlib.machinery.SourceFileLoader('boot_download', 'tools/boot-download')
-downloads = loader.load_module()
+spec = importlib.util.spec_from_loader(loader.name, loader)
+downloads = importlib.util.module_from_spec(spec)
+loader.exec_module(downloads)
 
 
 class Downloads(unittest.TestCase):

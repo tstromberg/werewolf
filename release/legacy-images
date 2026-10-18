@@ -2,6 +2,7 @@
 """Build or verify compatibility images using the shared resolved package snapshot."""
 import argparse
 import importlib.machinery
+import importlib.util
 import sys
 
 sys.dont_write_bytecode = True
@@ -16,7 +17,10 @@ check = commands.add_parser('check')
 for name in ('snapshot', 'first', 'second', 'output'):
     check.add_argument(name)
 args = parser.parse_args()
-images = importlib.machinery.SourceFileLoader('legacy_form_images', 'release/form-images').load_module()
+loader = importlib.machinery.SourceFileLoader('legacy_form_images', 'release/form-images')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+images = importlib.util.module_from_spec(spec)
+loader.exec_module(images)
 if args.command == 'build':
     sys.exit(bool(legacy_images.build(images, args.snapshot, args.output)))
 sys.exit(bool(legacy_images.check(images, args.snapshot, args.first, args.second, args.output)))
