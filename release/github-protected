@@ -9,13 +9,16 @@ import re
 import subprocess
 import sys
 import tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import legacy_images
+import image_profiles as profiles
 
 
 def command(args):
     return subprocess.run(args, check=True)
 
 
-def draft(targets, trust='release/protected'):
+def draft(targets, trust='release/protected', legacy=()):
     """targets lists (assets, bundle, report, provider), one per exported bundle."""
     loader = importlib.machinery.SourceFileLoader('github_export', 'release/export-protected')
     spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -25,6 +28,7 @@ def draft(targets, trust='release/protected'):
     for directory, bundle, report, provider in targets:
         directory = Path(directory).resolve()
         manifest = exporter.verify(directory, bundle, report, provider, trust)
+        profiles.identity(manifest['form'], manifest['arch'], 'secure-boot')
         provenance = manifest['provenance']
         if provenance['commit'] != os.environ['GITHUB_SHA'] or provenance['repository'] != os.environ['GITHUB_REPOSITORY']:
             raise ValueError('release provenance differs from this workflow')
@@ -32,6 +36,13 @@ def draft(targets, trust='release/protected'):
             raise ValueError('invalid protected release serial')
         manifests.append(manifest)
         assets += sorted(directory.iterdir())
+    for directory in legacy:
+        manifest = legacy_images.verify(directory, Path(trust) / 'image.crt')
+        if manifest['provenance']['commit'] != os.environ['GITHUB_SHA'] or \
+                manifest['provenance']['repository'] != os.environ['GITHUB_REPOSITORY']:
+            raise ValueError('legacy release provenance differs from this workflow')
+        manifests.append(manifest)
+        assets += sorted(Path(directory).iterdir())
     if not manifests or len({m['provenance']['run'] for m in manifests}) != 1:
         raise ValueError('a release carries the bundles of one workflow run')
     serial = max(m['serial'] for m in manifests)
@@ -39,6 +50,10 @@ def draft(targets, trust='release/protected'):
     provenance = manifests[0]['provenance']
     lines = []
     for m in manifests:
+        if m.get('boot_profile') == 'legacy-boot':
+            lines.append('- `%s-%s-legacy-boot`, serial %s: boots without Secure Boot, TPM or IPE.' % (
+                m['form'], m['arch'], m['serial']))
+            continue
         prefix = '%s-%s-%s' % (m['form'], m['provider'], m['arch'])
         mirror = 'https://dist.werewolf-linux.org/boot/v1/%s/%s/%s/objects/%s' % (
             m['form'], m['provider'], m['arch'], m['descriptor'])
@@ -48,8 +63,10 @@ def draft(targets, trust='release/protected'):
              'Each boot/image manifest and detached signature is byte-identical to its R2 bundle. '
              'Each standalone qcow2 has the same disk contents as the authenticated compressed raw disk; '
              'its size and SHA-256 are covered by the target\'s downloads manifest and RSA/SHA-256 signature.\n\n'
-             'All fourteen exact-bundle lifecycle gates passed for every target here. '
-             'Enrollments still require the matching Secure Boot certificate, TPM and host permit service.\n\n'
+             'Secure-boot targets passed all fourteen exact-bundle lifecycle gates and require '
+             'the matching Secure Boot certificate, TPM and host permit service. Legacy-boot targets '
+             'passed independent-build comparison, integration and package-update tests, and exact-image UEFI/direct boots '
+             'without Secure Boot or TPM. Their signed manifests identify the boot profile.\n\n'
              'Verify each download manifest against the committed `release/protected/image.crt`, '
              'then check asset digests. GitHub build provenance attestations also cover every asset.\n') % (
                  provenance['commit'], provenance['run'], '\n'.join(lines))
@@ -68,8 +85,12 @@ if __name__ == '__main__':
     try:
         if len(sys.argv) != 2:
             raise ValueError('usage: github-protected EXPORTED_JSON')
+        listed = json.loads(Path(sys.argv[1]).read_text())
+        for target in listed:
+            profiles.identity(target['form'], target['arch'], target.get('boot_profile', 'secure-boot'))
         targets = [(t['assets'], t['bundle'], json.loads(Path(t['gates']).read_text()), t['provider'])
-                   for t in json.loads(Path(sys.argv[1]).read_text())]
-        draft(targets)
+                   for t in listed if t.get('boot_profile', 'secure-boot') == 'secure-boot']
+        legacy = [t['assets'] for t in listed if t.get('boot_profile') == 'legacy-boot']
+        draft(targets, legacy=legacy)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         sys.exit('github-protected: ' + str(error))

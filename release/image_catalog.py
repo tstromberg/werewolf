@@ -143,7 +143,7 @@ def read_index(certificate):
     return open_index(raw, certificate)
 
 
-def page(rows, title='Werewolf images'):
+def page(rows, title='Werewolf images', legacy_rows=()):
     body = ['<!doctype html><html lang="en"><meta charset="utf-8">',
             '<meta name="viewport" content="width=device-width,initial-scale=1">',
             '<title>' + html.escape(title) + '</title>',
@@ -151,7 +151,7 @@ def page(rows, title='Werewolf images'):
             'table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:.6rem;border-bottom:1px solid #bbb}'
             'a{color:#1265ac}small{display:block}code{overflow-wrap:anywhere}</style>',
             '<h1>' + html.escape(title) + '</h1>',
-            '<p>Every form is built twice with every protection: signed UEFI boot, IPE, a verified root '
+            '<p>Secure-boot images are built twice with every protection: signed UEFI boot, IPE, a verified root '
             'and TPM-anchored A/B updates. A target is published only when its exact bundle has passed '
             'all fourteen lifecycle gates; a failed build or gate keeps the previous release.</p>',
             '<p><code>howl run --with FORM</code> downloads, verifies and enrolls a published image. '
@@ -159,8 +159,9 @@ def page(rows, title='Werewolf images'):
             '<a href="https://github.com/werewolf-linux/werewolf/blob/main/docs/form-images.md">'
             'How images are built and verified</a>.</p>',
             '<p><a href="' + PUBLIC + '/index.html">All forms</a> · '
-            '<a href="' + PUBLIC + '/index.json">Signed JSON catalog</a></p>',
-            '<table><thead><tr><th>Form</th><th>Target</th><th>Latest published image</th>'
+            '<a href="' + PUBLIC + '/index.json">Signed secure catalog</a> · '
+            '<a href="' + PUBLIC + '/boot-profiles.json">Signed boot profile catalog</a></p>',
+            '<h2>Secure boot</h2><table><thead><tr><th>Form</th><th>Target</th><th>Latest published image</th>'
             '<th>Latest attempt</th></tr></thead><tbody>']
     for row in rows:
         validate(row)
@@ -184,4 +185,17 @@ def page(rows, title='Werewolf images'):
                     '<small>' + html.escape(row.get('summary', '')) + '</small>'
                     '<small><a href="' + html.escape(guide, quote=True) + '">Setup guide</a></small></td><td>' +
                     row['provider'] + '/' + row['arch'] + '</td><td>' + links + '</td><td>' + status + '</td></tr>')
-    return '\n'.join(body + ['</tbody></table></html>']) + '\n'
+    body += ['</tbody></table>', '<h2>Legacy boot</h2>',
+             '<p>These images boot without Secure Boot, TPM enrollment or IPE enforcement. '
+             'They retain sandboxing and verified roots. Download signatures authenticate the files; '
+             'they do not provide firmware authentication or TPM rollback protection.</p>']
+    for row in legacy_rows:
+        base = PUBLIC + '/' + row['object']
+        disk = row['files']['disk.qcow2']['asset']
+        manifest = row['form'] + '-' + row['arch'] + '-legacy-boot-downloads.json'
+        body.append('<p>' + html.escape(row['form'] + ' / ' + row['arch']) + ': '
+                    '<a href="' + html.escape(base + '/' + disk, quote=True) + '">legacy-boot qcow2</a> · '
+                    '<a href="' + html.escape(base + '/' + manifest, quote=True) + '">manifest</a> · '
+                    '<a href="' + html.escape(base + '/' + manifest + '.sig', quote=True) + '">signature</a> · ' +
+                    html.escape(row['serial']) + '</p>')
+    return '\n'.join(body + ['</html>']) + '\n'

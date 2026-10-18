@@ -1,6 +1,9 @@
-# The one image pipeline. Every form is built twice, with every protection,
-# for each provider of each architecture; the copies must match byte for byte
-# and the form's own tests must pass. A target is published only when its
+# The one image pipeline. minimal, prod-ssh and playground are built twice,
+# with explicit secure-boot and legacy-boot profiles. Secure targets retain
+# every protection and exact-bundle lifecycle gates; compatibility targets
+# boot their exact disk and direct image without Secure Boot or TPM.
+# The copies must match byte for byte and the form's own tests must pass.
+# A secure target is published only when its
 # exact bundle has passed the fourteen lifecycle gates on a runner that can
 # boot it: hosted KVM for qemu/x86_64; for arm64, the self-hosted runners
 # named by the WEREWOLF_ARM64_KVM_RUNNER (qemu) and WEREWOLF_LIMA_RUNNER
@@ -33,9 +36,9 @@ on:
         description: Publish one supported target, or rebuild the full catalog
         type: choice
         options:
-          - playground/qemu/x86_64
           - all
-        default: playground/qemu/x86_64
+          - playground/qemu/x86_64
+        default: all
       force:
         description: Rebuild and retest even when authenticated inputs are unchanged
         type: boolean
@@ -224,6 +227,70 @@ jobs:
             build/**/check/**/*.log
             build/**/check/*-native/results.json
 
+  legacy-build:
+    needs: [plan, resolve]
+    if: always() && !cancelled() && needs.plan.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        copy: [1, 2]
+        target: ${{ fromJSON(needs.plan.outputs.matrix).include }}
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}
+          path: snapshot
+      - run: sudo test/ci-setup
+      - run: make howl
+      - name: Build compatibility images from the shared package snapshot
+        run: python3 release/legacy-images build snapshot legacy-candidates
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: legacy-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.copy }}
+          path: legacy-candidates/
+          compression-level: 0
+
+  legacy-check:
+    needs: [plan, resolve, legacy-build]
+    if: always() && !cancelled() && needs.plan.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}
+          path: snapshot
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: legacy-${{ matrix.arch }}-${{ matrix.shard }}-*
+          path: copies
+      - run: sudo test/ci-setup
+      - run: make howl build/host/form
+      - name: Compare builds, run integration tests and boot exact legacy images
+        run: |
+          python3 release/legacy-images check snapshot \
+            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-1 \
+            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-2 legacy-verified
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: legacy-verified-${{ matrix.arch }}-${{ matrix.shard }}
+          path: legacy-verified/
+          compression-level: 0
+
   gate:
     needs: [plan, check]
     if: always() && !cancelled() && needs.plan.result == 'success'
@@ -282,7 +349,7 @@ jobs:
             build/lifecycle/result.json
 
   publish:
-    needs: [plan, resolve, build, check, gate]
+    needs: [plan, resolve, build, check, gate, legacy-check]
     if: always() && !cancelled() && needs.plan.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     environment: release
@@ -320,6 +387,10 @@ jobs:
         with:
           pattern: gated-*
           path: gated
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: legacy-verified-*
+          path: legacy-verified
       - name: Export signed downloads and release notes for every gated bundle
         id: export
         env:
@@ -329,7 +400,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           python3 release/with-protected-keys python3 release/form-images export \
-            snapshots verified gated release-assets exported.json
+            snapshots verified gated release-assets exported.json --legacy-verified legacy-verified
       - name: Create the GitHub release as a draft
         id: github
         if: steps.export.outputs.targets != '0'
