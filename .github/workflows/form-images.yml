@@ -1,4 +1,4 @@
-# The one image pipeline. Every supported form is built twice,
+# The one image pipeline. Only minimal, prod-ssh and playground are built twice,
 # with explicit secure-boot and legacy-boot profiles. Secure targets retain
 # every protection and exact-bundle lifecycle gates; compatibility targets
 # boot their exact disk and direct image without Secure Boot or TPM.
@@ -33,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Publish base images, the full catalog, or the recovery target
+        description: Publish the three selected images (base/all) or the recovery target
         type: choice
         options:
           - base
@@ -57,8 +57,6 @@ concurrency:
 env:
   FORM_IMAGES_TARGET: ${{ inputs.target || (github.event_name == 'schedule' && 'all' || 'base') }}
   PYTHONDONTWRITEBYTECODE: '1'
-  DOTNET_NOLOGO: '1'
-  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
 
 jobs:
   plan:
@@ -111,11 +109,6 @@ jobs:
         run: tools/checkout-packages
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - name: Install example compilers for the full catalog
-        if: env.FORM_IMAGES_TARGET == 'all'
-        run: |
-          command -v javac || sudo apt-get install -y default-jdk-headless
-          test/ci-compilers
       - run: make howl build/host/form
       - name: Resolve package, OCI, recipe environment and source inputs
         env:
@@ -159,11 +152,6 @@ jobs:
           path: snapshot
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - name: Install example compilers for the full catalog
-        if: env.FORM_IMAGES_TARGET == 'all'
-        run: |
-          command -v javac || sudo apt-get install -y default-jdk-headless
-          test/ci-compilers
       - run: make howl
       # No compiled-kernel or form output cache is restored: the copies must
       # independently produce identical bytes, including PE and slot signatures.
@@ -220,11 +208,6 @@ jobs:
           path: copies
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - name: Install example compilers for the full catalog
-        if: env.FORM_IMAGES_TARGET == 'all'
-        run: |
-          command -v javac || sudo apt-get install -y default-jdk-headless
-          test/ci-compilers
       - run: make howl
       - name: Require byte-identical builds and passing tests for this form and architecture
         env:

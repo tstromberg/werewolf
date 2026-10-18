@@ -70,7 +70,7 @@ def draft(targets, trust='release/protected', legacy=()):
         lines.append('- `%s`, serial %s: [R2 bundle](%s/boot.json), [package changes](%s/release-notes.html), evidence `%s-gates.json`, '
                      'manifest `%s-downloads.json`.' % (prefix, m['serial'], mirror, mirror, prefix, prefix))
     notes = ('Base images built from %s in [GitHub Actions](%s).\n\n%s\n\n'
-             'Changed base forms (`minimal`, `prod`, `prod-ssh`, `playground`) are attached here; service-form images and their signed manifests are in '
+             'Changed images (`minimal`, `prod-ssh`, `playground`) are attached here and listed in '
              '[the R2 catalog](https://dist.werewolf-linux.org/boot/v1/index.html). '
              'Each attached boot/image manifest and detached signature is byte-identical to its R2 bundle. '
              'Each standalone qcow2 has the same disk contents as the authenticated compressed raw disk; '

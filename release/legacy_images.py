@@ -318,6 +318,8 @@ def publish(exported, store, certificate='release/protected/image.crt'):
             if signed['format'] != 'werewolf-boot-profiles/1':
                 raise ValueError('invalid prior boot profile catalog')
             for row in signed['legacy_boot']:
+                if row['form'] not in profiles.FORMS:
+                    continue
                 profiles.identity(row['form'], row['arch'], row['boot_profile'])
                 rows[(row['form'], row['arch'])] = row
     for target in exported:
