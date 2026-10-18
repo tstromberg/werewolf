@@ -234,7 +234,7 @@ pub fn localBundle(
     const port = try @import("download.zig").permitPort(gpa);
     // Resolve the host socket before a cold kernel build. Every checkout and
     // provider shares its transport identity, independently of VM authorities.
-    _ = try sharedTls(io, gpa, steps, port);
+    _ = try sharedTls(io, gpa, steps, port, provider != .bhyve);
     const prerequisites = try @import("prerequisites.zig").resolve(io, gpa, steps, arch, why);
     const boot = try secureboot.signer(io, gpa, steps, try howl.keysDir(
         io,
@@ -600,9 +600,12 @@ fn sharedTls(
     gpa: Allocator,
     steps: *progress.Steps,
     port: u16,
+    private: bool,
 ) !SharedTls {
     const cwd = try std.process.currentPathAlloc(io, gpa);
-    const root = try gpa.print("{s}/permit-service", .{try howl.dataDir(io, gpa)});
+    const root = try gpa.print("{s}/permit-service{s}", .{
+        try howl.dataDir(io, gpa), if (private) "/private" else "",
+    });
     try Dir.cwd().createDirPath(io, root);
     const helper = @import("files").local_publisher;
     var digest: [32]u8 = undefined;
@@ -627,9 +630,11 @@ fn sharedTls(
         }
     }
     const dir = try gpa.print("{s}/{d}", .{ root, port });
-    if (!(try steps.exec(&.{.{ .argv = &.{
-        "python3", program, "prepare-service", dir, cwd,
-    } }}, .{})).ok) return error.PermitServiceStateFailed;
+    const prepare = try std.mem.concat(gpa, []const u8, &.{
+        &.{ "python3", program, "prepare-service", dir, cwd },
+        if (private) &.{"--private"} else &.{},
+    });
+    if (!(try steps.exec(&.{.{ .argv = prepare }}, .{})).ok) return error.PermitServiceStateFailed;
     try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{});
     const guard = try Dir.cwd().createFile(
         io,
@@ -687,6 +692,7 @@ fn sharedTls(
             .program = program,
             .token = &std.fmt.bytesToHex(token, .lower),
             .refresh_seconds = 0,
+            .private = private,
         }, .{}));
     }
     return .{ .directory = dir, .key = key, .certificate = cert };
@@ -731,7 +737,7 @@ fn importImage(
         code,
         owner,
     );
-    const tls = try sharedTls(io, gpa, steps, m.permit_port);
+    const tls = try sharedTls(io, gpa, steps, m.permit_port, o.on.? != .bhyve);
     const slot = try gpa.print("{s}/initial-slot", .{authority});
     try Dir.cwd().createDir(io, slot, .fromMode(0o700));
     try enrollment.durable(io, try gpa.print("{s}/release.id", .{slot}), &verified.release);
@@ -1344,7 +1350,7 @@ pub fn create(
         var env = try howl.environ.clone(gpa);
         try env.put(
             "QEMU_SYSTEM_AARCH64",
-            try qemuCommand(gpa, try gpa.print("{s}/vars.fd", .{at})),
+            try permitQemuCommand(io, gpa, profile, at),
         );
         var starter = try std.process.spawn(io, .{
             .argv = &.{ "limactl", "start", "--tty=false", name },
@@ -1919,7 +1925,7 @@ fn startQemu(
         .owner = true,
     }, qemu.accel(io));
     if (!(try steps.exec(
-        &.{.{ .argv = args }},
+        &.{.{ .argv = try permitForwarding(gpa, profile, at, args) }},
         .{},
     )).ok) return steps.fail("secured QEMU did not start");
     errdefer {
@@ -1985,6 +1991,45 @@ pub fn qemuCommand(gpa: Allocator, vars: []const u8) ![]const u8 {
     const argument = try gpa.print("if=pflash,format=raw,unit=1,readonly=on,file={s}", .{escaped});
     const quoted = try std.mem.replaceOwned(u8, gpa, argument, "'", "'\\''");
     return gpa.print("qemu-system-aarch64 -drive '{s}'", .{quoted});
+}
+
+fn permitForwarding(
+    gpa: Allocator,
+    profile: Profile,
+    at: []const u8,
+    command: []const []const u8,
+) ![]const []const u8 {
+    const host = profile.spec.permit_host orelse return command;
+    return std.mem.concat(gpa, []const u8, &.{ &.{
+        "python3",
+        try gpa.print("{s}/authority/local-publisher", .{at}),
+        "qemu",
+        try gpa.print("{s}/authority/publisher.json", .{at}),
+        host,
+        try gpa.print("{d}", .{profile.spec.permit_port.?}),
+    }, command });
+}
+
+fn permitQemuCommand(io: Io, gpa: Allocator, profile: Profile, at: []const u8) ![]const u8 {
+    const vars = try std.mem.replaceOwned(u8, gpa, try gpa.print("{s}/vars.fd", .{at}), ",", ",,");
+    const args = try permitForwarding(gpa, profile, at, &.{
+        "qemu-system-aarch64",                                                      "-drive",
+        try gpa.print("if=pflash,format=raw,unit=1,readonly=on,file={s}", .{vars}),
+    });
+    var command: std.ArrayList(u8) = .empty;
+    for (args, 0..) |arg, i| {
+        if (i > 0) try command.append(gpa, ' ');
+        try command.append(gpa, '\'');
+        try command.appendSlice(gpa, try std.mem.replaceOwned(u8, gpa, arg, "'", "'\\''"));
+        try command.append(gpa, '\'');
+    }
+    // Lima probes accelerators using only the executable in QEMU_SYSTEM_*.
+    // Keep the fixed arguments inside an executable wrapper for those probes.
+    const wrapper = try gpa.print("{s}/qemu-private", .{at});
+    const file = try Dir.cwd().createFile(io, wrapper, .{ .permissions = .fromMode(0o700) });
+    defer file.close(io);
+    try file.writeStreamingAll(io, try gpa.print("#!/bin/sh\nexec {s} \"$@\"\n", .{command.items}));
+    return gpa.print("'{s}'", .{try std.mem.replaceOwned(u8, gpa, wrapper, "'", "'\\''")});
 }
 
 fn template(

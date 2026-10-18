@@ -79,6 +79,10 @@ pub fn main(init: std.process.Init) void {
     environ = init.environ_map;
     const args = init.minimal.args.toSlice(gpa) catch fatal(io, "out of memory", .{});
     if (args.len < 2) fatal(io, "{s}", .{usage});
+    if (std.mem.eql(u8, args[1], "_permit-bridge")) {
+        @import("permit-transport.zig").command(io, gpa, args[2..]) catch std.process.exit(1);
+        return;
+    }
     const verb = std.meta.stringToEnum(
         enum {
             build,

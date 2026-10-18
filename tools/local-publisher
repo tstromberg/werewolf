@@ -11,8 +11,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import socket
+import socketserver
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +28,83 @@ TAG = b'werewolf.boot/2\0'
 FILES = {'root.erofs', 'vmlinuz', 'stage0.zst', 'cmdline', 'uki.efi'}
 MAX_RECORDS = 4096
 MAX_MACHINES = 64
+
+
+def service_socket(config, create=False):
+    authority = Path(config['authority'])
+    if not authority.is_absolute():
+        raise ValueError('private publisher needs an absolute authority path')
+    digest = hashlib.sha256(os.fsencode(authority)).hexdigest()[:32]
+    directory = Path('/tmp') / ('ww-permit-%d-%s' % (os.getuid(), digest))
+    if create:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError('unsafe private publisher socket directory')
+    path = directory / 'service.sock'
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return path
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError('unsafe private publisher socket')
+    return path
+
+
+class PrivateConnection(http.client.HTTPSConnection):
+    def __init__(self, config, context):
+        super().__init__('127.0.0.1', context=context, timeout=2)
+        self.endpoint = service_socket(config)
+
+    def connect(self):
+        stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            stream.settimeout(self.timeout)
+            stream.connect(str(self.endpoint))
+            self.sock = self._context.wrap_socket(stream, server_hostname=self.host)
+        except BaseException:
+            stream.close()
+            raise
+
+
+def transport_config(path):
+    config = json.loads(Path(path).read_text())
+    if config.get('service'):
+        config = json.loads((Path(config['service']) / 'publisher.json').read_text())
+    return config
+
+
+def forward(args, path, host, port):
+    machine = json.loads(Path(path).read_text())
+    config = transport_config(path)
+    if not config.get('private'):
+        return args
+    if host not in ('10.0.2.2', '192.168.5.2') or not 1 <= port <= 65535 or config['port'] != port:
+        raise ValueError('undeclared private publisher endpoint')
+    if any(arg in ('-version', '--version', '-help', '--help') for arg in args) or any(
+            args[i:i + 2] == ['-accel', 'help'] for i in range(len(args) - 1)):
+        return args
+    network = [i + 1 for i, arg in enumerate(args[:-1])
+               if arg == '-netdev' and args[i + 1].startswith('user,')]
+    if len(network) != 1 or 'guestfwd=' in args[network[0]]:
+        raise ValueError('private publisher requires one unambiguous user network')
+    if not Path(machine['howl']).is_absolute():
+        raise ValueError('private publisher relay must be an absolute executable')
+    command = shlex.join([machine['howl'], '_permit-bridge', str(service_socket(config))])
+    if len(command.encode()) > 900:
+        raise ValueError('private publisher relay command exceeds QEMU forwarding limit')
+    result = list(args)
+    # Older libslirp rejects guestfwd on its own host address. Reserve that
+    # address for the signed endpoint and move slirp's host alias within the
+    # same subnet. The guestfwd address still answers the guest's gateway ARP.
+    netdev = result[network[0]]
+    aliases = re.findall(r',host=([^,]*)', netdev)
+    if aliases and aliases != [host]:
+        raise ValueError('unexpected private publisher host alias')
+    result[network[0]] = re.sub(r',host=[^,]*', '', netdev)
+    result[network[0]] += ',host=' + host.rsplit('.', 1)[0] + '.254'
+    result[network[0]] += ',guestfwd=tcp:%s:%d-cmd:%s' % (host, port, command.replace(',', ',,'))
+    return result
 
 
 def atomic(path, data):
@@ -196,12 +276,36 @@ class Server(http.server.HTTPServer):
         self.config = config
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         self.capacity = threading.BoundedSemaphore(8)
-        super().__init__(('127.0.0.1', config['port']), Handler)
+        if config.get('private'):
+            self.address_family = socket.AF_UNIX
+            endpoint = service_socket(config, create=True)
+            if endpoint.exists():
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    try:
+                        probe.connect(str(endpoint))
+                    except ConnectionRefusedError:
+                        endpoint.unlink()
+                    else:
+                        raise RuntimeError('private publisher socket is already occupied')
+            super().__init__(str(endpoint), Handler)
+            endpoint.chmod(0o600)
+            self.private_endpoint = endpoint
+            self.private_inode = endpoint.lstat().st_ino
+        else:
+            super().__init__(('127.0.0.1', config['port']), Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(config['certificate'], config['key'])
         # Defer TLS handshakes to bounded workers; a silent client cannot block accept.
         self.socket = context.wrap_socket(self.socket, server_side=True, do_handshake_on_connect=False)
+
+    def server_bind(self):
+        if self.address_family == socket.AF_UNIX:
+            socketserver.TCPServer.server_bind(self)
+            self.server_name = 'localhost'
+            self.server_port = self.config['port']
+        else:
+            super().server_bind()
 
     def process_request(self, request, client_address):
         if not self.capacity.acquire(blocking=False):
@@ -223,6 +327,13 @@ class Server(http.server.HTTPServer):
     def server_close(self):
         super().server_close()
         self.pool.shutdown(wait=True)
+        if hasattr(self, 'private_endpoint'):
+            try:
+                info = self.private_endpoint.lstat()
+                if stat.S_ISSOCK(info.st_mode) and info.st_ino == self.private_inode:
+                    self.private_endpoint.unlink()
+            except FileNotFoundError:
+                pass
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -290,7 +401,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def control(config, stop=False):
     context = ssl.create_default_context(cafile=config['certificate'])
-    connection = http.client.HTTPSConnection('127.0.0.1', config['port'], context=context, timeout=2)
+    connection = PrivateConnection(config, context) if config.get('private') else \
+        http.client.HTTPSConnection('127.0.0.1', config['port'], context=context, timeout=2)
     try:
         connection.request('POST' if stop else 'GET', '/_stop' if stop else '/_health',
                            headers={'X-Werewolf-Control': config['token']})
@@ -349,7 +461,7 @@ def reload_service(config, path):
     run(program + ['start', path])
 
 
-def prepare_service(directory, checkout):
+def prepare_service(directory, checkout, private=False):
     """One user-owned identity per host socket, shared by all providers/checkouts.
 
     Adopt an authenticated legacy identity without changing certificates or
@@ -368,7 +480,9 @@ def prepare_service(directory, checkout):
         if directory.exists():
             config = service_config(directory, port)
             active = config is not None and healthy(config)
-            if listening(port) and not active:
+            if private and config and not config.get('private'):
+                raise ValueError('private publisher namespace contains a TCP identity')
+            if not private and listening(port) and not active:
                 raise RuntimeError('host publisher port %d has a listener with a different TLS or control identity' % port)
             program = str(Path(__file__).resolve())
             if config and config.get('program') != program:
@@ -380,6 +494,9 @@ def prepare_service(directory, checkout):
                     atomic(directory / 'publisher.json', json.dumps(config).encode())
                     if active:
                         reload_service(config, directory / 'publisher.json')
+            return
+        if private:
+            directory.mkdir(mode=0o700)
             return
         candidates = []
         for root in worktrees(checkout):
@@ -422,16 +539,21 @@ def prepare_service(directory, checkout):
 
 
 def main():
+    if len(sys.argv) >= 7 and sys.argv[1] == 'qemu':
+        _, _, path, host, port, *command = sys.argv
+        command = forward(command, path, host, int(port))
+        os.execvp(command[0], command)
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['start', 'serve', 'stop', 'publish', 'prepare-service'])
     parser.add_argument('config', type=Path)
     parser.add_argument('source', type=Path, nargs='?')
+    parser.add_argument('--private', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     if args.action == 'prepare-service':
         if args.source is None:
             parser.error('prepare-service needs the current checkout directory')
-        prepare_service(args.config, args.source)
+        prepare_service(args.config, args.source, args.private)
         return
     config = json.loads(args.config.read_text())
     if args.action == 'publish':
@@ -493,7 +615,7 @@ def main():
         return
     if healthy(config):
         return
-    if listening(config['port']):
+    if not config.get('private') and listening(config['port']):
         raise RuntimeError('host publisher port %d has a listener with a different TLS or control identity' % config['port'])
     with (Path(config['authority']) / 'publisher.log').open('ab') as log:
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve', str(args.config.resolve())],
