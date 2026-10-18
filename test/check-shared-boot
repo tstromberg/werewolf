@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Boot identical vendor artifacts in independent Lima enrollments, without vendor keys."""
 import hashlib
-import http.client
 import json
 import os
 from pathlib import Path
 import secrets
 import shutil
 import socket
-import ssl
 import subprocess
 import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
+from publisher_transport import connection as publisher_connection
 
 howl, kernel, policy_key, policy_cert, stub, output = sys.argv[1:]
 howl, kernel, policy_key, policy_cert, stub = [str(Path(p).resolve())
@@ -38,7 +37,7 @@ with socket.socket() as probe:
     probe.bind(('127.0.0.1', 0))
     port = probe.getsockname()[1]
 channel = 'https://192.168.5.2:%d/playground' % port
-service = work / 'host-data/howl/permit-service' / str(port)
+service = work / 'host-data/howl/permit-service/private' / str(port)
 commands = work / 'commands.jsonl'
 commands.touch()
 wrappers = work / 'bin'
@@ -180,8 +179,7 @@ def update(name, label, previous):
 
 
 def shared_head(config):
-    connection = http.client.HTTPSConnection('127.0.0.1', port, timeout=10,
-        context=ssl.create_default_context(cafile=config['certificate']))
+    connection = publisher_connection(config)
     try:
         connection.request('GET', urlsplit(channel).path + '/aarch64/latest.json')
         response = connection.getresponse()
