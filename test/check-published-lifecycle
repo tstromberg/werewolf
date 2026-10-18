@@ -431,7 +431,11 @@ try:
         # updater readiness, before the keeper can commit the exact candidate.
         until = time.monotonic() + 180
         while True:
-            candidate = owner(names[0], 'status', 'trial-ready', check=False, timeout=15)
+            try:
+                candidate = owner(names[0], 'status', 'trial-ready', check=False, timeout=15)
+            except subprocess.TimeoutExpired:
+                # The port can exist before the new boot's updater is ready.
+                candidate = None
             if candidate and candidate['ready'] and releases[2] in candidate['cmdline']:
                 if candidate['committed']:
                     raise RuntimeError('trial committed before the disk fault was injected')
