@@ -301,6 +301,8 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/wordpress/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/opensearch/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/mediawiki/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/bugsink/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/cron/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
@@ -645,7 +647,7 @@ check-one:
 check-posture: | _check-shared
 	@$(CHECK_MAKE) FORM=minimal CHECK_NAME=posture FORM_CHECKS=test/checks-posture _check-form
 
-$(addprefix check-,$(filter-out $(NATIVE_TEST_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
+$(addprefix check-,$(filter-out bastion people $(NATIVE_TEST_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
 
 _check-legacy-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)

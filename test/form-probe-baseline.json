@@ -1181,6 +1181,16 @@
         "test-mediawiki/mw-upload-pdf",
         "test-mediawiki/mw-pdf-kept"
       ]
+    },
+    "bugsink": {
+      "bs-project": [
+        "test-bugsink-project/bs-project",
+        "test-bugsink-project/bs-project-kept"
+      ],
+      "bs-event": [
+        "test-bugsink/bs-event",
+        "test-bugsink/bs-event-kept"
+      ]
     }
   }
 }

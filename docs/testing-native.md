@@ -72,12 +72,12 @@ case on failure; independent cases continue. Name a step to capture its response
 Scalar and array assertions mean equality. Matcher maps support `equals`, `contains`,
 `absent`, `one_of`, `min`/`max`, regex `matches`/`not_matches`, `count` and `type`.
 `contains_all`/`contains_none` require each match/refusal; regexes use POSIX ERE.
+`^`/`$` anchor the whole text; YAML `"\n"` supplies a literal newline.
 For text, `occurrences: {literal: 3}` counts exact, non-overlapping occurrences.
 Use `equals` to compare a literal object containing a matcher key. All comparisons
 in a map must hold. JSON assertions map JSON Pointers to comparisons; missing fields
 and malformed JSON fail. Response header names use lowercase; `server: null` requires
-that header to be absent. File owners accept
-names or numeric IDs; quote octal mode strings, for example `'640'`.
+that header to be absent. File owners accept names or IDs; quote modes such as `'640'`.
 `readable` attempts a nonblocking read-open as the suite's user. Only permission
 denial proves `false`; missing paths and other I/O errors fail. Check existence and
 ownership separately as root when a protected parent hides metadata.
@@ -90,6 +90,7 @@ Service assertions cover every member of the service cgroup, not just its first 
 `user` checks the account; `uid: {min: 65536}` also checks its numeric ID range.
 Capabilities accept Linux names such as `[net_raw, net_admin]`. Groups accept names
 or IDs, either an exact list or `contains`/`absent`; `pids_max` is a string.
+`seccomp` is `none`, `strict` or `filter`, rather than a numeric kernel value.
 
 ## HTTP workflows
 
@@ -149,12 +150,13 @@ expansion occurs. List extra client packages under the top-level `packages`.
 PostgreSQL's SQL cases use the real `psql`, its stdin and `PGAPPNAME` for the run ID;
 its refusal suite runs as `nobody`. No su, setuid helper or injected shell is needed.
 
-For custom code, a suite declares `source: driver.zig`, `mode`, `user`, `policy` and
-`cases: {seed: [...], verify: [...]}` instead of probe cases. Sources sit beside the
-plan and use `test/native/driver.zig` for context and result records. PostgreSQL keeps
-native descriptor-policy attacks; Greenbone retains its GMP/OSP protocol clients.
-Custom HTTP clients use `driver.fetch.Client`. Native suites can declare `fixtures`.
-Leashed clients read `/run/svc/SUITE/`; root reads the declared `/run/config/` paths.
+For custom code, declare `source: driver.zig`, `mode`, `user`, `policy`,
+`cases: {seed: [...], verify: [...]}` and optional `fixtures`. Sources sit beside
+the plan. Use `test/native/driver.zig` for results and `driver.fetch.Client` for HTTP.
+PostgreSQL keeps descriptor attacks; Greenbone keeps GMP/OSP protocol clients.
+Leashed clients read `/run/svc/SUITE/`; root reads declared `/run/config/` paths.
+Native setup can save generated IDs as JSON on `/data`; YAML `file` steps capture
+them. [Bugsink](../forms/bugsink/test/tests.yaml) reuses project IDs across reboots.
 A form may use `tests.yaml` or `native.json`, never both.
 
 ## Migration and evidence
@@ -164,10 +166,8 @@ run-specific value; verify reads it before setup can recreate it. Keep case name
 stable or record split/renamed replacements in `test/form-probe-baseline.json`.
 `python3 test/form-coverage --probes` reports progress against 722 baseline cases;
 `--mapping` shows their current implementations. Native code does not count as YAML.
-Host attacks and supplied-code fixture runs are outside that inventory; keep their
-gates until their replacements pass too.
-Jellyfin retains `legacy: true` for inherited SSH host attacks after its guest port.
-The 80% target remains a migration target, not a claim about the initial ports.
+Keep host attacks and supplied-code gates until their replacements pass too.
+Jellyfin retains `legacy: true` for SSH host tests. The 80% target is not yet met.
 
 The harness compares production policies, accounts and runtime bytes before boot,
 then records kernel, image, plan and log hashes. Clean tests add no BusyBox, shell
