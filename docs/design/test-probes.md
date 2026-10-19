@@ -20,12 +20,13 @@ and client checks dominate. Native ports duplicate HTTP code; failures lack diag
 - Replacing VM orchestration, production acceptance or specialized protocol clients.
 
 ## Detailed design
-`forms/FORM/test/tests.yaml` replaces authoring `native.json`. The host validates it
-and generates the existing immutable launch plan plus typed probe data. Reject duplicate
-keys, unknown fields, tags, aliases, ambiguous scalars and unresolved references.
-The guest parses no YAML. A root runner with test-only grants runs probes; suites can
-select a user, groups and leash policy. One plan defines cases/steps or native sources.
-Reject old/new plans together. YAML and Zig share probes; cache builds per architecture.
+`forms/FORM/test/tests.yaml` replaces `native.json`; the host validates it and emits
+the existing launch plan and typed JSON. Reject duplicate keys, unknown fields,
+tags, aliases, ambiguous scalars and unresolved references. The guest parses no YAML.
+Suites select users, groups and policies for the root runner. A top-level `timeout`
+bounds each phase: default `300s`, maximum `1800s`; it also bounds SSH iteration.
+Read-only readiness suites precede restarts; application assertions follow.
+Reject old/new plans together. Cache shared probes/native drivers per architecture.
 
 | Probe | Contract and examples |
 | --- | --- |
@@ -33,7 +34,7 @@ Reject old/new plans together. YAML and Zig share probes; cache builds per archi
 | `file` | Content, type, owner, mode, size, links, entries; config and data. |
 | `exec` | Declared client path + argv, stdin, env, exit/output; psql, LDAP, Valkey. |
 | `service` | Process identities, caps, seccomp, cgroup limits and compiled connect rules. |
-| `listeners` | Expected TCP/UDP addresses and ports, IPv4/IPv6; detect extra listeners. |
+| `listeners` | TCP/UDP address sets, optionally scoped to one port; reject extras. |
 | `mount` | Filesystem type, source and required/forbidden mount flags. |
 
 `fetch` uses pinned test-only libcurl for TLS, framing, compression and HTTP/2/trailers.
@@ -64,8 +65,8 @@ steps:
 ```
 
 Each case is an ordered workflow; steps reference prior responses using typed selectors.
-Missing/ambiguous captures fail; sessions and captures stay within a case/phase.
-Allow cookies, CSRF/token capture and read-only polling; use Zig for branching or
+Missing/ambiguous captures fail; `regex` selects one nonempty group from one match.
+Sessions and captures stay within a case/phase. Use Zig for branching or
 computation. No loops or functions. PostgreSQL uses `psql`; expose a built-in run ID.
 The host retains run ID and disks for reboot; verify reads state before setup writes.
 Use existing native drivers for Greenbone GMP/OSP, inference, WebSockets, MQTT/NATS
@@ -73,9 +74,8 @@ concurrency, malformed/fragmented packets and security attacks needing custom fi
 Host drivers retain SSH/SFTP/Git, config rotation, power cuts and protected updates.
 Console checks and app fixtures share the result contract; test empty carriers too.
 
-Track case mappings in `test/form-coverage`, excluding custom code from the 80% target.
-Port fetch/file, then system/client checks. Test nginx, Gatus, PostgreSQL, Paperless and
-Greenbone on both architectures/reboot; delete legacy dispatch only after full parity.
+Track every case in `test/form-coverage`; custom code does not count toward 80%.
+Delete legacy dispatch after full parity on both architectures and reboot.
 
 ## Drawbacks
 YAML/libcurl add dependencies; root can mask access bugs. Keep complex cases in Zig.
@@ -93,7 +93,7 @@ Refusals must reach the intended control. No su/setuid or global enforcement cha
 Clean tests add no BusyBox/shell/SSH; iteration uses SSH. Releases omit test payloads.
 
 ## Reliability Considerations
-Bound output and time; `await` polls only read-only readiness/completion predicates.
+Bound time: `timeout` limits one fetch/exec; `await` polls only read-only predicates.
 Mutations run once; timeouts never prove refusal. Kill/reap timed-out children.
 Report source line, operation/input, got/want and diffs; redact secrets and captures.
 Stop dependent steps on failure; continue independent cases. Blocked cases cannot pass.

@@ -1,0 +1,100 @@
+version: 1
+packages:
+  - drill
+suites:
+  - name: blocky
+    cases:
+      - name: blocky-user
+        steps:
+          - service: blocky
+            expect:
+              user: _oci-blocky
+              uid:
+                min: 65536
+              capabilities:
+                - net_bind_service
+              no_new_privileges: true
+            await: 60s
+      - name: blocky-tls-only
+        steps:
+          - service: blocky
+            expect:
+              user: _oci-blocky
+              connect_rules:
+                - tcp/443 public
+                - tcp/853 public
+      - name: blocky-settings
+        steps:
+          - file: /run/svc/blocky/config.yml
+            expect:
+              json:
+                /upstreams/groups/default:
+                  - tcp-tls:dns.quad9.net
+                /blocking/denylists/ads:
+                  - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+              body:
+                absent: 'one.one.one.one"]'
+      - name: blocky-strangers
+        steps:
+          - file: /run/svc/blocky/config.yml
+            expect:
+              json:
+                /blocking/clientGroupsBlock/default:
+                  - strangers
+                /blocking/denylists/strangers:
+                  - "/.*/\n"
+              body:
+                not_matches: 0\.0\.0\.0/0|::/0
+  - name: blocky-dns
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: blocky-resolves
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - example.org
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)[1-9][0-9]*(\\.[0-9]+){3}(\n|$)"
+            timeout: 5s
+            await: 60s
+  - name: blocky-blocklist
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: blocky-blocks
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - ad.doubleclick.net
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "0.0.0.0\n"
+            timeout: 5s
+            await: 90s
+  - name: blocky-source-port
+    source: driver.zig
+    mode: squatter
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc inet unix connect exec
+      run:
+        - /usr/bin/sv
+        - /usr/bin/drill
+    cases:
+      seed:
+        - blocky-squatter
+      verify:
+        - blocky-squatter

@@ -1,6 +1,0 @@
-# Ping, write and read through MongoDB's actual wire protocol.
-ok  mongodb-works  i=0; until python3 /usr/share/werewolf-mongodb/probe.py; do i=$((i + 1)); [ $i -le 60 ] || exit 1; sleep 1; done
-ok  mongodb-local  netstat -ltn | awk '$4 ~ /:27017$/ { n++; if ($4 !~ /^127\.0\.0\.1:/) bad = 1 } END { exit !(n && !bad) }'
-ok  mongodb-user   p=$(pidof mongod); [ -n "$p" ] && ! grep -q '^Uid:[[:space:]]*0[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  mongodb-data   [ -f /data/svc/mongodb/WiredTiger ] && [ "$(stat -c %a /data/svc/mongodb)" = 700 ]
-ok  mongodb-no-javascript python3 /usr/share/werewolf-mongodb/probe.py --javascript-refused

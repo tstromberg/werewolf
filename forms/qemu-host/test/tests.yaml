@@ -1,0 +1,214 @@
+version: 1
+suites:
+  - name: qemu-host
+    fixtures:
+      source: /run/config/tests/qemu-source
+    policy:
+      run:
+        - /usr/bin/qemu-img
+        - /usr/bin/qemu-system-aarch64
+        - /usr/bin/qemu-system-x86_64
+    cases:
+      - name: qemu-disk
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - create
+                - -f
+                - qcow2
+                - /data/qemu-check-created.qcow2
+                - 1M
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - info
+                - --output=json
+                - /data/qemu-check-created.qcow2
+            expect:
+              exit: 0
+              json:
+                /format: qcow2
+                /virtual-size: 1048576
+            timeout: 20s
+      - name: qemu-roundtrip
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - convert
+                - -f
+                - raw
+                - -O
+                - qcow2
+                - /run/config/tests/qemu-source
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - convert
+                - -f
+                - qcow2
+                - -O
+                - raw
+                - /data/qemu-check-copied.qcow2
+                - /data/qemu-check-returned.raw
+            expect:
+              exit: 0
+            timeout: 20s
+          - file: /data/qemu-check-returned.raw
+            expect:
+              type: file
+              size: 1048576
+              body:
+                fixture: source
+                raw: true
+      - name: qemu-snapshot
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - snapshot
+                - -c
+                - integration
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - snapshot
+                - -l
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+              stdout:
+                contains: integration
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - snapshot
+                - -d
+                - integration
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - snapshot
+                - -l
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+              stdout:
+                not_matches: integration
+            timeout: 20s
+      - name: qemu-resize
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - resize
+                - /data/qemu-check-copied.qcow2
+                - 2M
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - info
+                - --output=json
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+              json:
+                /virtual-size: 2097152
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - compare
+                - /run/config/tests/qemu-source
+                - /data/qemu-check-copied.qcow2
+            expect:
+              exit: 0
+            timeout: 20s
+      - name: qemu-corrupt
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-img
+                - check
+                - -f
+                - qcow2
+                - /run/config/tests/qemu-corrupt
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Nn]ot in qcow2 format'
+            timeout: 20s
+      - name: qemu-no-jit
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/qemu-system-aarch64
+                - -machine
+                - virt
+                - -cpu
+                - cortex-a57
+                - -accel
+                - tcg
+                - -m
+                - '64'
+                - -nodefaults
+                - -no-user-config
+                - -display
+                - none
+                - -monitor
+                - none
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: 'mprotect of jit buffer: Permission denied|qemu_mprotect__osdep:
+                  mprotect failed: Permission denied'
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/qemu-system-x86_64
+                - -machine
+                - q35
+                - -cpu
+                - qemu64
+                - -accel
+                - tcg
+                - -m
+                - '64'
+                - -nodefaults
+                - -no-user-config
+                - -display
+                - none
+                - -monitor
+                - none
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: 'mprotect of jit buffer: Permission denied|qemu_mprotect__osdep:
+                  mprotect failed: Permission denied'
+            timeout: 20s

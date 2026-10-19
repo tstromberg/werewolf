@@ -2,6 +2,28 @@ version: 1
 packages:
   - postgresql-17-client
 suites:
+  - name: greenbone-ca
+    readiness: true
+    cases:
+      - name: greenbone-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: greenbone-ready
+    readiness: true
+    cases:
+      - name: greenbone-login
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                matches: id="(app|root)"
+            await: 170s
   - name: test-greenbone-database
     source: driver.zig
     mode: database
@@ -155,4 +177,118 @@ suites:
       connect:
         - /run/svc/gvmd/run/gvmd.sock
       run: []
-legacy: true
+  - name: greenbone-platform
+    cases:
+      - name: greenbone-gvmd
+        steps:
+          - service: gvmd
+            expect:
+              user: _oci-gvmd
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: greenbone-bind
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 9392
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 9392
+          - file: /run/svc/gvmd/run/gvmd.sock
+            expect:
+              type: socket
+              mode: '660'
+              gid: _oci-gvmd
+          - file: /run/svc/gsad/run/manager.sock
+            expect:
+              type: socket
+              mode: '660'
+      - name: greenbone-link
+        steps:
+          - service: gvm-link
+            expect:
+              user: _glink
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+              groups:
+                contains: _oci-gvmd
+      - name: greenbone-published
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                username: admin
+                password: admin
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 401
+                  - 403
+      - name: greenbone-scanner
+        steps:
+          - service: openvas
+            expect:
+              user: _oci-openvas
+              uid:
+                min: 65536
+              capabilities:
+                - net_raw
+                - net_admin
+              no_new_privileges: true
+      - name: greenbone-feed
+        steps:
+          - service: feed
+            expect:
+              user: _oci-feed
+              capabilities: []
+      - name: greenbone-posture
+        steps:
+          - file: /usr/share/werewolf/weaknesses
+            expect:
+              body:
+                matches: '(^|
+
+                  )network-fence-unbypassable '
+      - name: greenbone-alone
+        steps:
+          - service: gsad
+            expect:
+              groups:
+                absent: _oci-feed
+  - name: greenbone-assets
+    source: web.zig
+    mode: assets
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - greenbone-assets
+      verify:
+        - greenbone-assets
+  - name: greenbone-isolation
+    source: web.zig
+    mode: isolation
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - greenbone-cache
+        - greenbone-caps
+        - greenbone-redis
+        - greenbone-feed-command
+      verify:
+        - greenbone-cache
+        - greenbone-caps
+        - greenbone-redis
+        - greenbone-feed-command

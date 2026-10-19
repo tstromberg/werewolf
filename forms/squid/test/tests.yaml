@@ -1,0 +1,301 @@
+version: 1
+packages:
+  - libcurl-openssl4
+suites:
+  - name: squid-ready
+    readiness: true
+    policy:
+      run:
+        - /usr/lib/werewolf/test-squid-policy
+    cases:
+      - name: squid-ready
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - evil.example.net:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+            await: 60s
+  - name: squid
+    policy:
+      run:
+        - /usr/lib/werewolf/test-squid-policy
+    cases:
+      - name: squid-up
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - evil.example.net:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+          - file: /run/svc/squid/domains
+            expect:
+              body:
+                matches: "(^|\n)[.]example[.]com(\n|$)"
+          - file: /run/svc/squid/networks
+            expect:
+              body:
+                matches: "(^|\n)127[.]0[.]0[.]2/32(\n|$)"
+      - name: squid-allows
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - www.example.com:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 (200|503) '
+                not_matches: ERR_ACCESS_DENIED
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - www.example.com:443
+                - 127.0.0.2
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 (200|503) '
+                not_matches: ERR_ACCESS_DENIED
+            timeout: 15s
+      - name: squid-no-version
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - evil.example.net:443
+                - 127.0.0.1
+                - body
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+                not_matches: '[sS][qQ][uU][iI][dD]/[0-9]'
+            timeout: 15s
+      - name: squid-inward
+        steps:
+          - service: squid
+            expect:
+              connect_rules:
+                - tcp/443 public
+                - tcp/53
+                - udp/53
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - localhost:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 503 '
+                contains: 'X-Squid-Error: ERR_CONNECT_FAIL'
+            timeout: 15s
+      - name: squid-config
+        steps:
+          - file: /etc/squid.conf
+            expect:
+              body:
+                matches: "(^|\n)cache deny all(\n|$)"
+                not_matches: "(^|\n)cache_dir"
+          - file: /etc/squid.conf
+            expect:
+              body:
+                matches: "(^|\n)via off(\n|$)"
+          - file: /etc/squid.conf
+            expect:
+              body:
+                matches: "(^|\n)forwarded_for delete(\n|$)"
+      - name: squid-listeners
+        steps:
+          - listeners: tcp
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 0.0.0.0
+                  port: 3128
+      - name: squid-unlisted
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - evil.example.net:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-exact
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - evil.pypi.org:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-port-25
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - www.example.com:25
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-by-address
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - 127.0.0.1:443
+                - 127.0.0.1
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-plain-http
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - GET
+                - http://www.example.com/
+                - 127.0.0.1
+                - body
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-source
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - CONNECT
+                - www.example.com:443
+                - 127.0.0.3
+                - headers
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+      - name: squid-cachemgr
+        steps:
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - GET
+                - http://127.0.0.1:3128/squid-internal-mgr/menu
+                - 127.0.0.1
+                - body
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 403 '
+                contains: 'X-Squid-Error: ERR_ACCESS_DENIED'
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/lib/werewolf/test-squid-policy
+                - request
+                - GET
+                - cache_object://localhost/menu
+                - 127.0.0.1
+                - body
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: 'HTTP/1[.]1 400 '
+                contains: 'X-Squid-Error: ERR_INVALID_URL'
+            timeout: 15s
+  - name: squid-policy
+    source: driver.zig
+    mode: policy
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - squid-no-control-socket
+        - squid-resolver
+      verify:
+        - squid-no-control-socket
+        - squid-resolver

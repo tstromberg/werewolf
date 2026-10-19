@@ -1,0 +1,278 @@
+version: 1
+packages:
+  - drill
+suites:
+  - name: home-assistant-ca
+    readiness: true
+    cases:
+      - name: ha-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: home-assistant-ready
+    readiness: true
+    cases:
+      - name: ha-ready
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: <title>Home Assistant</title>
+            await: 120s
+  - name: home-assistant-startup
+    cases:
+      - name: ha-up
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: <title>Home Assistant</title>
+            await: 120s
+  - name: home-assistant
+    fixtures:
+      password: /run/config/home-assistant/owner-password
+    cases:
+      - name: ha-user
+        steps:
+          - service: home-assistant
+            expect:
+              user: _oci-home-assistant
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: ha-discovery-groups
+        steps:
+          - file: /proc/net/igmp
+            expect:
+              body:
+                contains: FB0000E0
+            await: 60s
+      - name: ha-loopback
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 8123
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 8123
+      - name: ha-onboarded
+        steps:
+          - fetch:
+              url: https://localhost/api/onboarding
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - file: /data/svc/home-assistant/.storage/onboarding
+            expect:
+              json:
+                /data/done:
+                  contains_all:
+                    - user
+                    - core_config
+                    - analytics
+                    - integration
+      - name: ha-http-stable
+        steps:
+          - file: /data/svc/home-assistant/.storage/http
+            expect:
+              json:
+                /data/pending: null
+                /data/yaml_migration_done: true
+                /data/stable/use_x_forwarded_for: true
+                /data/stable/trusted_proxies:
+                  contains: 127.0.0.1/32
+      - name: ha-api-locked
+        steps:
+          - fetch:
+              url: https://localhost/api/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: ha-login
+        steps:
+          - fetch:
+              url: https://localhost/auth/login_flow
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                client_id: https://localhost/
+                handler:
+                  - homeassistant
+                  - null
+                redirect_uri: https://localhost/?auth_callback=1
+            expect:
+              status: 200
+              json:
+                /flow_id:
+                  matches: ^[A-Za-z0-9]+$
+            name: flow
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - auth
+                - login_flow
+                - step: flow
+                  json: /flow_id
+              method: POST
+              json:
+                client_id: https://localhost/
+                username: owner
+                password:
+                  fixture: password
+            expect:
+              status: 200
+              json:
+                /result:
+                  matches: ^[A-Za-z0-9]+$
+            name: login
+            timeout: 30s
+          - fetch:
+              url: https://localhost/auth/token
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                grant_type: authorization_code
+                code:
+                  step: login
+                  json: /result
+                client_id: https://localhost/
+            expect:
+              status: 200
+              json:
+                /access_token:
+                  matches: .+
+            name: token
+          - fetch:
+              url: https://localhost/api/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: token
+                json: /access_token
+            expect:
+              status: 200
+              body:
+                contains: API running
+          - fetch:
+              url: https://localhost/api/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: token
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /time_zone: Europe/Berlin
+                /country: DE
+                /components:
+                  contains_all:
+                    - zeroconf
+                    - network
+                  contains_none:
+                    - ssdp
+                    - dhcp
+                    - bluetooth
+                    - usb
+      - name: ha-private
+        steps:
+          - file: /data/svc/home-assistant/.storage/auth
+            expect:
+              json:
+                /data/users/0/is_owner: true
+          - file: /data/svc/home-assistant
+            expect:
+              uid: _oci-home-assistant
+              mode: '700'
+          - file: /data/svc/home-assistant/.storage/auth_provider.homeassistant
+            expect:
+              uid: _oci-home-assistant
+              mode: '600'
+          - file: /run/svc/home-assistant/owner-password
+            expect:
+              exists: false
+      - name: ha-onboarding-closed
+        steps:
+          - fetch:
+              url: https://localhost/api/onboarding/users
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                client_id: https://localhost/
+                name: Mallory
+                username: mallory
+                password: mallory-password-1
+                language: en
+            expect:
+              status:
+                one_of:
+                  - 403
+                  - 404
+          - file: /data/svc/home-assistant/.storage/auth_provider.homeassistant
+            expect:
+              body:
+                not_matches: mallory
+      - name: ha-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/auth/login_flow
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                client_id: https://localhost/
+                handler:
+                  - homeassistant
+                  - null
+                redirect_uri: https://localhost/?auth_callback=1
+            expect:
+              status: 200
+              json:
+                /flow_id:
+                  matches: ^[A-Za-z0-9]+$
+            name: flow
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - auth
+                - login_flow
+                - step: flow
+                  json: /flow_id
+              method: POST
+              json:
+                client_id: https://localhost/
+                username: owner
+                password: wrong-password-1
+            expect:
+              status: 200
+              json:
+                /errors/base: invalid_auth
+            name: login
+            timeout: 30s
+        phases:
+          - seed
+  - name: home-assistant-discovery
+    source: driver.zig
+    mode: discovery
+    user: root
+    policy:
+      pledge: stdio rpath inet proc exec
+      run:
+        - /usr/bin/drill
+    cases:
+      seed:
+        - ha-discovery-policy
+        - ha-mdns-answer
+      verify:
+        - ha-discovery-policy
+        - ha-mdns-answer

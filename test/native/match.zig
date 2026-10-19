@@ -3,6 +3,30 @@ const std = @import("std");
 const Json = std.json.Value;
 const Allocator = std.mem.Allocator;
 extern fn werewolf_regex_match(pattern: [*:0]const u8, text: [*:0]const u8) c_int;
+extern fn werewolf_regex_capture(
+    pattern: [*:0]const u8,
+    text: [*:0]const u8,
+    start: *usize,
+    end: *usize,
+) c_int;
+
+pub fn extract(a: Allocator, pattern: []const u8, text: []const u8) ![]const u8 {
+    if (pattern.len == 0 or pattern.len > 512 or text.len > 1 << 20 or
+        std.mem.findScalar(u8, pattern, 0) != null or
+        std.mem.findScalar(u8, text, 0) != null) return error.InvalidCapturePattern;
+    const expression = try a.dupeSentinel(u8, pattern, 0);
+    defer a.free(expression);
+    const input = try a.dupeSentinel(u8, text, 0);
+    defer a.free(input);
+    var start: usize = 0;
+    var end: usize = 0;
+    switch (werewolf_regex_capture(expression, input, &start, &end)) {
+        0 => return error.MissingCapture,
+        1 => return text[start..end],
+        2 => return error.AmbiguousCapture,
+        else => return error.InvalidCapturePattern,
+    }
+}
 
 pub fn pointer(value: Json, path: []const u8) !Json {
     if (path.len == 0) return value;
@@ -88,12 +112,16 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
     if (want != .object) return equal(got, want);
     const operators = [_][]const u8{
         "equals",
+        "not_equals",
         "contains",
+        "contains_all",
+        "contains_none",
         "absent",
         "one_of",
         "min",
         "max",
         "matches",
+        "not_matches",
         "count",
         "occurrences",
         "type",
@@ -111,11 +139,26 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
         const value = entry.value_ptr.*;
         const ok = if (std.mem.eql(u8, op, "equals"))
             equal(got, value)
-        else if (std.mem.eql(u8, op, "contains"))
+        else if (std.mem.eql(u8, op, "not_equals")) blk: {
+            const numbers = (got == .integer or got == .float) and
+                (value == .integer or value == .float);
+            if (!numbers and std.meta.activeTag(got) != std.meta.activeTag(value))
+                return error.InvalidMatcher;
+            break :blk !equal(got, value);
+        } else if (std.mem.eql(u8, op, "contains"))
             try contains(got, value)
         else if (std.mem.eql(u8, op, "absent"))
             !try contains(got, value)
-        else if (std.mem.eql(u8, op, "one_of")) blk: {
+        else if (std.mem.eql(u8, op, "contains_all") or
+            std.mem.eql(u8, op, "contains_none"))
+        blk: {
+            if (value != .array or value.array.items.len == 0) return error.InvalidMatcher;
+            const present = std.mem.eql(u8, op, "contains_all");
+            for (value.array.items) |item| {
+                if (try contains(got, item) != present) break :blk false;
+            }
+            break :blk true;
+        } else if (std.mem.eql(u8, op, "one_of")) blk: {
             if (value != .array) return error.InvalidMatcher;
             for (value.array.items) |allowed| if (equal(got, allowed)) break :blk true;
             break :blk false;
@@ -156,7 +199,7 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
         } else if (std.mem.eql(u8, op, "type")) blk: {
             if (value != .string) return error.InvalidMatcher;
             break :blk std.mem.eql(u8, @tagName(got), value.string);
-        } else if (std.mem.eql(u8, op, "matches")) blk: {
+        } else if (std.mem.eql(u8, op, "matches") or std.mem.eql(u8, op, "not_matches")) blk: {
             if (got != .string or value != .string or value.string.len > 512 or
                 std.mem.findScalar(u8, value.string, 0) != null or
                 std.mem.findScalar(u8, got.string, 0) != null)
@@ -166,7 +209,7 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
                 (try arena.dupeSentinel(u8, got.string, 0)).ptr,
             );
             if (result < 0) return error.InvalidRegex;
-            break :blk result == 1;
+            break :blk result == (if (std.mem.eql(u8, op, "matches")) @as(c_int, 1) else 0);
         } else return error.InvalidMatcher;
         passed = passed and ok;
     }
@@ -208,6 +251,28 @@ test "absence with an incompatible type must not pass" {
     try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .string = "secret" }, invalid));
 }
 
+test "negative regex rejects matches, malformed patterns and incompatible input" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try std.json.parseFromSliceLeaky(
+        Json,
+        a,
+        "{\"not_matches\":\"[Ii][Nn][Ss][Tt][Aa][Ll][Ll]\"}",
+        .{},
+    );
+    try std.testing.expect(try matches(a, .{ .string = "werewolf check site" }, want));
+    try std.testing.expect(!try matches(a, .{ .string = "Install WordPress" }, want));
+    try std.testing.expect(!try matches(a, .{ .string = "INSTALL WordPress" }, want));
+    try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .integer = 0 }, want));
+    try std.testing.expectError(
+        error.InvalidMatcher,
+        matches(a, .{ .string = "safe\x00Install" }, want),
+    );
+    const invalid = try std.json.parseFromSliceLeaky(Json, a, "{\"not_matches\":\"[\"}", .{});
+    try std.testing.expectError(error.InvalidRegex, matches(a, .{ .string = "safe" }, invalid));
+}
+
 test "literal occurrence counts are exact and do not prove absence in non-text values" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -234,4 +299,42 @@ test "literal occurrence counts are exact and do not prove absence in non-text v
             matches(a, .{ .string = "text" }, invalid),
         );
     }
+}
+
+test "capture exactly one nonempty group from one unambiguous text match" {
+    const a = std.testing.allocator;
+    const pattern = "name=\"csrf\" value=\"([^\"]+)\"";
+    try std.testing.expectEqualStrings(
+        "secret-token",
+        try extract(a, pattern, "<input name=\"csrf\" value=\"secret-token\">"),
+    );
+    try std.testing.expectError(error.MissingCapture, extract(a, pattern, "<input>"));
+    try std.testing.expectError(error.AmbiguousCapture, extract(
+        a,
+        pattern,
+        "<input name=\"csrf\" value=\"first\"><input name=\"csrf\" value=\"second\">",
+    ));
+    try std.testing.expectError(error.AmbiguousCapture, extract(a, "aa(a)", "aaaa"));
+    try std.testing.expectEqualStrings("aaa", try extract(a, "^(aaa)", "aaaa"));
+    try std.testing.expectEqualStrings("aaa", try extract(a, "(aaa)$", "aaaa"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "[", "input"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "a", "a"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "(a)(b)", "ab"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "(a?)", ""));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "(a)\x00b", "ab"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "(a)", "a\x00a"));
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, "", "input"));
+    var too_long: [513]u8 = undefined;
+    @memset(&too_long, 'x');
+    try std.testing.expectError(error.InvalidCapturePattern, extract(a, &too_long, "input"));
+}
+
+test "literal inequality checks binary bodies without regex truncation" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try std.json.parseFromSliceLeaky(Json, a, "{\"not_equals\":\"\"}", .{});
+    try std.testing.expect(!try matches(a, .{ .string = "" }, want));
+    try std.testing.expect(try matches(a, .{ .string = "\x00\xff" }, want));
+    try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .bool = false }, want));
 }

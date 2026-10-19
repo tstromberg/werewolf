@@ -1,0 +1,591 @@
+version: 1
+packages:
+  - mosquitto-clients
+suites:
+  - name: mqtt-ready
+    readiness: true
+    policy:
+      run:
+        - /usr/bin/mosquitto_sub
+    cases:
+      - name: mqtt-ready
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/ready
+                - -E
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 15s
+            await: 60s
+  - name: mqtt
+    policy:
+      run:
+        - /usr/bin/mosquitto_pub
+        - /usr/bin/mosquitto_sub
+        - /usr/bin/mosquitto_rr
+    cases:
+      - name: mqtt-user
+        steps:
+          - service: mosquitto
+            expect:
+              user: mosquitto
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: mqtt-round-trip
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_rr
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/round
+                - -e
+                - test/round
+                - -m
+                - hello
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+              stdout: |
+                hello
+            timeout: 15s
+      - name: mqtt-no-anonymous
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -t
+                - test/x
+                - -m
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Nn]ot authori[sz]ed'
+            timeout: 15s
+      - name: mqtt-wrong-password
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - wrong
+                - -t
+                - test/x
+                - -m
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Nn]ot authori[sz]ed'
+            timeout: 15s
+      - name: mqtt-tls-only
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 1883
+            expect:
+              equals: []
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --no-tls
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/x
+                - -m
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Cc]onnection.*(lost|closed|reset)|[Pp]rotocol error'
+            timeout: 15s
+      - name: mqtt-retained-kept
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/acl-secret
+                - -C
+                - '1'
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                secret
+            timeout: 15s
+        phases:
+          - verify
+      - name: mqtt-acl
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - admin/x
+                - -m
+                - leaked
+                - -d
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+              stdout:
+                matches: received PUBACK.*RC:135
+              stderr:
+                matches: '[Nn]ot authori[sz]ed'
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - other
+                - -P
+                - werewolf-other
+                - -t
+                - test/x
+                - -m
+                - x
+                - -d
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+              stdout:
+                matches: received PUBACK.*RC:135
+              stderr:
+                matches: '[Nn]ot authori[sz]ed'
+            timeout: 15s
+      # The privileged reader proves delivery order before each restricted read.
+      - name: mqtt-read-admin
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - admin
+                - -P
+                - werewolf-admin
+                - -t
+                - admin/acl-secret
+                - -m
+                - admin-secret
+                - -r
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/acl-control
+                - -m
+                - check-canary
+                - -r
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - admin
+                - -P
+                - werewolf-admin
+                - -t
+                - admin/#
+                - -t
+                - test/acl-control
+                - -C
+                - '1'
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                admin-secret
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - admin/#
+                - -t
+                - test/acl-control
+                - -C
+                - '1'
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                check-canary
+            timeout: 15s
+      - name: mqtt-read-other
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/acl-secret
+                - -m
+                - secret
+                - -r
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_pub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - other
+                - -P
+                - werewolf-other
+                - -t
+                - other/acl-control
+                - -m
+                - other-canary
+                - -r
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+            expect:
+              exit: 0
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - admin
+                - -P
+                - werewolf-admin
+                - -t
+                - test/acl-secret
+                - -t
+                - other/acl-control
+                - -C
+                - '1'
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                secret
+            timeout: 15s
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - other
+                - -P
+                - werewolf-other
+                - -t
+                - test/acl-secret
+                - -t
+                - other/acl-control
+                - -C
+                - '1'
+                - -W
+                - '10'
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                other-canary
+            timeout: 15s
+      - name: mqtt-private
+        steps:
+          - file: /run/svc/mosquitto/tls-key
+            expect:
+              type: file
+              uid: mosquitto
+              mode: '600'
+          - file: /run/svc/mosquitto/passwords
+            expect:
+              type: file
+              uid: mosquitto
+              mode: '600'
+          - file: /data/svc/mosquitto
+            expect:
+              type: directory
+              uid: mosquitto
+      - name: mqtt-recovered
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mosquitto_sub
+                - -h
+                - localhost
+                - -p
+                - '8883'
+                - -V
+                - '5'
+                - -q
+                - '1'
+                - --cafile
+                - /run/config/mosquitto/tls.crt
+                - -u
+                - check
+                - -P
+                - werewolf-check
+                - -t
+                - test/ready
+                - -E
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/mqtt-test-context
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 15s
+            await: 30s

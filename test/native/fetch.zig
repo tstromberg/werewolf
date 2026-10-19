@@ -45,6 +45,28 @@ pub const Client = struct {
         return .{ .lib = lib, .api = api, .arena = arena };
     }
 
+    fn requestUrl(req: Json, a: Allocator) ![:0]const u8 {
+        const base = req.object.get("url").?.string;
+        const parts = req.object.get("path") orelse return a.dupeSentinel(u8, base, 0);
+        if (base.len > 65536) return error.UrlTooLong;
+        var url: std.Io.Writer.Allocating = .init(a);
+        defer url.deinit();
+        try url.writer.writeAll(std.mem.trimEnd(u8, base, "/"));
+        for (parts.array.items) |part| {
+            try url.writer.writeByte('/');
+            // URI path characters such as ':' stay literal; a slash is segment data.
+            var pieces = std.mem.splitScalar(u8, part.string, '/');
+            var first = true;
+            while (pieces.next()) |piece| {
+                if (!first) try url.writer.writeAll("%2F");
+                try (std.Uri.Component{ .raw = piece }).formatPath(&url.writer);
+                first = false;
+            }
+            if (url.writer.buffered().len > 65536) return error.UrlTooLong;
+        }
+        return a.dupeSentinel(u8, url.writer.buffered(), 0);
+    }
+
     pub fn deinit(self: *Client) void {
         var it = self.sessions.valueIterator();
         while (it.next()) |handle| self.api.curl_easy_cleanup(handle.*);
@@ -65,7 +87,7 @@ pub const Client = struct {
         defer if (session == null) api.curl_easy_cleanup(handle);
         api.curl_easy_reset(handle);
         var output: Output = .{ .arena = a };
-        const url = try a.dupeSentinel(u8, req.object.get("url").?.string, 0);
+        const url = try requestUrl(req, a);
         try check(api.curl_easy_setopt(handle, 10002, url.ptr)); // URL
         try check(api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, ""))); // no proxy env
         try check(api.curl_easy_setopt(handle, 181, @as(c_long, 3))); // HTTP + HTTPS only
@@ -113,6 +135,13 @@ pub const Client = struct {
         }
         if (req.object.get("bearer")) |token| {
             const line = try a.printSentinel("Authorization: Bearer {s}", .{token.string}, 0);
+            headers = api.curl_slist_append(headers, line.ptr) orelse return error.OutOfMemory;
+        }
+        if (req.object.get("authorization")) |auth| {
+            const line = try a.printSentinel("Authorization: {s} {s}", .{
+                auth.object.get("scheme").?.string,
+                auth.object.get("credentials").?.string,
+            }, 0);
             headers = api.curl_slist_append(headers, line.ptr) orelse return error.OutOfMemory;
         }
         const method = if (req.object.get("method")) |m| m.string else "GET";
@@ -194,6 +223,7 @@ pub const Client = struct {
         if (output.failed) return error.ResponseTooLarge;
         if (code != 0) return switch (code) {
             28 => error.Timeout,
+            35 => error.TlsHandshake,
             60 => error.CertificateVerification,
             7 => error.ConnectionRefused,
             else => error.HttpTransport,

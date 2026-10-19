@@ -1,0 +1,75 @@
+version: 1
+packages: []
+suites:
+  - name: cloudflared
+    cases:
+      - name: cloudflared-user
+        steps:
+          - service: cloudflared
+            expect:
+              user: cloudflared
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: cloudflared-metrics
+        steps:
+          - fetch:
+              url: http://127.0.0.1:2000/metrics
+            expect:
+              status: 200
+              body:
+                contains: cloudflared
+            await: 60s
+          - listeners: tcp
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 2000
+      - name: cloudflared-trying
+        steps:
+          - fetch:
+              url: http://127.0.0.1:2000/metrics
+            expect:
+              status: 200
+              body:
+                matches: '(^|
+
+                  )cloudflared_tunnel_'
+            await: 30s
+          - service: cloudflared
+            expect:
+              user: cloudflared
+              processes:
+                min: 1
+      - name: cloudflared-private
+        steps:
+          - file: /run/config/cloudflared/token
+            expect:
+              uid: 0
+              mode: '600'
+              readable: true
+      - name: cloudflared-not-ready
+        steps:
+          - fetch:
+              url: http://127.0.0.1:2000/ready
+            expect:
+              status: 503
+  - name: cloudflared-denied
+    user: cloudflared
+    policy:
+      pledge: stdio rpath
+      read:
+        - /run/config/cloudflared
+        - /usr/share/werewolf/net
+    cases:
+      - name: cloudflared-private-refused
+        steps:
+          - file: /usr/share/werewolf/net
+            expect:
+              readable: true
+          - file: /run/config/cloudflared/token
+            expect:
+              readable: false

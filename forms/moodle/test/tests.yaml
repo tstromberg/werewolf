@@ -1,0 +1,527 @@
+version: 1
+timeout: 1200s
+packages:
+  - postgresql-17-client
+suites:
+  - name: moodle-database-ready
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    readiness: true
+    cases:
+      - name: moodle-tables
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: 'SELECT count(*) > 0 FROM pg_tables WHERE schemaname = ''moodle'';
+
+                '
+              readonly: true
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: 't
+
+                '
+            await: 165s
+      - name: moodle-install
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: 'SELECT value FROM moodle.mdl_config WHERE name=''rolesactive'';
+
+                '
+              readonly: true
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: '1
+
+                '
+            await: 165s
+  - name: moodle-ca
+    readiness: true
+    cases:
+      - name: moodle-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+              size:
+                min: 1
+            await: 165s
+  - name: moodle-ready
+    readiness: true
+    cases:
+      - name: moodle-up
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 303
+              headers:
+                location: https://localhost/login/index.php
+            await: 160s
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: werewolf check school
+                contains_all:
+                  - logintoken
+            await: 160s
+  - name: moodle
+    cases:
+      - name: moodle-installed
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 303
+              headers:
+                location: https://localhost/login/index.php
+            await: 160s
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: werewolf check school
+                contains_all:
+                  - logintoken
+            await: 160s
+      - name: moodle-user
+        steps:
+          - service: moodle
+            expect:
+              user: moodle
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: moodle-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: moodle-login
+        steps:
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: login
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+            name: login
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: login
+              form:
+                username: admin
+                password: werewolf-check-Pass-1x
+                logintoken:
+                  step: login
+                  regex: name="logintoken" value="([^"]+)"
+            expect:
+              status:
+                one_of:
+                  - 302
+                  - 303
+              headers:
+                location:
+                  contains: testsession=
+              cookies:
+                MoodleSession:
+                  matches: .+
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: wrong
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+            name: wrong
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: wrong
+              form:
+                username: admin
+                password: werewolf-wrong
+                logintoken:
+                  step: wrong
+                  regex: name="logintoken" value="([^"]+)"
+            expect:
+              status: 303
+              headers:
+                location: https://localhost/login/index.php?loginredirect=1
+          - fetch:
+              url: https://localhost/login/index.php?loginredirect=1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: wrong
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: guest
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+            name: guest
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: guest
+              form:
+                username: guest
+                password: guest
+                logintoken:
+                  step: guest
+                  regex: name="logintoken" value="([^"]+)"
+            expect:
+              status: 303
+              headers:
+                location: https://localhost/login/index.php?loginredirect=1
+          - fetch:
+              url: https://localhost/login/index.php?loginredirect=1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: guest
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+      - name: moodle-no-signup
+        steps:
+          - fetch:
+              url: https://localhost/login/signup.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status:
+                min: 400
+                max: 599
+              body:
+                contains: may not use this page
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+                absent: loginguest
+      - name: moodle-paths-disabled
+        steps:
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: logintoken
+            name: admin
+          - fetch:
+              url: https://localhost/login/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              form:
+                username: admin
+                password: werewolf-check-Pass-1x
+                logintoken:
+                  step: admin
+                  regex: name="logintoken" value="([^"]+)"
+            expect:
+              status:
+                one_of:
+                  - 302
+                  - 303
+              headers:
+                location:
+                  contains: testsession=
+              cookies:
+                MoodleSession:
+                  matches: .+
+          - fetch:
+              url: https://localhost/admin/settings.php?section=systempaths
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: Setting executable and local paths disabled in config.php
+            name: paths
+          - fetch:
+              url: https://localhost/admin/settings.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              form:
+                section: systempaths
+                sesskey:
+                  step: paths
+                  regex: '"sesskey":"([^"]+)"'
+                return: ''
+                s__pathtogs: /usr/bin/php
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 302
+                  - 303
+          - fetch:
+              url: https://localhost/admin/tool/installaddon/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 302
+                  - 303
+                  - 403
+                  - 404
+              body:
+                absent: zipfile
+      - name: moodle-hidden
+        steps:
+          - fetch:
+              url: https://localhost/install.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/install/lang/en/install.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/admin/environment.xml
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/lib/db/install.xml
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/mod/upgrade.txt
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/pix/.cvsignore
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: moodle-public
+        steps:
+          - service: moodle
+            expect:
+              connect_rules:
+                contains: tcp/443 public
+          - service: cron
+            expect:
+              user: moodle-cron
+              connect_rules:
+                contains: tcp/443 public
+      - name: moodle-private-metadata
+        steps:
+          - file: /run/svc/moodle/admin-password
+            expect:
+              uid: moodle
+              mode: '600'
+          - file: /data/svc/moodle/site.json
+            expect:
+              uid: moodle
+              mode: '640'
+          - file: /data/svc/moodle/data
+            expect:
+              type: directory
+              mode: '2770'
+  - name: moodle-database
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: moodle-paths-kept
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: 'SELECT value FROM moodle.mdl_config WHERE name=''pathtogs'';
+
+                '
+              readonly: true
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: '/usr/bin/gs
+
+                '
+      - name: moodle-cron
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: 'SELECT value::bigint > 0 FROM moodle.mdl_config_plugins WHERE plugin=''tool_task''
+                AND name=''lastcronstart'';
+
+                '
+              readonly: true
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: 't
+
+                '
+            await: 165s
+  - name: moodle-avatar
+    source: driver.zig
+    mode: avatar
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - moodle-path-info
+      verify:
+        - moodle-path-info
+  - name: moodle-code-denied
+    source: driver.zig
+    mode: write-refused
+    user: moodle
+    policy:
+      pledge: stdio rpath wpath
+      read:
+        - /usr/share/moodle/public/local
+    cases:
+      seed:
+        - moodle-code-write-refused
+      verify:
+        - moodle-code-write-refused
+  - name: moodle-private
+    source: driver.zig
+    mode: private
+    user: root
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - moodle-private-tree
+      verify:
+        - moodle-private-tree

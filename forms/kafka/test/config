@@ -12,3 +12,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 printf '%s' werewolf-check-admin >"$d/admin-password"
 printf 'app werewolf-check-app\nstranger werewolf-check-stranger\n' >"$d/users"
 echo '{"domain":"localhost","admin":"ops"}' >"$d/settings.json"
+
+# Native Java clients use these directly; no guest shell or script is needed.
+mkdir -p "$1/tests"
+for entry in ops:admin app:app stranger:stranger ops:wrong-password; do
+	user=${entry%%:*}
+	label=$user
+	[ "${entry#*:}" != wrong-password ] || label=wrong
+	printf 'security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-512\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="werewolf-check-%s";\nssl.truststore.type=PEM\nssl.truststore.location=/run/config/kafka/tls.crt\n' \
+		"$user" "${entry#*:}" >"$1/tests/kafka-$label"
+done
+printf 'security.protocol=SSL\nssl.truststore.type=PEM\nssl.truststore.location=/run/config/kafka/tls.crt\n' \
+	>"$1/tests/kafka-anon"

@@ -1,0 +1,9 @@
+version: 1
+suites:
+  - name: node-app
+    cases:
+      - name: app-unshipped
+        steps:
+          - file: /usr/lib/app
+            expect:
+              exists: false

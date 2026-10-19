@@ -1,0 +1,126 @@
+version: 1
+packages:
+  - mariadb-12.3-client
+suites:
+  - name: wordpress-mariadb-ready
+    readiness: true
+    cases:
+      - name: wpm-ready
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 200
+              body:
+                contains: werewolf check site
+            await: 90s
+  - name: wordpress-mariadb
+    policy:
+      run:
+        - /usr/bin/mariadb
+    cases:
+      - name: wpm-installed
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 200
+              body:
+                contains: werewolf check site
+                not_matches: '[Ii][Nn][Ss][Tt][Aa][Ll][Ll]'
+            await: 90s
+      - name: wpm-login
+        steps:
+          - fetch:
+              url: http://localhost/wp-login.php
+              method: POST
+              headers:
+                Cookie: wordpress_test_cookie=WP%20Cookie%20check
+              form:
+                log: admin
+                pwd: werewolf-check
+                wp-submit: Log In
+                testcookie: '1'
+            expect:
+              status: 302
+              cookies:
+                # WordPress hashes the configured site URL, http://localhost.
+                wordpress_logged_in_86a9106ae65537651a8e456835b316ab:
+                  matches: .+
+      - name: wpm-wrong-password
+        steps:
+          - fetch:
+              url: http://localhost/wp-login.php
+              method: POST
+              headers:
+                Cookie: wordpress_test_cookie=WP%20Cookie%20check
+              form:
+                log: admin
+                pwd: wrong-password
+                testcookie: '1'
+            expect:
+              status: 200
+              cookies:
+                wordpress_logged_in_86a9106ae65537651a8e456835b316ab: null
+      - name: wpm-in-mariadb
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SELECT count(*) FROM wordpress.wp_users;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: "1\n"
+          - file: /data/svc/php-fpm/database
+            expect:
+              type: directory
+              entries: []
+      - name: wpm-php-role
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: SHOW GRANTS FOR 'php'@'localhost';
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout:
+                contains: unix_socket
+                matches: 'GRANT ALL PRIVILEGES ON `wordpress`\.\* TO'
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
+              stdin: |
+                SELECT count(*) FROM information_schema.user_privileges
+                  WHERE grantee = CONCAT(QUOTE('php'), '@', QUOTE('localhost'))
+                  AND privilege_type <> 'USAGE';
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: "0\n"
+  - name: wordpress-mariadb-php
+    user: php
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read:
+        - /run/svc/mariadb
+      connect:
+        - /run/svc/mariadb/mariadb.sock
+      run:
+        - /usr/bin/mariadb
+    cases:
+      - name: wpm-php-file-refused
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=php]
+              stdin: SELECT current_user(); SELECT load_file('/etc/passwd') IS NULL;
+              env:
+                LC_ALL: C
+            expect:
+              exit: 0
+              stdout: "php@localhost\n1\n"

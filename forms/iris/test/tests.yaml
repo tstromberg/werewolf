@@ -1,0 +1,165 @@
+version: 1
+timeout: 600s
+packages:
+  - postgresql-17-client
+suites:
+  - name: iris-ca
+    readiness: true
+    cases:
+      - name: iris-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+              size:
+                min: 1
+            await: 300s
+  - name: iris-ready
+    readiness: true
+    cases:
+      - name: iris-up
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                matches: '[Pp]assword'
+            await: 300s
+  - name: iris
+    fixtures:
+      password: /run/config/iris/admin-password
+    policy:
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: iris-login
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                matches: '[Pp]assword'
+            await: 300s
+      - name: iris-db-policy
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -h
+                - 127.0.0.1
+                - -U
+                - iris
+                - -d
+                - postgres
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+              stdin: |
+                SELECT count(*) FROM pg_roles r JOIN pg_database d ON d.datdba=r.oid WHERE r.rolname=current_user AND r.rolcreatedb AND NOT r.rolsuper AND NOT r.rolcreaterole AND d.datname IN ('postgres','iris_tasks');
+              readonly: true
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: |
+                2
+            await: 90s
+      - name: iris-user
+        steps:
+          - service: iris
+            expect:
+              user: _oci-iris
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: iris-bind
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 8000
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 8000
+      - name: iris-published
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: wrong
+            expect:
+              status: 200
+              body:
+                contains: csrf_token
+            name: form
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: wrong
+              form:
+                username: administrator
+                password: admin
+                csrf_token:
+                  step: form
+                  regex: name="csrf_token"[^>]*value="([^"]+)"
+            expect:
+              status: 200
+              body:
+                contains: Wrong credentials
+          - fetch:
+              url: https://localhost/dashboard
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: wrong
+            expect:
+              status: 302
+              headers:
+                location:
+                  contains: /login
+      - name: iris-admin
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: csrf_token
+            name: form
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              form:
+                username: administrator
+                password:
+                  fixture: password
+                csrf_token:
+                  step: form
+                  regex: name="csrf_token"[^>]*value="([^"]+)"
+            expect:
+              status: 302
+          - fetch:
+              url: https://localhost/dashboard
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              body:
+                matches: '[Dd]ashboard'

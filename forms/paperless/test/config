@@ -13,3 +13,6 @@ for s in paperless-consumer paperless-worker paperless-beat; do
 	echo '{"domain":"localhost"}' >"$1/$s/settings.json"
 done
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
+
+mkdir -p "$1/tests"
+printf 'Werewolf PostgreSQL integration document.\n' >"$1/tests/paperless-document.txt"

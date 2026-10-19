@@ -8,6 +8,8 @@ const Plan = struct { drivers: []const struct {
     mode: []const u8 = "probes",
     root: bool = false,
     wait: []const []const u8,
+    phases: []const []const u8,
+    readiness: bool = false,
 } };
 
 pub fn main(init: std.process.Init) !void {
@@ -34,20 +36,41 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 2 or !std.mem.eql(u8, args[1], "run")) return error.Usage;
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const ctx = try test_driver.Run.load(io, gpa, "/run/config/tests/context");
+    const phase_deadline = test_driver.deadline(io, ctx.timeout_seconds);
     const plan = try std.json.parseFromSliceLeaky(Plan, gpa, @embedFile("plan.json"), .{});
     var passed = true;
+    var readiness_passed = true;
     for (plan.drivers) |d| {
+        var selected = false;
+        for (d.phases) |phase| selected = selected or std.mem.eql(u8, phase, ctx.phase);
+        if (!selected) continue;
         const name = d.name;
-        if (!try ready(io, d.wait)) {
+        if (std.mem.eql(u8, name, "test-lifecycle") and !readiness_passed) {
             try test_driver.emit(io, .{
                 .event = "driver",
                 .run = ctx.run,
                 .phase = ctx.phase,
                 .suite = name,
                 .status = "fail",
-                .reason = "service paths unavailable",
+                .reason = "readiness failed; restart blocked",
             });
             passed = false;
+            continue;
+        }
+        if (!try ready(io, d.wait, phase_deadline.deadline.raw)) {
+            try test_driver.emit(io, .{
+                .event = "driver",
+                .run = ctx.run,
+                .phase = ctx.phase,
+                .suite = name,
+                .status = "fail",
+                .reason = if (Io.Clock.awake.now(io).compare(.gte, phase_deadline.deadline.raw))
+                    "phase deadline exceeded"
+                else
+                    "service paths unavailable",
+            });
+            passed = false;
+            if (d.readiness) readiness_passed = false;
             continue;
         }
         const result = std.process.run(gpa, io, .{
@@ -66,10 +89,7 @@ pub fn main(init: std.process.Init) !void {
             ) },
             .stdout_limit = .limited(64 << 10),
             .stderr_limit = .limited(16 << 10),
-            .timeout = test_driver.deadline(
-                io,
-                if (std.mem.eql(u8, name, "test-platform")) 360 else 180,
-            ),
+            .timeout = phase_deadline,
         }) catch |err| {
             try test_driver.emit(
                 io,
@@ -83,11 +103,13 @@ pub fn main(init: std.process.Init) !void {
                 },
             );
             passed = false;
+            if (d.readiness) readiness_passed = false;
             continue;
         };
         try Io.File.stdout().writeStreamingAll(io, result.stdout);
         try Io.File.stderr().writeStreamingAll(io, result.stderr);
         const ok = result.term == .exited and result.term.exited == 0;
+        if (d.readiness) readiness_passed = readiness_passed and ok;
         try test_driver.emit(
             io,
             .{
@@ -113,12 +135,13 @@ pub fn main(init: std.process.Init) !void {
 
 // Wait for leash's logger gate and the Landlock socket/path inodes before
 // starting the client; its own checks handle application protocol readiness.
-fn ready(io: Io, paths: []const []const u8) !bool {
+fn ready(io: Io, paths: []const []const u8, stop: Io.Timestamp) !bool {
     const syslog = blk: {
         Io.Dir.cwd().access(io, "/usr/lib/werewolf/syslogd", .{}) catch break :blk false;
         break :blk true;
     };
     for (0..1200) |_| {
+        if (Io.Clock.awake.now(io).compare(.gte, stop)) return false;
         var present = true;
         if (syslog) {
             var flag: [2]u8 = undefined;
@@ -132,4 +155,10 @@ fn ready(io: Io, paths: []const []const u8) !bool {
         try io.sleep(.fromMilliseconds(100), .awake);
     }
     return false;
+}
+
+test "exhausted phase budget does not start another readiness wait" {
+    const io = std.testing.io;
+    const past = Io.Clock.awake.now(io).subDuration(.fromMilliseconds(1));
+    try std.testing.expect(!try ready(io, &.{"/unavailable-test-service"}, past));
 }

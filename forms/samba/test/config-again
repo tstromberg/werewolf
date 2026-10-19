@@ -4,3 +4,4 @@ set -eu
 umask 077
 printf '%s\n' carol alice >"$1/users"
 printf '%s\n' 'carol:werewolf-new-password' 'alice:werewolf-rotated-password' >"$1/samba/users"
+printf 'new-user\n' >"$1/tests/samba-new-payload"

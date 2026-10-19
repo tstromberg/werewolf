@@ -1,0 +1,369 @@
+version: 1
+packages:
+  - openldap-2.6-clients
+suites:
+  - name: openldap-ready
+    readiness: true
+    fixtures:
+      admin: /run/config/openldap/admin-password
+    policy:
+      run:
+        - /usr/bin/ldapwhoami
+    cases:
+      - name: ldap-admin
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapwhoami
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                dn:cn=ops,dc=example,dc=com
+            await: 60s
+  - name: openldap
+    fixtures:
+      admin: /run/config/openldap/admin-password
+    policy:
+      run:
+        - /usr/bin/ldapwhoami
+        - /usr/bin/ldapadd
+        - /usr/bin/ldapsearch
+        - /usr/bin/ldapmodify
+    cases:
+      - name: ldap-add-search
+        phases:
+          - seed
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapadd
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              stdin: |
+                dn: uid=alice,dc=example,dc=com
+                objectClass: inetOrgPerson
+                uid: alice
+                cn: Alice
+                sn: Check
+                userPassword: werewolf-alice-pass-1
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - dc=example,dc=com
+                - (uid=alice)
+                - cn
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)cn: Alice(\n|$)"
+      - name: ldap-entry-kept
+        phases:
+          - verify
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - dc=example,dc=com
+                - (uid=alice)
+                - cn
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)cn: Alice(\n|$)"
+      - name: ldap-hashed
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - uid=alice,dc=example,dc=com
+                - -s
+                - base
+                - userPassword
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)userPassword:: e0FSR09OMn0kYXJnb24yaWQkdj0xOSRtPTE5NDU2LHQ9MixwPTEk"
+          - file: /run/svc/openldap/slapd.conf
+            expect:
+              uid: openldap
+              mode: '600'
+              body:
+                matches: "(^|\n)rootpw \\{ARGON2\\}\\$argon2id\\$"
+                absent: werewolf-check-admin-1
+          - file: /run/svc/openldap/admin-password
+            expect:
+              exists: false
+      - name: ldap-user
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - uid=alice,dc=example,dc=com
+                - -w
+                - werewolf-alice-pass-1
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - dc=example,dc=com
+                - (uid=*)
+                - '*'
+                - userPassword
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)dn: uid=alice,dc=example,dc=com(\n|$)"
+                not_matches: "(^|\n)[Uu][Ss][Ee][Rr][Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]:"
+      - name: ldap-no-prehashed
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapmodify
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - uid=alice,dc=example,dc=com
+                - -w
+                - werewolf-alice-pass-1
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              stdin: |
+                dn: uid=alice,dc=example,dc=com
+                changetype: modify
+                replace: userPassword
+                userPassword: {ARGON2}$argon2id$v=19$m=4194304,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g
+            expect:
+              exit: 19
+              stderr:
+                contains: Constraint violation
+          - exec:
+              argv:
+                - /usr/bin/ldapwhoami
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - uid=alice,dc=example,dc=com
+                - -w
+                - werewolf-alice-pass-1
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                dn:uid=alice,dc=example,dc=com
+      - name: ldap-no-config
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - cn=config
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit:
+                one_of:
+                  - 32
+                  - 50
+              stdout:
+                not_matches: "(^|\n)dn:"
+              stderr:
+                matches: No such object|Insufficient access
+      - name: ldap-no-anonymous
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - dc=example,dc=com
+                - (uid=*)
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stdout:
+                not_matches: "(^|\n)dn:"
+              stderr:
+                contains: anonymous bind disallowed
+          - exec:
+              argv:
+                - /usr/bin/ldapsearch
+                - -H
+                - ldaps://localhost
+                - -x
+                - -D
+                - uid=alice,dc=example,dc=com
+                - -w
+                - ''
+                - -LLL
+                - -o
+                - ldif_wrap=no
+                - -b
+                - dc=example,dc=com
+                - (uid=*)
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stdout:
+                not_matches: "(^|\n)dn:"
+              stderr:
+                contains: unauthenticated bind
+      - name: ldap-no-cleartext
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 389
+          - exec:
+              argv:
+                - /usr/bin/ldapwhoami
+                - -H
+                - ldap://127.0.0.1
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                contains: Can't contact LDAP server
+          - exec:
+              argv:
+                - /usr/bin/ldapwhoami
+                - -H
+                - ldap://10.0.2.15
+                - -x
+                - -D
+                - cn=ops,dc=example,dc=com
+                - -w
+                - fixture: admin
+              env:
+                LDAPTLS_CACERT: /run/config/openldap/tls-cert
+                LDAPTLS_REQCERT: demand
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                contains: Can't contact LDAP server
+  - name: openldap-privacy
+    source: driver.zig
+    mode: privacy
+    user: root
+    policy:
+      pledge: stdio rpath
+      read:
+        - /run/svc/openldap
+        - /run/config/openldap/admin-password
+    cases:
+      seed:
+        - ldap-secret-copies
+      verify:
+        - ldap-secret-copies

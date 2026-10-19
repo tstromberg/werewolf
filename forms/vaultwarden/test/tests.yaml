@@ -45,7 +45,7 @@ suites:
               form:
                 token: wrong-admin-token
             expect:
-              status: 200
+              status: 401
               cookies:
                 VW_ADMIN: null
               body:
@@ -59,7 +59,7 @@ suites:
                 token: werewolf-check-admin
               session: admin
             expect:
-              status: 302
+              status: 200
               cookies:
                 VW_ADMIN:
                   matches: .+
@@ -216,7 +216,8 @@ suites:
             expect:
               status: 400
               json:
-                /error: invalid_grant
+                /object: error
+                /message: Username or password is incorrect. Try again
       - name: vw-private
         steps:
           - file: /run/svc/vaultwarden/admin-token

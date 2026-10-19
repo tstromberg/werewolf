@@ -1,0 +1,13 @@
+#!/bin/sh
+# Deterministic disk contents; never replace the harness's encryption key.
+set -eu
+mkdir -p "$1/tests"
+python3 - "$1/tests" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+with (root / 'qemu-source').open('wb') as disk:
+    disk.write(b'werewolf-guest-disk')
+    disk.truncate(1 << 20)
+(root / 'qemu-corrupt').write_bytes(b'not-a-qcow2')
+PY

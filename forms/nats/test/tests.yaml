@@ -1,0 +1,326 @@
+version: 1
+packages: [nats]
+suites:
+  - name: nats-ready
+    readiness: true
+    policy:
+      run: [/usr/bin/nats]
+    cases:
+      - name: nats-ready
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - rtt
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 20s
+            await: 60s
+  - name: nats
+    policy:
+      run: [/usr/bin/nats]
+    cases:
+      - name: nats-user
+        steps:
+          - service: nats
+            expect:
+              user: nats
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: nats-no-anonymous
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - pub
+                - check.x
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Aa]uthorization'
+            timeout: 20s
+      - name: nats-wrong-password
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - wrong
+                - pub
+                - check.x
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: '[Aa]uthorization'
+            timeout: 20s
+      - name: nats-permissions
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - other
+                - --password
+                - werewolf-check
+                - pub
+                - check.x
+                - x
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+            expect:
+              stderr:
+                matches: '[Pp]ermissions [Vv]iolation'
+            timeout: 20s
+      - name: nats-jetstream
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - stream
+                - add
+                - check
+                - --subjects
+                - check.s.>
+                - --storage
+                - file
+                - --defaults
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - pub
+                - check.s.a
+                - kept
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+            expect:
+              exit: 0
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - stream
+                - info
+                - check
+                - --json
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+              readonly: true
+            expect:
+              exit: 0
+              json:
+                /state/messages: 1
+            timeout: 20s
+            await: 10s
+          - file: /data/svc/nats/jetstream
+            expect:
+              type: directory
+        phases: [seed]
+      - name: nats-stream-kept
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - stream
+                - info
+                - check
+                - --json
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+              readonly: true
+            expect:
+              exit: 0
+              json:
+                /state/messages: 1
+            timeout: 20s
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - stream
+                - get
+                - check
+                - '1'
+                - --json
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+              readonly: true
+            expect:
+              exit: 0
+              json:
+                /subject: check.s.a
+                /data: a2VwdA==
+            timeout: 20s
+        phases: [verify]
+      - name: nats-monitor-local
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8222/varz
+            expect:
+              status: 200
+              json:
+                /server_name: werewolf
+          - listeners:
+              protocol: tcp
+              port: 8222
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 8222
+      - name: nats-private
+        steps:
+          - file: /run/svc/nats/tls-key
+            expect:
+              type: file
+              uid: nats
+              mode: '600'
+          - file: /run/svc/nats/users
+            expect:
+              type: file
+              uid: nats
+              mode: '600'
+  - name: nats-delivery
+    source: driver.zig
+    mode: round-trip
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet unix proc exec
+      run: [/usr/bin/nats]
+    cases:
+      seed: [nats-round-trip]
+      verify: [nats-round-trip]
+  - name: nats-copy
+    source: driver.zig
+    mode: config-restart
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc exec
+      run: [/usr/bin/sv]
+    cases:
+      seed: [config-restart]
+      verify: [config-restart]
+  - name: nats-recovered
+    policy:
+      run: [/usr/bin/nats]
+    cases:
+      - name: nats-recovered
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/nats
+                - --server
+                - tls://localhost:4222
+                - --tlsca
+                - /run/config/nats/tls.crt
+                - --user
+                - check
+                - --password
+                - werewolf-check
+                - rtt
+              env:
+                HOME: /tmp
+                XDG_CONFIG_HOME: /tmp/nats-test-context
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 20s
+            await: 60s
+  - name: nats-plaintext
+    source: driver.zig
+    mode: plaintext
+    user: root
+    policy:
+      pledge: stdio inet
+    cases:
+      seed: [nats-tls-only]
+      verify: [nats-tls-only]

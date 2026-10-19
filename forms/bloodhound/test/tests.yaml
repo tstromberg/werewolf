@@ -1,0 +1,123 @@
+version: 1
+suites:
+  - name: bloodhound-ca
+    readiness: true
+    cases:
+      - name: bh-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: bloodhound-ready
+    readiness: true
+    cases:
+      - name: bh-ready
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/self
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /data: null
+            await: 120s
+  - name: bloodhound-startup
+    cases:
+      - name: bh-health
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/self
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /data: null
+            await: 120s
+  - name: bloodhound
+    cases:
+      - name: bh-user
+        steps:
+          - service: bloodhound
+            expect:
+              user: _oci-bloodhound
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: neo4j-user
+        steps:
+          - service: neo4j
+            expect:
+              user: neo4j
+              uid:
+                min: 65536
+              capabilities: []
+      - name: neo4j-bolt
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 7687
+              absent:
+                - address: 0.0.0.0
+                  port: 7687
+                - address: '::'
+                  port: 7687
+                - port: 7474
+      - name: bh-bind
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 8080
+              absent:
+                - address: 0.0.0.0
+                  port: 8080
+                - address: '::'
+                  port: 8080
+      - name: bh-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/self
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /data: null
+            timeout: 15s
+      - name: bh-wrong
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                login_method: secret
+                username: admin
+                secret: bloodhoundcommunityedition
+            expect:
+              status:
+                one_of:
+                  - 400
+                  - 401
+                  - 403
+            timeout: 30s
+      - name: bh-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                login_method: secret
+                username: admin
+                secret: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /data/session_token:
+                  matches: .+
+            timeout: 30s

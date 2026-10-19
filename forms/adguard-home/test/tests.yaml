@@ -1,0 +1,212 @@
+version: 1
+packages:
+  - drill
+suites:
+  - name: agh
+    fixtures:
+      authorization: /run/config/tests/agh-authorization
+    cases:
+      - name: agh-user
+        steps:
+          - service: adguard-home
+            expect:
+              user: _oci-adguard-home
+              uid:
+                min: 65536
+              capabilities:
+                - net_bind_service
+              no_new_privileges: true
+            await: 60s
+      - name: agh-config
+        steps:
+          - file: /data/svc/adguard-home/AdGuardHome.yaml
+            expect:
+              type: file
+              uid: _oci-adguard-home
+              body:
+                matches: "(^|\n)schema_version: 34(\n|$)"
+                contains: 'allowed_clients:'
+                not_matches: "(^|\n)#"
+            await: 60s
+          - file: /data/svc/adguard-home/AdGuardHome.yaml
+            expect:
+              body:
+                matches: "(^|\n)theme:"
+      - name: agh-no-busybox
+        steps:
+          - file: /etc/sv/adguard-home/service
+            expect:
+              body:
+                matches: "(^|\n)before /usr/lib/werewolf/adguard-home-setup(\n|$)"
+                not_matches: "/bin/|(^|\n)run "
+      - name: agh-login
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+            await: 60s
+          - fetch:
+              url: https://localhost/control/status
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /running: true
+      - name: agh-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/control/status
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization: Basic YWRtaW46d3Jvbmc=
+            expect:
+              status: 401
+      - name: agh-settings
+        steps:
+          - file: /data/svc/adguard-home/AdGuardHome.yaml
+            expect:
+              body:
+                absent: one.one.one.one
+          - fetch:
+              url: https://localhost/control/dns_info
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /upstream_dns:
+                  - tls://dns.quad9.net
+          - fetch:
+              url: https://localhost/control/filtering/status
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /filters:
+                  count: 1
+                /filters/0/url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+      - name: agh-strangers
+        steps:
+          - fetch:
+              url: https://localhost/control/access/list
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /allowed_clients:
+                  contains: 192.168.0.0/16
+                  absent: 0.0.0.0/0
+          - fetch:
+              url: https://localhost/control/access/list
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status: 200
+              json:
+                /allowed_clients:
+                  contains: 10.0.0.0/8
+                  absent: ::/0
+      - name: agh-no-wizard
+        steps:
+          - fetch:
+              url: https://localhost/control/install/get_addresses
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status:
+                min: 400
+                max: 499
+          - fetch:
+              url: https://localhost/control/install/configure
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                web:
+                  ip: 0.0.0.0
+                  port: 3000
+                dns:
+                  ip: 0.0.0.0
+                  port: 53
+                username: x
+                password: xxxxxxxx
+              headers:
+                Authorization:
+                  fixture: authorization
+            expect:
+              status:
+                min: 400
+                max: 499
+  - name: agh-dns
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: agh-resolves
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - example.org
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)[1-9][0-9]*(\\.[0-9]+){3}(\n|$)"
+            timeout: 5s
+            await: 90s
+  - name: agh-blocklist
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: agh-blocks
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - ad.doubleclick.net
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "0.0.0.0\n"
+            timeout: 5s
+            await: 120s
+  - name: agh-source-port
+    source: driver.zig
+    mode: squatter
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc inet unix connect exec
+      run:
+        - /usr/bin/sv
+        - /usr/bin/drill
+    cases:
+      seed:
+        - agh-squatter
+      verify:
+        - agh-squatter
