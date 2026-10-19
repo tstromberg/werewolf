@@ -314,6 +314,7 @@ jobs:
           path: |
             build/lock/*.lock.json
             build/*/check/ci-forms-*.json
+            build/*/check/*-native/*.json
             build/*/check/**/*.log
           retention-days: 3
 
