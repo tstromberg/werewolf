@@ -1,1 +1,0 @@
-ok  mongodb-kept i=0; until python3 /usr/share/werewolf-mongodb/probe.py --retained; do i=$((i + 1)); [ $i -le 60 ] || exit 1; sleep 1; done

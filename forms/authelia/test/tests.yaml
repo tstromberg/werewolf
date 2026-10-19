@@ -1,0 +1,190 @@
+version: 1
+suites:
+  - name: authelia
+    cases:
+      - name: authelia-hosts
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://werewolf.internal/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - werewolf.internal:443:127.0.0.1
+              headers:
+                Accept: text/html
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://auth\.werewolf\.internal/
+              body:
+                absent: signed in
+            await: 120s
+      - name: authelia-health
+        steps:
+          - fetch:
+              url: https://auth.werewolf.internal/api/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+            expect:
+              status: 200
+              json:
+                /status: OK
+            await: 120s
+      - name: authelia-portal
+        steps:
+          - fetch:
+              url: https://werewolf.internal/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - werewolf.internal:443:127.0.0.1
+              headers:
+                Accept: text/html
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://auth\.werewolf\.internal/
+              body:
+                absent: signed in
+      - name: authelia-forged
+        steps:
+          - fetch:
+              url: https://werewolf.internal/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - werewolf.internal:443:127.0.0.1
+              headers:
+                Accept: text/html
+                Remote-User: alice
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://auth\.werewolf\.internal/
+              body:
+                absent: signed in
+      - name: authelia-one-factor
+        steps:
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: alice
+                password: werewolf-check-pass-1
+                targetURL: https://werewolf.internal/
+              session: alice
+            expect:
+              status: 200
+              json:
+                /status: OK
+          - fetch:
+              url: https://auth.werewolf.internal/api/state
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              session: alice
+            expect:
+              status: 200
+              json:
+                /data/authentication_level: 1
+          - fetch:
+              url: https://werewolf.internal/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - werewolf.internal:443:127.0.0.1
+              headers:
+                Accept: text/html
+              session: alice
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://auth\.werewolf\.internal/
+              body:
+                absent: signed in
+      - name: authelia-ban
+        steps:
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: bob
+                password: wrong
+                targetURL: https://werewolf.internal/
+            expect:
+              status: 401
+              json:
+                /status: KO
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: bob
+                password: wrong
+                targetURL: https://werewolf.internal/
+            expect:
+              status: 401
+              json:
+                /status: KO
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: bob
+                password: wrong
+                targetURL: https://werewolf.internal/
+            expect:
+              status: 401
+              json:
+                /status: KO
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: bob
+                password: werewolf-check-pass-1
+                targetURL: https://werewolf.internal/
+            expect:
+              status: 401
+              json:
+                /status: KO
+        phases:
+          - seed
+      - name: authelia-ban-kept
+        steps:
+          - fetch:
+              url: https://auth.werewolf.internal/api/firstfactor
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              resolve:
+                - auth.werewolf.internal:443:127.0.0.1
+              method: POST
+              json:
+                username: bob
+                password: werewolf-check-pass-1
+                targetURL: https://werewolf.internal/
+            expect:
+              status: 401
+              json:
+                /status: KO
+        phases:
+          - verify

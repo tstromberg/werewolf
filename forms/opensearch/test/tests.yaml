@@ -1,0 +1,157 @@
+version: 1
+suites:
+  - name: opensearch-ready
+    readiness: true
+    cases:
+      - name: os-ready
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/_cluster/health
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /status:
+                  one_of:
+                    - green
+                    - yellow
+            await: 170s
+  - name: opensearch-startup
+    cases:
+      - name: os-up
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/_cluster/health
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /status:
+                  one_of:
+                    - green
+                    - yellow
+            await: 170s
+  - name: opensearch
+    cases:
+      - name: os-search
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/logs/_doc/1?refresh=true
+              ca: /run/config/opensearch/tls-ca
+              method: PUT
+              json:
+                message: werewolf check line
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 201
+              json:
+                /result: created
+          - fetch:
+              url: https://127.0.0.1:9200/logs/_search?q=message:werewolf
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /hits/total/value: 1
+                /hits/hits/0/_source/message: werewolf check line
+        phases:
+          - seed
+      - name: os-search-kept
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/logs/_search?q=message:werewolf
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json:
+                /hits/total/value: 1
+                /hits/hits/0/_source/message: werewolf check line
+        phases:
+          - verify
+      - name: os-setup
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/_plugins/_security/api/internalusers
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
+            expect:
+              status: 200
+              json: {'': {count: 1}, /admin: {type: object}}
+          - file: /run/svc/opensearch/opensearch-security/internal_users.yml
+            expect:
+              type: file
+              uid: opensearch
+              mode: '600'
+              body:
+                contains: 'hash: "$2b$12$'
+          - file: /run/svc/opensearch/admin-password
+            expect:
+              exists: false
+          - file: /data/svc/opensearch/nodes
+            expect:
+              type: directory
+      - name: os-transport
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 9300
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 9300
+      - name: os-refuses
+        steps:
+          - fetch:
+              url: https://127.0.0.1:9200/logs/_search
+              ca: /run/config/opensearch/tls-ca
+            expect:
+              status: 401
+          - fetch:
+              url: https://127.0.0.1:9200/logs/_search
+              ca: /run/config/opensearch/tls-ca
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46YWRtaW4=
+            expect:
+              status: 401
+  - name: opensearch-files
+    source: driver.zig
+    mode: files
+    user: root
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - os-no-plaintext-secrets
+        - os-no-demo-certificates
+      verify:
+        - os-no-plaintext-secrets
+        - os-no-demo-certificates
+  - name: opensearch-tls
+    source: driver.zig
+    mode: plaintext
+    user: root
+    policy:
+      pledge: stdio inet
+    cases:
+      seed:
+        - os-no-plain-http
+      verify:
+        - os-no-plain-http

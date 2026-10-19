@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+ROOT = Path(__file__).resolve().parent.parent
+
 loader = importlib.machinery.SourceFileLoader('ci_forms', str(Path(__file__).with_name('ci-forms')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 ci = importlib.util.module_from_spec(spec)
@@ -113,6 +115,41 @@ class Coverage(unittest.TestCase):
         ci.clean(self.build, 'alpha')
         self.assertTrue((outside / 'evidence').exists())
         self.assertFalse((self.build / 'alpha').exists())
+
+
+class PlatformInputs(unittest.TestCase):
+    def test_generated_forms_do_not_also_run_unconfigured_base_form(self):
+        env = {key: value for key, value in os.environ.items()
+               if key not in {'MAKEFLAGS', 'MFLAGS', 'MAKELEVEL', 'GNUMAKEFLAGS', 'MAKEFILES'}}
+        for name in ('bastion', 'people'):
+            with self.subTest(form=name):
+                result = subprocess.run(['make', '-n', 'MAKE=echo', 'check-' + name],
+                                        cwd=ROOT, env=env, text=True, capture_output=True, check=True)
+                self.assertIn('test/' + name + '-form ', result.stdout)
+                self.assertIn('/' + name + '-check image', result.stdout)
+                self.assertNotIn('FORM=' + name + ' image', result.stdout)
+                self.assertNotIn('FORM=' + name + ' _check-form', result.stdout)
+
+    def test_nodata_reuses_native_prod_disk_without_its_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'check/prod-native').mkdir(parents=True)
+            (root / 'check/prod-native/data.img').write_bytes(b'LUKS-test-ciphertext')
+            (root / 'check/prod-native/data.key').write_bytes(b'must-not-be-passed')
+            (root / 'test').mkdir()
+            boot = root / 'test/boot'
+            boot.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > boot-args\n')
+            boot.chmod(0o755)
+            env = dict(os.environ, CHECK=str(root / 'check'), OUT='/image',
+                       KERNEL='/kernel', CMDLINE='console=ttyS0')
+            subprocess.run(['sh', str(ROOT / 'test/check-nodata'), 'qemu'],
+                           cwd=root, env=env, check=True)
+            self.assertEqual((root / 'check/nodata.img').read_bytes(), b'LUKS-test-ciphertext')
+            args = (root / 'boot-args').read_text()
+            self.assertIn('nodata.img,format=raw,if=virtio', args)
+            self.assertEqual(args.count('-drive'), 1)
+            self.assertNotIn('data.key', args)
+            self.assertNotIn('prod-native', args)
 
 
 if __name__ == '__main__':

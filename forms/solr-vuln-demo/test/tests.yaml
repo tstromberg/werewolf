@@ -1,6 +1,18 @@
 version: 1
 packages: []
 suites:
+  - name: solr-demo-ready
+    readiness: true
+    cases:
+      - name: solr-demo-ready
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/info/system?wt=json
+            expect:
+              status: 200
+              json:
+                /lucene/solr-spec-version: 8.11.0
+            await: 90s
   - name: test-solr
     source: driver.zig
     mode: http
@@ -36,3 +48,55 @@ suites:
       connect:
         - tcp/8983
       run: []
+  - name: solr-demo
+    cases:
+      - name: solr-demo-admin
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/
+            expect:
+              status: 200
+              body:
+                matches: '[Ss][Oo][Ll][Rr]'
+            await: 90s
+      - name: solr-demo-version
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/info/system?wt=json
+            expect:
+              status: 200
+              json:
+                /lucene/solr-spec-version: 8.11.0
+            await: 90s
+      - name: solr-demo-cores
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/cores?action=STATUS&wt=json
+            expect:
+              status: 200
+              json:
+                /status:
+                  type: object
+      - name: solr-demo-log4j
+        steps:
+          - file: /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar
+            expect:
+              type: file
+      - name: solr-demo-home
+        steps:
+          - file: /data/svc/solr/home/solr.xml
+            expect:
+              type: file
+              size:
+                min: 1
+      - name: solr-demo-direct-java
+        steps:
+          - file: /usr/lib/solr/bin/solr
+            expect:
+              exists: false
+          - file: /etc/sv/solr/service
+            expect:
+              body:
+                matches: '(^|
+
+                  )exec /usr/bin/java '

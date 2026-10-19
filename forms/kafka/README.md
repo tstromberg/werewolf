@@ -60,6 +60,15 @@ topic alone. Passwords are 12 to 1024 bytes.
 Topics start empty. Producers write to the address howl prints. This form does not
 import a log.
 
+### Testing
+
+`howl test --with kafka` checks TLS, SCRAM, ACLs and message persistence after reboot.
+For local iteration, seed the retained VM with
+`howl test --with kafka --iterate --driver test-kafka`, then repeat refusals with
+`howl test --with kafka --iterate --driver test-kafka-security`.
+Use `howl test --with kafka --iterate --reset` before repeating the seed.
+The [test plan](test/tests.yaml) runs Kafka's Java clients directly, without a shell.
+
 ### Known Quirks
 
 - No shell and no Kafka scripts on the machine. Administration is from outside.

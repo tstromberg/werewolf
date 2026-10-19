@@ -35,17 +35,20 @@ Native sources use the same stage and result contract. See
 | `match.zig` | Structural equality, JSON Pointers and explicit comparisons. |
 | `regex.c` | Keep libc's private `regex_t` layout behind a small C ABI. |
 | `platform.zig` | Shared boot, confinement, service restart and reboot checks. |
+| `udp.zig` | DNS source-port impersonation refusal and service recovery. |
 
-Clean boots prepend `platform.yaml` to the form's plan. Its client waits for posture
-before inspecting kernel violations or restarting a service. A planted child must
-die with that service; a run-specific data marker must survive reboot. The host rejects
+Clean boots run declared readiness, startup checks, lifecycle checks and application
+suites in order. Readiness probes are read-only; failed readiness blocks restart
+attacks. A planted child must die with its service; a run-specific data marker
+must survive reboot. The host rejects
 reformatting on the second boot. Existing form exclusions remain explicit; unknown
 exclusions fail. SSH iteration uses only the selected form suite.
 
 Limits are 256 KiB of YAML, 32 suites, 256 cases per suite and 64 steps per case.
 Responses allow 1 MiB of body and 64 KiB of headers; clients allow 1 MiB stdout
 and 64 KiB stderr. Regex patterns allow 512 bytes. Probes default to a 10-second
-request deadline. `await` retries read-only operations within its declared budget;
+request deadline; `timeout: 45s` overrides one fetch/exec call (1s..300s).
+`await` retries read-only operations within its declared budget;
 transport and parse failures do not silently satisfy a refusal assertion.
 The existing launcher and console also impose whole-suite/boot deadlines.
 

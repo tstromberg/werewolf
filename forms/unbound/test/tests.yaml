@@ -1,0 +1,173 @@
+version: 1
+packages:
+  - drill
+suites:
+  - name: unbound
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: unbound-answers
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - localhost
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: '(^|
+
+                  )localhost\.[[:space:]]+[^
+
+                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
+
+                  |$)'
+            await: 60s
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -t
+                - localhost
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: '(^|
+
+                  )localhost\.[[:space:]]+[^
+
+                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
+
+                  |$)'
+            await: 60s
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - localhost
+                - '@10.0.2.15'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: '(^|
+
+                  )localhost\.[[:space:]]+[^
+
+                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
+
+                  |$)'
+            await: 60s
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -t
+                - localhost
+                - '@10.0.2.15'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: '(^|
+
+                  )localhost\.[[:space:]]+[^
+
+                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
+
+                  |$)'
+            await: 60s
+      - name: unbound-forwards
+        steps:
+          - file: /run/svc/unbound/unbound-setup.conf
+            expect:
+              type: file
+              uid: unbound
+              mode: '600'
+              body:
+                contains: 'name: "corp.example."'
+                occurrences:
+                  'forward-addr: 10.0.2.3': 2
+                  'domain-insecure: "10.in-addr.arpa."': 1
+                  'local-zone: "10.in-addr.arpa." nodefault': 1
+      - name: unbound-anchor
+        steps:
+          - file: /data/svc/unbound/root.key
+            expect:
+              type: file
+              uid: unbound
+              mode: '600'
+              body:
+                matches: '(^|
+
+                  )\. [^
+
+                  ]*DNSKEY[^
+
+                  ]*257 3 8 [^
+
+                  ]*
+
+                  ([^
+
+                  ]*
+
+                  )*\. [^
+
+                  ]*DNSKEY[^
+
+                  ]*257 3 8 '
+          - file: /etc/unbound/unbound.conf
+            expect:
+              body:
+                occurrences:
+                  'module-config: "validator iterator"': 1
+                  'auto-trust-anchor-file: "/data/svc/unbound/root.key"': 1
+      - name: unbound-no-ctl
+        steps:
+          - file: /etc/unbound/unbound.conf
+            expect:
+              body:
+                occurrences:
+                  'control-enable: no': 1
+          - file: /usr/bin/unbound-control
+            expect:
+              exists: false
+          - file: /usr/bin/unbound-control-setup
+            expect:
+              exists: false
+          - file: /usr/bin/sh
+            expect:
+              exists: false
+          - file: /usr/bin/bash
+            expect:
+              exists: false
+      - name: unbound-refuses
+        steps:
+          - file: /etc/unbound/unbound.conf
+            expect:
+              body:
+                contains: "\taccess-control: 0.0.0.0/0 refuse\n\taccess-control: ::/0 refuse\n\
+                  \taccess-control: 127.0.0.0/8 allow\n\taccess-control: ::1/128 allow\n\
+                  \taccess-control: 10.0.0.0/8 allow\n\taccess-control: 172.16.0.0/12 allow\n\
+                  \taccess-control: 192.168.0.0/16 allow\n\taccess-control: 100.64.0.0/10\
+                  \ allow\n\taccess-control: 169.254.0.0/16 allow\n\taccess-control: fc00::/7\
+                  \ allow\n\taccess-control: fe80::/10 allow\n"
+                occurrences:
+                  'access-control:': 11
+                  'include:': 1
+  - name: unbound-policy
+    source: driver.zig
+    mode: policy
+    user: root
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - unbound-no-sockets
+        - unbound-no-policy-override
+      verify:
+        - unbound-no-sockets
+        - unbound-no-policy-override

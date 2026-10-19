@@ -1,0 +1,129 @@
+version: 1
+packages:
+  - drill
+suites:
+  - name: ph
+    cases:
+      - name: ph-user
+        steps:
+          - service: pi-hole
+            expect:
+              user: _oci-pi-hole
+              uid:
+                min: 65536
+              capabilities:
+                - net_bind_service
+              no_new_privileges: true
+            await: 120s
+      - name: ph-local
+        steps:
+          - file: /data/svc/pi-hole/etc/pihole/pihole.toml
+            expect:
+              body:
+                contains: listeningMode = "LOCAL"
+          - file: /data/svc/pi-hole/etc/pihole/pihole.toml
+            expect:
+              body:
+                contains: active = false
+          - file: /etc/sv/pi-hole/service
+            expect:
+              body:
+                contains: env FTLCONF_dhcp_active=false
+      - name: ph-login
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/api/auth
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+              json:
+                /session/valid: false
+            await: 60s
+          - fetch:
+              url: https://localhost/api/auth
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                password: werewolf-check-pihole
+            expect:
+              status: 200
+              json:
+                /session/valid: true
+                /session/sid:
+                  matches: .+
+      - name: ph-wrong
+        steps:
+          - fetch:
+              url: https://localhost/api/auth
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                password: wrong
+            expect:
+              status: 401
+              json:
+                /session/valid: false
+      - name: ph-stranger
+        steps:
+          - fetch:
+              url: https://localhost/api/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+  - name: ph-dns
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: ph-resolves
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - example.org
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)[1-9][0-9]*(\\.[0-9]+){3}(\n|$)"
+            timeout: 5s
+            await: 60s
+  - name: ph-blocklist
+    policy:
+      run:
+        - /usr/bin/drill
+    cases:
+      - name: ph-blocks
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/drill
+                - -Q
+                - ad.doubleclick.net
+                - '@127.0.0.1'
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "0.0.0.0\n"
+            timeout: 5s
+            await: 90s
+  - name: ph-source-port
+    source: driver.zig
+    mode: squatter
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc inet unix connect exec
+      run:
+        - /usr/bin/sv
+        - /usr/bin/drill
+    cases:
+      seed:
+        - ph-squatter
+      verify:
+        - ph-squatter

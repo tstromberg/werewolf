@@ -1,0 +1,43 @@
+version: 1
+suites:
+  - name: mongodb-ready
+    source: driver.zig
+    mode: ready
+    readiness: true
+    user: root
+    policy: {pledge: stdio inet}
+    cases:
+      seed: [mongodb-ready]
+      verify: [mongodb-ready]
+  - name: mongodb
+    cases:
+      - name: mongodb-local
+        steps:
+          - listeners: {protocol: tcp, port: 27017}
+            expect:
+              equals: [{protocol: tcp, address: 127.0.0.1, port: 27017}]
+            await: 60s
+      - name: mongodb-user
+        steps:
+          - service: mongodb
+            expect:
+              uid: {min: 1}
+              capabilities: []
+              no_new_privileges: true
+      - name: mongodb-data
+        steps:
+          - file: /data/svc/mongodb/WiredTiger
+            expect:
+              type: file
+          - file: /data/svc/mongodb
+            expect:
+              type: directory
+              mode: '700'
+  - name: mongodb-wire
+    source: driver.zig
+    mode: wire
+    user: root
+    policy: {pledge: stdio inet}
+    cases:
+      seed: [mongodb-works, mongodb-no-javascript]
+      verify: [mongodb-kept, mongodb-no-javascript]

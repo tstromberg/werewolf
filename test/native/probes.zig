@@ -14,6 +14,7 @@ const Step = struct {
     request: Json,
     expect: Json,
     await_seconds: u16,
+    timeout_seconds: u16 = 10,
     line: usize,
 };
 const Case = struct { name: []const u8, phases: []const []const u8, steps: []const Step };
@@ -85,7 +86,44 @@ pub fn main(init: std.process.Init) !void {
     if (!passed) std.process.exit(1);
 }
 
+// A response body may contain arbitrary bytes; a JSON round trip changes them.
+fn copyValue(a: Allocator, value: Json) Allocator.Error!Json {
+    return switch (value) {
+        .string => |text| .{ .string = try a.dupe(u8, text) },
+        .number_string => |text| .{ .number_string = try a.dupe(u8, text) },
+        .array => |items| blk: {
+            var result: std.json.Array = .init(a);
+            for (items.items) |item| try result.append(try copyValue(a, item));
+            break :blk .{ .array = result };
+        },
+        .object => |object| blk: {
+            var result = system.object(a);
+            var it = object.iterator();
+            while (it.next()) |entry| try result.object.put(
+                a,
+                try a.dupe(u8, entry.key_ptr.*),
+                try copyValue(a, entry.value_ptr.*),
+            );
+            break :blk result;
+        },
+        else => value,
+    };
+}
+
 const Failure = struct { field: []const u8, got: Json, want: Json };
+
+fn onlyPort(listeners: Json, port: i64) Json {
+    var result = listeners;
+    var count: usize = 0;
+    for (result.array.items) |entry| {
+        if (entry.object.get("port").?.integer != port) continue;
+        result.array.items[count] = entry;
+        count += 1;
+    }
+    result.array.items = result.array.items[0..count];
+    return result;
+}
+
 const Workflow = struct {
     io: Io,
     a: Allocator,
@@ -129,6 +167,13 @@ const Workflow = struct {
                     const cookies = prior.object.get("cookies") orelse return error.MissingCapture;
                     return capture(cookies.object.get(cookie.string));
                 }
+                if (value.object.get("regex")) |pattern| {
+                    return system.text(try match.extract(
+                        w.a,
+                        pattern.string,
+                        try jsonOutput(prior),
+                    ));
+                }
                 if (value.object.get(
                     "body",
                 )) |_| return prior.object.get("body") orelse error.MissingCapture;
@@ -161,13 +206,17 @@ const Workflow = struct {
             u8,
             step.probe,
             "fetch",
-        ) and (req.object.contains("bearer") or req.object.contains("session") or
+        ) and (req.object.contains("bearer") or req.object.contains("authorization") or
+            req.object.contains("session") or
             req.object.contains("headers") or req.object.contains("json") or
             req.object.contains("body") or req.object.contains("form") or
             req.object.contains("multipart"))) w.sensitive = true;
         const deadline = Io.Clock.awake.now(
             w.io,
-        ).addDuration(.fromSeconds(if (step.await_seconds > 0) step.await_seconds else 30));
+        ).addDuration(.fromSeconds(if (step.await_seconds > 0)
+            step.await_seconds
+        else
+            step.timeout_seconds));
         while (true) {
             var attempt: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
             defer attempt.deinit();
@@ -178,11 +227,12 @@ const Workflow = struct {
                 step.probe,
                 req,
                 expected,
-                @max(1, @min(remaining, 10000)),
+                @max(1, @min(remaining, @as(i64, step.timeout_seconds) * 1000)),
             ) catch |err| {
                 w.a = original;
                 const transient = switch (err) {
                     error.ConnectionRefused,
+                    error.TlsHandshake,
                     error.Timeout,
                     error.ServiceNotRunning,
                     error.ProcessSetChanged,
@@ -201,13 +251,7 @@ const Workflow = struct {
             const ok = try w.check(step.probe, got, expected);
             if (ok) {
                 // Captures outlive this attempt, but retries release their response data.
-                const copy = try std.json.parseFromSliceLeaky(
-                    Json,
-                    original,
-                    try std.json.Stringify.valueAlloc(attempt.allocator(), got, .{}),
-                    .{},
-                );
-                try w.previous.put(original, step.name, copy);
+                try w.previous.put(original, step.name, try copyValue(original, got));
                 return true;
             }
             if (step.await_seconds == 0 or
@@ -242,7 +286,15 @@ const Workflow = struct {
             }
             return got;
         }
-        if (std.mem.eql(u8, name, "listeners")) return system.listeners(w.io, w.a, request.string);
+        if (std.mem.eql(u8, name, "listeners")) {
+            const scoped = request == .object;
+            const proto = if (scoped) request.object.get("protocol").?.string else request.string;
+            const listeners = try system.listeners(w.io, w.a, proto);
+            return if (scoped)
+                onlyPort(listeners, request.object.get("port").?.integer)
+            else
+                listeners;
+        }
         if (std.mem.eql(u8, name, "mount")) return system.mount(w.io, w.a, request.string);
         if (std.mem.eql(u8, name, "exec")) return w.exec(request, timeout_ms);
         return error.UnknownProbe;
@@ -508,16 +560,54 @@ fn validateRequest(name: []const u8, req: Json) !void {
     if (std.mem.eql(u8, name, "fetch")) {
         for ([_][]const u8{ "url", "method", "bearer", "session", "ca" }) |key|
             if (req.object.get(key)) |value| try textInput(value, std.mem.eql(u8, key, "bearer"));
+        if (req.object.get("path")) |parts| {
+            const uri = std.Uri.parse(req.object.get("url").?.string) catch
+                return error.InvalidPathBase;
+            const path = switch (uri.path) {
+                .raw, .percent_encoded => |p| p,
+            };
+            if (uri.host == null or uri.user != null or uri.password != null or
+                uri.query != null or uri.fragment != null or
+                (path.len > 0 and !std.mem.eql(u8, path, "/"))) return error.InvalidPathBase;
+            if (parts != .array or parts.array.items.len == 0 or parts.array.items.len > 32)
+                return error.InvalidPath;
+            for (parts.array.items, 0..) |part, index| {
+                try textInput(part, false);
+                const text = part.string;
+                if (text.len > 1024 or std.mem.eql(u8, text, ".") or
+                    std.mem.eql(u8, text, "..") or
+                    (text.len == 0 and index + 1 != parts.array.items.len))
+                    return error.InvalidPath;
+            }
+        }
+        if (req.object.get("authorization")) |auth| {
+            if (auth != .object) return error.InvalidAuthorization;
+            const scheme = auth.object.get("scheme") orelse return error.InvalidAuthorization;
+            const credentials = auth.object.get("credentials") orelse
+                return error.InvalidAuthorization;
+            try textInput(scheme, true);
+            try textInput(credentials, true);
+            if (scheme.string.len == 0 or req.object.contains("bearer"))
+                return error.InvalidAuthorization;
+            for (scheme.string) |ch| {
+                if (!std.ascii.isAlphanumeric(ch) and
+                    std.mem.findScalar(u8, "!#$%&'*+-.^_`|~", ch) == null)
+                    return error.InvalidAuthorization;
+            }
+        }
         // libcurl receives the body's explicit length; unlike headers it may be binary.
         if (req.object.get("body")) |body| if (body != .string) return error.InvalidTextInput;
         for ([_][]const u8{ "headers", "form" }) |key| {
             if (req.object.get(key)) |values| {
                 if (values != .object) return error.InvalidTextMap;
                 var it = values.object.iterator();
-                while (it.next()) |entry| try textInput(
-                    entry.value_ptr.*,
-                    std.mem.eql(u8, key, "headers"),
-                );
+                while (it.next()) |entry| {
+                    if (std.mem.eql(u8, key, "headers") and
+                        std.ascii.eqlIgnoreCase(entry.key_ptr.*, "authorization") and
+                        (req.object.contains("bearer") or req.object.contains("authorization")))
+                        return error.InvalidAuthorization;
+                    try textInput(entry.value_ptr.*, std.mem.eql(u8, key, "headers"));
+                }
             }
         }
         if (req.object.get("multipart")) |parts| {
@@ -544,6 +634,31 @@ fn capture(value: ?Json) !Json {
     const v = value orelse return error.MissingCapture;
     if (v != .string) return error.AmbiguousCapture;
     return v;
+}
+
+test "port scope retains every address so a wildcard listener still fails" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const listeners = try std.json.parseFromSliceLeaky(Json, a,
+        \\[{"protocol":"tcp","address":"127.0.0.1","port":11434},
+        \\ {"protocol":"tcp","address":"::","port":443},
+        \\ {"protocol":"tcp","address":"0.0.0.0","port":11434}]
+    , .{});
+    const scoped = onlyPort(listeners, 11434);
+    var workflow: Workflow = .{
+        .a = a,
+        .io = std.testing.io,
+        .ctx = undefined,
+        .plan = undefined,
+        .suite = "",
+    };
+    const expected = try std.json.parseFromSliceLeaky(Json, a,
+        \\{"equals":[{"protocol":"tcp","address":"127.0.0.1","port":11434}]}
+    , .{});
+    try std.testing.expectEqual(@as(usize, 2), scoped.array.items.len);
+    try std.testing.expect(!try workflow.check("listeners", scoped, expected));
+    try std.testing.expectEqual(@as(usize, 0), onlyPort(scoped, 8080).array.items.len);
 }
 
 test "group assertions compare sets and reject duplicate identities" {

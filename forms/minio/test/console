@@ -1,0 +1,2 @@
+# Missing credentials must park the shipping service.
+seen    minio-needs-secret  secret MINIO_ROOT_USER: /run/config/minio/root_user: FileNotFound

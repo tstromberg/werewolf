@@ -1,0 +1,203 @@
+version: 1
+suites:
+  - name: kafka
+    policy:
+      run:
+        - /usr/bin/java
+    fixtures:
+      ops: /run/config/tests/kafka-ops
+      app: /run/config/tests/kafka-app
+    cases:
+      - name: kafka-up
+        steps:
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.TopicCommand, --bootstrap-server, 'localhost:9093',
+                     --command-config, /run/config/tests/kafka-ops, --list]
+              readonly: true
+            timeout: 45s
+            expect:
+              exit: 0
+            await: 90s
+      - name: kafka-acl-user
+        steps:
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.TopicCommand, --bootstrap-server, 'localhost:9093',
+                     --command-config, /run/config/tests/kafka-ops, --create, --topic, orders, --partitions,
+                     '1', --replication-factor, '1']
+            timeout: 45s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.AclCommand, --bootstrap-server, 'localhost:9093',
+                     --command-config, /run/config/tests/kafka-ops, --add, --allow-principal, 'User:app', --producer,
+                     --topic, orders]
+            timeout: 45s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.AclCommand, --bootstrap-server, 'localhost:9093',
+                     --command-config, /run/config/tests/kafka-ops, --add, --allow-principal, 'User:app', --consumer,
+                     --topic, orders, --group, check]
+            timeout: 45s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.ConsoleProducer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-app, --topic, orders, --command-property,
+                     max.block.ms=10000]
+              stdin:
+                run: true
+            timeout: 45s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.consumer.ConsoleConsumer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-app, --topic, orders, --group,
+                     check, --from-beginning, --max-messages, '1', --timeout-ms, '30000']
+            timeout: 45s
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+                matches: "^[0-9a-f]{32}\n$"
+        phases:
+          - seed
+      - name: kafka-kept
+        steps:
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.consumer.group.ConsumerGroupCommand,
+                     --bootstrap-server, 'localhost:9093', --command-config, /run/config/tests/kafka-ops, --group,
+                     check, --reset-offsets, --topic, orders, --to-earliest, --execute]
+            timeout: 45s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.consumer.ConsoleConsumer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-app, --topic, orders, --group,
+                     check, --from-beginning, --max-messages, '1', --timeout-ms, '30000']
+            timeout: 45s
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+                matches: "^[0-9a-f]{32}\n$"
+        phases:
+          - verify
+  - name: kafka-security
+    policy:
+      run:
+        - /usr/bin/java
+    fixtures:
+      ops: /run/config/tests/kafka-ops
+      stranger: /run/config/tests/kafka-stranger
+      wrong: /run/config/tests/kafka-wrong
+      anon: /run/config/tests/kafka-anon
+    cases:
+      - name: kafka-no-login
+        steps:
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.ConsoleProducer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-anon, --topic, orders, --command-property,
+                     max.block.ms=10000]
+              stdin: "leaked\n"
+            timeout: 45s
+            expect:
+              exit: 0
+              stderr:
+                contains: Error when sending message to topic orders
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.ConsoleProducer, --bootstrap-server,
+                     'localhost:9093', --topic, orders, --command-property, max.block.ms=10000]
+              stdin: "leaked\n"
+            timeout: 45s
+            expect:
+              exit: 0
+              stderr:
+                contains: Error when sending message to topic orders
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.ConsoleProducer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-wrong, --topic, orders, --command-property,
+                     max.block.ms=10000]
+              stdin: "leaked\n"
+            timeout: 45s
+            expect:
+              exit: 0
+              stderr:
+                contains: invalid credentials with SASL mechanism SCRAM-SHA-512
+      - name: kafka-no-acl
+        steps:
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.ConsoleProducer, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-stranger, --topic, orders,
+                     --command-property, max.block.ms=10000]
+              stdin: "stolen\n"
+            timeout: 45s
+            expect:
+              exit: 0
+              stderr:
+                contains: 'Not authorized to access topics: [orders]'
+          - exec:
+              argv: [/usr/bin/java, -Xmx96m, '-XX:-UsePerfData', '-XX:TieredStopAtLevel=1', -Dlog4j2.configurationFile=/usr/lib/kafka/config/tools-log4j2.yaml,
+                     -cp, /usr/lib/kafka/libs/*, org.apache.kafka.tools.GetOffsetShell, --bootstrap-server,
+                     'localhost:9093', --command-config, /run/config/tests/kafka-ops, --topic, orders]
+            timeout: 45s
+            expect:
+              exit: 0
+              stdout: "orders:0:1\n"
+  - name: kafka-files
+    cases:
+      - name: kafka-setup
+        steps:
+          - file: /run/svc/kafka/server.properties
+            expect:
+              type: file
+              uid: kafka
+              mode: '600'
+              body:
+                contains: super.users=User:ops;User:_node
+                absent: werewolf-check
+          - file: /run/svc/kafka/tls.pem
+            expect:
+              type: file
+              uid: kafka
+              mode: '600'
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 9094
+              absent:
+                - address: 0.0.0.0
+                  port: 9094
+                - address: '::'
+                  port: 9094
+          - file: /data/svc/kafka/log/meta.properties
+            expect:
+              type: file
+              body:
+                contains: cluster.id=
+  - name: kafka-logfiles
+    source: driver.zig
+    mode: logfiles
+    user: root
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - kafka-console-logs
+      verify:
+        - kafka-console-logs

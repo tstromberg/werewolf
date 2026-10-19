@@ -1,0 +1,42 @@
+version: 1
+suites:
+  - name: php
+    cases:
+      - name: php-placeholder
+        steps:
+          - fetch:
+              url: http://127.0.0.1/
+            expect:
+              status: 200
+              body:
+                contains: nginx is serving this page
+            await: 60s
+      - name: php-missing-script
+        steps:
+          - fetch:
+              url: http://127.0.0.1/missing.php
+            expect:
+              status: 404
+      - name: php-socket-private
+        steps:
+          - file: /run/svc/php-fpm/php.sock
+            expect:
+              type: socket
+              mode: '660'
+            await: 60s
+  - name: php-denied
+    user: nobody
+    policy:
+      pledge: stdio rpath
+      read:
+        - /run/svc/php-fpm
+        - /usr/share/werewolf/net
+    cases:
+      - name: php-socket-refused
+        steps:
+          - file: /usr/share/werewolf/net
+            expect:
+              readable: true
+          - file: /run/svc/php-fpm/php.sock
+            expect:
+              readable: false

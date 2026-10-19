@@ -1,0 +1,51 @@
+version: 1
+suites:
+  - name: ruby-ready
+    readiness: true
+    cases:
+      - name: ruby-ready
+        steps:
+          - fetch: {url: 'http://127.0.0.1:8080/'}
+            expect:
+              status: 200
+              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+            await: 60s
+  - name: ruby
+    cases:
+      - name: ruby-greeting
+        steps:
+          - fetch: {url: 'http://127.0.0.1:8080/'}
+            expect:
+              status: 200
+              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+      - name: ruby-content-type
+        steps:
+          - fetch: {url: 'http://127.0.0.1:8080/'}
+            expect:
+              status: 200
+              headers:
+                content-type:
+                  matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$
+      - name: ruby-reconnect
+        steps:
+          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+            expect:
+              status: 200
+              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+            expect:
+              status: 200
+              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+            expect:
+              status: 200
+              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+  - name: ruby-wire
+    source: driver.zig
+    mode: wire
+    user: root
+    policy:
+      pledge: stdio inet
+    cases:
+      seed: [ruby-framing, ruby-fragmented]
+      verify: [ruby-framing, ruby-fragmented]

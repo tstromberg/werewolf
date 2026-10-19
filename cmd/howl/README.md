@@ -85,10 +85,6 @@ cannot attach it. Progress goes to stderr and the machine record to stdout.
 
 Local builds need the checkout and build tools; clouds need their provider CLIs.
 
-## Alternatives Considered
-
-[Make, SDKs and Terraform](../../docs/design/cli.md#alternatives-considered).
-
 ## Security Considerations
 
 | Risk | Control |
@@ -100,8 +96,3 @@ Local builds need the checkout and build tools; clouds need their provider CLIs.
 | Config tar left readable | written 0600 and renamed into place; delete removes `build/machines/NAME` |
 | Untrusted OCI layers | `_unpack` runs with no environment; on Linux, Landlock confines it |
 | A forged or swapped form | a name's form is taken only as the packages key's index lists it (`lib/apk.zig`) |
-
-## Reliability Considerations
-
-Content names make uploads and creates retryable; console works after a failed boot.
-Partial failures leave named resources. Proxmox still needs testing on a real node.

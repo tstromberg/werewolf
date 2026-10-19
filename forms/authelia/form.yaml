@@ -17,7 +17,7 @@ packages:
   # What ../packages/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 
-# The check signs in with curl, which keeps cookies.
+# curl helps inspect the portal in development mode.
 dev:
   - curl
 

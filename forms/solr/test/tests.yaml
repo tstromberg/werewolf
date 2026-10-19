@@ -1,37 +1,159 @@
 version: 1
-packages: []
 suites:
-  - name: test-solr
-    source: driver.zig
-    mode: http
-    user: solr
+  - name: solr
     cases:
-      seed:
-        - ready
-        - version
-        - private-listener
-        - create-core
-        - index-document
-        - persisted-document
-        - home-confined
-        - cve-2021-44228-fixed
-        - no-shell-launcher
-        - hardened-java
-      verify:
-        - ready
-        - version
-        - private-listener
-        - persisted-document
-        - home-confined
-        - cve-2021-44228-fixed
-        - no-shell-launcher
-        - hardened-java
-    policy:
-      pledge: stdio rpath wpath inet connect
-      read:
-        - /etc/sv/solr/service
-        - /usr/lib/apk/db/installed
-        - /usr/lib/solr/server/lib/ext
-      connect:
-        - tcp/8983
-      run: []
+      - name: solr-admin
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/
+            expect:
+              status: 200
+              body:
+                matches: '[Ss][Oo][Ll][Rr]'
+            await: 120s
+      - name: solr-ping
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/info/system?wt=json
+            expect:
+              status: 200
+              json:
+                /lucene/solr-spec-version: 10.0.0
+            await: 120s
+      - name: solr-cores
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/cores?action=STATUS&wt=json
+            expect:
+              status: 200
+              json:
+                /status:
+                  type: object
+      - name: solr-create-core
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/cores
+              method: POST
+              form:
+                action: CREATE
+                name: check
+                configSet: _default
+                wt: json
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 400
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/cores?action=STATUS&core=check&wt=json
+            expect:
+              status: 200
+              json:
+                /status/check/name: check
+        phases:
+          - seed
+      - name: solr-index-document
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/check/update?commit=true&wt=json
+              method: POST
+              json:
+                - id:
+                    run: true
+                  name: shell-free Solr
+            expect:
+              status: 200
+              json:
+                /responseHeader/status: 0
+        phases:
+          - seed
+      - name: solr-query-document
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/check/select?q=*:*&rows=0&wt=json
+            expect:
+              status: 200
+              json:
+                /responseHeader/status: 0
+            await: 120s
+          - fetch:
+              url: http://127.0.0.1:8983/solr/check/select
+              method: POST
+              form:
+                q: '{!term f=id v=$probe}'
+                probe:
+                  run: true
+                wt: json
+            expect:
+              status: 200
+              json:
+                /response/numFound: 1
+                /response/docs/0/id:
+                  run: true
+                /response/docs:
+                  count: 1
+              body:
+                contains: shell-free Solr
+      - name: solr-home-confined
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8983/solr/admin/cores
+              method: POST
+              form:
+                action: CREATE
+                name: escape
+                instanceDir: /etc/solr-check
+                configSet: _default
+                wt: json
+            expect:
+              status:
+                one_of:
+                  - 400
+                  - 403
+      - name: solr-home
+        steps:
+          - file: /data/svc/solr/home/solr.xml
+            expect:
+              type: file
+              size:
+                min: 1
+      - name: solr-direct-java
+        steps:
+          - file: /etc/sv/solr/service
+            expect:
+              body:
+                matches: '^exec /usr/bin/java '
+                absent: run /bin/sh
+          - file: /usr/lib/solr/bin/solr
+            expect:
+              exists: false
+          - file: /usr/bin/bash
+            expect:
+              exists: false
+          - file: /usr/bin/busybox
+            expect:
+              exists: false
+      - name: solr-hardened-jvm
+        steps:
+          - file: /usr/lib/apk/db/installed
+            expect:
+              body:
+                matches: "(^|\n)P:openjdk-27-jre\nV:27\\.[^\n]*-r([2-9][0-9]{3}|[1-9][0-9]{4,})\n"
+      - name: solr-log4j
+        steps:
+          - file: /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar
+            expect:
+              exists: false
+          - file: /usr/lib/solr/server/lib/ext/log4j-core-2.25.3.jar
+            expect:
+              type: file
+              size:
+                min: 1
+      - name: solr-private-listener
+        steps:
+          - listeners: tcp
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 8983

@@ -13,3 +13,19 @@ bob:$2y$10$6jXCPv0yPt30HkBJAcHQ8uzDWhts1sX/QWDQkJgZWycVloBkKF6nG
 EOT
 echo '{"pushers":["alice"]}' >"$1/zot/settings.json"
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
+
+# crane reads fixed credentials; all network activity still goes through TLS.
+mkdir -p "$1/tests"
+for user in alice bob none; do
+	mkdir -p "$1/tests/zot-$user"
+	if [ "$user" = none ]; then
+		printf '%s\n' '{"auths":{}}' >"$1/tests/zot-$user/config.json"
+	else
+		auth=$(printf '%s' "$user:werewolf-check-$user" | base64 | tr -d '\n')
+		printf '{"auths":{"localhost":{"auth":"%s"}}}\n' "$auth" \
+			>"$1/tests/zot-$user/config.json"
+		printf '%s' "$auth" >"$1/tests/zot-$user-auth"
+	fi
+done
+cp "$(dirname "$0")/layer.tar.gz" "$1/tests/zot-layer"
+cp "$(dirname "$0")/evil.tar.gz" "$1/tests/zot-evil"

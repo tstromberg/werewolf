@@ -1,0 +1,40 @@
+version: 1
+suites:
+  - name: haproxy-ready
+    readiness: true
+    cases:
+      - name: haproxy-ready
+        steps:
+          - fetch: {url: 'http://127.0.0.1/'}
+            expect: {status: 503}
+            await: 60s
+  - name: haproxy
+    cases:
+      - name: haproxy-unavailable
+        steps:
+          - fetch: {url: 'http://127.0.0.1/'}
+            expect: {status: 503}
+      - name: haproxy-setup
+        steps:
+          - file: /run/svc/haproxy/haproxy.cfg
+            expect:
+              body:
+                matches: "(^|\n)    server app1 127[.]0[.]0[.]1:443 check(\n|$)"
+                not_matches: stats|lua|external-check|:443 ssl
+      - name: haproxy-user
+        steps:
+          - service: haproxy
+            expect:
+              user: haproxy
+              uid: {min: 65536}
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+  - name: haproxy-wire
+    source: driver.zig
+    mode: wire
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed: [haproxy-proxies, haproxy-httpoxy, haproxy-slow, haproxy-no-sockets]
+      verify: [haproxy-proxies, haproxy-httpoxy, haproxy-slow, haproxy-no-sockets]

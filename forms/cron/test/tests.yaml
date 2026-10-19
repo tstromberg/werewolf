@@ -1,0 +1,59 @@
+version: 1
+suites:
+  - name: cron-fixture
+    source: driver.zig
+    mode: prepare
+    user: root
+    policy: {pledge: stdio rpath wpath}
+    cases:
+      seed: [cron-fixture-clean]
+      verify: [cron-fixture-clean]
+  - name: cron-jobs
+    source: driver.zig
+    mode: jobs
+    user: supercronic
+    memory: 64
+    policy:
+      pledge: stdio rpath proc exec
+      read: [/etc/cron]
+      run: [/usr/bin/supercronic]
+    cases:
+      seed: [cron-job-runs]
+      verify: [cron-job-runs]
+  - name: cron-audit
+    source: driver.zig
+    mode: audit
+    user: root
+    policy: {pledge: stdio rpath}
+    cases:
+      seed: [cron-pledged]
+      verify: [cron-pledged]
+  - name: cron
+    cases:
+      - name: cron-leashed
+        steps:
+          - service: cron
+            expect:
+              user: supercronic
+              uid: {min: 65536}
+              capabilities: []
+              no_new_privileges: true
+              seccomp: filter
+          - file: /etc/passwd
+            expect:
+              body:
+                matches: "(^|\n)supercronic:[^\n]*:/usr/lib/werewolf/sh-shim(\n|$)"
+      - name: cron-unlisted-refused
+        steps:
+          - file: /data/svc/test-cron-jobs/cron.log
+            expect:
+              body:
+                contains: 'sh-shim: /usr/bin/zstd: permission denied'
+      - name: cron-shell-refused
+        steps:
+          - file: /data/svc/test-cron-jobs/cron.log
+            expect:
+              body:
+                matches: 'sh-shim: refused: unquoted .* is shell syntax'
+          - file: /data/svc/test-cron-jobs/shell-ran
+            expect: {exists: false}

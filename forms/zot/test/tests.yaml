@@ -1,0 +1,281 @@
+version: 1
+packages:
+  - crane
+suites:
+  - name: zot-ca
+    readiness: true
+    cases:
+      - name: zot-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: zot-ready
+    readiness: true
+    cases:
+      - name: zot-ready
+        steps:
+          - fetch:
+              url: https://localhost/v2/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+            await: 60s
+  - name: zot-startup
+    cases:
+      - name: zot-stranger
+        steps:
+          - fetch:
+              url: https://localhost/v2/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+            await: 60s
+  - name: zot
+    fixtures:
+      alice-auth: /run/config/tests/zot-alice-auth
+      bob-auth: /run/config/tests/zot-bob-auth
+      layer: /run/config/tests/zot-layer
+    policy:
+      run:
+        - /usr/bin/crane
+    cases:
+      - name: zot-user
+        steps:
+          - service: zot
+            expect:
+              user: zot
+              capabilities: []
+              no_new_privileges: true
+      - name: zot-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/v2/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Basic
+                credentials: YWxpY2U6d3Jvbmc=
+            expect:
+              status: 401
+            timeout: 15s
+      - name: zot-only-v2
+        steps:
+          - fetch:
+              url: https://localhost/metrics
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: alice-auth
+            expect:
+              status: 404
+      - name: zot-push
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/crane
+                - append
+                - -f
+                - /run/config/tests/zot-layer
+                - -t
+                - localhost/app/hello:1
+              env:
+                DOCKER_CONFIG: /run/config/tests/zot-alice
+                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
+                HOME: /tmp
+            expect:
+              exit: 0
+            timeout: 30s
+          - file: /data/svc/zot/app/hello/index.json
+            expect:
+              type: file
+              uid: zot
+        phases:
+          - seed
+      - name: zot-pull
+        steps:
+          - fetch:
+              url: https://localhost/v2/app/hello/manifests/1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+            expect:
+              status: 200
+              headers:
+                docker-content-digest:
+                  matches: ^sha256:[0-9a-f]{64}$
+              json:
+                /schemaVersion: 2
+                /layers:
+                  count: 1
+                /layers/0/digest: sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+            name: manifest
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: GET
+              path:
+                - v2
+                - app
+                - hello
+                - manifests
+                - step: manifest
+                  header: docker-content-digest
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+            expect:
+              status: 200
+              body:
+                step: manifest
+                body: true
+          - exec:
+              argv:
+                - /usr/bin/crane
+                - blob
+                - localhost/app/hello@sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+              env:
+                DOCKER_CONFIG: /run/config/tests/zot-bob
+                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
+                HOME: /tmp
+            expect:
+              exit: 0
+              stdout:
+                fixture: layer
+                raw: true
+            timeout: 30s
+          - file: /data/svc/zot/app/hello/index.json
+            expect:
+              type: file
+              uid: zot
+      - name: zot-alone
+        steps:
+          - service: zot
+            expect:
+              connect_rules: []
+      - name: zot-stranger-pull
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/crane
+                - digest
+                - localhost/app/hello:1
+              env:
+                DOCKER_CONFIG: /run/config/tests/zot-none
+                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
+                HOME: /tmp
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                contains: UNAUTHORIZED
+            timeout: 30s
+      - name: zot-stranger-push
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/crane
+                - append
+                - -f
+                - /run/config/tests/zot-layer
+                - -t
+                - localhost/app/evil:1
+              env:
+                DOCKER_CONFIG: /run/config/tests/zot-none
+                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
+                HOME: /tmp
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                contains: '401'
+            timeout: 30s
+          - file: /data/svc/zot/app/evil
+            expect:
+              exists: false
+      - name: zot-reader-push
+        steps:
+          - fetch:
+              url: https://localhost/v2/app/hello/manifests/1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+            expect:
+              status: 200
+              headers:
+                docker-content-digest:
+                  matches: ^sha256:[0-9a-f]{64}$
+              json:
+                /schemaVersion: 2
+                /layers:
+                  count: 1
+                /layers/0/digest: sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+            name: manifest
+          - exec:
+              argv:
+                - /usr/bin/crane
+                - append
+                - -f
+                - /run/config/tests/zot-evil
+                - -t
+                - localhost/app/hello:1
+              env:
+                DOCKER_CONFIG: /run/config/tests/zot-bob
+                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
+                HOME: /tmp
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                contains: DENIED
+            timeout: 30s
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: DELETE
+              path:
+                - v2
+                - app
+                - hello
+                - manifests
+                - step: manifest
+                  header: docker-content-digest
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+            expect:
+              status: 403
+              json:
+                /errors/0/code: DENIED
+          - fetch:
+              url: https://localhost/v2/app/hello/manifests/1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+            expect:
+              status: 200
+              body:
+                step: manifest
+                body: true

@@ -20,10 +20,17 @@ suites:
         - root-unlinked
         - root-verified
         - cgrouped
-        - reaped
         - sealed
         - power-separated
         - data-mark
       verify:
         - data-usable
         - data-kept
+  - name: test-lifecycle
+    source: platform.zig
+    mode: platform
+    user: root
+    policy: {pledge: stdio rpath}
+    cases:
+      seed: [reaped]
+      verify: []

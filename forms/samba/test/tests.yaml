@@ -1,0 +1,399 @@
+version: 1
+packages: [samba-client]
+suites:
+  - name: samba-ready
+    readiness: true
+    policy:
+      run: [/usr/bin/smbclient]
+    cases:
+      - name: samba-ready
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-check-password
+                - -c
+                - ls
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 30s
+            await: 60s
+        phases: [seed]
+      - name: samba-updated-ready
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-rotated-password
+                - -c
+                - ls
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 30s
+            await: 60s
+        phases: [verify]
+  - name: samba
+    policy:
+      run: [/usr/bin/smbclient]
+    cases:
+      - name: samba-up
+        phases: [seed]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-check-password
+                - -c
+                - put /run/config/tests/samba-payload hi.txt
+            expect:
+              exit: 0
+            timeout: 30s
+          - file: /data/svc/samba/homes/alice/hi.txt
+            expect:
+              body: |
+                hello
+              uid: samba
+      - name: samba-upload-kept
+        phases: [verify]
+        steps:
+          - file: /data/svc/samba/homes/alice/hi.txt
+            expect:
+              body: |
+                hello
+              uid: samba
+      - name: samba-round
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-check-password
+                - -c
+                - get hi.txt /data/werewolf-smb-download
+            expect:
+              exit: 0
+            timeout: 30s
+          - file: /data/werewolf-smb-download
+            expect:
+              body: |
+                hello
+        phases: [seed]
+      - name: samba-guest
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - '%'
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCESS_DENIED
+            timeout: 30s
+      - name: samba-other
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/bob
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - bob%werewolf-other-password
+                - -c
+                - ls
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 30s
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - bob%werewolf-other-password
+                - -c
+                - get hi.txt /data/werewolf-smb-refused
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_ACCESS_DENIED|NT_STATUS_BAD_NETWORK_NAME
+            timeout: 30s
+          - file: /data/werewolf-smb-refused
+            expect:
+              exists: false
+        phases: [seed]
+      - name: samba-network
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/bob
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - bob%werewolf-other-password
+                - -c
+                - ls
+              readonly: true
+            expect:
+              exit: 0
+            timeout: 30s
+        phases: [seed]
+      - name: samba-wrong
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%incorrect-password
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_WRONG_PASSWORD
+            timeout: 30s
+      - name: samba-smb2
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/alice
+                - -E
+                - -m
+                - SMB2
+                - -t
+                - '20'
+                - --option=client min protocol=SMB2_02
+                - -U
+                - alice%werewolf-check-password
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: protocol negotiation failed|no protocol supported|NT_STATUS_NOT_SUPPORTED
+            timeout: 30s
+        phases: [seed]
+      - name: samba-no-preload
+        steps:
+          - file: /etc/sv/samba/service
+            expect:
+              body:
+                absent: LD_PRELOAD
+          - file: /usr/lib/werewolf/samba-passwd.so
+            expect:
+              exists: false
+          - file: /run/svc/samba/passwd
+            expect:
+              exists: false
+      - name: samba-kept
+        phases: [verify]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-rotated-password
+                - -c
+                - get hi.txt /data/werewolf-smb-kept
+            expect:
+              exit: 0
+            timeout: 30s
+          - file: /data/werewolf-smb-kept
+            expect:
+              body: |
+                hello
+      - name: samba-new-user
+        phases: [verify]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/carol
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - carol%werewolf-new-password
+                - -c
+                - put /run/config/tests/samba-new-payload hi.txt; get hi.txt /data/werewolf-smb-new
+            expect:
+              exit: 0
+            timeout: 30s
+          - file: /data/werewolf-smb-new
+            expect:
+              body: |
+                new-user
+          - file: /data/svc/samba/homes/carol/hi.txt
+            expect:
+              body: |
+                new-user
+              uid: samba
+      - name: samba-old-pass
+        phases: [verify]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - alice%werewolf-check-password
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_WRONG_PASSWORD|NT_STATUS_NO_SUCH_USER
+            timeout: 30s
+      - name: samba-removed
+        phases: [verify]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/bob
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - bob%werewolf-other-password
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_WRONG_PASSWORD|NT_STATUS_NO_SUCH_USER
+            timeout: 30s
+      - name: samba-new-other
+        phases: [verify]
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //10.0.2.15/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - carol%werewolf-new-password
+                - -c
+                - get hi.txt /data/werewolf-smb-new-refused
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_ACCESS_DENIED|NT_STATUS_BAD_NETWORK_NAME
+            timeout: 30s
+          - file: /data/werewolf-smb-new-refused
+            expect:
+              exists: false
+  - name: samba-identity
+    source: driver.zig
+    mode: identity
+    user: samba
+    policy:
+      pledge: stdio rpath
+      read: [/run/werewolf/passwd, /run/svc/samba/private]
+    cases:
+      seed: [samba-unix-users]
+      verify: [samba-new-account]

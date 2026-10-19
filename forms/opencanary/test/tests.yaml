@@ -1,0 +1,68 @@
+version: 1
+suites:
+  - name: opencanary-ready
+    readiness: true
+    cases:
+      - name: oc-ready
+        steps:
+          - fetch: {url: 'http://127.0.0.1/'}
+            expect:
+              status: 302
+              headers: {location: /index.html}
+            await: 60s
+          - fetch: {url: 'http://127.0.0.1/index.html'}
+            expect: {status: 200}
+            await: 60s
+  - name: opencanary
+    cases:
+      - name: oc-user
+        steps:
+          - service: opencanary
+            expect:
+              user: _oci-opencanary
+              uid: {min: 65536}
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+            await: 60s
+      - name: oc-smb
+        steps:
+          - listeners: {protocol: tcp, port: 445}
+            expect: {equals: []}
+      - name: oc-https
+        steps:
+          - listeners: {protocol: tcp, port: 443}
+            expect: {equals: []}
+      - name: oc-http
+        steps:
+          - fetch: {url: 'http://127.0.0.1/'}
+            expect:
+              status: 302
+              headers: {location: /index.html}
+            await: 60s
+          - fetch: {url: 'http://127.0.0.1/index.html'}
+            expect: {status: 200}
+            await: 60s
+      - name: oc-host-key
+        steps:
+          - file: /data/svc/opencanary/id_rsa
+            expect: {type: file, size: {min: 1}}
+          - file: /data/svc/opencanary/id_rsa.pub
+            expect: {type: file, size: {min: 1}}
+  - name: opencanary-key-denied
+    user: nobody
+    policy:
+      pledge: stdio rpath
+      read: [/data/svc/opencanary]
+    cases:
+      - name: oc-private-key-refused
+        steps:
+          - file: /data/svc/opencanary/id_rsa
+            expect: {readable: false}
+  - name: opencanary-wire
+    source: driver.zig
+    mode: wire
+    user: root
+    policy: {pledge: stdio rpath inet}
+    cases:
+      seed: [oc-ftp, oc-ssh, oc-login-logged]
+      verify: [oc-ftp, oc-ssh, oc-login-logged]

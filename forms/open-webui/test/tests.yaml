@@ -1,0 +1,281 @@
+version: 1
+suites:
+  - name: open-webui-ready
+    readiness: true
+    cases:
+      - name: owui-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /status: true
+            await: 180s
+  - name: open-webui
+    cases:
+      - name: owui-user
+        steps:
+          - service: open-webui
+            expect:
+              user: open-webui
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: owui-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: owui-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.test
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /role: admin
+                /token:
+                  matches: .+
+      - name: owui-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.test
+                password: wrong
+            expect:
+              status: 400
+              body:
+                not_matches: '"token"[[:space:]]*:'
+      - name: owui-data
+        steps:
+          - file: /data/svc/open-webui/webui.db
+            expect:
+              exists: false
+          - file: /data/svc/open-webui/.webui_secret_key
+            expect:
+              uid: open-webui
+              mode: '600'
+              size:
+                min: 43
+      - name: owui-ollama
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.test
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /role: admin
+                /token:
+                  matches: .+
+          - fetch:
+              url: https://localhost/ollama/api/version
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /token
+            expect:
+              status: 200
+              json:
+                /version:
+                  matches: .+
+          - listeners:
+              protocol: tcp
+              port: 11434
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 11434
+      - name: owui-public
+        steps:
+          - service: open-webui
+            expect:
+              user: open-webui
+              connect_rules:
+                contains: tcp/443 public
+          - service: open-webui
+            expect:
+              user: open-webui
+              connect_rules:
+                contains: tcp/80 public
+      - name: owui-cors
+        steps:
+          - fetch:
+              url: https://localhost/api/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Origin: https://evil.example
+            expect:
+              status: 200
+              headers:
+                access-control-allow-origin: null
+          - fetch:
+              url: https://localhost/api/config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Origin: https://localhost
+            expect:
+              status: 200
+              headers:
+                access-control-allow-origin: https://localhost
+      - name: owui-signup-closed
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/auths/signup
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                name: stranger
+                email: stranger@example.test
+                password: stranger-pass-1
+            expect:
+              status: 403
+          - fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: stranger@example.test
+                password: stranger-pass-1
+            expect:
+              status: 400
+      - name: owui-unauth
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/users/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost/api/v1/functions/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: owui-add-user
+        phases: [seed]
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.test
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /role: admin
+                /token:
+                  matches: .+
+          - fetch:
+              url: https://localhost/api/v1/auths/add
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              bearer:
+                step: login
+                json: /token
+              json:
+                name: check
+                email: user@example.test
+                password: werewolf-check-pass-2
+                role: user
+            expect:
+              status: 200
+              json:
+                /email: user@example.test
+                /role: user
+      - name: owui-user-kept
+        phases: [verify]
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: user@example.test
+                password: werewolf-check-pass-2
+            expect:
+              status: 200
+              json:
+                /role: user
+                /token:
+                  matches: .+
+      - name: owui-no-user-code
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/v1/auths/signin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: user@example.test
+                password: werewolf-check-pass-2
+            expect:
+              status: 200
+              json:
+                /role: user
+                /token:
+                  matches: .+
+          - fetch:
+              url: https://localhost/api/v1/functions/create
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              bearer:
+                step: login
+                json: /token
+              json:
+                id: check_code
+                name: check
+                content: |
+                  import os
+                  class Pipe:
+                      def pipe(self, body):
+                          return os.getcwd()
+                meta:
+                  description: x
+            expect:
+              status: 401
+          - fetch:
+              url: https://localhost/api/v1/tools/create
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              bearer:
+                step: login
+                json: /token
+              json:
+                id: check_code
+                name: check
+                content: |
+                  import os
+                  class Pipe:
+                      def pipe(self, body):
+                          return os.getcwd()
+                meta:
+                  description: x
+            expect:
+              status: 401

@@ -444,10 +444,10 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 }
 }
 
-# Judge the console: wait up to five minutes, reading the console, for every
+# Judge the console: wait up to its budget, reading the console, for every
 # seen line. No unseen line may appear.
 if {[llength $console]} {
-	set deadline [expr {[clock seconds] + 300}]
+	set deadline [expr {[clock seconds] + ([info exists env(CONSOLE_TIMEOUT)] ? $env(CONSOLE_TIMEOUT) : 300)}]
 	while 1 {
 		# Binary, so a lone carriage return stays one: Tcl's default turns
 		# each into a newline, and the console ends lines \r\r\n.

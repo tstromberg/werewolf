@@ -1,0 +1,561 @@
+version: 1
+suites:
+  - name: mediawiki-ready
+    readiness: true
+    cases:
+      - name: mw-ready
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=siteinfo
+            expect:
+              status: 200
+              json:
+                /error/code: readapidenied
+            await: 170s
+  - name: mediawiki
+    fixtures:
+      pdf: /run/config/tests/mw-pdf
+    cases:
+      - name: mw-user
+        steps:
+          - service: php-fpm
+            expect:
+              user: php
+              capabilities: []
+              no_new_privileges: true
+      - name: mw-installed
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=siteinfo
+            expect:
+              status: 200
+              json:
+                /error/code: readapidenied
+            await: 170s
+      - name: mw-login
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+      - name: mw-main-page
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/wiki/
+              session: admin
+            expect:
+              status: 301
+              headers:
+                location: http://localhost/wiki/Main_Page
+          - fetch:
+              url: http://localhost/wiki/Main_Page
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains_all:
+                  - Werewolf check wiki
+                  - MediaWiki has been installed
+      - name: mw-wrong-password
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-wrong-pass
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Failed
+      - name: mw-anon-edit
+        steps:
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              form:
+                action: edit
+                format: json
+                title: Werewolf_attack
+                text: pwned
+                createonly: '1'
+                token: +\
+            expect:
+              status: 200
+              body:
+                contains: '"error"'
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&formatversion=2&titles=Werewolf_attack
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/pages/0/missing: true
+      - name: mw-anon-signup
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=createaccount
+              session: stranger
+            expect:
+              status: 200
+              json:
+                /query/tokens/createaccounttoken:
+                  matches: .+
+            name: signup-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: stranger
+              form:
+                action: createaccount
+                format: json
+                username: Mallory
+                password: mallory-pass-123456
+                retype: mallory-pass-123456
+                createreturnurl: http://localhost/
+                createtoken:
+                  step: signup-token
+                  json: /query/tokens/createaccounttoken
+            expect:
+              status: 200
+              body:
+                not_matches: '"status"[[:space:]]*:[[:space:]]*"PASS"'
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&list=allusers&auprefix=Admin
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/allusers/0/name: Admin
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&list=allusers&auprefix=Mallory
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/allusers: []
+      - name: mw-upload-banned
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/csrftoken:
+                  matches: .+
+            name: csrf
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              multipart:
+                action: upload
+                format: json
+                ignorewarnings: '1'
+                filename: x.svg
+                token:
+                  step: csrf
+                  json: /query/tokens/csrftoken
+                file:
+                  file: /run/config/tests/mw-svg
+                  filename: x.svg
+                  type: image/svg+xml
+            expect:
+              status: 200
+              json:
+                /error/code: filetype-banned
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              multipart:
+                action: upload
+                format: json
+                ignorewarnings: '1'
+                filename: x.html
+                token:
+                  step: csrf
+                  json: /query/tokens/csrftoken
+                file:
+                  file: /run/config/tests/mw-html
+                  filename: x.html
+                  type: text/html
+            expect:
+              status: 200
+              json:
+                /error/code: verification-error
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              multipart:
+                action: upload
+                format: json
+                ignorewarnings: '1'
+                filename: x.png
+                token:
+                  step: csrf
+                  json: /query/tokens/csrftoken
+                file:
+                  file: /run/config/tests/mw-png
+                  filename: x.png
+                  type: image/png
+            expect:
+              status: 200
+              json:
+                /error/code: verification-error
+      - name: mw-upload-pdf
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/csrftoken:
+                  matches: .+
+            name: csrf
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              multipart:
+                action: upload
+                format: json
+                ignorewarnings: '1'
+                filename: Werewolf.pdf
+                token:
+                  step: csrf
+                  json: /query/tokens/csrftoken
+                file:
+                  file: /run/config/tests/mw-pdf
+                  filename: Werewolf.pdf
+                  type: application/pdf
+            expect:
+              status: 200
+              json:
+                /upload/result: Success
+                /upload/imageinfo/url: http://localhost/img_auth.php/6/68/Werewolf.pdf
+          - fetch:
+              url: http://localhost/img_auth.php/6/68/Werewolf.pdf
+              session: admin
+            expect:
+              status: 200
+              body:
+                fixture: pdf
+                raw: true
+          - fetch:
+              url: http://localhost/img_auth.php/6/68/Werewolf.pdf
+            expect:
+              status:
+                one_of:
+                  - 401
+                  - 403
+                  - 404
+        phases:
+          - seed
+      - name: mw-pdf-kept
+        steps:
+          - fetch:
+              url: http://localhost/api.php?format=json&action=query&meta=tokens&type=login
+              session: admin
+            expect:
+              status: 200
+              json:
+                /query/tokens/logintoken:
+                  matches: .+
+            name: login-token
+          - fetch:
+              url: http://localhost/api.php
+              method: POST
+              session: admin
+              form:
+                action: login
+                format: json
+                lgname: Admin
+                lgpassword: werewolf-check-pass-1
+                lgtoken:
+                  step: login-token
+                  json: /query/tokens/logintoken
+            expect:
+              status: 200
+              json:
+                /login/result: Success
+          - fetch:
+              url: http://localhost/img_auth.php/6/68/Werewolf.pdf
+              session: admin
+            expect:
+              status: 200
+              body:
+                fixture: pdf
+                raw: true
+          - fetch:
+              url: http://localhost/img_auth.php/6/68/Werewolf.pdf
+            expect:
+              status:
+                one_of:
+                  - 401
+                  - 403
+                  - 404
+        phases:
+          - verify
+      - name: mw-code-hidden
+        steps:
+          - fetch:
+              url: http://localhost/LocalSettings.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/includes/Defines.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/maintenance/run.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/vendor/autoload.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/composer.json
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/cache/
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/images/
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/mw-config/index.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/extensions/OATHAuth/extension.json
+            expect:
+              status: 404
+      - name: mw-private
+        steps:
+          - file: /run/svc/php-fpm/admin-password
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/secrets.php
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/images
+            expect:
+              uid: php
+              mode: '700'
+          - file: /data/svc/php-fpm/database/wiki.sqlite
+            expect:
+              type: file
+              size:
+                min: 1
+          - file: /data/svc/php-fpm/database.new
+            expect:
+              exists: false
+          - file: /run/svc/php-fpm/LocalSettings.php
+            expect:
+              exists: false
+  - name: mediawiki-files
+    source: driver.zig
+    mode: files
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet proc exec
+    cases:
+      seed:
+        - mw-no-banned-files
+      verify:
+        - mw-no-banned-files
+  - name: mediawiki-throttle
+    source: driver.zig
+    mode: throttle
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet proc exec
+    cases:
+      seed:
+        - mw-throttled
+      verify:
+        - mw-throttled
+  - name: mediawiki-update
+    source: driver.zig
+    mode: update
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet proc exec
+      run:
+        - /usr/bin/sv
+    cases:
+      seed:
+        - mw-update
+      verify:
+        - mw-update

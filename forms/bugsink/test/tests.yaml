@@ -1,0 +1,343 @@
+version: 1
+suites:
+  - name: bugsink-ca
+    readiness: true
+    cases:
+      - name: bs-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: bugsink-ready
+    readiness: true
+    cases:
+      - name: bs-ready
+        steps:
+          - fetch:
+              url: https://localhost/health/ready
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+            await: 170s
+  - name: bugsink-startup
+    cases:
+      - name: bs-health
+        steps:
+          - fetch:
+              url: https://localhost/health/ready
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+            await: 170s
+  - name: bugsink-worker
+    source: driver.zig
+    mode: worker
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - bs-snappea
+      verify:
+        - bs-snappea
+  - name: bugsink-login
+    source: driver.zig
+    mode: login
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - bs-login
+      verify:
+        - bs-login
+  - name: bugsink-project
+    source: driver.zig
+    mode: project
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - bs-project
+      verify:
+        - bs-project-kept
+  - name: bugsink
+    cases:
+      - name: bs-user
+        steps:
+          - service: bugsink
+            expect:
+              user: _oci-bugsink
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: bs-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: bs-anon
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^/accounts/login/
+          - fetch:
+              url: https://localhost/projects/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^/accounts/login/
+          - fetch:
+              url: https://localhost/teams/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^/accounts/login/
+          - fetch:
+              url: https://localhost/bsmain/auth_tokens/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^/accounts/login/
+      - name: bs-signup
+        steps:
+          - fetch:
+              url: https://localhost/accounts/signup/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: bs-no-admin
+        steps:
+          - fetch:
+              url: https://localhost/admin/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: bs-wrong
+        steps:
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              cookies:
+                csrftoken:
+                  matches: .+
+            name: login-page
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              headers:
+                Referer: https://localhost/accounts/login/
+              form:
+                csrfmiddlewaretoken:
+                  step: login-page
+                  cookie: csrftoken
+                username: admin@example.test
+                password: wrong
+            expect:
+              status: 200
+              cookies:
+                sessionid: null
+      - name: bs-wrong-key
+        steps:
+          - file: /data/bugsink-test.json
+            expect:
+              type: file
+              json:
+                /project:
+                  matches: ^[0-9]+$
+            name: project
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - api
+                - step: project
+                  json: /project
+                - store
+                - ''
+              method: POST
+              headers:
+                X-Sentry-Auth: Sentry sentry_version=7, sentry_key=00000000000000000000000000000000
+              json:
+                event_id: 0123456789abcdef0123456789abcdef
+                message: werewolf-check-forged
+                level: error
+                platform: other
+            expect:
+              status: 403
+      - name: bs-event
+        steps:
+          - file: /data/bugsink-test.json
+            expect:
+              type: file
+              json:
+                /project:
+                  matches: ^[0-9]+$
+            name: project
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - api
+                - step: project
+                  json: /project
+                - store
+                - ''
+              method: POST
+              headers:
+                X-Sentry-Auth:
+                  step: project
+                  json: /authorization
+              json:
+                event_id:
+                  run: true
+                message:
+                  run: true
+                level: error
+                platform: other
+            expect:
+              status: 200
+              json:
+                /id:
+                  run: true
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              cookies:
+                csrftoken:
+                  matches: .+
+            name: login-page
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              headers:
+                Referer: https://localhost/accounts/login/
+              form:
+                csrfmiddlewaretoken:
+                  step: login-page
+                  cookie: csrftoken
+                username: admin@example.test
+                password: werewolf-check-pass-1
+            expect:
+              status: 302
+              cookies:
+                sessionid:
+                  matches: .+
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - issues
+                - step: project
+                  json: /project
+                - ''
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains:
+                  run: true
+                absent: werewolf-check-forged
+            await: 30s
+        phases:
+          - seed
+      - name: bs-event-kept
+        steps:
+          - file: /data/bugsink-test.json
+            expect:
+              type: file
+              json:
+                /project:
+                  matches: ^[0-9]+$
+            name: project
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              cookies:
+                csrftoken:
+                  matches: .+
+            name: login-page
+          - fetch:
+              url: https://localhost/accounts/login/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              headers:
+                Referer: https://localhost/accounts/login/
+              form:
+                csrfmiddlewaretoken:
+                  step: login-page
+                  cookie: csrftoken
+                username: admin@example.test
+                password: werewolf-check-pass-1
+            expect:
+              status: 302
+              cookies:
+                sessionid:
+                  matches: .+
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - issues
+                - step: project
+                  json: /project
+                - ''
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains:
+                  run: true
+                absent: werewolf-check-forged
+            await: 30s
+        phases:
+          - verify
+      - name: bs-data
+        steps:
+          - file: /data/svc/bugsink/db.sqlite3
+            expect:
+              type: file
+              uid: _oci-bugsink
+          - file: /run/svc/bugsink/snappea.sqlite3
+            expect:
+              type: file
+              uid: _oci-bugsink
+      - name: bs-net
+        steps:
+          - service: bugsink
+            expect:
+              connect_rules:
+                - tcp/443 public
+                - tcp/53
+                - udp/53

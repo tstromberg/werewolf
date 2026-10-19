@@ -4,7 +4,7 @@
 # init must refuse the disk, not format it again. make passes CHECK_ENV
 # (Makefile).
 set -eu
-cp "$CHECK/prod.img" "$CHECK/nodata.img"
+cp "$CHECK/prod-native/data.img" "$CHECK/nodata.img"
 exec test/boot nodata test/checks-nodata "$CHECK/nodata.log" "$@" \
 	-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
 	-drive "file=$CHECK/nodata.img,format=raw,if=virtio"

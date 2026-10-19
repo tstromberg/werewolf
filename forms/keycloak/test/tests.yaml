@@ -1,0 +1,149 @@
+version: 1
+suites:
+  - name: keycloak-ca
+    readiness: true
+    cases:
+      - name: keycloak-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: keycloak-ready
+    readiness: true
+    cases:
+      - name: keycloak-ready
+        steps:
+          - fetch:
+              url: https://localhost/realms/master/.well-known/openid-configuration
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /issuer: https://localhost/realms/master
+            await: 170s
+  - name: keycloak-startup
+    cases:
+      - name: keycloak-oidc
+        steps:
+          - fetch:
+              url: https://localhost/realms/master/.well-known/openid-configuration
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /issuer: https://localhost/realms/master
+              body:
+                absent: evil.example
+            await: 170s
+  - name: keycloak
+    cases:
+      - name: keycloak-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: keycloak-admin
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/realms/master/protocol/openid-connect/token
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                grant_type: password
+                client_id: admin-cli
+                username: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /access_token:
+                  matches: .+
+          - fetch:
+              url: https://localhost/admin/realms/master
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /registrationAllowed: false
+      - name: keycloak-refused
+        steps:
+          - fetch:
+              url: https://localhost/realms/master/protocol/openid-connect/token
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                grant_type: password
+                client_id: admin-cli
+                username: admin
+                password: werewolf-check-pass-2
+            expect:
+              status:
+                one_of: [400, 401]
+              json:
+                /error: invalid_grant
+              body:
+                absent: access_token
+      - name: keycloak-host
+        steps:
+          - fetch:
+              url: https://localhost/realms/master/.well-known/openid-configuration
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                X-Forwarded-Host: evil.example
+            expect:
+              status: 200
+              json:
+                /issuer: https://localhost/realms/master
+              body:
+                absent: evil.example
+          - fetch:
+              url: http://127.0.0.1:8180/realms/master/.well-known/openid-configuration
+              headers:
+                Host: evil.example
+                X-Forwarded-Host: evil.example
+                X-Forwarded-Proto: http
+            expect:
+              status: 200
+              json:
+                /issuer: https://localhost/realms/master
+              body:
+                absent: evil.example
+      - name: keycloak-management
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9180/health/ready
+            expect:
+              status: 200
+              json:
+                /status: UP
+          - fetch:
+              url: https://localhost/health/ready
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+              body:
+                absent: UP
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 8180
+                - address: 127.0.0.1
+                  port: 9180
+              absent:
+                - address: 0.0.0.0
+                  port: 8180
+                - address: 0.0.0.0
+                  port: 9180
+                - address: '::'
+                  port: 8180
+                - address: '::'
+                  port: 9180

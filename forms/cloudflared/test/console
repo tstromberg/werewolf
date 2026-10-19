@@ -1,0 +1,2 @@
+# Missing credentials must park the shipping service.
+seen    cloudflared-needs-secret  secret TUNNEL_TOKEN: /run/config/cloudflared/token: FileNotFound

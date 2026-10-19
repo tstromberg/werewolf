@@ -1,0 +1,78 @@
+version: 1
+packages: [tailscale]
+suites:
+  - name: headscale-ca
+    readiness: true
+    cases:
+      - name: hs-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {type: file}
+            await: 60s
+  - name: headscale-ready
+    readiness: true
+    cases:
+      - name: hs-ready
+        steps:
+          - fetch:
+              url: https://localhost/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, json: {/status: pass}}
+            await: 120s
+  - name: headscale
+    cases:
+      - name: hs-health
+        steps:
+          - fetch:
+              url: https://localhost/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, json: {/status: pass}}
+            await: 120s
+      - name: hs-user
+        steps:
+          - service: headscale
+            expect:
+              user: _oci-headscale
+              uid: {min: 65536}
+              capabilities: []
+              no_new_privileges: true
+      - name: hs-https
+        steps:
+          - fetch: {url: 'http://localhost/'}
+            expect:
+              status: 308
+              headers: {location: 'https://localhost/'}
+      - name: hs-state
+        steps:
+          - file: /data/svc/headscale/noise_private.key
+            expect: {type: file, uid: _oci-headscale}
+          - file: /data/svc/headscale/db.sqlite
+            expect: {type: file, uid: _oci-headscale}
+          - file: /run/svc/headscale/run/headscale.sock
+            expect: {type: socket, uid: _oci-headscale}
+      - name: hs-no-admin
+        steps:
+          - listeners: tcp
+            expect:
+              absent: [{port: 50443}, {port: 9090}]
+      - name: hs-api-closed
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/node
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 401}
+          - fetch:
+              url: https://localhost/api/v1/node
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer: hskey-api-abcdefghijkl-0123456789abcdef0123456789abcdef
+            expect: {status: 401}
+  - name: headscale-client
+    source: driver.zig
+    mode: join-refused
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet unix proc exec
+      run: [/usr/bin/tailscale, /usr/bin/tailscaled]
+    cases:
+      seed: [hs-join-refused]
+      verify: [hs-join-refused]

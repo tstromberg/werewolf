@@ -57,8 +57,11 @@ def read_plan(form):
         plan = load(path)
     else:
         plan = json.loads(path.read_text())
-    if set(plan) - {'format', 'packages', 'drivers', 'legacy'} or plan.get('format') != 'werewolf-native-tests/1':
+    if set(plan) - {'format', 'packages', 'drivers', 'legacy', 'timeout_seconds'} or plan.get('format') != 'werewolf-native-tests/1':
         raise ValueError('invalid native test plan')
+    seconds = plan.setdefault('timeout_seconds', 300)
+    if type(seconds) is not int or not 1 <= seconds <= 1800:
+        raise ValueError('phase timeout must be 1..1800 seconds')
     if not isinstance(plan.get('legacy', False), bool):
         raise ValueError('legacy must be a boolean')
     # Retaining a shell suite must not silently stop running its assertions.
@@ -73,8 +76,10 @@ def read_plan(form):
     names = set()
     for d in plan['drivers']:
         required = {'name', 'source', 'mode', 'user', 'pledge', 'read', 'connect', 'run', 'cases'}
-        if not required <= set(d) or set(d) - required - {'config', 'groups', 'memory', 'allow', 'probes'}:
+        if not required <= set(d) or set(d) - required - {'config', 'groups', 'memory', 'allow', 'probes', 'readiness'}:
             raise ValueError('invalid driver fields')
+        if type(d.get('readiness', False)) is not bool:
+            raise ValueError('invalid readiness flag')
         if type(d.get('memory', 128)) is not int or not 16 <= d.get('memory', 128) <= 8192:
             raise ValueError('driver memory must be 16..8192 MiB')
         grants = d.get('allow', [])
@@ -87,8 +92,8 @@ def read_plan(form):
             raise ValueError('invalid driver account')
         if not d['name'].startswith('test-') or d['name'] in names:
             raise ValueError('driver needs a unique test name')
-        if d['name'] == 'test-platform':
-            raise ValueError('test-platform is reserved for shared boot checks')
+        if d['name'] in {'test-platform', 'test-lifecycle'}:
+            raise ValueError('test-platform and test-lifecycle are reserved for shared checks')
         names.add(d['name'])
         groups = d.get('groups', [])
         if not isinstance(groups, list) or len(groups) > 16 or any(
@@ -100,11 +105,14 @@ def read_plan(form):
         source = Path(d['source'])
         if 'probes' not in d and (source.name != d['source'] or source.suffix != '.zig' or not (path.parent / source).is_file()):
             raise ValueError('driver source must be adjacent Zig source')
-        if set(d['cases']) != {'seed', 'verify'}:
+        if not isinstance(d['cases'], dict) or set(d['cases']) != {'seed', 'verify'}:
             raise ValueError('declare seed and verify cases')
         for cases in d['cases'].values():
-            if not cases or len(set(cases)) != len(cases) or any(not IDENT.fullmatch(c) for c in cases):
+            if not isinstance(cases, list) or any(not isinstance(c, str) or
+                    not IDENT.fullmatch(c) for c in cases) or len(set(cases)) != len(cases):
                 raise ValueError('invalid case set')
+        if not any(d['cases'].values()):
+            raise ValueError('driver requires at least one case')
         if any(p not in {'stdio', 'rpath', 'wpath', 'proc', 'unix', 'connect', 'exec', 'inet'}
                for p in d['pledge'].split()):
             raise ValueError('unsupported test pledge')
@@ -126,19 +134,27 @@ def read_plan(form):
 
 
 def boot_plan(form):
-    """Clean boots always include the shared suite; SSH iteration uses read_plan."""
+    """Wait for readiness, check boot, restart, then behavior; iteration uses read_plan."""
     from probe_plan import load
     plan = read_plan(form)
     common = load(PLATFORM)
-    shared = common['drivers'][0]
     skip = set(call('build/host/form', 'check', form, 'skip', capture_output=True, text=True).stdout.split())
-    known = set(shared['cases']['seed']) | set(shared['cases']['verify'])
+    known = {case for driver in common['drivers'] for cases in driver['cases'].values() for case in cases}
     if skip - known:
         raise ValueError('unknown shared check exclusions: ' + ', '.join(sorted(skip - known)))
-    shared['cases'] = {phase: [case for case in cases if case not in skip]
-                       for phase, cases in shared['cases'].items()}
+    shared = []
+    for driver in common['drivers']:
+        driver['cases'] = {phase: [case for case in cases if case not in skip]
+                           for phase, cases in driver['cases'].items()}
+        if any(driver['cases'].values()): shared.append(driver)
+    # Declared readiness budgets precede generic port checks and restart attacks.
+    # Killing a database's before-command can erase a half-initialized first boot.
+    startup = [driver for driver in shared if driver['name'] == 'test-platform']
+    lifecycle = [driver for driver in shared if driver['name'] == 'test-lifecycle']
+    readiness = [driver for driver in plan['drivers'] if driver.get('readiness')]
+    application = [driver for driver in plan['drivers'] if not driver.get('readiness')]
     return {**plan, 'packages': sorted(set(plan['packages'] + common['packages'])),
-            'drivers': [shared, *plan['drivers']]}
+            'drivers': [*readiness, *startup, *lifecycle, *application]}
 
 
 def write(path, data):
@@ -257,7 +273,9 @@ def prepare(form, arch):
     runtime_grants(root, plan['drivers'])
     compile_dir = work / 'compile'
     write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
-    write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], mode=d['mode'], root=d['user'] == 'root', wait=wait_paths(d))
+    write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], mode=d['mode'], root=d['user'] == 'root', wait=wait_paths(d),
+                                                    readiness=d.get('readiness', False),
+                                                    phases=[phase for phase, cases in d['cases'].items() if cases])
                                                for d in plan['drivers']]})
 
     def compile(source, binary, transport=False):
@@ -279,10 +297,10 @@ def prepare(form, arch):
             write(root / 'usr/share/werewolf/tests' / d['name'] / 'probes.json', d['probes'])
         else:
             source = Path('forms') / form / 'test' / d['source']
-            if d['name'] == 'test-platform':
-                source = compile_dir / 'platform.zig'
+            if d['name'] in {'test-platform', 'test-lifecycle'}:
+                source = compile_dir / d['name'] / 'platform.zig'
                 write(source, PLATFORM.with_suffix('.zig').read_text())
-                write(compile_dir / 'platform.json', d['cases'])
+                write(source.with_name('platform.json'), d['cases'])
             compile(source, root / binary.lstrip('/'),
                     'libcurl-openssl4' in plan['packages'])
         service = [f'exec {binary} {d["name"]} {d["mode"]} /run/svc/{d["name"]}/context',
@@ -298,11 +316,13 @@ def prepare(form, arch):
 
 def validate(text, plan, context, only_driver=None):
     cases, drivers, completed = set(), set(), False
-    selected = [d for d in plan['drivers'] if only_driver is None or d['name'] == only_driver]
+    selected = [d for d in plan['drivers'] if d['cases'][context['phase']] and
+                (only_driver is None or d['name'] == only_driver)]
     if not selected:
         raise ValueError('unknown test driver: ' + str(only_driver))
     expected = {(d['name'], name) for d in selected for name in d['cases'][context['phase']]}
     expected_drivers = {d['name'] for d in selected}
+    position = 0
     for line in console_clean(text.encode()).decode().splitlines():
         if 'werewolf-test: ' not in line:
             continue
@@ -319,16 +339,21 @@ def validate(text, plan, context, only_driver=None):
         event = record.get('event')
         if event == 'case':
             key = (record.get('suite'), record.get('case'))
+            if position >= len(selected) or key[0] != selected[position]['name']:
+                raise ValueError('test suites ran out of order')
             if key not in expected or key in cases or key[0] in drivers:
                 raise ValueError('unexpected or duplicate case')
             cases.add(key)
         elif event == 'driver':
             name = record.get('suite')
+            if position >= len(selected) or name != selected[position]['name']:
+                raise ValueError('test suites ran out of order')
             if name not in expected_drivers or name in drivers:
                 raise ValueError('unexpected or duplicate driver')
             if any(key not in cases for key in expected if key[0] == name):
                 raise ValueError('driver omitted cases')
             drivers.add(name)
+            position += 1
         elif event == 'complete':
             if cases != expected or drivers != expected_drivers:
                 raise ValueError('incomplete test run')
@@ -379,7 +404,11 @@ def compare(form, arch):
             shell = directory + '/' + name
             if shell in b and shell not in a:
                 raise ValueError('native dependency introduced a shell: ' + shell)
+    executables = {name for name, record in b.items()
+                   if record[0] in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE)}
     a, b = files(before / 'overlay.tar'), files(after / 'overlay.tar')
+    executables.update(name for name, record in b.items()
+                       if record[0] in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE))
     changed_metadata = {'etc/runit/2', 'etc/apk/world', 'usr/share/werewolf/form',
                         'usr/share/werewolf/overlay', 'usr/share/werewolf/release'}
     for name, record in a.items():
@@ -405,6 +434,10 @@ def compare(form, arch):
     for name in b.keys() - a.keys():
         if name not in additions and name not in parents and name != metadata and not name.startswith(metadata + '/'):
             raise ValueError('native instrumentation added runtime overlay: ' + name)
+    for driver in plan['drivers']:
+        for executable in driver['run']:
+            if executable.lstrip('/') not in executables:
+                raise ValueError('native test client missing from image: ' + executable)
     print('native-tests: production service policies, accounts and runtime payload match', flush=True)
 
 
@@ -414,6 +447,9 @@ def run(form, arch, qemu):
     inputs = dict(kernel=Path(os.environ['KERNEL']), image=output / 'initramfs.zst',
                   production_image=Path(os.environ.get('PRODUCTION_OUT', output.parent / form)) / 'initramfs.zst',
                   plan=plan_path(form), platform_plan=PLATFORM, platform_driver=PLATFORM.with_suffix('.zig'))
+    fixtures = {phase: Path('forms') / form / 'test' / name
+                for phase, name in (('seed', 'config'), ('verify', 'config-again'))}
+    inputs.update({phase + '_config': path for phase, path in fixtures.items() if path.exists()})
     identity = {name: digest(path) for name, path in inputs.items()}
     check = Path(os.environ['CHECK'])
     work = check / (form + '-native')
@@ -426,13 +462,15 @@ def run(form, arch, qemu):
     config = work / 'config'
     config.mkdir(mode=0o700)
     (config / 'data.key').write_bytes(secrets.token_bytes(32))
-    fixture = Path('forms') / form / 'test/config'
-    if fixture.exists():
-        call(fixture, config)
+    data_key = digest(config / 'data.key')
     run_id = secrets.token_hex(16)
     results = []
     for phase in ('seed', 'verify'):
-        context = dict(run=run_id, phase=phase)
+        if phase + '_config' in inputs:
+            call(fixtures[phase], config)
+        if digest(config / 'data.key') != data_key:
+            raise ValueError('test configuration replaced the data key')
+        context = dict(run=run_id, phase=phase, timeout_seconds=plan['timeout_seconds'])
         write(config / 'tests/context', context)
         packed = work / (phase + '.tar')
         with (work / (phase + '-pack.log')).open('wb') as output:
@@ -446,7 +484,8 @@ def run(form, arch, qemu):
              '-kernel', os.environ['KERNEL'], '-initrd', os.environ['OUT'] + '/initramfs.zst',
              '-append', os.environ['CMDLINE'] + ' werewolf.data=vda',
              '-drive', f'file={disk},format=raw,if=virtio',
-             '-drive', f'file={packed},format=raw,if=virtio,readonly=on')
+             '-drive', f'file={packed},format=raw,if=virtio,readonly=on',
+             env=dict(os.environ, CONSOLE_TIMEOUT=str(plan['timeout_seconds'] + 30)))
         if any(digest(path) != identity[name] for name, path in inputs.items()):
             raise ValueError('native test inputs changed during the run; rebuild and retry')
         # Preserve serial CRs until console_clean removes interleaved kernel lines.
@@ -456,7 +495,7 @@ def run(form, arch, qemu):
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
-        profile='local-qemu', **identity, phases=results))
+        profile='local-qemu', timeout_seconds=plan['timeout_seconds'], **identity, phases=results))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,149 @@
+version: 1
+packages:
+  - mc
+suites:
+  - name: minio
+    policy:
+      run:
+        - /usr/bin/mc
+    fixtures:
+      endpoint: /run/config/tests/minio-endpoint
+    cases:
+      - name: minio-user
+        steps:
+          - service: minio
+            expect:
+              user: minio
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+            await: 60s
+      - name: minio-live
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9000/minio/health/live
+            expect:
+              status: 200
+            await: 90s
+      - name: minio-anonymous
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9000/
+            expect:
+              status: 403
+              body:
+                contains: <Code>AccessDenied</Code>
+      - name: minio-round-trip
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mc
+                - --quiet
+                - mb
+                - w/check
+              env:
+                HOME: /tmp
+                MC_CONFIG_DIR: /tmp/test-mc
+                MC_HOST_w:
+                  fixture: endpoint
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/mc
+                - --quiet
+                - pipe
+                - w/check/x
+              env:
+                HOME: /tmp
+                MC_CONFIG_DIR: /tmp/test-mc
+                MC_HOST_w:
+                  fixture: endpoint
+              stdin:
+                run: true
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/mc
+                - --quiet
+                - cat
+                - w/check/x
+              env:
+                HOME: /tmp
+                MC_CONFIG_DIR: /tmp/test-mc
+                MC_HOST_w:
+                  fixture: endpoint
+            expect:
+              exit: 0
+              stdout:
+                run: true
+          - file: /data/svc/minio/check/x
+            expect:
+              type: directory
+        phases:
+          - seed
+      - name: minio-kept
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mc
+                - --quiet
+                - cat
+                - w/check/x
+              env:
+                HOME: /tmp
+                MC_CONFIG_DIR: /tmp/test-mc
+                MC_HOST_w:
+                  fixture: endpoint
+            expect:
+              exit: 0
+              stdout:
+                run: true
+          - file: /data/svc/minio/check/x
+            expect:
+              type: directory
+        phases:
+          - verify
+      - name: minio-object-private
+        steps:
+          - fetch:
+              url: http://127.0.0.1:9000/check/x
+            expect:
+              status: 403
+              body:
+                contains: <Code>AccessDenied</Code>
+      - name: minio-no-console
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 9001
+          - fetch:
+              url: http://127.0.0.1:9000/login
+            expect:
+              status: 403
+      - name: minio-private
+        steps:
+          - file: /run/config/minio/root_password
+            expect:
+              uid: 0
+              mode: '600'
+              readable: true
+  - name: minio-denied
+    user: minio
+    policy:
+      pledge: stdio rpath
+      read:
+        - /run/config/minio
+        - /usr/share/werewolf/net
+    cases:
+      - name: minio-private-refused
+        steps:
+          - file: /usr/share/werewolf/net
+            expect:
+              readable: true
+          - file: /run/config/minio/root_password
+            expect:
+              readable: false

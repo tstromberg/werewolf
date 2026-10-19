@@ -1,0 +1,83 @@
+version: 1
+suites:
+  - name: dependency-track
+    cases:
+      - name: dtrack-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 240s
+          - fetch:
+              url: https://localhost/api/version
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /version:
+                  matches: .+
+            await: 120s
+      - name: dtrack-user
+        steps:
+          - service: dtrack
+            expect:
+              user: dtrack
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: dtrack-bind
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - address: 127.0.0.1
+                  port: 8080
+              absent:
+                - address: 0.0.0.0
+                  port: 8080
+                - address: '::'
+                  port: 8080
+      - name: dtrack-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/project
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: dtrack-published
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/user/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                username: admin
+                password: admin
+            expect:
+              status:
+                one_of: [401, 403]
+      - name: dtrack-admin
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/v1/user/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              form:
+                username: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              body:
+                matches: ^eyJ
+          - fetch:
+              url: https://localhost/api/v1/project
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                body: true
+            expect:
+              status: 200
+              json:
+                '': []

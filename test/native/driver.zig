@@ -3,10 +3,12 @@ const std = @import("std");
 const Io = std.Io;
 pub const fetch = @import("fetch.zig");
 pub const system = @import("system.zig");
+pub const udp = @import("udp.zig");
 
 pub const Run = struct {
     run: []const u8,
     phase: []const u8,
+    timeout_seconds: u16 = 300,
 
     pub fn load(io: Io, gpa: std.mem.Allocator, path: []const u8) !Run {
         const raw = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
@@ -15,6 +17,7 @@ pub const Run = struct {
         for (c.run) |ch| if (!std.ascii.isHex(ch)) return error.InvalidRun;
         if (!std.mem.eql(u8, c.phase, "seed") and !std.mem.eql(u8, c.phase, "verify"))
             return error.InvalidPhase;
+        if (c.timeout_seconds == 0 or c.timeout_seconds > 1800) return error.InvalidTimeout;
         return c;
     }
 
@@ -151,4 +154,32 @@ test "private listeners cover IPv4, IPv6, wildcard and non-listening sockets" {
         5432,
         false,
     ));
+}
+
+test "phase budgets keep old contexts valid and reject unbounded waits" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    const path = try a.print("{s}/context", .{root});
+    const run = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try tmp.dir.writeFile(t.io, .{
+        .sub_path = "context",
+        .data = try std.json.Stringify.valueAlloc(a, .{ .run = run, .phase = "seed" }, .{}),
+    });
+    try t.expectEqual(@as(u16, 300), (try Run.load(t.io, a, path)).timeout_seconds);
+    for ([_]u16{ 1, 1200, 1800, 0, 1801 }) |seconds| {
+        const data = try std.json.Stringify.valueAlloc(a, .{
+            .run = run,
+            .phase = "seed",
+            .timeout_seconds = seconds,
+        }, .{});
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "context", .data = data });
+        if (seconds == 0 or seconds > 1800) {
+            try t.expectError(error.InvalidTimeout, Run.load(t.io, a, path));
+        } else try t.expectEqual(seconds, (try Run.load(t.io, a, path)).timeout_seconds);
+    }
 }
