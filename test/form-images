@@ -217,6 +217,41 @@ class Images(unittest.TestCase):
         self.assertTrue((self.root / 'store/minimal/index.html').exists())
         self.assertIn('playground/qemu/x86_64/objects/', (self.root / 'store/index.html').read_text())
 
+    def test_retry_reuses_signed_exports_and_preserves_immutable_objects(self):
+        failed, listing = self.run_pipeline(self.serial, focused=True)
+        self.assertFalse(failed)
+        work = self.root / ('run-' + self.serial)
+        objects = self.root / 'store' / self.rows()[('playground', 'qemu', 'x86_64')]['latest']['object']
+        before = {path.name: catalog.sha(path) for path in objects.iterdir()}
+        exported = work / 'retry.json'
+        with patch.dict(os.environ, GITHUB_RUN_ATTEMPT='2'), \
+             patch.object(images.exporter, 'export', side_effect=AssertionError('must reuse the signed export')):
+            images.export(work / 'snapshots', work / 'verified', work / 'gated', self.store, work / 'retry-assets', exported)
+            failed = images.publish(work / 'snapshots', work / 'verified', {('playground', 'qemu', 'x86_64')},
+                                    exported, self.store, focused=True)
+        self.assertFalse(failed)
+        retried, = json.loads(exported.read_text())
+        self.assertEqual(before, {path.name: catalog.sha(path) for path in objects.iterdir()})
+        signed = json.loads((Path(retried['assets']) / 'playground-qemu-x86_64-downloads.json').read_text())
+        self.assertEqual('1', signed['provenance']['attempt'])
+
+    def test_retry_refuses_damaged_signed_exports(self):
+        self.run_pipeline(self.serial, focused=True)
+        work = self.root / ('run-' + self.serial)
+        objects = self.root / 'store' / self.rows()[('playground', 'qemu', 'x86_64')]['latest']['object']
+        for filename in ('downloads.json.sig', 'packages.json'):
+            with self.subTest(filename=filename):
+                path = objects / filename
+                original = path.read_bytes()
+                path.write_bytes(b'corrupted')
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()), patch.dict(os.environ, GITHUB_RUN_ATTEMPT='2'):
+                        images.export(work / 'snapshots', work / 'verified', work / 'gated', self.store,
+                                      work / ('retry-' + filename), work / 'retry.json')
+                    self.assertEqual([], json.loads((work / 'retry.json').read_text()))
+                finally:
+                    path.write_bytes(original)
+
     def test_release_notes_compare_with_the_targets_last_publication(self):
         self.run_pipeline(self.serial)
         previous = self.rows()[('playground', 'qemu', 'x86_64')]['latest']
