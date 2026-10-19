@@ -114,7 +114,7 @@ def prepare(form, arch, plan):
     return work, generated
 
 
-def hash_tree(result, path, exclude_tests=False):
+def hash_tree(result, path, exclude_tests=False, exclude_test_sources=False):
     if not path.exists():
         result.update(b'absent\0' + str(path).encode() + b'\0')
         return
@@ -128,6 +128,9 @@ def hash_tree(result, path, exclude_tests=False):
         return
     for item in sorted(path.rglob('*')):
         relative = item.relative_to(path)
+        if exclude_test_sources and (item.suffix in {'.zig', '.c', '.h'} or
+                                     relative.as_posix() in {'tests.yaml', 'native.json'}):
+            continue
         if exclude_tests and relative.parts and relative.parts[0] == 'test':
             continue
         result.update(str(path).encode() + b'\0' + str(relative).encode() + b'\0')
@@ -148,7 +151,8 @@ def fingerprint(form, plan_path, generated):
         hash_tree(result, ROOT / directory, exclude_tests=True)
     if plan_path.suffix == '.yaml':
         plan = NATIVE.read_plan(form)
-        fixed = {**plan, 'drivers': [{k: v for k, v in d.items() if k not in {'probes', 'cases'}} for d in plan['drivers']]}
+        fixed = {k: v for k, v in plan.items() if k != 'timeout_seconds'}
+        fixed['drivers'] = [{k: v for k, v in d.items() if k not in {'probes', 'cases'}} for d in plan['drivers']]
         result.update(json.dumps(fixed, sort_keys=True).encode())
     else:
         hash_tree(result, plan_path)
@@ -165,8 +169,7 @@ def fingerprint(form, plan_path, generated):
         generated,
     ):
         hash_tree(result, path)
-    fixture = ROOT / 'forms' / form / 'test/config'
-    hash_tree(result, fixture)
+    hash_tree(result, ROOT / 'forms' / form / 'test', exclude_test_sources=True)
     kernel = os.environ.get('KERNEL_ROOTFS')
     if kernel is not None:
         archive = (ROOT / kernel).resolve()
@@ -204,12 +207,13 @@ def config_for(form, work, fresh):
     return config
 
 
-def ssh(howl, name, command, *, capture=False, check=True):
+def ssh(howl, name, command, *, capture=False, check=True, timeout=60):
     return subprocess.run(
         [howl, 'ssh', name, '--', command],
         check=check,
         capture_output=capture,
         text=True,
+        timeout=timeout,
     )
 
 
@@ -319,7 +323,8 @@ def validate_output(text, driver, context):
 def run_driver(howl, form, arch, driver, phase, work, machine, state):
     name = state['machine']
     binary = compile_driver(form, arch, driver, work)
-    context = {'run': state['run'], 'phase': phase}
+    seconds = NATIVE.read_plan(form)['timeout_seconds']
+    context = {'run': state['run'], 'phase': phase, 'timeout_seconds': seconds}
     context_path = work / 'context.new'
     write(context_path, context, 0o600)
     remote_binary = '/run/howl-dev/.' + driver['name'] + '.new'
@@ -332,7 +337,7 @@ def run_driver(howl, form, arch, driver, phase, work, machine, state):
     ssh(howl, name, CONTROL + ' install ' + driver['name'])
     wait_paths(howl, name, driver)
     command = CONTROL + ' run ' + driver['name']
-    result = ssh(howl, name, command, capture=True, check=False)
+    result = ssh(howl, name, command, capture=True, check=False, timeout=seconds + 30)
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     if result.returncode != 0:
@@ -379,5 +384,5 @@ if __name__ == '__main__':
     os.umask(0o077)
     try:
         main()
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         sys.exit('native-iterate: ' + str(error))

@@ -205,6 +205,23 @@ class Plans(unittest.TestCase):
             with self.subTest(readiness=invalid), self.assertRaisesRegex(ValueError, 'boolean'):
                 normalize(plan, Path('tests.yaml'))
 
+    def test_one_phase_budget_allows_long_readiness_but_bounds_every_await(self):
+        plan = self.plan()
+        self.assertEqual(normalize(plan, Path('tests.yaml'))['timeout_seconds'], 300)
+        plan['timeout'] = '1200s'
+        step = plan['suites'][0]['cases'][0]['steps'][0]
+        step['await'] = '900s'
+        compiled = normalize(plan, Path('tests.yaml'))
+        self.assertEqual(compiled['timeout_seconds'], 1200)
+        self.assertEqual(compiled['drivers'][0]['probes']['cases'][0]['steps'][0]['await_seconds'], 900)
+        step['await'] = '1201s'
+        with self.assertRaisesRegex(ValueError, 'phase timeout'): normalize(plan, Path('tests.yaml'))
+        step['await'] = '0s'
+        for value in ('0s', '1801s', '-1s', '1m', 1200, True, None):
+            plan['timeout'] = value
+            with self.subTest(timeout=value), self.assertRaisesRegex(ValueError, 'phase timeout'):
+                normalize(plan, Path('tests.yaml'))
+
     def test_operation_timeout_does_not_enable_mutation_polling(self):
         plan = self.plan()
         step = plan['suites'][0]['cases'][0]['steps'][0]

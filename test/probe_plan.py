@@ -372,11 +372,15 @@ def expectations(action, expect):
 def normalize(data, path, locations=None):
     locations = locations or {}
     literal(data)
-    fields(data, {'version', 'packages', 'suites', 'legacy'}, {'version', 'suites'})
+    fields(data, {'version', 'packages', 'suites', 'legacy', 'timeout'}, {'version', 'suites'})
     if type(data['version']) is not int or data['version'] != 1:
         raise ValueError('unsupported test plan version')
     if type(data.get('legacy', False)) is not bool:
         raise ValueError('legacy must be boolean')
+    timeout = data.get('timeout', '300s')
+    if not isinstance(timeout, str) or not re.fullmatch(r'[1-9][0-9]*s', timeout) or int(timeout[:-1]) > 1800:
+        raise ValueError('phase timeout must be 1s..1800s')
+    phase_seconds = int(timeout[:-1])
     suites = data['suites']
     if not isinstance(suites, list) or len(suites) > 32:
         raise ValueError('expected 0..32 suites')
@@ -442,8 +446,8 @@ def normalize(data, path, locations=None):
                 if sname in previous: raise ValueError('duplicate step')
                 references(step[action], previous, fixtures)
                 wait = step.get('await', '0s')
-                if not isinstance(wait, str) or not re.fullmatch(r'(0|[1-9][0-9]*)s', wait) or int(wait[:-1]) > 300:
-                    raise ValueError('await must be 0s..300s')
+                if not isinstance(wait, str) or not re.fullmatch(r'(0|[1-9][0-9]*)s', wait) or int(wait[:-1]) > phase_seconds:
+                    raise ValueError('await must fit within the phase timeout')
                 timeout = step.get('timeout', '10s')
                 if not isinstance(timeout, str) or not re.fullmatch(r'[1-9][0-9]*s', timeout) or int(timeout[:-1]) > 300:
                     raise ValueError('timeout must be 1s..300s')
@@ -537,5 +541,5 @@ def normalize(data, path, locations=None):
         d.update(source='probes.zig', mode='probes', cases=phase_cases,
                  probes=dict(source=str(path), fixtures=fixtures if d['user'] == 'root' else {k: '/run/svc/' + name + '/' + k for k in fixtures}, cases=normalized))
         drivers.append(d)
-    return dict(format='werewolf-native-tests/1', legacy=data.get('legacy', False),
+    return dict(format='werewolf-native-tests/1', legacy=data.get('legacy', False), timeout_seconds=phase_seconds,
                 packages=sorted(packages), drivers=drivers)

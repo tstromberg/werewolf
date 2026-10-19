@@ -57,8 +57,11 @@ def read_plan(form):
         plan = load(path)
     else:
         plan = json.loads(path.read_text())
-    if set(plan) - {'format', 'packages', 'drivers', 'legacy'} or plan.get('format') != 'werewolf-native-tests/1':
+    if set(plan) - {'format', 'packages', 'drivers', 'legacy', 'timeout_seconds'} or plan.get('format') != 'werewolf-native-tests/1':
         raise ValueError('invalid native test plan')
+    seconds = plan.setdefault('timeout_seconds', 300)
+    if type(seconds) is not int or not 1 <= seconds <= 1800:
+        raise ValueError('phase timeout must be 1..1800 seconds')
     if not isinstance(plan.get('legacy', False), bool):
         raise ValueError('legacy must be a boolean')
     # Retaining a shell suite must not silently stop running its assertions.
@@ -467,7 +470,7 @@ def run(form, arch, qemu):
             call(fixtures[phase], config)
         if digest(config / 'data.key') != data_key:
             raise ValueError('test configuration replaced the data key')
-        context = dict(run=run_id, phase=phase)
+        context = dict(run=run_id, phase=phase, timeout_seconds=plan['timeout_seconds'])
         write(config / 'tests/context', context)
         packed = work / (phase + '.tar')
         with (work / (phase + '-pack.log')).open('wb') as output:
@@ -481,7 +484,8 @@ def run(form, arch, qemu):
              '-kernel', os.environ['KERNEL'], '-initrd', os.environ['OUT'] + '/initramfs.zst',
              '-append', os.environ['CMDLINE'] + ' werewolf.data=vda',
              '-drive', f'file={disk},format=raw,if=virtio',
-             '-drive', f'file={packed},format=raw,if=virtio,readonly=on')
+             '-drive', f'file={packed},format=raw,if=virtio,readonly=on',
+             env=dict(os.environ, CONSOLE_TIMEOUT=str(plan['timeout_seconds'] + 30)))
         if any(digest(path) != identity[name] for name, path in inputs.items()):
             raise ValueError('native test inputs changed during the run; rebuild and retry')
         # Preserve serial CRs until console_clean removes interleaved kernel lines.
@@ -491,7 +495,7 @@ def run(form, arch, qemu):
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
-        profile='local-qemu', **identity, phases=results))
+        profile='local-qemu', timeout_seconds=plan['timeout_seconds'], **identity, phases=results))
 
 
 if __name__ == '__main__':

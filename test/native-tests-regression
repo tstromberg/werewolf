@@ -26,7 +26,7 @@ loader.exec_module(iteration)
 
 
 class ConsoleTransport(unittest.TestCase):
-    def boot(self, poweroff, fragment=False):
+    def boot(self, poweroff, fragment=False, console_timeout=300):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             qemu = root / 'qemu'
@@ -47,7 +47,7 @@ def until(ending):
         data += part
     return data
 send(b'handing over to runit\\nposture: fail= pass=100 skip=0 COMPLETE\\n')
-if sys.argv[2] != 'whole':
+if sys.argv[2] not in ('whole', 'missing'):
     if sys.argv[2] == 'fragment': time.sleep(.2)
     send(b'werewolf-test: {"event":"complete","status":"pass"}\\r')
     time.sleep(.2)
@@ -74,7 +74,8 @@ time.sleep(.01)
             checks = root / 'checks'
             checks.write_text('seen complete ' + (native.COMPLETION if fragment else 'COMPLETE') + '\n')
             log = root / 'console.log'
-            env = dict(os.environ, POSTURE_KNOWN='', SSH_PORT='', GITEA_PORT='')
+            env = dict(os.environ, POSTURE_KNOWN='', SSH_PORT='', GITEA_PORT='',
+                       CONSOLE_TIMEOUT=str(console_timeout))
             result = subprocess.run(['test/boot', 'serial-utf8', str(checks), str(log),
                                      str(qemu), 'poweroff' if poweroff else 'exit',
                                      'fragment' if fragment is True else fragment or 'whole'],
@@ -96,6 +97,13 @@ time.sleep(.01)
         result, log = self.boot(True)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode(errors='replace'))
         self.assertIn(b'\xe2\x96\xa1' * 30, log)
+        self.assertIn(b'reboot: Power down', log)
+
+    def test_console_collection_obeys_the_explicit_budget(self):
+        result, log = self.boot(True, fragment='missing', console_timeout=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'FAIL', result.stdout)
+        self.assertIn(b'complete', result.stdout)
         self.assertIn(b'reboot: Power down', log)
 
     def test_successful_exit_without_poweroff_is_still_rejected(self):
@@ -214,10 +222,34 @@ class IterationInputs(unittest.TestCase):
                 original = fingerprint()
                 plan['drivers'][0]['probes']['cases'][1]['steps'][0]['expect']['status'] = 503
                 self.assertEqual(original, fingerprint())
+                plan['timeout_seconds'] = 1200
+                self.assertEqual(original, fingerprint())
                 plan['drivers'][0]['user'] = 'gatus'
                 self.assertNotEqual(original, fingerprint())
                 plan['drivers'][0]['user'] = 'root'
                 plan['packages'].append('postgresql-17-client')
+                self.assertNotEqual(original, fingerprint())
+
+    def test_fixture_bytes_refresh_vm_while_adjacent_driver_sources_stay_hot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'forms/gatus/test'
+            directory.mkdir(parents=True)
+            photo = directory / 'photo.jpg'
+            source = directory / 'helper.zig'
+            photo.write_bytes(b'first fixture')
+            source.write_text('first test helper')
+            plan = native.read_plan('gatus')
+            with patch.object(iteration, 'ROOT', root), \
+                    patch.object(iteration.NATIVE, 'read_plan', return_value=plan), \
+                    patch.object(iteration, 'call', return_value=type('Dirs', (), {'stdout': ''})()):
+                fingerprint = lambda: iteration.fingerprint('gatus', directory / 'tests.yaml', root / 'generated')
+                original = fingerprint()
+                source.write_text('edited test helper')
+                self.assertEqual(original, fingerprint())
+                photo.write_bytes(b'edited fixture')
+                self.assertNotEqual(original, fingerprint())
+                photo.unlink()
                 self.assertNotEqual(original, fingerprint())
 
     def test_first_build_records_resolved_locks(self):
@@ -401,6 +433,14 @@ class Plans(unittest.TestCase):
                 expected = native.call('build/host/form', verb, 'greenbone', *rest, capture_output=True).stdout
                 actual = native.call('build/host/form', verb, generated, *rest, capture_output=True).stdout
                 self.assertEqual(actual, expected)
+
+    def test_phase_budget_is_bounded_for_native_plans_too(self):
+        plan = native.read_plan('greenbone')
+        self.assertEqual(plan['timeout_seconds'], 300)
+        for value in (0, 1801, -1, True, '900', 1.5):
+            plan['timeout_seconds'] = value
+            with self.subTest(timeout=value), patch('probe_plan.load', return_value=plan):
+                with self.assertRaisesRegex(ValueError, 'phase timeout'): native.read_plan('greenbone')
 
     def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
@@ -755,6 +795,8 @@ class RunIdentity(unittest.TestCase):
                 if str(args[0]) != 'test/boot':
                     return
                 context = json.loads((config / 'tests/context').read_text())
+                self.assertEqual(context['timeout_seconds'], plan['timeout_seconds'])
+                self.assertEqual(kwargs['env']['CONSOLE_TIMEOUT'], str(plan['timeout_seconds'] + 30))
                 if update:
                     verify = context['phase'] == 'verify'
                     self.assertEqual((config / 'updated').exists(), verify)

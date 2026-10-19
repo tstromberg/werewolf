@@ -1197,6 +1197,16 @@
         "test-greenbone-platform/greenbone-feed",
         "test-greenbone-isolation/greenbone-feed-command"
       ]
+    },
+    "immich": {
+      "immich-upload": [
+        "test-immich-upload/immich-upload",
+        "test-immich-upload/immich-upload-kept"
+      ],
+      "immich-thumbnail": [
+        "test-immich/immich-thumbnail-hash",
+        "test-immich-files/immich-thumbnail"
+      ]
     }
   }
 }

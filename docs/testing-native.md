@@ -1,8 +1,7 @@
 # Writing form tests
 
-Use `forms/FORM/test/tests.yaml` for fixed probes and ordered HTTP workflows. The host
-validates YAML and builds the existing native test image; the guest parses only JSON.
-Keep custom Zig drivers for protocol state, computation and security attacks. See [the
+Author probes and HTTP workflows in `forms/FORM/test/tests.yaml`; use Zig for custom
+protocols and attacks. The host validates YAML; the guest parses JSON. See [the
 design](design/test-probes.md) and [runner internals](../test/native/README.md).
 
 Run the clean test image and shipping-image checks with:
@@ -129,10 +128,11 @@ For `exec`, JSON assertions and captures parse stdout after checking the expecte
 Use `{fixture: NAME, raw: true}` to preserve every byte, including binary HTTP bodies.
 `{run: true}` supplies the shared run ID. References preserve types; putting an object
 in a bearer token or argv fails the case. Captured values are not string templates.
-`await: 60s` polls read-only GET/HEAD/OPTIONS requests or an explicitly `readonly: true`
-client operation. Never poll a mutation or use a timeout as evidence of refusal.
-`timeout: 45s` gives one fetch or client call up to 45 seconds; it never retries.
-The default is 10 seconds; accepted values are 1s..300s, within the suite/boot limits.
+Top-level `timeout: 1200s` bounds each phase (default `300s`, range `1s..1800s`).
+`await: 60s` polls GET/HEAD/OPTIONS or a `readonly: true` client within that budget.
+Never poll mutations or accept timeouts as refusals. A step's `timeout: 45s` caps one
+fetch/client call without retries (default `10s`, maximum `300s`). Clean runs and
+SSH iteration use the same phase budget, including readiness and native drivers.
 Text assertions use named matchers such as `contains`, `absent` or `matches`;
 unknown matcher names fail plan validation before an image is built.
 

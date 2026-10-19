@@ -1,0 +1,283 @@
+version: 1
+timeout: 1200s
+suites:
+  - name: immich-ca
+    readiness: true
+    cases:
+      - name: immich-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+              size:
+                min: 1
+            await: 900s
+  - name: immich-ready
+    readiness: true
+    cases:
+      - name: immich-up
+        steps:
+          - fetch:
+              url: https://localhost/api/server/ping
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: pong
+            await: 900s
+  - name: immich-startup
+    cases:
+      - name: immich-startup
+        steps:
+          - fetch:
+              url: https://localhost/api/server/ping
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: pong
+            await: 900s
+  - name: immich-identity
+    fixtures:
+      password: /run/config/caddy/admin-password
+    cases:
+      - name: immich-user
+        steps:
+          - service: immich
+            expect:
+              user: _oci-immich
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: immich-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 201
+              json:
+                /isAdmin: true
+            name: login
+          - fetch:
+              url: https://localhost/api/users/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /accessToken
+            expect:
+              status: 200
+              json:
+                /isAdmin: true
+                /email: admin@example.com
+      - name: immich-defaults
+        steps:
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 201
+              json:
+                /isAdmin: true
+            name: login
+          - fetch:
+              url: https://localhost/api/system-config
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /accessToken
+            expect:
+              status: 200
+              json:
+                /newVersionCheck/enabled: false
+                /machineLearning/enabled: false
+                /server/externalDomain: https://localhost
+      - name: immich-offline
+        steps:
+          - service: immich
+            expect:
+              connect_rules:
+                - tcp/5432
+                - tcp/6379
+      - name: immich-signup-closed
+        steps:
+          - fetch:
+              url: https://localhost/api/auth/admin-sign-up
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: stranger@example.com
+                password: stranger-pass-1
+                name: x
+            expect:
+              status: 403
+          - fetch:
+              url: http://127.0.0.1:2283/api/auth/admin-sign-up
+              method: POST
+              json:
+                email: stranger@example.com
+                password: stranger-pass-1
+                name: x
+            expect:
+              status: 400
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 201
+              json:
+                /isAdmin: true
+            name: login
+          - fetch:
+              url: https://localhost/api/admin/users
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /accessToken
+            expect:
+              status: 200
+              json:
+                ? ''
+                : count: 1
+                /0/email: admin@example.com
+  - name: immich-upload
+    source: driver.zig
+    mode: upload
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    fixtures:
+      password: /run/config/caddy/admin-password
+      photo: /run/config/tests/immich/photo
+    cases:
+      seed:
+        - immich-upload
+      verify:
+        - immich-upload-kept
+  - name: immich
+    fixtures:
+      password: /run/config/caddy/admin-password
+    cases:
+      - name: immich-exif
+        steps:
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 201
+              json:
+                /isAdmin: true
+            name: login
+          - file: /data/immich-test.json
+            expect:
+              json:
+                /run:
+                  run: true
+                /asset:
+                  matches: ^[0-9a-f-]{36}$
+            name: photo
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - api
+                - assets
+                - step: photo
+                  json: /asset
+              bearer:
+                step: login
+                json: /accessToken
+            expect:
+              status: 200
+              json:
+                /exifInfo/make: werewolf
+            await: 120s
+      - name: immich-thumbnail-hash
+        steps:
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status:
+                one_of:
+                  - 200
+                  - 201
+              json:
+                /isAdmin: true
+            name: login
+          - file: /data/immich-test.json
+            expect:
+              json:
+                /run:
+                  run: true
+                /asset:
+                  matches: ^[0-9a-f-]{36}$
+            name: photo
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              path:
+                - api
+                - assets
+                - step: photo
+                  json: /asset
+              bearer:
+                step: login
+                json: /accessToken
+            expect:
+              status: 200
+              json:
+                /thumbhash:
+                  matches: .+
+            await: 120s
+  - name: immich-files
+    source: driver.zig
+    mode: files
+    user: root
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - immich-library
+        - immich-thumbnail
+      verify:
+        - immich-library
+        - immich-thumbnail

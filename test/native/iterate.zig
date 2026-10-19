@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (!std.mem.eql(u8, args[1], "run")) return error.Usage;
+    const context = try driver.Run.load(io, gpa, "/run/config/native-iterate-context");
     if (linux.errno(linux.chdir(try gpa.dupeSentinel(u8, directory, 0))) != .SUCCESS)
         return error.ChangeDirectory;
     const result = try std.process.run(gpa, io, .{
@@ -68,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
         } else &.{"/usr/lib/werewolf/leash"},
         .stdout_limit = .limited(64 << 10),
         .stderr_limit = .limited(16 << 10),
-        .timeout = driver.deadline(io, 180),
+        .timeout = driver.deadline(io, context.timeout_seconds),
     });
     try Io.File.stdout().writeStreamingAll(io, result.stdout);
     try Io.File.stderr().writeStreamingAll(io, result.stderr);

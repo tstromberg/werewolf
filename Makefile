@@ -285,6 +285,8 @@ _test/probes:
 	zig test -lc test/native/match.zig test/native/regex.c
 	zig test -lc test/native/probes.zig test/native/regex.c
 	zig test test/native/udp.zig
+	zig test test/native/driver.zig
+	zig test --dep test-driver -Mroot=test/native/stage.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/openldap/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/nats/test/driver.zig -Mtest-driver=test/native/driver.zig
@@ -305,6 +307,7 @@ _test/probes:
 	zig test --dep test-driver -Mroot=forms/cron/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/galene/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/greenbone/test/web.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
