@@ -1238,6 +1238,12 @@
         "test-postdoc-private/postdoc-token-root-only",
         "test-postdoc-tunnel-private/postdoc-token-service-only"
       ]
+    },
+    "minecraft": {
+      "mc-no-rcon": [
+        "test-minecraft/mc-no-rcon-listener",
+        "test-minecraft-game/mc-no-rcon"
+      ]
     }
   }
 }

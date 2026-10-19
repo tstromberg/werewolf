@@ -306,6 +306,9 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/bugsink/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/cron/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/postdoc-server/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/mox/test/smtp.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/minecraft/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/mox/test/submit.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/galene/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/greenbone/test/web.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
