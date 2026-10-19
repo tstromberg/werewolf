@@ -71,6 +71,8 @@ def service(driver):
         f'memory {driver.get("memory", 128)}',
         'nofile 128',
     ]
+    if 'probes' in driver:
+        lines.append('read /run/howl-dev/' + name + '.json')
     for field in ('read', 'connect', 'run'):
         lines.extend(field + ' ' + item for item in driver[field])
     lines.extend('config ' + key + ' ' + value for key, value in driver.get('config', {}).items())

@@ -387,7 +387,13 @@ fn answering(io: Io, a: Allocator, http: bool) !void {
                     socket.object.get("port").?.integer == port.port;
             }
             if (ok) break;
-            if (Io.Clock.awake.now(io).compare(.gte, until)) return error.PortNotAnswering;
+            if (Io.Clock.awake.now(io).compare(.gte, until)) {
+                std.debug.print(
+                    "test-platform: readiness timed out for tcp/{d} (HTTP: {})\n",
+                    .{ port.port, http },
+                );
+                return error.PortNotAnswering;
+            }
             try io.sleep(.fromMilliseconds(100), .awake);
         }
     }

@@ -183,6 +183,36 @@ def application_overlay(form, baseline, root):
         shutil.copytree(application, root, dirs_exist_ok=True)
 
 
+def command_links(baseline, root):
+    """Keep package-provided command aliases when a test library adds tools."""
+    if root.is_symlink(): raise ValueError('symlink at generated test root')
+    root.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(baseline / 'overlay.tar') as archive:
+        overlaid = {m.name.removeprefix('./') for m in archive}
+    with tarfile.open(baseline / 'rootfs.tar') as archive:
+        entries = {m.name.removeprefix('./'): m for m in archive}
+    for name, entry in entries.items():
+        parent = str(Path(name).parent)
+        if (parent not in {'bin', 'sbin', 'usr/bin', 'usr/sbin'} or name in overlaid or
+                not entry.issym() or (entry.uid, entry.gid, entry.mode) != (0, 0, 0o777)):
+            continue
+        if parent not in entries or not entries[parent].isdir():
+            continue
+        for part in reversed(Path(parent).parents):
+            if part == Path('.'): continue
+            path = root / part
+            if path.is_symlink(): raise ValueError('symlink in command parent: ' + str(part))
+            path.mkdir(exist_ok=True)
+        directory = root / parent
+        if directory.is_symlink(): raise ValueError('symlink in command parent: ' + parent)
+        directory.mkdir(exist_ok=True)
+        directory.chmod(entries[parent].mode)
+        target = directory / Path(name).name
+        if target.exists() or target.is_symlink():
+            raise ValueError('test client replaces a production command: ' + name)
+        target.symlink_to(entry.linkname)
+
+
 def wait_paths(driver):
     # Landlock binds inodes before the client starts. These paths are created
     # by production startup, unlike image paths that already exist at boot.
@@ -268,6 +298,7 @@ def prepare(form, arch):
         raise ValueError('compiled native tests need PRODUCTION_OUT')
     if baseline:
         application_overlay(form, Path(baseline), root)
+        command_links(Path(baseline), root)
     write(generated / 'form.yaml', form_config(form, plan, pins))
     write(root / 'usr/share/werewolf/test-image', 'werewolf-native-tests/1\n')
     runtime_grants(root, plan['drivers'])
@@ -389,11 +420,18 @@ def compare(form, arch):
             raise ValueError('native tests changed account identities')
     def files(path):
         with tarfile.open(path) as archive:
-            return {m.name.removeprefix('./'): (m.type, m.mode, m.uid, m.gid, m.linkname,
+            # Linux does not use symlink permission bits; keep owner and target exact.
+            return {m.name.removeprefix('./'): (m.type, 0o777 if m.issym() else m.mode, m.uid, m.gid, m.linkname,
                     hashlib.sha256(archive.extractfile(m).read()).hexdigest() if m.isfile() else '')
                     for m in archive}
-    a, b = files(before / 'rootfs.tar'), files(after / 'rootfs.tar')
+    package_a, package_b = files(before / 'rootfs.tar'), files(after / 'rootfs.tar')
+    overlay_a, overlay_b = files(before / 'overlay.tar'), files(after / 'overlay.tar')
+    # Compare what is mounted: form files take precedence over package files.
+    a, b = package_a | overlay_a, package_b | overlay_b
+    changed_metadata = {'etc/runit/2', 'etc/apk/world', 'usr/share/werewolf/form',
+                        'usr/share/werewolf/overlay', 'usr/share/werewolf/release'}
     for name, record in a.items():
+        if name in changed_metadata: continue
         if name in {'etc/apko.json', 'etc/apk/world', 'etc/ld.so.cache'} or name.removeprefix('usr/') in {
                 'lib/apk/db/installed', 'lib/apk/db/scripts.tar', 'lib/apk/db/triggers'}:
             continue
@@ -406,14 +444,6 @@ def compare(form, arch):
                 raise ValueError('native dependency introduced a shell: ' + shell)
     executables = {name for name, record in b.items()
                    if record[0] in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE)}
-    a, b = files(before / 'overlay.tar'), files(after / 'overlay.tar')
-    executables.update(name for name, record in b.items()
-                       if record[0] in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE))
-    changed_metadata = {'etc/runit/2', 'etc/apk/world', 'usr/share/werewolf/form',
-                        'usr/share/werewolf/overlay', 'usr/share/werewolf/release'}
-    for name, record in a.items():
-        if name not in changed_metadata and b.get(name) != record:
-            raise ValueError('native instrumentation changed runtime overlay: ' + name)
     # New configuration can change a service just as replacing a file can.
     # Permit only the declared clients, their launcher and inert form metadata.
     plan = boot_plan(form)
@@ -427,11 +457,11 @@ def compare(form, arch):
             runtime, name = grant.split(':')
             allowance = 'etc/runtime-hardening/allow/' + driver['name'] + '/' + runtime + '/' + name
             additions.add(allowance)
-            if allowance not in b or b[allowance][0] != tarfile.REGTYPE or b[allowance][-1] != hashlib.sha256(b'').hexdigest():
+            if allowance not in overlay_b or overlay_b[allowance][0] != tarfile.REGTYPE or overlay_b[allowance][-1] != hashlib.sha256(b'').hexdigest():
                 raise ValueError('invalid native runtime allowance file')
     parents = {str(parent) for name in additions for parent in Path(name).parents}
     metadata = 'usr/share/werewolf/forms/native-test-' + form
-    for name in b.keys() - a.keys():
+    for name in overlay_b.keys() - a.keys():
         if name not in additions and name not in parents and name != metadata and not name.startswith(metadata + '/'):
             raise ValueError('native instrumentation added runtime overlay: ' + name)
     for driver in plan['drivers']:

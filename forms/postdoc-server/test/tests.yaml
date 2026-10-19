@@ -1,0 +1,148 @@
+# Analyze once on a fresh disk; after reboot, look up the saved verdict first.
+version: 1
+# Keep inherited SSH host attacks until they have a native replacement.
+legacy: true
+timeout: 1200s
+suites:
+  - name: postdoc-ready
+    readiness: true
+    cases:
+      - name: postdoc-healthy
+        steps:
+          - fetch:
+              url: http://127.0.0.1:49999/_/health
+            expect:
+              status: 200
+              json:
+                /status: ok
+            await: 900s
+  - name: postdoc
+    fixtures:
+      token: /run/config/postdoc/api-token
+    cases:
+      - name: postdoc-user
+        steps:
+          - service: postdoc
+            expect:
+              user: postdoc
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: postdoc-loopback
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 49999
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 49999
+      - name: postdoc-unauth
+        steps:
+          - fetch:
+              url: http://127.0.0.1:49999/_/info
+            expect:
+              status: 401
+      - name: postdoc-wrong-token
+        steps:
+          - fetch:
+              url: http://127.0.0.1:49999/_/info
+              bearer: 0123456789abcdef0123456789abcdef
+            expect:
+              status: 401
+      - name: postdoc-info
+        steps:
+          - fetch:
+              url: http://127.0.0.1:49999/_/info
+              bearer:
+                fixture: token
+            expect:
+              status: 200
+              json:
+                /version:
+                  type: string
+                  not_equals: ''
+      - name: postdoc-analyzes
+        steps:
+          - fetch:
+              # Exercise the analyzer again during hot iterations.
+              url: http://127.0.0.1:49999/v1/analyze?force=1
+              method: POST
+              headers:
+                X-Filename: add.js
+                Content-Type: application/octet-stream
+              body: |
+                module.exports = function add(a, b) { return a + b; };
+              bearer:
+                fixture: token
+            expect:
+              status: 200
+              headers:
+                content-type:
+                  one_of: [application/json, application/x-ndjson]
+              body:
+                contains: '"decision":"allow"'
+            timeout: 300s
+        phases:
+          - seed
+      - name: postdoc-remembers
+        steps:
+          - fetch:
+              url: http://127.0.0.1:49999/v1/lookup?sha256=cf48981276a20c3ed7a5e878416c98179ff43a5ee7fd309738bf72a3bea8df17
+              bearer:
+                fixture: token
+            expect:
+              status: 200
+              json:
+                /decision: allow
+      - name: postdoc-private
+        steps:
+          - file: /run/config/postdoc/api-token
+            expect:
+              type: file
+              uid: 0
+              mode: '600'
+      - name: sshd-listens
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - port: 22
+      - name: cloudflared-metrics
+        steps:
+          - fetch:
+              url: http://127.0.0.1:2000/metrics
+            expect:
+              status: 200
+              body:
+                contains: cloudflared
+            await: 60s
+  - name: postdoc-private
+    user: postdoc
+    cases:
+      - name: postdoc-token-root-only
+        steps:
+          - file: /run/config/postdoc/api-token
+            expect:
+              readable: false
+  - name: postdoc-tunnel-private
+    user: cloudflared
+    cases:
+      - name: postdoc-token-service-only
+        steps:
+          - file: /run/svc/postdoc/api-token
+            expect:
+              readable: false
+  - name: postdoc-audit
+    source: driver.zig
+    user: root
+    mode: audit
+    policy:
+      pledge: stdio rpath
+    cases:
+      seed:
+        - postdoc-pledged
+      verify:
+        - postdoc-pledged
