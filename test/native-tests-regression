@@ -444,9 +444,8 @@ class Plans(unittest.TestCase):
             with self.subTest(timeout=value), patch('probe_plan.load', return_value=plan):
                 with self.assertRaisesRegex(ValueError, 'phase timeout'): native.read_plan('greenbone')
 
-    def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
+    def test_greenbone_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
-        self.assertTrue(plan['legacy'])
         self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-17-client'])
         self.assertEqual(next(d for d in plan['drivers'] if d['mode'] == 'manager')['user'], '_oci-gvmd')
 

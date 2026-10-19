@@ -292,4 +292,3 @@ suites:
         - greenbone-caps
         - greenbone-redis
         - greenbone-feed-command
-legacy: true
