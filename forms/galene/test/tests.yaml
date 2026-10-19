@@ -1,0 +1,107 @@
+version: 1
+suites:
+  - name: galene-ca
+    readiness: true
+    cases:
+      - name: galene-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: galene-ready
+    readiness: true
+    cases:
+      - name: galene-https
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: mainpage.js
+            await: 120s
+  - name: galene
+    cases:
+      - name: galene-redirect
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: galene-group
+        steps:
+          - fetch:
+              url: https://localhost/group/lecture/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: galene.js
+            await: 60s
+          - fetch:
+              url: https://localhost/group/nosuch/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: galene-unlisted
+        steps:
+          - fetch:
+              url: https://localhost/public-groups.json
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                ? ''
+                : []
+      - name: galene-hashed
+        steps:
+          - file: /run/svc/galene/operator-password
+            expect:
+              exists: false
+          - file: /run/svc/galene/password
+            expect:
+              exists: false
+          - file: /run/svc/galene/groups/lecture.json
+            expect:
+              json:
+                /users/ada/password/type: bcrypt
+                /wildcard-user/password/type: bcrypt
+              body:
+                absent: werewolf-check
+  - name: galene-join
+    source: driver.zig
+    mode: join
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - galene-join
+      verify:
+        - galene-join
+  - name: galene-refused
+    source: driver.zig
+    mode: refused
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - galene-join-refused
+      verify:
+        - galene-join-refused
+  - name: galene-media
+    source: driver.zig
+    mode: media
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - galene-udp
+      verify:
+        - galene-udp

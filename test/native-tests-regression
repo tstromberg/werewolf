@@ -405,7 +405,7 @@ class Plans(unittest.TestCase):
     def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
         self.assertTrue(plan['legacy'])
-        self.assertEqual(plan['packages'], ['postgresql-17-client'])
+        self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-17-client'])
         self.assertEqual(next(d for d in plan['drivers'] if d['mode'] == 'manager')['user'], '_oci-gvmd')
 
     def test_config_cannot_replace_context_or_read_arbitrary_host_files(self):

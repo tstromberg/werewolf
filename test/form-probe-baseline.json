@@ -1191,6 +1191,12 @@
         "test-bugsink/bs-event",
         "test-bugsink/bs-event-kept"
       ]
+    },
+    "greenbone": {
+      "greenbone-feed": [
+        "test-greenbone-platform/greenbone-feed",
+        "test-greenbone-isolation/greenbone-feed-command"
+      ]
     }
   }
 }

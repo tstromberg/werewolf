@@ -88,8 +88,8 @@ Use `listeners: {protocol: tcp, port: 636}` to check that port's complete addres
 without depending on other services' listeners.
 Service assertions cover every member of the service cgroup, not just its first PID.
 `user` checks the account; `uid: {min: 65536}` also checks its numeric ID range.
-Capabilities accept Linux names such as `[net_raw, net_admin]`. Groups accept names
-or IDs, either an exact list or `contains`/`absent`; `pids_max` is a string.
+Capabilities accept names such as `[net_raw, net_admin]`. Groups take an exact list
+or `{contains: group}`/`{absent: group}` with names or IDs; `pids_max` is a string.
 `seccomp` is `none`, `strict` or `filter`, rather than a numeric kernel value.
 
 ## HTTP workflows
@@ -151,9 +151,9 @@ PostgreSQL's SQL cases use the real `psql`, its stdin and `PGAPPNAME` for the ru
 its refusal suite runs as `nobody`. No su, setuid helper or injected shell is needed.
 
 For custom code, declare `source: driver.zig`, `mode`, `user`, `policy`,
-`cases: {seed: [...], verify: [...]}` and optional `fixtures`. Sources sit beside
-the plan. Use `test/native/driver.zig` for results and `driver.fetch.Client` for HTTP.
-PostgreSQL keeps descriptor attacks; Greenbone keeps GMP/OSP protocol clients.
+`cases: {seed: [...], verify: [...]}` and optional `fixtures` beside the sources.
+Use `test/native/driver.zig` for results and `driver.fetch.Client` for HTTP.
+Unit-test custom parsers against rendered fixtures before building a VM.
 Leashed clients read `/run/svc/SUITE/`; root reads declared `/run/config/` paths.
 Native setup can save generated IDs as JSON on `/data`; YAML `file` steps capture
 them. [Bugsink](../forms/bugsink/test/tests.yaml) reuses project IDs across reboots.
