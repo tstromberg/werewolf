@@ -74,6 +74,30 @@ class LegacyImages(unittest.TestCase):
         return legacy.export(directory.parent, self.root / ('assets-' + directory.parent.name),
                              self.provenance, targets, self.cert)
 
+    def test_retry_reuses_the_signed_legacy_release_without_lowering_its_floor(self):
+        candidate = self.candidate()
+        first, = self.export(candidate)
+        legacy.publish([first], self.store, self.cert)
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        targets = {('minimal', 'x86_64'): dict(manifest, status='build')}
+        second, = legacy.export(candidate.parent, self.root / 'retry-assets',
+                                dict(self.provenance, attempt='2'), targets, self.cert, store=self.store)
+        original = {path.name: path.read_bytes() for path in Path(first['assets']).iterdir()}
+        self.assertEqual(original, {path.name: path.read_bytes() for path in Path(second['assets']).iterdir()})
+        legacy.publish([second], self.store, self.cert)
+
+    def test_retry_refuses_a_damaged_published_legacy_asset(self):
+        candidate = self.candidate()
+        first, = self.export(candidate)
+        row, = legacy.publish([first], self.store, self.cert)
+        asset = self.root / 'store' / row['object'] / row['files']['disk.qcow2']['asset']
+        asset.write_bytes(b'corrupted')
+        manifest = json.loads((candidate / 'manifest.json').read_text())
+        targets = {('minimal', 'x86_64'): dict(manifest, status='build')}
+        with self.assertRaisesRegex(ValueError, 'signed bytes'):
+            legacy.export(candidate.parent, self.root / 'retry-assets', dict(self.provenance, attempt='2'),
+                          targets, self.cert, store=self.store)
+
     def test_artifact_must_match_the_trusted_resolved_plan(self):
         candidate = self.candidate()
         manifest = json.loads((candidate / 'manifest.json').read_text())

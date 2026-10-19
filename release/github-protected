@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Create one GitHub draft carrying the exact signed assets exported for R2."""
+import datetime
 import importlib.machinery
 import importlib.util
 import json
@@ -55,6 +56,10 @@ def draft(targets, trust='release/protected', legacy=()):
     if not manifests or len({m['provenance']['run'] for m in manifests}) != 1:
         raise ValueError('a release carries the bundles of one workflow run')
     serial = max(m['serial'] for m in manifests)
+    # A previous attempt may have published a subset as an immutable release.
+    # Keep signed image serials intact and give this publication its own tag.
+    if int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')) > 1:
+        serial = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     tag = 'base-images-' + serial
     provenance = manifests[0]['provenance']
     lines = []

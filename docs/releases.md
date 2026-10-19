@@ -38,6 +38,11 @@ changes against its last published inventory. GitHub release notes also list inc
 PRs and contributors. A focused `playground/qemu/x86_64` dispatch remains available for
 recovery.
 
+Retries use a fresh publication timestamp in the GitHub tag, because published
+releases are immutable. The signed image serials and source provenance stay intact.
+Already published bundles reuse their verified signed exports, including the original
+release notes, rather than regenerating files under an immutable object identity.
+
 Protected R2 heads keep their existing namespace for installed clients. Legacy
 objects and signed release floors live under `legacy-boot/FORM/ARCH`; they never
 write protected heads. `boot-profiles.json` is the signed inventory of both profiles;
@@ -51,6 +56,12 @@ compatibility builds receive no code-signing or TPM credentials. The main-only
 
 The previous independent image-release workflow is retired. Package publication
 remains separate because installed package-updating systems still consume it.
+
+Mac QEMU runners need a working IPv4 DNS server in their host network configuration.
+Libslirp forwards guest IPv4 DNS to an IPv4 upstream; an IPv6-only host resolver
+leaves guest lookups failing even when host downloads work. Add the network's IPv4
+resolver alongside existing DNS servers, then verify DNS from a guest. The workflow
+installs missing Mac runtime packages.
 
 ## Packages
 
