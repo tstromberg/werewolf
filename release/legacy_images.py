@@ -221,6 +221,38 @@ def previous_inventory(store, form, arch, certificate, work):
         notes.validate(json.loads(catalog.read(inventory, 4 << 20)), form, arch)
 
 
+def reuse_export(store, manifest, report, provenance, assets, certificate):
+    if store is None:
+        return False
+    namespace = 'legacy-boot/' + manifest['form'] + '/' + manifest['arch']
+    with tempfile.TemporaryDirectory(prefix='ww-legacy-retry-') as temporary:
+        receipt = Path(temporary) / 'accepted.json'
+        if not store.fetch(namespace + '/latest/accepted.json', receipt):
+            return False
+        envelope = json.loads(catalog.read(receipt, 4 << 20))
+        raw, signature = envelope['manifest'].encode(), bytes.fromhex(envelope['signature'])
+        catalog.verify_signature(raw, signature, certificate)
+        previous = json.loads(raw)
+        if previous['serial'] != manifest['serial']:
+            return False
+        if previous['tests'] != report or any(previous['provenance'][name] != provenance[name]
+                                              for name in ('repository', 'commit', 'run')):
+            raise ValueError('existing legacy export is from another workflow build')
+        if not set(previous['files']) <= FILES | {'tests.json'} | NOTES:
+            raise ValueError('existing legacy export contains unexpected files')
+        prefix = profiles.prefix(manifest['form'], manifest['arch'], 'legacy-boot')
+        head = assets / (prefix + '-downloads.json')
+        head.write_bytes(raw)
+        Path(str(head) + '.sig').write_bytes(signature)
+        object = namespace + '/objects/' + hashlib.sha256(raw).hexdigest()
+        for name in previous['files']:
+            asset = prefix + ('.qcow2' if name == 'disk.qcow2' else '-' + name)
+            if not store.fetch(object + '/' + asset, assets / asset):
+                raise ValueError('existing legacy export is incomplete')
+        verify(assets, certificate)
+        return True
+
+
 def export(verified, output, provenance, targets, certificate='release/protected/image.crt', store=None):
     """Sign only fully verified legacy artifacts; never produce a protected head."""
     output = Path(output).resolve()
@@ -245,6 +277,10 @@ def export(verified, output, provenance, targets, certificate='release/protected
         prefix = profiles.prefix(manifest['form'], manifest['arch'], 'legacy-boot')
         assets = output / prefix
         assets.mkdir()
+        if reuse_export(store, manifest, report, provenance, assets, certificate):
+            exported.append(dict(form=manifest['form'], arch=manifest['arch'], boot_profile='legacy-boot',
+                                 serial=manifest['serial'], assets=str(assets)))
+            continue
         files = {}
         for name in sorted(FILES | {'tests.json'}):
             asset = prefix + ('.qcow2' if name == 'disk.qcow2' else '-' + name)

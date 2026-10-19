@@ -564,6 +564,37 @@ def inventory(store, latest, work):
     return json.loads(catalog.read(work / names[2], 4 << 20))
 
 
+def reuse_export(store, key, bundle, report, provider, output, verified, work):
+    """Reuse the authenticated bytes of an already exported immutable bundle."""
+    base = key + '/objects/' + catalog.sha(bundle / 'boot.json')
+    head, signature = work / 'downloads.json', work / 'downloads.json.sig'
+    if not store.fetch(base + '/downloads.json', head):
+        return False
+    if not store.fetch(base + '/downloads.json.sig', signature):
+        raise ValueError('existing export is missing its signature')
+    catalog.verify_signature(catalog.read(head, 4 << 20), catalog.read(signature, 512), TRUST / 'image.crt')
+    signed = json.loads(catalog.read(head, 4 << 20))
+    current = exporter.provenance()
+    if any(signed['provenance'][name] != current[name] for name in ('repository', 'commit', 'run')):
+        raise ValueError('existing export is from another workflow build')
+    allowed = set(exporter.sources(bundle, TRUST)) | {'disk.qcow2', 'gates.json'} | exporter.EXTRAS
+    if not set(signed['files']) <= allowed:
+        raise ValueError('existing export contains unexpected files')
+    publisher.preparation.prepare(str(HOWL), bundle, report, provider, work / 'admitted', TRUST)
+    staging = work / 'assets'
+    staging.mkdir()
+    prefix = key.replace('/', '-') + '-'
+    for name in ('downloads.json', 'downloads.json.sig', *signed['files']):
+        if not store.fetch(base + '/' + name, staging / (prefix + name)):
+            raise ValueError('existing export is incomplete')
+    exporter.verify(staging, bundle, report, provider, TRUST)
+    for name in ('inputs.tar.gz', 'packages.json', 'tests.json'):
+        if catalog.sha(staging / (prefix + name)) != catalog.sha(verified / name):
+            raise ValueError('existing export differs from the verified build inputs')
+    os.rename(staging, output)
+    return True
+
+
 def export_one(directory, targets, results, previous, store, assets):
     report = json.loads(catalog.read(directory / 'gates.json', 64 << 10))
     bundle = directory / 'bundle'
@@ -580,8 +611,12 @@ def export_one(directory, targets, results, previous, store, assets):
             any(v is not True for v in tests['checks'].values()) or \
             tests['bundles'].get(provider) != catalog.sha(bundle / 'boot.json'):
         raise ValueError('gated bundle differs from the verified build')
-    with tempfile.TemporaryDirectory(prefix='ww-form-extras-') as temporary:
+    output = assets / key.replace('/', '-')
+    with tempfile.TemporaryDirectory(prefix='ww-form-extras-', dir=assets) as temporary:
         work = Path(temporary)
+        if reuse_export(store, key, bundle, report, provider, output, verified, work):
+            return dict(form=form, provider=provider, arch=arch, bundle=str(bundle.resolve()),
+                        gates=str((directory / 'gates.json').resolve()), assets=str(output))
         latest = previous.get((form, provider, arch), {}).get('latest')
         old = inventory(store, latest, work) if latest else None
         packages = json.loads(catalog.read(verified / 'packages.json', 4 << 20))
@@ -591,7 +626,6 @@ def export_one(directory, targets, results, previous, store, assets):
         (work / 'release-notes.html').write_text(notes.page(release), encoding='utf-8')
         extras = {name: verified / name for name in ('inputs.tar.gz', 'packages.json', 'tests.json')}
         extras.update({name: work / name for name in ('release-notes.json', 'release-notes.html')})
-        output = assets / key.replace('/', '-')
         exporter.export(str(HOWL), bundle, report, provider, output, TRUST, publisher.preparation, extras)
     return dict(form=form, provider=provider, arch=arch, bundle=str(bundle.resolve()),
                 gates=str((directory / 'gates.json').resolve()), assets=str(output))

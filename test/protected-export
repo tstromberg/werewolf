@@ -182,6 +182,27 @@ class ProtectedExport(unittest.TestCase):
                 github.draft([], self.trust)
             run.assert_not_called()
 
+    def test_github_retry_keeps_signed_images_and_uses_a_fresh_release_tag(self):
+        created = set()
+        signed = {path.name: path.read_bytes() for path in self.copy.iterdir()}
+
+        def create(argv):
+            tag = argv[3]
+            if tag in created:
+                raise subprocess.CalledProcessError(1, argv, 'immutable release')
+            created.add(tag)
+
+        later = datetime.datetime.strptime(self.manifest['image']['serial'], '%Y%m%dT%H%M%SZ') + datetime.timedelta(seconds=1)
+        with patch.dict(os.environ, dict(self.environment, GITHUB_OUTPUT=str(self.work / 'outputs'))), \
+             patch.object(github, 'command', side_effect=create), patch.object(github.datetime, 'datetime') as clock:
+            first = github.draft([(self.copy, self.bundle, self.report, 'qemu')], self.trust)
+            os.environ['GITHUB_RUN_ATTEMPT'] = '2'
+            clock.now.return_value = later
+            second = github.draft([(self.copy, self.bundle, self.report, 'qemu')], self.trust)
+        self.assertNotEqual(first, second)
+        self.assertEqual(2, len(created))
+        self.assertEqual(signed, {path.name: path.read_bytes() for path in self.copy.iterdir()})
+
     def test_signed_extras_are_mirrored_and_unknown_extras_refuse(self):
         notes = self.work / 'notes.html'
         notes.write_text('<p>release notes</p>')
