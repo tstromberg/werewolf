@@ -1,0 +1,333 @@
+version: 1
+timeout: 1200s
+packages:
+  - postgresql-17-client
+suites:
+  - name: nextcloud-ca
+    readiness: true
+    cases:
+      - name: nc-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+              size:
+                min: 1
+            await: 600s
+  - name: nextcloud-ready
+    readiness: true
+    cases:
+      - name: nc-up
+        steps:
+          - fetch:
+              url: https://localhost/status.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /installed: true
+                /maintenance: false
+                /needsDbUpgrade: false
+            await: 600s
+  - name: nextcloud
+    cases:
+      - name: nc-installed
+        steps:
+          - fetch:
+              url: https://localhost/status.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /installed: true
+                /maintenance: false
+                /needsDbUpgrade: false
+            await: 600s
+      - name: nc-user
+        steps:
+          - service: nextcloud
+            expect:
+              user: nextcloud
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: nc-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: nc-no-installer
+        steps:
+          - file: /usr/share/nextcloud/config/CAN_INSTALL
+            expect:
+              exists: false
+          - file: /data/svc/nextcloud/config/CAN_INSTALL
+            expect:
+              exists: false
+          - fetch:
+              url: https://localhost/index.php/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: login
+                not_matches: '[Aa][Dd][Mm][Ii][Nn] [Aa][Cc][Cc][Oo][Uu][Nn][Tt]'
+      - name: nc-login
+        steps:
+          - fetch:
+              url: https://localhost/ocs/v2.php/cloud/user?format=json
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                OCS-APIRequest: 'true'
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stUGFzcy0xeA==
+            expect:
+              status: 200
+              json:
+                /ocs/data/id: admin
+      - name: nc-webdav-seed
+        steps:
+          - fetch:
+              url: https://localhost/remote.php/dav/files/admin/werewolf-check.txt
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: PUT
+              body:
+                run: true
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stUGFzcy0xeA==
+            expect:
+              status:
+                one_of:
+                  - 201
+                  - 204
+          - fetch:
+              url: https://localhost/remote.php/dav/files/admin/werewolf-check.txt
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stUGFzcy0xeA==
+            expect:
+              status: 200
+              body:
+                run: true
+          - file: /data/svc/nextcloud/data/admin/files/werewolf-check.txt
+            expect:
+              type: file
+              uid: nextcloud
+              body:
+                run: true
+        phases:
+          - seed
+      - name: nc-webdav-kept
+        steps:
+          - fetch:
+              url: https://localhost/remote.php/dav/files/admin/werewolf-check.txt
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stUGFzcy0xeA==
+            expect:
+              status: 200
+              body:
+                run: true
+          - file: /data/svc/nextcloud/data/admin/files/werewolf-check.txt
+            expect:
+              type: file
+              uid: nextcloud
+              body:
+                run: true
+        phases:
+          - verify
+      - name: nc-hidden
+        steps:
+          - fetch:
+              url: https://localhost/config/config.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/data/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/occ
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/console.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/cron.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/.htaccess
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/.user.ini
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/3rdparty/autoload.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/lib/base.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/core/register_command.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/apps/files/lib/AppInfo/Application.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/custom_apps/.htaccess
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: nc-web-update-hidden
+        steps:
+          - fetch:
+              url: https://localhost/updater/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/updater/index.php
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+          - file: /data/svc/nextcloud/config/werewolf.config.php
+            expect:
+              body:
+                contains: '''upgrade.disable-web'' => true'
+      - name: nc-no-signup
+        steps:
+          - file: /usr/share/nextcloud/apps/registration
+            expect:
+              exists: false
+          - file: /data/svc/nextcloud/apps/registration
+            expect:
+              exists: false
+          - fetch:
+              url: https://localhost/index.php/apps/registration/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 404
+      - name: nc-public-only
+        steps:
+          - service: nextcloud
+            expect:
+              connect_rules:
+                contains_all:
+                  - tcp/443 public
+                  - tcp/587 public
+      - name: nc-private
+        steps:
+          - file: /run/svc/nextcloud/admin-password
+            expect:
+              uid: nextcloud
+              mode: '600'
+          - file: /data/svc/nextcloud/config/config.php
+            expect:
+              uid: nextcloud
+              mode: '640'
+          - file: /data/svc/nextcloud/data
+            expect:
+              mode: '770'
+              type: directory
+      - name: nc-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/ocs/v2.php/cloud/user?format=json
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                OCS-APIRequest: 'true'
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtd3Jvbmc=
+            expect:
+              status: 401
+  - name: nextcloud-cron
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: nc-cron
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - nextcloud
+              stdin: 'SELECT (SELECT configvalue::bigint > 0 FROM oc_appconfig WHERE appid=''core'' AND
+                configkey=''lastcron'') AND (SELECT configvalue = ''cron'' FROM oc_appconfig WHERE appid=''core''
+                AND configkey=''backgroundjobs_mode'');
+
+                '
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+              readonly: true
+            expect:
+              exit: 0
+              stdout: 't
+
+                '
+            await: 340s
+  - name: nextcloud-code-denied
+    source: driver.zig
+    mode: write-refused
+    user: nextcloud
+    policy:
+      pledge: stdio rpath wpath
+      read:
+        - /usr/share/nextcloud
+    cases:
+      seed:
+        - nc-code-write-refused
+      verify:
+        - nc-code-write-refused

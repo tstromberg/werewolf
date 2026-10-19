@@ -1207,6 +1207,19 @@
         "test-immich/immich-thumbnail-hash",
         "test-immich-files/immich-thumbnail"
       ]
+    },
+    "nextcloud": {
+      "nc-webdav": [
+        "test-nextcloud/nc-webdav-seed",
+        "test-nextcloud/nc-webdav-kept"
+      ],
+      "nc-no-web-update": [
+        "test-nextcloud/nc-web-update-hidden",
+        "test-nextcloud-code-denied/nc-code-write-refused"
+      ],
+      "nc-cron-wait": [
+        "test-nextcloud-cron/nc-cron"
+      ]
     }
   }
 }
