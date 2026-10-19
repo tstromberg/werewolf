@@ -1,0 +1,57 @@
+version: 1
+suites:
+  - name: tailscale
+    cases:
+      - name: tailscale-private
+        steps:
+          - file: /run/svc/tailscale/auth-key
+            expect:
+              type: file
+              uid: tailscale
+              mode: '600'
+            await: 60s
+      - name: tailscale-user
+        steps:
+          - service: tailscale
+            expect:
+              user: tailscale
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: tailscale-no-tun
+        steps:
+          - file: /dev/net/tun
+            expect:
+              exists: false
+          - file: /proc/sys/net/ipv4/ip_forward
+            expect:
+              body: "0\n"
+      - name: tailscale-no-ingress
+        steps:
+          - file: /usr/share/werewolf/net
+            expect:
+              body:
+                absent: 'listen '
+      - name: tailscale-listeners
+        steps:
+          - listeners: tcp
+            expect:
+              equals: []
+          - listeners: udp
+            expect:
+              equals:
+                - protocol: udp
+                  address: 0.0.0.0
+                  port: 41641
+            await: 60s
+      - name: tailscale-config
+        steps:
+          - file: /run/svc/tailscale/config.json
+            expect:
+              type: file
+              uid: tailscale
+              mode: '600'
+              json:
+                /advertiseRoutes: [10.20.0.0/24]
+                /locked: true

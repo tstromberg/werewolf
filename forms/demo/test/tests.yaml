@@ -1,0 +1,60 @@
+version: 1
+suites:
+  - name: demo
+    cases:
+      - name: scan-cpu-share
+        steps:
+          - file: /run/cgroup/svc/scan/cpu.weight
+            expect:
+              body: "25\n"
+            await: 30s
+      - name: demo-page
+        steps:
+          - fetch:
+              url: http://127.0.0.1/
+            expect:
+              status: 200
+              body:
+                contains: Security
+                matches: kernel
+            await: 90s
+      - name: demo-logo
+        steps:
+          - name: logo
+            file: /usr/share/werewolf-demo/logo.png
+            expect:
+              type: file
+              body:
+                type: string
+          - fetch:
+              url: http://127.0.0.1/logo.png
+            expect:
+              status: 200
+              body:
+                step: logo
+                body: true
+      - name: demo-headers
+        steps:
+          - fetch:
+              url: http://127.0.0.1/
+            expect:
+              status: 200
+              headers:
+                x-content-type-options: nosniff
+                content-security-policy:
+                  contains: form-action
+                referrer-policy: no-referrer
+      - name: demo-hidden
+        steps:
+          - fetch:
+              url: http://127.0.0.1/scan.json
+            expect:
+              status: 404
+      - name: demo-readonly
+        steps:
+          - fetch:
+              url: http://127.0.0.1/
+              method: POST
+              body: changed
+            expect:
+              status: 403

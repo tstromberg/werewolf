@@ -1019,6 +1019,168 @@
         "test-vaultwarden/vw-account",
         "test-vaultwarden/vw-kept"
       ]
+    },
+    "minio": {
+      "minio-private": [
+        "test-minio/minio-private",
+        "test-minio-denied/minio-private-refused"
+      ],
+      "minio-round-trip": [
+        "test-minio/minio-round-trip",
+        "test-minio/minio-kept"
+      ]
+    },
+    "cloudflared": {
+      "cloudflared-private": [
+        "test-cloudflared/cloudflared-private",
+        "test-cloudflared-denied/cloudflared-private-refused"
+      ]
+    },
+    "authelia": {
+      "authelia-ban": [
+        "test-authelia/authelia-ban",
+        "test-authelia/authelia-ban-kept"
+      ]
+    },
+    "unbound": {
+      "unbound-no-ctl": [
+        "test-unbound/unbound-no-ctl",
+        "test-unbound-policy/unbound-no-sockets"
+      ],
+      "unbound-refuses": [
+        "test-unbound/unbound-refuses",
+        "test-unbound-policy/unbound-no-policy-override"
+      ]
+    },
+    "kafka": {
+      "kafka-setup": [
+        "test-kafka-files/kafka-setup",
+        "test-kafka-logfiles/kafka-console-logs"
+      ],
+      "kafka-acl-user": [
+        "test-kafka/kafka-acl-user",
+        "test-kafka/kafka-kept"
+      ]
+    },
+    "umami": {
+      "umami-collect": [
+        "test-umami/umami-collect",
+        "test-umami/umami-collect-kept"
+      ]
+    },
+    "php": {
+      "php-socket-private": [
+        "test-php/php-socket-private",
+        "test-php-denied/php-socket-refused"
+      ]
+    },
+    "wordpress-mariadb": {
+      "wpm-php-role": [
+        "test-wordpress-mariadb/wpm-php-role",
+        "test-wordpress-mariadb-php/wpm-php-file-refused"
+      ]
+    },
+    "open-webui": {
+      "owui-add-user": [
+        "test-open-webui/owui-add-user",
+        "test-open-webui/owui-no-user-code"
+      ]
+    },
+    "openldap": {
+      "ldap-hashed": [
+        "test-openldap/ldap-hashed",
+        "test-openldap-privacy/ldap-secret-copies"
+      ]
+    },
+    "mosquitto": {
+      "mqtt-acl": [
+        "test-mqtt/mqtt-acl",
+        "test-mqtt/mqtt-read-admin",
+        "test-mqtt/mqtt-read-other"
+      ]
+    },
+    "haproxy": {
+      "haproxy-setup": [
+        "test-haproxy/haproxy-setup",
+        "test-haproxy-wire/haproxy-no-sockets"
+      ]
+    },
+    "opencanary": {
+      "oc-host-key": [
+        "test-opencanary/oc-host-key",
+        "test-opencanary-key-denied/oc-private-key-refused"
+      ]
+    },
+    "suricata": {
+      "rules-cache": [
+        "test-suricata/rules-cache",
+        "test-suricata-security/rules-cache-identities"
+      ]
+    },
+    "paperless": {
+      "pl-postgres": [
+        "test-paperless-database/pl-postgres",
+        "test-paperless-sqlite/pl-no-sqlite"
+      ],
+      "pl-login": [
+        "test-paperless/pl-document-upload",
+        "test-paperless/pl-document-kept"
+      ],
+      "pl-document-worker": [
+        "test-paperless/pl-document-upload"
+      ],
+      "pl-again-login": [
+        "test-paperless/pl-document-kept"
+      ]
+    },
+    "squid": {
+      "squid-config": [
+        "test-squid/squid-config",
+        "test-squid/squid-listeners",
+        "test-squid-policy/squid-no-control-socket",
+        "test-squid-policy/squid-resolver"
+      ],
+      "squid-listeners": [
+        "test-squid/squid-listeners",
+        "test-squid-policy/squid-resolver"
+      ]
+    },
+    "zot": {
+      "zot-push": [
+        "test-zot/zot-push",
+        "test-zot/zot-pull"
+      ]
+    },
+    "wordpress": {
+      "wp-no-file-mods": [
+        "test-wordpress/wp-no-file-mods",
+        "test-wordpress-code-denied/wp-code-write-refused"
+      ]
+    },
+    "opensearch": {
+      "os-search": [
+        "test-opensearch/os-search",
+        "test-opensearch/os-search-kept"
+      ],
+      "os-setup": [
+        "test-opensearch/os-setup",
+        "test-opensearch-files/os-no-plaintext-secrets"
+      ],
+      "os-refuses": [
+        "test-opensearch/os-refuses",
+        "test-opensearch-files/os-no-demo-certificates",
+        "test-opensearch-tls/os-no-plain-http"
+      ]
+    },
+    "mediawiki": {
+      "mw-upload-banned": [
+        "test-mediawiki/mw-upload-banned",
+        "test-mediawiki-files/mw-no-banned-files"
+      ],
+      "mw-upload-pdf": [
+        "test-mediawiki/mw-upload-pdf",
+        "test-mediawiki/mw-pdf-kept"
+      ]
     }
   }
 }

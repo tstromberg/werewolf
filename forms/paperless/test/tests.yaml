@@ -1,0 +1,429 @@
+version: 1
+packages:
+  - postgresql-17-client
+suites:
+  - name: paperless-ca
+    readiness: true
+    cases:
+      - name: pl-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+  - name: paperless-ready
+    readiness: true
+    cases:
+      - name: pl-ready
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+            await: 180s
+  - name: paperless-startup
+    cases:
+      - name: pl-up
+        steps:
+          - fetch:
+              url: https://localhost/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 302
+            await: 180s
+  - name: paperless
+    fixtures:
+      password: /run/config/paperless/admin-password
+    cases:
+      - name: pl-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: pl-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/documents/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status:
+                one_of:
+                  - 401
+                  - 403
+      - name: pl-signup
+        steps:
+          - fetch:
+              url: https://localhost/accounts/signup/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                not_matches: name=["']password1["']
+      - name: pl-wrong
+        steps:
+          - fetch:
+              url: https://localhost/api/token/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password: wrong
+            expect:
+              status: 400
+        phases:
+          - seed
+      - name: pl-data
+        steps:
+          - file: /data/svc/paperless
+            expect:
+              type: directory
+              uid: paperless
+      - name: pl-shared-user
+        steps:
+          - service: paperless
+            expect:
+              user: paperless
+              capabilities: 0
+              no_new_privileges: true
+            await: 60s
+          - file: /etc/sv/paperless/service
+            expect:
+              body:
+                matches: "(^|\n)shared-user true(\n|$)"
+          - service: paperless-consumer
+            expect:
+              user: paperless
+              capabilities: 0
+              no_new_privileges: true
+            await: 60s
+          - file: /etc/sv/paperless-consumer/service
+            expect:
+              body:
+                matches: "(^|\n)shared-user true(\n|$)"
+          - service: paperless-worker
+            expect:
+              user: paperless
+              capabilities: 0
+              no_new_privileges: true
+            await: 60s
+          - file: /etc/sv/paperless-worker/service
+            expect:
+              body:
+                matches: "(^|\n)shared-user true(\n|$)"
+          - service: paperless-beat
+            expect:
+              user: paperless
+              capabilities: 0
+              no_new_privileges: true
+            await: 60s
+          - file: /etc/sv/paperless-beat/service
+            expect:
+              body:
+                matches: "(^|\n)shared-user true(\n|$)"
+      - name: pl-no-preload
+        steps:
+          - file: /etc/sv/paperless/service
+            expect:
+              body:
+                not_matches: LD_PRELOAD
+          - file: /etc/sv/paperless-consumer/service
+            expect:
+              body:
+                not_matches: LD_PRELOAD
+          - file: /etc/sv/paperless-worker/service
+            expect:
+              body:
+                not_matches: LD_PRELOAD
+          - file: /etc/sv/paperless-beat/service
+            expect:
+              body:
+                not_matches: LD_PRELOAD
+          - file: /usr/lib/werewolf/paperless-group.so
+            expect:
+              exists: false
+      - name: pl-no-tcp
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 5432
+            expect:
+              equals: []
+      - name: pl-document-upload
+        steps:
+          - fetch:
+              url: https://localhost/api/token/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password:
+                  fixture: password
+            expect:
+              status: 200
+              json:
+                /token:
+                  matches: .+
+            name: login
+            timeout: 30s
+          - fetch:
+              url: https://localhost/api/documents/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Token
+                credentials:
+                  step: login
+                  json: /token
+            expect:
+              status: 200
+              json:
+                /count:
+                  min: 0
+            name: list-documents
+          - fetch:
+              url: https://localhost/api/documents/post_document/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              multipart:
+                document:
+                  file: /run/config/tests/paperless-document.txt
+                  filename: werewolf-check.txt
+                  type: text/plain
+                title: werewolf-postgres-check
+              authorization:
+                scheme: Token
+                credentials:
+                  step: login
+                  json: /token
+            expect:
+              status: 200
+              body:
+                matches: .+
+            timeout: 30s
+            name: upload-document
+          - fetch:
+              url: https://localhost/api/documents/?title__iexact=werewolf-postgres-check
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Token
+                credentials:
+                  step: login
+                  json: /token
+            expect:
+              status: 200
+              json:
+                /count: 1
+                /results/0/title: werewolf-postgres-check
+            name: processed-document
+            await: 90s
+        phases:
+          - seed
+      - name: pl-no-oom
+        steps:
+          - file: /run/cgroup/svc/paperless/memory.events
+            expect:
+              body:
+                matches: "(^|\n)oom_kill 0(\n|$)"
+          - file: /run/cgroup/svc/paperless-consumer/memory.events
+            expect:
+              body:
+                matches: "(^|\n)oom_kill 0(\n|$)"
+          - file: /run/cgroup/svc/paperless-worker/memory.events
+            expect:
+              body:
+                matches: "(^|\n)oom_kill 0(\n|$)"
+          - file: /run/cgroup/svc/paperless-beat/memory.events
+            expect:
+              body:
+                matches: "(^|\n)oom_kill 0(\n|$)"
+      - name: pl-document-kept
+        steps:
+          - fetch:
+              url: https://localhost/api/token/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password:
+                  fixture: password
+            expect:
+              status: 200
+              json:
+                /token:
+                  matches: .+
+            name: login
+            timeout: 30s
+          - fetch:
+              url: https://localhost/api/documents/
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Token
+                credentials:
+                  step: login
+                  json: /token
+            expect:
+              status: 200
+              json:
+                /count:
+                  min: 1
+            name: list-documents
+          - fetch:
+              url: https://localhost/api/documents/?title__iexact=werewolf-postgres-check
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Token
+                credentials:
+                  step: login
+                  json: /token
+            expect:
+              status: 200
+              json:
+                /count: 1
+                /results/0/title: werewolf-postgres-check
+        phases:
+          - verify
+      - name: pl-again-no-sqlite
+        steps:
+          - file: /data/svc/paperless/db.sqlite3
+            expect:
+              exists: false
+        phases:
+          - verify
+  - name: paperless-database
+    user: postgres
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: pl-postgres
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: |
+                SELECT count(*) > 0 FROM paperless.django_migrations;
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                t
+  - name: paperless-sqlite
+    cases:
+      - name: pl-no-sqlite
+        steps:
+          - file: /data/svc/paperless/db.sqlite3
+            expect:
+              exists: false
+  - name: paperless-owner
+    user: paperless
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: pl-again-postgres
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - paperless
+                - -d
+                - postgres
+              stdin: |
+                SELECT count(*) FROM paperless.documents_document;
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+              readonly: true
+            expect:
+              exit: 0
+              stdout: |
+                1
+        phases:
+          - verify
+  - name: paperless-peer-denied
+    user: caddy
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: pl-peer-refusal
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - paperless
+                - -d
+                - postgres
+              stdin: |
+                SELECT 1;
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+              readonly: true
+            expect:
+              exit: 2
+              stderr:
+                matches: Peer authentication failed for user "paperless"

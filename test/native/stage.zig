@@ -8,6 +8,8 @@ const Plan = struct { drivers: []const struct {
     mode: []const u8 = "probes",
     root: bool = false,
     wait: []const []const u8,
+    phases: []const []const u8,
+    readiness: bool = false,
 } };
 
 pub fn main(init: std.process.Init) !void {
@@ -36,8 +38,24 @@ pub fn main(init: std.process.Init) !void {
     const ctx = try test_driver.Run.load(io, gpa, "/run/config/tests/context");
     const plan = try std.json.parseFromSliceLeaky(Plan, gpa, @embedFile("plan.json"), .{});
     var passed = true;
+    var readiness_passed = true;
     for (plan.drivers) |d| {
+        var selected = false;
+        for (d.phases) |phase| selected = selected or std.mem.eql(u8, phase, ctx.phase);
+        if (!selected) continue;
         const name = d.name;
+        if (std.mem.eql(u8, name, "test-lifecycle") and !readiness_passed) {
+            try test_driver.emit(io, .{
+                .event = "driver",
+                .run = ctx.run,
+                .phase = ctx.phase,
+                .suite = name,
+                .status = "fail",
+                .reason = "readiness failed; restart blocked",
+            });
+            passed = false;
+            continue;
+        }
         if (!try ready(io, d.wait)) {
             try test_driver.emit(io, .{
                 .event = "driver",
@@ -48,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
                 .reason = "service paths unavailable",
             });
             passed = false;
+            if (d.readiness) readiness_passed = false;
             continue;
         }
         const result = std.process.run(gpa, io, .{
@@ -83,11 +102,13 @@ pub fn main(init: std.process.Init) !void {
                 },
             );
             passed = false;
+            if (d.readiness) readiness_passed = false;
             continue;
         };
         try Io.File.stdout().writeStreamingAll(io, result.stdout);
         try Io.File.stderr().writeStreamingAll(io, result.stderr);
         const ok = result.term == .exited and result.term.exited == 0;
+        if (d.readiness) readiness_passed = readiness_passed and ok;
         try test_driver.emit(
             io,
             .{

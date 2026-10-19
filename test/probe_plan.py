@@ -200,7 +200,7 @@ def references(value, previous, fixtures):
         for v in value: references(v, previous, fixtures)
 
 
-MATCHERS = {'equals', 'contains', 'absent', 'one_of', 'min', 'max', 'matches', 'count', 'occurrences', 'type'}
+MATCHERS = {'equals', 'contains', 'contains_all', 'contains_none', 'absent', 'one_of', 'min', 'max', 'matches', 'not_matches', 'count', 'occurrences', 'type'}
 
 
 def string(value):
@@ -242,9 +242,11 @@ def matcher(value):
             raise ValueError('count requires nonnegative integer')
         if key == 'one_of' and (not isinstance(v, list) or not v):
             raise ValueError('one_of requires nonempty list')
+        if key in ('contains_all', 'contains_none') and (not isinstance(v, list) or not v):
+            raise ValueError(key + ' requires nonempty list')
         if key == 'type' and (not isinstance(v, str) or v not in ('null', 'bool', 'integer', 'float', 'string', 'array', 'object')):
             raise ValueError('invalid type matcher')
-        if key == 'matches' and (not isinstance(v, str) or len(v.encode()) > 512):
+        if key in ('matches', 'not_matches') and (not isinstance(v, str) or len(v.encode()) > 512):
             raise ValueError('regex exceeds 512 bytes')
         if key == 'occurrences':
             if not isinstance(v, dict) or not v:
@@ -252,6 +254,16 @@ def matcher(value):
             for needle, count in v.items():
                 if not string(needle) or type(count) is not int or count < 0:
                     raise ValueError('occurrences requires nonempty strings and nonnegative counts')
+
+
+def text_matcher(value):
+    if isinstance(value, dict):
+        if not set(value) & {'run', 'step', 'fixture'}:
+            if not value: raise ValueError('empty text matcher')
+            fields(value, MATCHERS)
+    elif value is not None and not isinstance(value, str):
+        raise ValueError('text assertion requires a string, null, reference or matcher')
+    matcher(value)
 
 
 def text_input(value):
@@ -278,11 +290,33 @@ def request_fields(action, request):
         try: port = url.port
         except ValueError as error: raise ValueError('invalid URL port') from error
         if port is not None and not 1 <= port <= 65535: raise ValueError('invalid URL port')
+        if 'path' in request:
+            if url.path not in ('', '/') or '?' in request['url'] or '#' in request['url']:
+                raise ValueError('path requires a literal origin without path or query')
+            parts = request['path']
+            if not isinstance(parts, list) or not 1 <= len(parts) <= 32:
+                raise ValueError('path requires 1..32 segments')
+            for index, part in enumerate(parts):
+                text_input(part)
+                if isinstance(part, str) and (len(part.encode()) > 1024 or
+                        part in ('.', '..') or not part and index != len(parts) - 1):
+                    raise ValueError('invalid path segment')
         for key in ('body', 'bearer'):
             if key in request: text_input(request[key])
+        if 'authorization' in request:
+            auth = request['authorization']
+            fields(auth, {'scheme', 'credentials'}, {'scheme', 'credentials'})
+            if not isinstance(auth['scheme'], str) or not re.fullmatch(
+                    r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", auth['scheme']):
+                raise ValueError('invalid authorization scheme')
+            text_input(auth['credentials'])
         if 'session' in request: identity(request['session'])
         if 'resolve' in request: strings(request['resolve'])
         if 'headers' in request: text_map(request['headers'], headers=True)
+        if ('bearer' in request and 'authorization' in request or
+                set(request) & {'bearer', 'authorization'} and any(
+                    k.lower() == 'authorization' for k in request.get('headers', {}))):
+            raise ValueError('choose one authorization source')
         if 'form' in request: text_map(request['form'])
         if 'multipart' in request:
             if not isinstance(request['multipart'], dict): raise ValueError('multipart requires mapping')
@@ -314,7 +348,8 @@ def expectations(action, expect):
         elif key in ('headers', 'cookies'):
             if not isinstance(value, dict) or not value: raise ValueError(key + ' requires assertion map')
             if key == 'headers' and any(k != k.lower() for k in value): raise ValueError('response header names must be lowercase')
-            for comparison in value.values(): matcher(comparison)
+            for comparison in value.values(): text_matcher(comparison)
+        elif key in ('body', 'stdout', 'stderr'): text_matcher(value)
         elif action == 'service' and key == 'user':
             if type(value) is int:
                 if not 0 <= value < 1 << 32: raise ValueError('invalid user ID')
@@ -348,7 +383,9 @@ def normalize(data, path, locations=None):
     packages = set(strings(data.get('packages', [])))
     drivers, names = [], set()
     for index, suite in enumerate(suites):
-        fields(suite, {'name', 'user', 'groups', 'policy', 'fixtures', 'cases', 'source', 'mode', 'memory', 'allow'}, {'name'})
+        fields(suite, {'name', 'user', 'groups', 'policy', 'fixtures', 'cases', 'source', 'mode', 'memory', 'allow', 'readiness'}, {'name'})
+        if type(suite.get('readiness', False)) is not bool:
+            raise ValueError('readiness must be boolean')
         name = identity(suite['name'])
         if not name.startswith('test-'): name = 'test-' + name
         if name in names: raise ValueError('duplicate suite')
@@ -358,7 +395,8 @@ def normalize(data, path, locations=None):
         d = dict(name=name, user=suite.get('user', 'root'), groups=suite.get('groups', []),
                  pledge=policy.get('pledge', 'stdio rpath'), read=policy.get('read', []),
                  connect=policy.get('connect', []), run=policy.get('run', []),
-                 memory=suite.get('memory', 128), allow=suite.get('allow', []), config={})
+                 memory=suite.get('memory', 128), allow=suite.get('allow', []),
+                 readiness=suite.get('readiness', False), config={})
         string(d['pledge'])
         for field in ('read', 'connect', 'run', 'groups', 'allow'): strings(d[field])
         if not isinstance(d['user'], str) or not ACCOUNT.fullmatch(d['user']): raise ValueError('invalid suite user')
@@ -396,7 +434,7 @@ def normalize(data, path, locations=None):
                 raise ValueError('expected 1..64 steps')
             previous, compiled = {}, []
             for si, step in enumerate(steps):
-                fields(step, ACTIONS | {'name', 'expect', 'await'}, {'expect'})
+                fields(step, ACTIONS | {'name', 'expect', 'await', 'timeout'}, {'expect'})
                 actions = set(step) & ACTIONS
                 if len(actions) != 1: raise ValueError('step needs exactly one probe')
                 action = next(iter(actions))
@@ -406,9 +444,14 @@ def normalize(data, path, locations=None):
                 wait = step.get('await', '0s')
                 if not isinstance(wait, str) or not re.fullmatch(r'(0|[1-9][0-9]*)s', wait) or int(wait[:-1]) > 300:
                     raise ValueError('await must be 0s..300s')
+                timeout = step.get('timeout', '10s')
+                if not isinstance(timeout, str) or not re.fullmatch(r'[1-9][0-9]*s', timeout) or int(timeout[:-1]) > 300:
+                    raise ValueError('timeout must be 1s..300s')
+                if 'timeout' in step and action not in {'fetch', 'exec'}:
+                    raise ValueError('timeout applies to fetch and exec')
                 request = step[action]
                 if action == 'fetch':
-                    fields(request, {'url', 'method', 'headers', 'json', 'body', 'bearer', 'session', 'ca', 'resolve', 'form', 'multipart'}, {'url'})
+                    fields(request, {'url', 'path', 'method', 'headers', 'json', 'body', 'bearer', 'authorization', 'session', 'ca', 'resolve', 'form', 'multipart'}, {'url'})
                     if not isinstance(request['url'], str) or not request['url'].startswith(('http://', 'https://')):
                         raise ValueError('fetch requires a literal HTTP(S) URL')
                     method = request.get('method', 'GET')
@@ -418,6 +461,8 @@ def normalize(data, path, locations=None):
                         raise ValueError('choose one request body')
                     if int(wait[:-1]) and method not in {'GET', 'HEAD', 'OPTIONS'}:
                         raise ValueError('await cannot repeat an HTTP mutation')
+                    if d['readiness'] and method not in {'GET', 'HEAD', 'OPTIONS'}:
+                        raise ValueError('readiness requires read-only HTTP probes')
                     if 'ca' in request: absolute(request['ca'])
                     packages.add('libcurl-openssl4')
                 elif action == 'exec':
@@ -428,12 +473,21 @@ def normalize(data, path, locations=None):
                     if argv[0] not in d['run']: raise ValueError('exec client must be declared in policy.run')
                     if int(wait[:-1]) and request.get('readonly') is not True:
                         raise ValueError('await requires a declared read-only client operation')
+                    if d['readiness'] and request.get('readonly') is not True:
+                        raise ValueError('readiness requires a declared read-only client operation')
                 elif action in {'file', 'mount'}:
                     absolute(request)
                 elif action == 'service':
                     identity(request)
                 elif action == 'listeners':
-                    if not isinstance(request, str) or request not in ('tcp', 'udp', 'all'): raise ValueError('invalid listener protocol')
+                    if isinstance(request, str):
+                        protocol = request
+                    else:
+                        fields(request, {'protocol', 'port'}, {'protocol', 'port'})
+                        protocol = request['protocol']
+                        if type(request['port']) is not int or not 1 <= request['port'] <= 65535:
+                            raise ValueError('invalid listener port')
+                    if protocol not in ('tcp', 'udp', 'all'): raise ValueError('invalid listener protocol')
                 request_fields(action, request)
                 references(step['expect'], previous, fixtures)
                 if not isinstance(step['expect'], dict) or not step['expect']:
@@ -448,6 +502,9 @@ def normalize(data, path, locations=None):
                 }[action]
                 fields(step['expect'], allowed)
                 if action == 'service':
+                    if isinstance(step['expect'].get('connect_rules'), list):
+                        rules = strings(step['expect']['connect_rules'])
+                        step['expect']['connect_rules'] = sorted(rules)
                     for key in ('capabilities', 'bounding_capabilities'):
                         if key in step['expect'] and isinstance(step['expect'][key], list):
                             caps = strings(step['expect'][key])
@@ -473,7 +530,8 @@ def normalize(data, path, locations=None):
                             raise ValueError('duplicate listener')
                 expectations(action, step['expect'])
                 compiled.append(dict(name=sname, probe=action, request=request, expect=step['expect'],
-                                     await_seconds=int(wait[:-1]), line=locations.get(('suites', index, 'cases', ci, 'steps', si), 1)))
+                                     await_seconds=int(wait[:-1]), timeout_seconds=int(timeout[:-1]),
+                                     line=locations.get(('suites', index, 'cases', ci, 'steps', si), 1)))
                 previous[sname] = action
             normalized.append(dict(name=cname, phases=phases, steps=compiled))
         d.update(source='probes.zig', mode='probes', cases=phase_cases,

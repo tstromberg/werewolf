@@ -1,0 +1,77 @@
+version: 1
+suites:
+  - name: ollama
+    cases:
+      - name: ollama-user
+        steps:
+          - service: ollama
+            expect:
+              user: ollama
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+              connect_rules: [tcp/443 public, tcp/53, udp/53]
+            await: 60s
+      - name: ollama-api
+        steps:
+          - fetch:
+              url: http://127.0.0.1:11434/api/version
+            expect:
+              status: 200
+              json:
+                /version:
+                  matches: .+
+            await: 60s
+          - fetch:
+              url: http://127.0.0.1:11434/api/tags
+            expect:
+              status: 200
+              json:
+                /models: []
+      - name: ollama-origin
+        steps:
+          - fetch:
+              url: http://127.0.0.1:11434/api/tags
+              headers:
+                Origin: https://evil.example
+            expect:
+              status: 403
+      - name: ollama-pull-fails
+        steps:
+          - fetch:
+              url: http://127.0.0.1:11434/api/pull
+              method: POST
+              json:
+                model: nothing.invalid/x/y:latest
+                stream: false
+            expect:
+              status: 500
+              json:
+                /error:
+                  contains: nothing.invalid
+      - name: ollama-private
+        steps:
+          - fetch:
+              url: http://127.0.0.1:11434/api/pull
+              method: POST
+              json:
+                model: 10.0.0.1/x/y:latest
+                stream: false
+            expect:
+              status: 500
+              json:
+                /error:
+                  contains: permission denied
+          - fetch:
+              url: http://127.0.0.1:11434/api/tags
+            expect:
+              status: 200
+              json:
+                /models: []
+      - name: ollama-models
+        steps:
+          - file: /data/svc/ollama
+            expect:
+              type: directory
+              uid: ollama

@@ -1,0 +1,79 @@
+version: 1
+suites:
+  - name: step-ca
+    cases:
+      - name: step-health
+        steps:
+          - fetch:
+              url: https://localhost/health
+              ca: /run/config/step-ca/root.crt
+            expect:
+              status: 200
+              json:
+                /status: ok
+            await: 60s
+      - name: step-user
+        steps:
+          - service: step-ca
+            expect:
+              user: step
+              uid:
+                min: 65536
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+      - name: step-roots
+        steps:
+          - fetch:
+              url: https://localhost/roots
+              ca: /run/config/step-ca/root.crt
+            expect:
+              status: 201
+              body:
+                contains: BEGIN CERTIFICATE
+      - name: step-acme
+        steps:
+          - fetch:
+              url: https://localhost/acme/acme/directory
+              ca: /run/config/step-ca/root.crt
+            expect:
+              status: 200
+              json:
+                /newAccount: https://localhost/acme/acme/new-account
+      - name: step-policy
+        steps:
+          - file: /run/svc/step-ca/ca.json
+            expect:
+              type: file
+              uid: step
+              mode: '600'
+              json:
+                /authority/policy/x509/allow/dns: [example.test]
+                /dnsNames: [localhost]
+                /authority/enableAdmin: false
+      - name: step-no-admin
+        steps:
+          - fetch:
+              url: https://localhost/admin/provisioners
+              ca: /run/config/step-ca/root.crt
+            expect:
+              status:
+                min: 400
+                max: 499
+      - name: step-private
+        steps:
+          - file: /run/svc/step-ca/intermediate-key
+            expect:
+              type: file
+              uid: step
+              mode: '600'
+          - file: /run/svc/step-ca/password
+            expect:
+              type: file
+              uid: step
+              mode: '600'
+          - file: /run/config/step-ca/root.key
+            expect:
+              exists: false
+          - file: /data/svc/step-ca/db
+            expect:
+              type: directory

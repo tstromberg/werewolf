@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Probe contracts: real HTTP workflows and fail-closed plan validation."""
 import copy
+import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import ssl
@@ -17,6 +21,58 @@ from probe_plan import load, normalize
 
 
 class Plans(unittest.TestCase):
+    def test_custom_native_clients_do_not_count_as_standard_yaml_probes(self):
+        loader = importlib.machinery.SourceFileLoader('coverage', str(Path(__file__).with_name('form-coverage')))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        coverage = importlib.util.module_from_spec(spec)
+        loader.exec_module(coverage)
+        helper = '/usr/lib/werewolf/test-helper'
+        raw = dict(version=1, suites=[
+            dict(name='helper', source='driver.zig', mode='wire', user='root',
+                 policy={'pledge': 'stdio'}, cases={'seed': ['control'], 'verify': ['control']}),
+            dict(name='cases', policy={'run': [helper, '/usr/bin/psql']}, cases=[
+                dict(name='custom', steps=[dict(exec={'argv': [helper]}, expect={'exit': 0})]),
+                dict(name='client', steps=[dict(exec={'argv': ['/usr/bin/psql']}, expect={'exit': 0})]),
+                dict(name='file', steps=[dict(file='/etc/passwd', expect={'type': 'file'})])])])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'forms/example/test'
+            directory.mkdir(parents=True)
+            (root / 'test').mkdir()
+            (directory / 'driver.zig').write_text('// Native client fixture.\n')
+            (directory / 'tests.yaml').write_text(json.dumps(raw))
+            (root / 'test/form-probe-baseline.json').write_text(json.dumps({
+                'base': 'fixture', 'forms': {'example': ['custom', 'client', 'file']}}))
+            with contextlib.redirect_stdout(io.StringIO()):
+                counts = coverage.probe_coverage(root)
+            self.assertEqual(counts, {'probes': 2, 'native': 1, 'legacy': 0})
+
+    def test_path_segments_require_a_fixed_origin_and_bounded_text(self):
+        for parts in ('a', [], ['x'] * 33, ['..'], ['.'], ['', 'x'],
+                      [42], [['nested']], ['x' * 1025]):
+            plan = self.plan()
+            plan['suites'][0]['cases'][0]['steps'][0]['fetch']['path'] = parts
+            with self.subTest(parts=parts), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+        for url in ('http://localhost/base', 'http://localhost/?', 'http://localhost/#',
+                    'http://localhost/?q=1'):
+            plan = self.plan()
+            plan['suites'][0]['cases'][0]['steps'][0]['fetch'].update(url=url,path=['api'])
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+        plan = self.plan()
+        plan['suites'][0]['cases'][0]['steps'][0]['fetch']['path'] = ['api', '']
+        normalize(plan, Path('tests.yaml'))
+
+    def test_membership_lists_are_explicit_and_nonempty(self):
+        for operator in ('contains_all','contains_none'):
+            for value in ('x',None,[],{},42):
+                plan=self.plan()
+                plan['suites'][0]['cases'][0]['steps'][0]['expect']={
+                    'json':{'/items':{operator:value}}}
+                with self.subTest(operator=operator,value=value),self.assertRaises(ValueError):
+                    normalize(plan,Path('tests.yaml'))
+
     def plan(self):
         return dict(version=1, suites=[dict(name='web', cases=[dict(name='health', steps=[
             dict(fetch=dict(url='http://localhost/'), expect=dict(status=200))])])])
@@ -39,6 +95,25 @@ class Plans(unittest.TestCase):
         for invalid in ('relative', '/etc/shadow', '/run/config/../shadow'):
             suite['fixtures']['password'] = invalid
             with self.subTest(path=invalid), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+
+    def test_authorization_requires_one_literal_scheme_and_typed_credentials(self):
+        valid = {'scheme': 'Token', 'credentials': {'fixture': 'password'}}
+        for auth in (None, {}, {'scheme': 'Token'}, {'credentials': 'secret'},
+                     {'scheme': 'Token bad', 'credentials': 'secret'},
+                     {'scheme': 'Token\r\nInjected', 'credentials': 'secret'},
+                     {'scheme': 'Token', 'credentials': 42},
+                     {'scheme': 'Token', 'credentials': 'secret', 'unknown': True}):
+            plan = self.plan()
+            plan['suites'][0]['cases'][0]['steps'][0]['fetch']['authorization'] = auth
+            with self.subTest(auth=auth), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+        for extra in ({'bearer': 'other'}, {'headers': {'aUtHoRiZaTiOn': 'Token other'}}):
+            plan = self.plan()
+            plan['suites'][0]['fixtures'] = {'password': '/run/config/app/password'}
+            plan['suites'][0]['cases'][0]['steps'][0]['fetch'].update(
+                authorization=valid, **extra)
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
                 normalize(plan, Path('tests.yaml'))
 
     def test_rejects_mutating_poll_and_forward_capture(self):
@@ -84,6 +159,69 @@ class Plans(unittest.TestCase):
             with self.subTest(selector=selector), self.assertRaises(ValueError):
                 normalize(plan, Path('tests.yaml'))
 
+    def test_rejects_unknown_text_matchers_before_building(self):
+        for field in ('body', 'headers', 'cookies', 'stdout', 'stderr'):
+            for invalid in ({'not_contains': 'secret'}, {}, 3, ['secret']):
+                step = dict(fetch={'url': 'http://localhost/'}, expect={field: invalid})
+                plan = self.plan()
+                if field in ('headers', 'cookies'):
+                    step['expect'][field] = {'x-token': invalid}
+                if field in ('stdout', 'stderr'):
+                    step = dict(exec={'argv': ['/usr/bin/client']}, expect={field: invalid})
+                    plan['suites'][0]['policy'] = {'run': ['/usr/bin/client']}
+                plan['suites'][0]['cases'][0]['steps'] = [step]
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    normalize(plan, Path('tests.yaml'))
+
+    def test_literal_json_objects_are_not_text_matchers(self):
+        plan = self.plan()
+        plan['suites'][0]['cases'][0]['steps'][0]['expect'] = {
+            'json': {'/configuration': {'not_contains': 'a literal field'}}}
+        normalize(plan, Path('tests.yaml'))
+
+    def test_both_regex_matchers_require_bounded_text_patterns(self):
+        for name in ('matches', 'not_matches'):
+            for invalid in (3, False, 'x' * 513):
+                plan = self.plan()
+                plan['suites'][0]['cases'][0]['steps'][0]['expect'] = {'body': {name: invalid}}
+                with self.subTest(name=name, pattern=invalid), self.assertRaises(ValueError):
+                    normalize(plan, Path('tests.yaml'))
+
+    def test_readiness_suites_require_read_only_probes(self):
+        for request, valid in (({'fetch': {'url': 'http://localhost/'}}, True),
+                               ({'fetch': {'url': 'http://localhost/', 'method': 'POST'}}, False),
+                               ({'exec': {'argv': ['/usr/bin/client'], 'readonly': True}}, True),
+                               ({'exec': {'argv': ['/usr/bin/client']}}, False)):
+            plan = self.plan()
+            suite = plan['suites'][0]
+            suite.update(readiness=True, policy={'run': ['/usr/bin/client']})
+            suite['cases'][0]['steps'][0] = dict(**request, expect={'exit': 0} if 'exec' in request else {'status': 200})
+            with self.subTest(request=request):
+                if valid: self.assertTrue(normalize(plan, Path('tests.yaml'))['drivers'][0]['readiness'])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'read-only'): normalize(plan, Path('tests.yaml'))
+        for invalid in (1, 'true', None):
+            plan = self.plan(); plan['suites'][0]['readiness'] = invalid
+            with self.subTest(readiness=invalid), self.assertRaisesRegex(ValueError, 'boolean'):
+                normalize(plan, Path('tests.yaml'))
+
+    def test_operation_timeout_does_not_enable_mutation_polling(self):
+        plan = self.plan()
+        step = plan['suites'][0]['cases'][0]['steps'][0]
+        step.update(fetch={'url': 'http://localhost/', 'method': 'POST'}, timeout='45s')
+        compiled = normalize(plan, Path('tests.yaml'))['drivers'][0]['probes']['cases'][0]['steps'][0]
+        self.assertEqual(compiled['timeout_seconds'], 45)
+        self.assertEqual(compiled['await_seconds'], 0)
+        for invalid in ('0s', '301s', '-1s', '1m', 45, True):
+            step['timeout'] = invalid
+            with self.subTest(timeout=invalid), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+        step.update(timeout='45s', **{'await': '60s'})
+        with self.assertRaises(ValueError): normalize(plan, Path('tests.yaml'))
+        step.clear()
+        step.update(file='/etc/passwd', timeout='1s', expect={'exists': True})
+        with self.assertRaises(ValueError): normalize(plan, Path('tests.yaml'))
+
     def test_listener_absence_can_cover_every_address_but_equality_is_exact(self):
         for expect, valid in [({'absent':[{'port':5432}]},True),
                               ({'contains':[{'address':'127.0.0.1','port':8080}]},True),
@@ -94,6 +232,40 @@ class Plans(unittest.TestCase):
             if valid: normalize(plan,Path('tests.yaml'))
             else:
                 with self.assertRaises(ValueError): normalize(plan,Path('tests.yaml'))
+
+    def test_connect_rules_compare_declarations_without_order(self):
+        plan = self.plan()
+        step = {'service': 'app', 'expect': {'connect_rules': ['udp/53', 'tcp/443 public']}}
+        plan['suites'][0]['cases'][0]['steps'] = [step]
+        normalized = normalize(plan, Path('tests.yaml'))
+        compiled = normalized['drivers'][0]['probes']['cases'][0]['steps'][0]
+        self.assertEqual(compiled['expect']['connect_rules'], ['tcp/443 public', 'udp/53'])
+        step['expect']['connect_rules'] = ['tcp/443 public', 443]
+        with self.assertRaises(ValueError): normalize(plan, Path('tests.yaml'))
+
+    def test_file_readability_is_an_explicit_boolean_assertion(self):
+        plan = self.plan()
+        step = {'file': '/run/config/app/secret', 'expect': {'readable': False}}
+        plan['suites'][0]['cases'][0]['steps'] = [step]
+        normalize(plan, Path('tests.yaml'))
+        for value in (None, 0, 'false', {'equals': False}):
+            step['expect']['readable'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+
+    def test_listener_port_scope_is_explicit_and_bounded(self):
+        plan = self.plan()
+        step = dict(listeners={'protocol': 'tcp', 'port': 11434},
+                    expect={'equals': [{'protocol': 'tcp', 'address': '127.0.0.1', 'port': 11434}]})
+        plan['suites'][0]['cases'][0]['steps'] = [step]
+        normalize(plan, Path('tests.yaml'))
+        for request in ({'port': 11434}, {'protocol': 'tcp'}, {'protocol': 'unix', 'port': 11434},
+                        {'protocol': 'tcp', 'port': '11434'}, {'protocol': 'tcp', 'port': False},
+                        {'protocol': 'tcp', 'port': 0}, {'protocol': 'tcp', 'port': 65536},
+                        {'protocol': 'tcp', 'port': 11434, 'ignore': True}):
+            step['listeners'] = request
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
 
     def test_yaml_duplicate_alias_and_ambiguous_scalar(self):
         for text in ['version: 1\nversion: 1\nsuites: []\n',
@@ -145,10 +317,26 @@ class Server(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.calls[self.path] = self.calls.get(self.path, 0) + 1
-        if self.path == '/cookie':
+        if self.path == '/path-value':
+            self.reply(200, {'id': 'a/b ?#%é', 'number': 42})
+        elif self.path == '/membership':
+            self.reply(200, {'items':['network','zeroconf'],'text':'hello world'})
+        elif self.path.startswith('/path/'):
+            self.reply(200, {'path': self.path})
+        elif self.path == '/binary-body':
+            body = b'\x00\xff\r\n'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == '/cookie':
             self.reply(200, {}, {'Set-Cookie': 'session=secret-cookie; Path=/; HttpOnly'})
         elif self.path == '/protected':
             good = self.headers.get('Authorization') == 'Bearer secret-token'
+            self.reply(200 if good else 401, {'results': []})
+        elif self.path == '/token-protected':
+            good = self.headers.get_all('Authorization') == ['Token secret-token']
             self.reply(200 if good else 401, {'results': []})
         elif self.path == '/cookie-protected':
             self.reply(200 if self.headers.get('Cookie') == 'session=secret-cookie' else 401, {})
@@ -235,6 +423,50 @@ class Workflows(unittest.TestCase):
 
     def fetch(self, path, **options): return dict(url=self.base+path, **options)
 
+    def test_path_capture_is_one_escaped_segment_under_the_literal_origin(self):
+        result = self.run_plan([dict(name='paths', steps=[
+            dict(name='value', fetch=self.fetch('/path-value'), expect={'status':200}),
+            dict(fetch=dict(url=self.base, path=['path', {'step':'value','json':'/id'}, '']),
+                 expect={'status':200,'json':{'/path':'/path/a%2Fb%20%3F%23%25%C3%A9/'}}),
+            dict(fetch=dict(url=self.base+'/', path=['path', {'fixture':'password'}]),
+                 expect={'status':200,'json':{'/path':'/path/https:%2F%2Fother.invalid%2F'}}),
+            dict(fetch=dict(url=self.base, path=['path', 'sha256:abcdef']),
+                 expect={'status':200,'json':{'/path':'/path/sha256:abcdef'}}),
+        ])], fixture=b'https://other.invalid/')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(Server.calls.get('/path-value'), 1)
+
+    def test_membership_requires_every_positive_and_every_refusal(self):
+        expected={'/items':{'contains_all':['network','zeroconf'],
+                            'contains_none':['ssdp','dhcp']},
+                  '/text':{'contains_all':['hello','world'],'contains_none':['bad']}}
+        result=self.run_plan([dict(name='membership',steps=[dict(
+            fetch=self.fetch('/membership'),expect={'status':200,'json':expected})])])
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        for operator,value in [('contains_all',['network','missing']),
+                               ('contains_none',['ssdp','network'])]:
+            result=self.run_plan([dict(name='missing-member',steps=[dict(
+                fetch=self.fetch('/membership'),expect={'status':200,'json':{
+                    '/items':{operator:value}}})])])
+            self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+
+    def test_invalid_captured_paths_fail_before_the_dependent_request(self):
+        for value in (b'..', b'.', b'a\0b', b'x' * 1025):
+            Server.calls = {}
+            result = self.run_plan([dict(name='bad-path',steps=[
+                dict(fetch=dict(url=self.base,path=['path',{'fixture':'password'}]),
+                     expect={'status':200}),
+            ])],fixture=value)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(Server.calls, {})
+        result = self.run_plan([dict(name='numeric-path',steps=[
+            dict(name='value',fetch=self.fetch('/path-value'),expect={'status':200}),
+            dict(fetch=dict(url=self.base,path=['path',{'step':'value','json':'/number'}]),
+                 expect={'status':200}),
+        ])])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(Server.calls, {'/path-value':1})
+
     def test_binary_body_preserves_nuls_but_headers_refuse_them(self):
         fixture = {'fixture': 'password', 'raw': True}
         result = self.run_plan([dict(name='binary', steps=[dict(
@@ -247,6 +479,15 @@ class Workflows(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('InvalidTextInput', result.stdout)
         self.assertNotIn('/must-not-fetch', Server.calls)
+
+    def test_binary_response_capture_preserves_bytes_between_steps(self):
+        result = self.run_plan([dict(name='download', steps=[
+            dict(name='download', fetch=self.fetch('/binary-body'),
+                 expect={'status': 200, 'body': {'fixture': 'password', 'raw': True}}),
+            dict(fetch=self.fetch('/binary', method='POST', body={'step': 'download', 'body': True}),
+                 expect={'status': 200, 'json': {'/hex': '00ff0d0a'}}),
+        ])], fixture=b'\0\xff\r\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_token_cookie_polling_and_literal_redirect(self):
         result = self.run_plan([
@@ -263,6 +504,28 @@ class Workflows(unittest.TestCase):
         self.assertEqual(result.stdout.count('"status":"pass"'), 4)
         self.assertEqual(Server.calls.get('/login'), 1)
         self.assertNotIn('/must-not-fetch', Server.calls)
+
+    def test_token_authorization_captures_and_redacts_credentials(self):
+        result = self.run_plan([dict(name='token', steps=[
+            dict(name='login', fetch=self.fetch('/login', method='POST',
+                 json={'username': 'admin', 'password': {'fixture': 'password'}}),
+                 expect={'status': 200}),
+            dict(fetch=self.fetch('/token-protected', authorization={
+                 'scheme': 'Token', 'credentials': {'step': 'login', 'json': '/token'}}),
+                 expect={'status': 200, 'json': {'/results': []}}),
+        ])])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(Server.calls.get('/login'), 1)
+        self.assertNotIn('secret-token', result.stdout + result.stderr)
+        for credential in (b'bad\r\nInjected: yes', b'bad\0value'):
+            result = self.run_plan([dict(name='invalid-auth', steps=[
+                dict(fetch=self.fetch('/must-not-fetch', authorization={
+                     'scheme': 'Token', 'credentials': {'fixture': 'password', 'raw': True}}),
+                     expect={'status': 200}),
+            ])], fixture=credential)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn('/must-not-fetch', Server.calls)
+            self.assertNotIn('Injected', result.stdout + result.stderr)
         self.assertNotIn('secret-', result.stdout+result.stderr)
 
     def test_failure_stops_dependent_steps_but_not_independent_cases(self):
@@ -287,6 +550,20 @@ class Workflows(unittest.TestCase):
                 result = self.run_plan([dict(name='headers', steps=[dict(
                     fetch=self.fetch('/ready'), expect={'status': 200, 'headers': headers})])])
                 self.assertEqual(result.returncode, expected, result.stdout+result.stderr)
+
+    def test_negative_regex_distinguishes_absence_match_and_invalid_pattern(self):
+        result = self.run_plan([
+            dict(name='absent', steps=[dict(fetch=self.fetch('/ready'),
+                expect={'status': 200, 'body': {'not_matches': '[Ii][Nn][Ss][Tt][Aa][Ll][Ll]'}})]),
+            dict(name='present', steps=[dict(fetch=self.fetch('/ready'),
+                expect={'status': 200, 'body': {'not_matches': '[Rr][Ee][Aa][Dd][Yy]'}})]),
+            dict(name='invalid', steps=[dict(fetch=self.fetch('/ready'),
+                expect={'status': 200, 'body': {'not_matches': '['}})]),
+        ])
+        self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+        self.assertIn('"case":"absent","status":"pass"', result.stdout)
+        self.assertIn('"case":"present","status":"fail"', result.stdout)
+        self.assertIn('InvalidRegex', result.stdout)
 
     def test_readiness_checks_status_before_json_but_rejects_malformed_success(self):
         for path, expected, calls in [('/starting', 0, 3), ('/invalid-json', 1, 1)]:
@@ -377,6 +654,45 @@ class Workflows(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 
+    def test_tls_startup_handshake_retries_only_with_explicit_await(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key, cert = Path(directory)/'key', Path(directory)/'cert'
+            subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+                '-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost',
+                '-keyout',str(key),'-out',str(cert)],check=True,capture_output=True)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert,key)
+
+            class StartingTLS(ThreadingHTTPServer):
+                attempts = 0
+
+                def get_request(self):
+                    sock, address = super().get_request()
+                    self.attempts += 1
+                    if self.attempts == 1:
+                        # Caddy can accept TLS before it has a serving certificate.
+                        sock.sendall(b'\x15\x03\x03\x00\x02\x02\x50')
+                        sock.close()
+                        raise OSError('certificate not ready')
+                    return context.wrap_socket(sock, server_side=True), address
+
+            for wait in (False, True):
+                with self.subTest(wait=wait):
+                    server = StartingTLS(('127.0.0.1',0),Server)
+                    thread = threading.Thread(target=server.serve_forever)
+                    thread.start()
+                    try:
+                        step = dict(fetch={'url':'https://localhost:'+str(server.server_port)+'/redirect',
+                                           'ca':str(cert)}, expect={'status':302})
+                        if wait: step['await'] = '3s'
+                        result = self.run_plan([dict(name='startup',steps=[step])])
+                        self.assertEqual(result.returncode, 0 if wait else 1,
+                                         result.stdout+result.stderr)
+                        self.assertEqual(server.attempts, 2 if wait else 1)
+                        if not wait: self.assertIn('TlsHandshake', result.stdout)
+                    finally:
+                        server.shutdown(); server.server_close(); thread.join()
+
     def test_exec_stdin_drains_both_pipes_and_reports_exit(self):
         code = "import sys; sys.stdout.write('o'*100000); sys.stdout.flush(); sys.stderr.write('e'*10000); sys.stderr.flush(); data=sys.stdin.read(); sys.stdout.write(data); sys.exit(7)"
         result = self.run_plan([dict(name='client', steps=[dict(
@@ -409,6 +725,12 @@ class Workflows(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
         self.assertIn('Timeout', result.stdout)
         self.assertLess(time.monotonic()-start, 5)
+
+    def test_explicit_exec_timeout_can_exceed_the_default(self):
+        result = self.run_plan([dict(name='slow-client', steps=[dict(
+            exec={'argv': [sys.executable, '-c', 'import time; time.sleep(10.2); print("done")']},
+            expect={'exit': 0, 'stdout': 'done\n'}, timeout='15s')])])
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_exec_output_limit_fails(self):
         code = "import sys; sys.stdout.write('x'*2000000)"

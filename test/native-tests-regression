@@ -341,6 +341,46 @@ class Protocol(unittest.TestCase):
 
 
 class Plans(unittest.TestCase):
+    def test_phase_only_suite_is_required_only_in_its_declared_phase(self):
+        for selected in ('seed', 'verify'):
+            plan = native.read_plan('gatus')
+            driver = plan['drivers'][0]
+            driver['cases'] = {phase: ['phase-only'] if phase == selected else []
+                               for phase in ('seed', 'verify')}
+            control = copy.deepcopy(driver)
+            control['name'] = 'test-control'
+            control['cases'] = {'seed': ['control'], 'verify': ['control']}
+            plan['drivers'].insert(0, control)
+            with patch('probe_plan.load', return_value=plan):
+                plan = native.read_plan('gatus')
+            for phase in ('seed', 'verify'):
+                context = dict(run='a' * 32, phase=phase)
+                case = dict(event='case', suite=driver['name'], case='phase-only',
+                            status='pass', **context)
+                done = dict(event='driver', suite=driver['name'], status='pass', **context)
+                complete = dict(event='complete', status='pass', **context)
+                control_case = dict(case, suite=control['name'], case='control')
+                control_done = dict(done, suite=control['name'])
+                prefix = [control_case, control_done]
+                def transcript(records):
+                    return '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
+                records = prefix + ([case, done, complete] if phase == selected else [complete])
+                self.assertEqual(native.validate(transcript(records), plan, context),
+                                 2 if phase == selected else 1)
+                with self.assertRaises(ValueError):
+                    native.validate(transcript(prefix + ([complete] if phase == selected else
+                                               [case, done, complete])), plan, context)
+
+    def test_empty_or_malformed_case_sets_are_rejected(self):
+        for cases in ({'seed': [], 'verify': []}, {'seed': 'ready', 'verify': []},
+                      {'seed': [42], 'verify': []}, {'seed': [[]], 'verify': []},
+                      {'seed': ['duplicate', 'duplicate'], 'verify': []},
+                      {'seed': ['ready']}, ['seed', 'verify']):
+            plan = native.read_plan('gatus')
+            plan['drivers'][0]['cases'] = cases
+            with self.subTest(cases=cases), patch('probe_plan.load', return_value=plan):
+                with self.assertRaises(ValueError): native.read_plan('gatus')
+
     def test_driver_memory_is_bounded_and_used_by_iteration(self):
         for memory in (True, "1024", 0, 15, 8193, [1024]):
             plan = native.read_plan('postgresql')
@@ -435,7 +475,8 @@ class PlatformPlan(unittest.TestCase):
 
     def test_only_declared_foundations_can_use_the_platform_suite_alone(self):
         self.assertEqual(native.read_plan('minimal')['drivers'], [])
-        self.assertEqual([d['name'] for d in native.boot_plan('minimal')['drivers']], ['test-platform'])
+        self.assertEqual([d['name'] for d in native.boot_plan('minimal')['drivers']],
+                         ['test-platform', 'test-lifecycle'])
         plan = native.read_plan('gatus')
         plan['drivers'] = []
         with patch('probe_plan.load', return_value=plan):
@@ -445,8 +486,10 @@ class PlatformPlan(unittest.TestCase):
         application = native.read_plan('gatus')
         clean = native.boot_plan('gatus')
         self.assertEqual(clean['drivers'][0]['name'], 'test-platform')
-        self.assertEqual(len(clean['drivers'][0]['cases']['seed']), 16)
+        self.assertEqual(len(clean['drivers'][0]['cases']['seed']), 15)
         self.assertEqual(clean['drivers'][0]['cases']['verify'], ['data-usable', 'data-kept'])
+        self.assertEqual(clean['drivers'][1]['name'], 'test-lifecycle')
+        self.assertEqual(clean['drivers'][1]['cases'], {'seed': ['reaped'], 'verify': []})
         self.assertNotIn('test-platform', [d['name'] for d in application['drivers']])
         context = dict(run='a' * 32, phase='seed')
         records = []
@@ -463,15 +506,56 @@ class PlatformPlan(unittest.TestCase):
         with patch.object(native, 'call', return_value=type('Output', (), {'stdout': 'http-answering'})()):
             plan = native.boot_plan('gatus')
             self.assertNotIn('http-answering', plan['drivers'][0]['cases']['seed'])
-            self.assertIn('reaped', plan['drivers'][0]['cases']['seed'])
+            self.assertIn('reaped', plan['drivers'][1]['cases']['seed'])
+        with patch.object(native, 'call', return_value=type('Output', (), {'stdout': 'reaped'})()):
+            self.assertNotIn('test-lifecycle', [d['name'] for d in native.boot_plan('gatus')['drivers']])
         with patch.object(native, 'call', return_value=type('Output', (), {'stdout': 'misspelled'})()):
             with self.assertRaisesRegex(ValueError, 'unknown shared check'): native.boot_plan('gatus')
 
     def test_form_cannot_replace_the_platform_suite(self):
-        plan = native.read_plan('gatus')
-        plan['drivers'][0]['name'] = 'test-platform'
-        with patch('probe_plan.load', return_value=plan):
-            with self.assertRaisesRegex(ValueError, 'reserved'): native.read_plan('gatus')
+        for name in ('test-platform', 'test-lifecycle'):
+            plan = native.read_plan('gatus')
+            plan['drivers'][0]['name'] = name
+            with self.subTest(name=name), patch('probe_plan.load', return_value=plan):
+                with self.assertRaisesRegex(ValueError, 'reserved'): native.read_plan('gatus')
+
+    def test_boot_checks_and_restart_follow_declared_readiness(self):
+        application = native.read_plan('gatus')
+        ready = copy.deepcopy(application['drivers'][0])
+        ready.update(name='test-ready', readiness=True, cases={'seed': ['ready'], 'verify': ['ready']})
+        application['drivers'].insert(0, ready)
+        with patch.object(native, 'read_plan', return_value=application): plan = native.boot_plan('gatus')
+        self.assertEqual([driver['name'] for driver in plan['drivers']],
+                         ['test-ready', 'test-platform', 'test-lifecycle', 'test-gatus'])
+        self.assertEqual(plan['drivers'][1]['cases'], native.boot_plan('gatus')['drivers'][0]['cases'])
+        context = dict(run='a' * 32, phase='seed')
+        def transcript(drivers):
+            records = []
+            for driver in drivers:
+                records.extend(dict(event='case', suite=driver['name'], case=case,
+                                    status='pass', **context) for case in driver['cases']['seed'])
+                records.append(dict(event='driver', suite=driver['name'], status='pass', **context))
+            records.append(dict(event='complete', status='pass', **context))
+            return '\n'.join('werewolf-test: ' + json.dumps(record) for record in records)
+        native.validate(transcript(plan['drivers']), plan, context)
+        with self.assertRaisesRegex(ValueError, 'out of order'):
+            native.validate(transcript([plan['drivers'][1], plan['drivers'][0],
+                                        plan['drivers'][2], plan['drivers'][3]]), plan, context)
+        with self.assertRaisesRegex(ValueError, 'out of order'):
+            native.validate(transcript([plan['drivers'][0], plan['drivers'][2],
+                                        plan['drivers'][1], plan['drivers'][3]]), plan, context)
+
+    def test_reboot_does_not_claim_seed_only_lifecycle_checks(self):
+        plan = native.boot_plan('gatus')
+        context = dict(run='a' * 32, phase='verify')
+        records = []
+        for driver in plan['drivers']:
+            if not driver['cases']['verify']: continue
+            records.extend(dict(event='case', suite=driver['name'], case=case,
+                                status='pass', **context) for case in driver['cases']['verify'])
+            records.append(dict(event='driver', suite=driver['name'], status='pass', **context))
+        records.append(dict(event='complete', status='pass', **context))
+        native.validate('\n'.join('werewolf-test: ' + json.dumps(record) for record in records), plan, context)
 
 
 class CompiledApplications(unittest.TestCase):
@@ -532,7 +616,13 @@ class Payload(unittest.TestCase):
             for name in ('pledge', 'net', 'weaknesses'):
                 native.write(root / 'meta/usr/share/werewolf' / name, name + '\n')
             self.archive(root / 'rootfs.tar', {'usr/bin/postgres': b'production database'})
-            self.archive(root / 'overlay.tar', {'usr/lib/werewolf/init': b'production init'})
+            overlay = {'usr/lib/werewolf/init': b'production init'}
+            if root == self.test:
+                self.archive(root / 'rootfs.tar', {'usr/bin/postgres': b'production database',
+                                                  'usr/bin/psql': b'client',
+                                                  'usr/lib/werewolf/sh-shim': b'command shim'})
+                overlay['usr/lib/werewolf/test-postgres-policy'] = b'test driver'
+            self.archive(root / 'overlay.tar', overlay)
 
     def archive(self, path, files):
         with tarfile.open(path, 'w') as archive:
@@ -548,15 +638,22 @@ class Payload(unittest.TestCase):
             native.compare('base', 'aarch64')
 
     def test_client_addition(self):
-        self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database', 'usr/bin/psql': b'client'})
+        self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database',
+            'usr/bin/psql': b'client', 'usr/lib/werewolf/sh-shim': b'command shim'})
         self.compare()
+
+    def test_missing_client_is_rejected_before_boot(self):
+        self.archive(self.test / 'rootfs.tar', {'usr/bin/postgres': b'production database'})
+        with self.assertRaisesRegex(ValueError, 'client missing from image: /usr/bin/psql'):
+            self.compare()
 
     def test_only_declared_driver_runtime_grants_can_be_added(self):
         plan = native.read_plan('postgresql')
         plan['drivers'][0]['allow'] = ['python:native']
         namespace = plan['drivers'][0]['name']
         grant = 'etc/runtime-hardening/allow/' + namespace + '/python/native'
-        files = {'usr/lib/werewolf/init': b'production init', grant: b''}
+        files = {'usr/lib/werewolf/init': b'production init', grant: b'',
+                 'usr/lib/werewolf/test-postgres-policy': b'test driver'}
         self.archive(self.test / 'overlay.tar', files)
         with patch.object(native, 'read_plan', return_value=plan):
             self.compare()
@@ -631,7 +728,7 @@ class Payload(unittest.TestCase):
 
 
 class RunIdentity(unittest.TestCase):
-    def serial_run(self, reformat=False):
+    def serial_run(self, reformat=False, update=False, rotate_key=False):
         plan = native.read_plan('postgresql')
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -642,11 +739,32 @@ class RunIdentity(unittest.TestCase):
                          plan=root / 'forms/postgresql/test/native.json')
             for path in paths.values():
                 native.write(path, 'original')
+            fixture = root / 'forms/postgresql/test/config-again'
+            if update:
+                native.write(fixture, 'host configuration update')
+            updates = []
 
             def boot(*args, **kwargs):
+                config = root / 'check/postgresql-native/config'
+                if Path(args[0]) == fixture.relative_to(root):
+                    updates.append('updated')
+                    native.write(config / 'updated', 'new config')
+                    if rotate_key:
+                        (config / 'data.key').write_bytes(b'wrong key')
+                    return
                 if str(args[0]) != 'test/boot':
                     return
-                context = json.loads((root / 'check/postgresql-native/config/tests/context').read_text())
+                context = json.loads((config / 'tests/context').read_text())
+                if update:
+                    verify = context['phase'] == 'verify'
+                    self.assertEqual((config / 'updated').exists(), verify)
+                    self.assertEqual(updates, ['updated'] if verify else [])
+                    disk = config.parent / 'data.img'
+                    with disk.open('r+b') as data:
+                        if verify:
+                            self.assertEqual(data.read(9), b'kept data')
+                        else:
+                            data.write(b'kept data')
                 records = []
                 for driver in plan['drivers']:
                     records.extend(dict(event='case', suite=driver['name'], case=name,
@@ -669,14 +787,16 @@ class RunIdentity(unittest.TestCase):
                                    PRODUCTION_OUT=str(paths['production_image'].parent),
                                    CHECK=str(root / 'check'), HOWL='howl',
                                    KERNEL=str(paths['kernel']), CMDLINE='test'):
-                    if reformat:
-                        with self.assertRaisesRegex(ValueError, 'reformatted'):
+                    if reformat or rotate_key:
+                        with self.assertRaisesRegex(ValueError, 'data key' if rotate_key else 'reformatted'):
                             native.run('postgresql', 'x86_64', [])
                         self.assertFalse((root / 'check/postgresql-native/results.json').exists())
                         return
                     native.run('postgresql', 'x86_64', [])
                 report = json.loads((root / 'check/postgresql-native/results.json').read_text())
                 self.assertEqual([phase['cases'] for phase in report['phases']], [12, 11])
+                if update:
+                    self.assertEqual(report['verify_config'], native.digest(fixture))
             finally:
                 os.chdir(cwd)
 
@@ -686,9 +806,16 @@ class RunIdentity(unittest.TestCase):
     def test_reformatting_cannot_pass_even_with_successful_case_records(self):
         self.serial_run(reformat=True)
 
+    def test_update_fixture_runs_once_before_verify_on_the_same_data_disk(self):
+        self.serial_run(update=True)
+
+    def test_update_fixture_cannot_replace_the_data_key(self):
+        self.serial_run(update=True, rotate_key=True)
+
     def test_concurrent_input_change_cannot_write_success_report(self):
         plan = native.read_plan('postgresql')
-        for changed in ('kernel', 'image', 'production_image', 'plan', 'platform_plan', 'platform_driver'):
+        for changed in ('kernel', 'image', 'production_image', 'plan', 'platform_plan',
+                        'platform_driver', 'seed_config', 'verify_config'):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 images = root / 'build'
@@ -696,7 +823,9 @@ class RunIdentity(unittest.TestCase):
                              image=images / 'native-test-postgresql/initramfs.zst',
                              production_image=images / 'postgresql-ipe/initramfs.zst',
                              plan=root / 'forms/postgresql/test/native.json',
-                             platform_plan=root / 'platform.yaml', platform_driver=root / 'platform.zig')
+                             platform_plan=root / 'platform.yaml', platform_driver=root / 'platform.zig',
+                             seed_config=root / 'forms/postgresql/test/config',
+                             verify_config=root / 'forms/postgresql/test/config-again')
                 for path in paths.values():
                     native.write(path, 'original')
 

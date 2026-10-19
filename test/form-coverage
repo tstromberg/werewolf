@@ -126,9 +126,14 @@ def probe_coverage(root, listing=False):
             plan = load(yaml_plan)
         elif native_plan.exists(): plan = json.loads(native_plan.read_text())
         else: plan = {'drivers': []}
+        custom_clients = {'/usr/lib/werewolf/' + d['name']
+                          for d in plan['drivers'] if 'probes' not in d}
         for suite in plan['drivers']:
-            kind = 'probes' if 'probes' in suite else 'native'
+            custom = {case['name'] for case in suite.get('probes', {}).get('cases', [])
+                      if any(step['probe'] == 'exec' and step['request']['argv'][0] in custom_clients
+                             for step in case['steps'])}
             for case in set(suite['cases']['seed']) | set(suite['cases']['verify']):
+                kind = 'probes' if 'probes' in suite and case not in custom else 'native'
                 targets[suite['name'] + '/' + case] = kind
                 migrated[case] = 'native' if 'native' in (kind, migrated.get(case)) else kind
         legacy = cases(directory / 'checks') | cases(directory / 'checks-again')

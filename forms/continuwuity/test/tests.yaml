@@ -1,0 +1,96 @@
+version: 1
+suites:
+  - name: continuwuity
+    cases:
+      - name: continuwuity-up
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/_matrix/client/versions
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /versions:
+                  type: array
+            await: 180s
+      - name: continuwuity-https
+        steps:
+          - fetch:
+              url: http://localhost/_matrix/client/versions
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/_matrix/client/versions
+      - name: continuwuity-closed
+        steps:
+          - fetch:
+              url: https://localhost/_matrix/client/v3/register
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: eve
+                password: werewolf-check-pass-1
+            expect:
+              status: 403
+              json:
+                /errcode: M_FORBIDDEN
+      - name: continuwuity-admin
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/_matrix/client/v3/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                type: m.login.password
+                identifier:
+                  type: m.id.user
+                  user: alice
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /access_token:
+                  matches: .+
+                /user_id: '@alice:localhost'
+          - fetch:
+              url: https://localhost/_matrix/client/v3/account/whoami
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /access_token
+            expect:
+              status: 200
+              json:
+                /user_id: '@alice:localhost'
+      - name: continuwuity-unauth
+        steps:
+          - fetch:
+              url: https://localhost/_matrix/client/v3/account/whoami
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+              json:
+                /errcode: M_UNAUTHORIZED
+      - name: continuwuity-wrong-password
+        steps:
+          - fetch:
+              url: https://localhost/_matrix/client/v3/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                type: m.login.password
+                identifier:
+                  type: m.id.user
+                  user: alice
+                password: wrong-password
+            expect:
+              status: 403
+              json:
+                /errcode: M_FORBIDDEN
+              body:
+                absent: access_token

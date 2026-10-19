@@ -1,0 +1,49 @@
+version: 1
+packages: [drill]
+suites:
+  - name: zeek-ready
+    readiness: true
+    cases:
+      - name: zeek-ready
+        steps:
+          - file: /data/svc/zeek/reporter.log
+            expect:
+              size: {min: 1}
+              body: {contains: werewolf-zeek}
+            await: 90s
+  - name: zeek
+    cases:
+      - name: zeek-user
+        steps:
+          - service: zeek
+            expect:
+              user: _oci-zeek
+              uid: {min: 65536}
+              capabilities: [net_raw, net_admin]
+              bounding_capabilities: [net_raw, net_admin]
+              no_new_privileges: true
+      - name: zeek-caps
+        steps:
+          - file: /etc/sv/zeek/service
+            expect:
+              body:
+                matches: "(^|\n)caps net_raw net_admin(\n|$)"
+      - name: zeek-started
+        steps:
+          - file: /data/svc/zeek/reporter.log
+            expect:
+              size: {min: 1}
+              body: {contains: werewolf-zeek}
+            await: 90s
+  - name: zeek-traffic
+    source: driver.zig
+    mode: traffic
+    user: _oci-zeek
+    policy:
+      pledge: stdio rpath inet unix connect proc exec
+      read: [/data/svc/zeek]
+      connect: [tcp/53]
+      run: [/usr/bin/drill]
+    cases:
+      seed: [zeek-dns-log, zeek-connection-log]
+      verify: [zeek-dns-log, zeek-connection-log]

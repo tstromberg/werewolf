@@ -6,7 +6,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Json = std.json.Value;
 const linux = std.os.linux;
-const suite = "test-platform";
 const mark = "/data/.werewolf-platform-check";
 const Plan = struct { seed: []const []const u8, verify: []const []const u8 };
 const Check = enum {
@@ -38,7 +37,9 @@ pub fn main(init: std.process.Init) !void {
         try io.sleep(.fromSeconds(120), .awake);
         std.process.exit(1);
     }
-    if (args.len != 4 or !std.mem.eql(u8, args[1], suite)) return error.Usage;
+    if (args.len != 4 or (!std.mem.eql(u8, args[1], "test-platform") and
+        !std.mem.eql(u8, args[1], "test-lifecycle"))) return error.Usage;
+    const suite = args[1];
     const ctx = try driver.Run.load(io, a, args[3]);
     const plan = try std.json.parseFromSliceLeaky(Plan, a, @embedFile("platform.json"), .{});
     // The old console checks ran after posture. Its attacks and initial service
@@ -358,7 +359,8 @@ fn answering(io: Io, a: Allocator, http: bool) !void {
     for (ports) |port| {
         if (!std.mem.eql(u8, port.protocol, "tcp") or port.port == 22) continue;
         if (http and (port.port == 443 or port.loopback)) continue;
-        const until = Io.Clock.awake.now(io).addDuration(.fromSeconds(60));
+        // Cold application setup may finish after its supervisor reports up.
+        const until = Io.Clock.awake.now(io).addDuration(.fromSeconds(120));
         while (true) {
             var arena: std.heap.ArenaAllocator = .init(a);
             defer arena.deinit();

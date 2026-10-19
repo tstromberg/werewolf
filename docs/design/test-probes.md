@@ -23,9 +23,9 @@ and client checks dominate. Native ports duplicate HTTP code; failures lack diag
 `forms/FORM/test/tests.yaml` replaces authoring `native.json`. The host validates it
 and generates the existing immutable launch plan plus typed probe data. Reject duplicate
 keys, unknown fields, tags, aliases, ambiguous scalars and unresolved references.
-The guest parses no YAML. A root runner with test-only grants runs probes; suites can
-select a user, groups and leash policy. One plan defines cases/steps or native sources.
-Reject old/new plans together. YAML and Zig share probes; cache builds per architecture.
+The guest parses no YAML. Suites select users, groups and policies for the root runner.
+Read-only readiness suites precede restart attacks; application assertions follow.
+Reject old/new plans together. Cache shared probes/native drivers per architecture.
 
 | Probe | Contract and examples |
 | --- | --- |
@@ -33,7 +33,7 @@ Reject old/new plans together. YAML and Zig share probes; cache builds per archi
 | `file` | Content, type, owner, mode, size, links, entries; config and data. |
 | `exec` | Declared client path + argv, stdin, env, exit/output; psql, LDAP, Valkey. |
 | `service` | Process identities, caps, seccomp, cgroup limits and compiled connect rules. |
-| `listeners` | Expected TCP/UDP addresses and ports, IPv4/IPv6; detect extra listeners. |
+| `listeners` | TCP/UDP address sets, optionally scoped to one port; reject extras. |
 | `mount` | Filesystem type, source and required/forbidden mount flags. |
 
 `fetch` uses pinned test-only libcurl for TLS, framing, compression and HTTP/2/trailers.
@@ -93,7 +93,7 @@ Refusals must reach the intended control. No su/setuid or global enforcement cha
 Clean tests add no BusyBox/shell/SSH; iteration uses SSH. Releases omit test payloads.
 
 ## Reliability Considerations
-Bound output and time; `await` polls only read-only readiness/completion predicates.
+Bound time: `timeout` limits one fetch/exec; `await` polls only read-only predicates.
 Mutations run once; timeouts never prove refusal. Kill/reap timed-out children.
 Report source line, operation/input, got/want and diffs; redact secrets and captures.
 Stop dependent steps on failure; continue independent cases. Blocked cases cannot pass.

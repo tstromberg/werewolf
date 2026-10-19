@@ -13,9 +13,12 @@ howl test --with gatus
 
 Every clean run includes shared platform checks for networking, immutable root,
 encrypted data, service cleanup, privilege separation and persistence after reboot.
-The form's existing `check.skip` exclusions still apply. Iteration omits this suite.
-Foundations with a zero-case coverage exception can use `suites: []`; service forms
-must declare application suites as well.
+Suites marked `readiness: true` run read-only probes before platform checks and
+restart attacks; application suites follow. Failed readiness blocks restarts.
+The form's `check.skip` exclusions still apply. Iteration omits these shared suites.
+The host runs `test/config` before seed and optional `test/config-again` before verify,
+keeping the same data disk/key; verify cases must use the updated configuration.
+Foundations with a zero-case exception can use `suites: []`; services need app suites.
 Retained `test/checks` or `checks-again` always keep the legacy DEV path active.
 `legacy: true` can request it explicitly. Remove them only after their assertions have
 replacements; shared supplied-code fixtures live under `test/`. The targeted clean
@@ -60,23 +63,29 @@ case on failure; independent cases continue. Name a step to capture its response
 | Probe | Request | Expected fields |
 | --- | --- | --- |
 | `fetch` | HTTP(S) request map | `status`, `headers`, `cookies`, `body`, `json` |
-| `file` | Absolute path | `exists`, `type`, `uid`, `gid`, `mode`, `size`, `body`, `json`, `link`, `entries` |
+| `file` | Absolute path | `exists`, `readable`, `type`, `uid`, `gid`, `mode`, `size`, `body`, `json`, `link`, `entries` |
 | `exec` | `argv`, optional `stdin`, `env`, `readonly` | `exit`, `stdout`, `stderr`, `json` |
 | `service` | Service name | `user`, `uid`, `groups`, `capabilities`, `bounding_capabilities`, `no_new_privileges`, `seccomp`, `processes`, `pids_max`, `connect_rules` |
-| `listeners` | `tcp`, `udp`, or `all` | `contains`, `absent`, `equals` lists of protocol/address/port maps |
+| `listeners` | Protocol string or `{protocol: tcp, port: 636}` | `contains`, `absent`, `equals` address/port maps |
 | `mount` | Exact mount path | `type`, `source`, `flags`, `absent_flags` |
 
 Scalar and array assertions mean equality. Matcher maps support `equals`, `contains`,
-`absent`, `one_of`, numeric `min`/`max`, `matches` (POSIX ERE), `count` and `type`.
+`absent`, `one_of`, `min`/`max`, regex `matches`/`not_matches`, `count` and `type`.
+`contains_all`/`contains_none` require each match/refusal; regexes use POSIX ERE.
 For text, `occurrences: {literal: 3}` counts exact, non-overlapping occurrences.
 Use `equals` to compare a literal object containing a matcher key. All comparisons
 in a map must hold. JSON assertions map JSON Pointers to comparisons; missing fields
 and malformed JSON fail. Response header names use lowercase; `server: null` requires
 that header to be absent. File owners accept
 names or numeric IDs; quote octal mode strings, for example `'640'`.
+`readable` attempts a nonblocking read-open as the suite's user. Only permission
+denial proves `false`; missing paths and other I/O errors fail. Check existence and
+ownership separately as root when a protected parent hides metadata.
 Use `listeners: tcp` with `expect: {absent: [{port: 5432}]}` to reject that port on
 any address. `contains` and `absent` accept partial patterns; `equals` requires all
 three fields so overlapping patterns cannot hide an extra listener.
+Use `listeners: {protocol: tcp, port: 636}` to check that port's complete address set
+without depending on other services' listeners.
 Service assertions cover every member of the service cgroup, not just its first PID.
 `user` checks the account; `uid: {min: 65536}` also checks its numeric ID range.
 Capabilities accept Linux names such as `[net_raw, net_admin]`. Groups accept names
@@ -84,18 +93,19 @@ or IDs, either an exact list or `contains`/`absent`; `pids_max` is a string.
 
 ## HTTP workflows
 
-`fetch` accepts `url`, `method`, `headers`, `bearer`, `session`, `ca`, `resolve` and
-one of `body`, `json`, `form`, `multipart`. Multipart fields are strings or maps with
-`file`, optional `filename` and `type`. TLS verifies both the CA and hostname.
+`fetch` takes `url`, `method`, `path`, `headers`, `bearer`, `authorization`, `session`,
+`ca`, `resolve` and one of `body`, `json`, `form`, `multipart`. Multipart fields have
+`file`, optional `filename` and `type`, or a string value. TLS verifies CA and hostname.
+`authorization` takes `scheme` and `credentials`; `bearer` is the Bearer shorthand.
 Declare local CA files with `ca`; redirects and ambient proxies are disabled.
 An expected status is checked before JSON assertions, so a starting proxy can be
 polled through an empty 502. Malformed JSON at the expected status fails immediately.
-Paths are sent literally, including traversal probes. `session` names a cookie jar
-scoped to the current case. Header and cookie captures must be unambiguous.
+Use `path: [api, {step: create, json: /id}]` under a fixed origin; each value
+stays one escaped segment. Literal URLs still send traversal probes unchanged.
+`session` scopes cookies to a case. Header and cookie captures must be unambiguous.
 Cookie assertions use case-sensitive names from the cookie jar; `VW_ADMIN: null`
 requires absence. Duplicate names are ambiguous, never absent. Without `session`,
 the jar belongs to that one request.
-
 ```yaml
 # Inside a suite with fixtures: {password: /run/config/app/password}
 name: login-and-list
@@ -120,10 +130,14 @@ Use `{fixture: NAME, raw: true}` to preserve every byte, including binary HTTP b
 in a bearer token or argv fails the case. Captured values are not string templates.
 `await: 60s` polls read-only GET/HEAD/OPTIONS requests or an explicitly `readonly: true`
 client operation. Never poll a mutation or use a timeout as evidence of refusal.
+`timeout: 45s` gives one fetch or client call up to 45 seconds; it never retries.
+The default is 10 seconds; accepted values are 1s..300s, within the suite/boot limits.
+Text assertions use named matchers such as `contains`, `absent` or `matches`;
+unknown matcher names fail plan validation before an image is built.
 
 `service.connect_rules` reads explicit fence connect declarations for each process's
-effective UID, including global grants. Rules use form syntax (`tcp/443 public`) and
-are sorted lexically. DNS resolver grants are separate; test actual refusals too.
+effective UID, including global grants. Rules use form syntax (`tcp/443 public`);
+literal lists compare without order. DNS grants are separate; test actual refusals too.
 
 ## Identity and native drivers
 
@@ -139,9 +153,9 @@ For custom code, a suite declares `source: driver.zig`, `mode`, `user`, `policy`
 `cases: {seed: [...], verify: [...]}` instead of probe cases. Sources sit beside the
 plan and use `test/native/driver.zig` for context and result records. PostgreSQL keeps
 native descriptor-policy attacks; Greenbone retains its GMP/OSP protocol clients.
-Native suites can declare `fixtures` too. For leashed clients, they appear under
-`/run/svc/SUITE/`; root clients read the declared `/run/config/` paths directly.
-Existing `native.json` plans remain readable, but a form cannot contain both formats.
+Custom HTTP clients use `driver.fetch.Client`. Native suites can declare `fixtures`.
+Leashed clients read `/run/svc/SUITE/`; root reads the declared `/run/config/` paths.
+A form may use `tests.yaml` or `native.json`, never both.
 
 ## Migration and evidence
 
@@ -150,6 +164,9 @@ run-specific value; verify reads it before setup can recreate it. Keep case name
 stable or record split/renamed replacements in `test/form-probe-baseline.json`.
 `python3 test/form-coverage --probes` reports progress against 722 baseline cases;
 `--mapping` shows their current implementations. Native code does not count as YAML.
+Host attacks and supplied-code fixture runs are outside that inventory; keep their
+gates until their replacements pass too.
+Jellyfin retains `legacy: true` for inherited SSH host attacks after its guest port.
 The 80% target remains a migration target, not a claim about the initial ports.
 
 The harness compares production policies, accounts and runtime bytes before boot,

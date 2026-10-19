@@ -1,0 +1,192 @@
+version: 1
+suites:
+  - name: wordpress-ready
+    readiness: true
+    cases:
+      - name: wp-ready
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 200
+              body:
+                contains: werewolf check site
+                not_matches: '[Ii][Nn][Ss][Tt][Aa][Ll][Ll]'
+            await: 60s
+  - name: wordpress
+    cases:
+      - name: wp-user
+        steps:
+          - service: php-fpm
+            expect:
+              user: php
+              capabilities: []
+              no_new_privileges: true
+      - name: wp-installed
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 200
+              body:
+                contains: werewolf check site
+                not_matches: '[Ii][Nn][Ss][Tt][Aa][Ll][Ll]'
+            await: 60s
+      - name: wp-hidden
+        steps:
+          - fetch:
+              url: http://localhost/wp-admin/install.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/wp-admin/setup-config.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/wp-config.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/wp-config-sample.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/readme.html
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/license.txt
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/.git/HEAD
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/.git/config
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/wp-content/plugins/sqlite-database-integration/.gitignore
+            expect:
+              status: 404
+      - name: wp-login
+        steps:
+          - fetch:
+              url: http://localhost/wp-login.php
+              method: POST
+              headers:
+                Cookie: wordpress_test_cookie=WP%20Cookie%20check
+              form:
+                log: admin
+                pwd: werewolf-check
+                wp-submit: Log In
+                testcookie: '1'
+            expect:
+              status: 302
+              cookies:
+                wordpress_logged_in_86a9106ae65537651a8e456835b316ab:
+                  matches: .+
+      - name: wp-wrong-password
+        steps:
+          - fetch:
+              url: http://localhost/wp-login.php
+              method: POST
+              headers:
+                Cookie: wordpress_test_cookie=WP%20Cookie%20check
+              form:
+                log: admin
+                pwd: werewolf-wrong
+                wp-submit: Log In
+                testcookie: '1'
+            expect:
+              status: 200
+              cookies:
+                wordpress_logged_in_86a9106ae65537651a8e456835b316ab: null
+      - name: wp-users-hidden
+        steps:
+          - fetch:
+              url: http://localhost/?rest_route=/wp/v2/users
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/?author=1
+            expect:
+              status: 404
+      - name: wp-no-pingback
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 200
+              headers:
+                x-pingback: null
+          - fetch:
+              url: http://localhost/xmlrpc.php
+              method: POST
+              headers:
+                Content-Type: text/xml
+              body: <?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName><params/></methodCall>
+            expect:
+              status: 200
+              body:
+                absent: pingback.ping
+      - name: wp-no-file-mods
+        steps:
+          - file: /usr/src/wordpress/wp-config.php
+            expect:
+              body:
+                contains: define( 'DISALLOW_FILE_MODS', true )
+      - name: wp-private
+        steps:
+          - file: /run/svc/php-fpm/admin-password-hash
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/salts.php
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/database
+            expect:
+              uid: php
+              mode: '700'
+              type: directory
+          - file: /run/svc/php-fpm/smtp-password
+            expect:
+              exists: false
+  - name: wordpress-uploads
+    source: driver.zig
+    mode: uploads
+    user: root
+    policy:
+      pledge: stdio rpath inet wpath
+    cases:
+      seed:
+        - wp-uploads-data
+      verify:
+        - wp-uploads-data
+  - name: wordpress-rate-limit
+    source: driver.zig
+    mode: rate-limit
+    user: root
+    policy:
+      pledge: stdio rpath inet wpath
+    cases:
+      seed:
+        - wp-rate-limited
+      verify:
+        - wp-rate-limited
+  - name: wordpress-code-denied
+    source: driver.zig
+    mode: write-refused
+    user: php
+    policy:
+      pledge: stdio rpath wpath
+      read:
+        - /usr/src/wordpress/wp-content/plugins
+    cases:
+      seed:
+        - wp-code-write-refused
+      verify:
+        - wp-code-write-refused

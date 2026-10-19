@@ -9,3 +9,5 @@ umask 077
 printf '%s' werewolf-check-pass-1 >"$1/caddy/admin-password"
 echo '{"base-url":"https://localhost","admin":"admin","admin-email":"admin@example.com"}' >"$1/caddy/settings.json"
 echo '{"base-url":"https://localhost"}' >"$1/mattermost/settings.json"
+mkdir -p "$1/tests"
+printf '%s' 'not a plugin' >"$1/tests/mattermost-plugin"

@@ -284,6 +284,23 @@ _test/probes:
 	@mkdir -p build/test-probes
 	zig test -lc test/native/match.zig test/native/regex.c
 	zig test -lc test/native/probes.zig test/native/regex.c
+	zig test test/native/udp.zig
+	zig test --dep test-driver -Mroot=forms/openldap/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/nats/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/zeek/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/suricata/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/ruby-example/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test forms/mongodb/test/bson.zig
+	zig test --dep test-driver -Mroot=forms/haproxy/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/opencanary/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/headscale/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/squid/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/mastodon/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/home-assistant/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/wordpress/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/opensearch/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/mediawiki/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
@@ -639,6 +656,7 @@ _check-legacy-%: | _check-shared
 .PHONY: check-native-tests _check-native-tests
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
+	@python3 test/native-tests describe $* $(ARCH) >/dev/null
 	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) python3 test/native-tests prepare $* $(ARCH)
 	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= image)

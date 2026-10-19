@@ -1,0 +1,149 @@
+version: 1
+packages:
+  - postgresql-17-client
+suites:
+  - name: mattermost
+    cases:
+      - name: mm-ping
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/api/v4/system/ping
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /status: OK
+            await: 180s
+      - name: mm-user
+        steps:
+          - service: mattermost
+            expect:
+              user: mattermost
+              capabilities: []
+              no_new_privileges: true
+              connect_rules:
+                - tcp/443 public
+                - tcp/465 public
+                - tcp/53
+                - tcp/587 public
+                - tcp/80 public
+                - udp/53
+      - name: mm-admin
+        steps:
+          - fetch:
+              url: https://localhost/api/v4/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                login_id: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              headers:
+                token:
+                  matches: .+
+              json:
+                /roles: system_admin system_user
+      - name: mm-no-signup
+        steps:
+          - fetch:
+              url: https://localhost/api/v4/users
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                email: eve@example.com
+                username: eve
+                password: werewolf-check-eve-1
+            expect:
+              status: 403
+          - fetch:
+              url: https://localhost/api/v4/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                login_id: eve
+                password: werewolf-check-eve-1
+            expect:
+              status: 401
+      - name: mm-no-plugin
+        steps:
+          - fetch:
+              url: https://localhost/api/v4/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                login_id: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              headers:
+                token:
+                  matches: .+
+              json:
+                /roles: system_admin system_user
+            name: login
+          - fetch:
+              url: https://localhost/api/v4/plugins
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              bearer:
+                step: login
+                header: token
+              multipart:
+                plugin:
+                  file: /run/config/tests/mattermost-plugin
+                  filename: evil.tar.gz
+                  type: application/gzip
+            expect:
+              status: 501
+          - file: /data/svc/mattermost/plugins
+            expect:
+              exists: false
+  - name: mattermost-schema
+    user: postgres
+    policy:
+      pledge: stdio rpath wpath proc unix connect exec
+      read:
+        - /run/svc/postgres
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: mm-schema
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/psql
+                - -X
+                - -w
+                - -A
+                - -t
+                - -q
+                - -v
+                - ON_ERROR_STOP=1
+                - -P
+                - pager=off
+                - -h
+                - /run/svc/postgres
+                - -U
+                - postgres
+                - -d
+                - postgres
+              stdin: 'SELECT count(*) FROM pg_tables WHERE schemaname = ''mattermost''
+                AND tablename IN (''users'', ''configurations'');
+
+                '
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+            expect:
+              exit: 0
+              stdout: '2
+
+                '

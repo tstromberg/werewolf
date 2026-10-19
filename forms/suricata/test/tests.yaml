@@ -1,0 +1,72 @@
+version: 1
+suites:
+  - name: suricata-ready
+    readiness: true
+    cases:
+      - name: suricata-ready
+        steps:
+          - file: /data/svc/suricata/suricata.log
+            expect:
+              body: {contains: Engine started}
+            await: 180s
+  - name: suricata
+    cases:
+      - name: suricata-no-preload
+        steps:
+          - file: /etc/sv/suricata/service
+            expect:
+              body:
+                not_matches: LD_PRELOAD|CRASH_LOG
+          - file: /usr/lib/werewolf/crash-log.so
+            expect:
+              exists: false
+      - name: suricata-user
+        steps:
+          - service: suricata
+            expect:
+              user: suricata
+              uid: {min: 65536}
+              capabilities: [net_raw, net_admin]
+              bounding_capabilities: [net_raw, net_admin]
+              no_new_privileges: true
+      - name: suricata-caps
+        steps:
+          - file: /etc/sv/suricata/service
+            expect:
+              body:
+                matches: "(^|\n)caps net_raw net_admin(\n|$)"
+          - file: /etc/sv/rules-fetch/service
+            expect:
+              body:
+                not_matches: "(^|\n)caps "
+      - name: suricata-started
+        steps:
+          - file: /data/svc/suricata/suricata.log
+            expect:
+              body: {contains: Engine started}
+            await: 180s
+      - name: suricata-rule
+        steps:
+          - file: /data/svc/suricata/suricata.log
+            expect:
+              body: {contains: werewolf.rules}
+      - name: rules-cache
+        steps:
+          - file: /data/svc/rules-fetch/rules/werewolf.rules
+            expect:
+              type: file
+              uid: _rules
+              mode: '644'
+          - file: /usr/share/suricata/rules/werewolf.rules
+            expect:
+              type: file
+              size: {min: 1}
+  - name: suricata-security
+    source: driver.zig
+    mode: security
+    user: root
+    policy:
+      pledge: stdio rpath wpath
+    cases:
+      seed: [rules-cache-identities, suricata-socket, suricata-rules]
+      verify: [rules-cache-identities, suricata-socket, suricata-rules]

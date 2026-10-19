@@ -1,0 +1,94 @@
+version: 1
+suites:
+  - name: mastodon-ca
+    readiness: true
+    cases:
+      - name: mastodon-ca
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {type: file}
+            await: 60s
+  - name: mastodon-ready
+    readiness: true
+    cases:
+      - name: mastodon-ready
+        steps:
+          - fetch:
+              url: https://localhost/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, body: {one_of: [OK, "OK\n"]}}
+            await: 170s
+  - name: mastodon-startup
+    cases:
+      - name: mastodon-health
+        steps:
+          - fetch:
+              url: https://localhost/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, body: {one_of: [OK, "OK\n"]}}
+            await: 170s
+  - name: mastodon-streaming
+    cases:
+      - name: streaming-health
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/streaming/health
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, body: {one_of: [OK, "OK\n"]}}
+            await: 60s
+  - name: mastodon
+    cases:
+      - name: mastodon-instance
+        steps:
+          - fetch:
+              url: https://localhost/api/v2/instance
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, json: {/domain: localhost}}
+      - name: mastodon-owner
+        steps:
+          - fetch:
+              url: https://localhost/api/v1/accounts/lookup?acct=owner
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect: {status: 200, json: {/username: owner}}
+      - name: https-redirect
+        steps:
+          - fetch: {url: 'http://localhost/'}
+            expect: {status: 308, headers: {location: 'https://localhost/'}}
+      - name: secrets-private
+        steps:
+          - file: /data/svc/mastodon/env
+            expect: {type: file, uid: mastodon, gid: mastodon, mode: '640'}
+          - file: /data/svc/mastodon
+            expect: {type: directory, gid: mastodon, mode: '2771'}
+      - name: jobs-egress
+        steps:
+          - service: mastodon
+            expect:
+              connect_rules: [tcp/443 public, tcp/80 public, tcp/53, udp/53]
+          - service: mastodon-jobs
+            expect:
+              connect_rules: [tcp/443 public, tcp/80 public, tcp/587 public, tcp/53, udp/53]
+      - name: jobs-smtp
+        steps:
+          - file: /run/svc/mastodon-jobs/site
+            expect:
+              body:
+                matches: "(^|\n)SMTP_SERVER=smtp[.]example[.]com(\n|$)"
+                not_matches: SMTP_PASSWORD
+          - file: /run/svc/mastodon-jobs/site
+            expect:
+              body: {matches: "(^|\n)SMTP_PORT=587(\n|$)"}
+          - file: /run/svc/mastodon-jobs/site
+            expect:
+              body:
+                matches: "(^|\n)SMTP_FROM_ADDRESS=mastodon@example[.]com(\n|$)"
+          - file: /run/config/mastodon-jobs/smtp-password
+            expect: {type: file, size: {min: 1}}
+  - name: mastodon-assets
+    source: driver.zig
+    mode: assets
+    user: root
+    policy: {pledge: stdio rpath inet}
+    cases:
+      seed: [assets-served]
+      verify: [assets-served]

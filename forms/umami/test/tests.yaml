@@ -1,0 +1,243 @@
+version: 1
+packages:
+  - postgresql-17-client
+suites:
+  - name: umami
+    policy:
+      run:
+        - /usr/bin/psql
+    cases:
+      - name: umami-health
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              type: file
+            await: 60s
+          - fetch:
+              url: https://localhost/api/heartbeat
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              json:
+                /ok: true
+            await: 180s
+      - name: umami-user
+        steps:
+          - service: umami
+            expect:
+              user: _oci-umami
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      - name: umami-https
+        steps:
+          - fetch:
+              url: http://localhost/
+            expect:
+              status: 308
+              headers:
+                location: https://localhost/
+      - name: umami-default
+        steps:
+          # The first auth route after reboot is cold under software emulation.
+          - fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password: umami
+            expect:
+              status: 401
+            timeout: 30s
+      - name: umami-admin
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /token:
+                  matches: .+
+          - fetch:
+              url: https://localhost/api/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              bearer:
+                step: login
+                json: /token
+            expect:
+              status: 200
+              json:
+                /user/username: admin
+      - name: umami-anon
+        steps:
+          - fetch:
+              url: https://localhost/api/websites
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 401
+      - name: umami-tracker
+        steps:
+          - fetch:
+              url: https://localhost/script.js
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: api/send
+      - name: umami-collect
+        phases: [seed]
+        steps:
+          - name: login
+            fetch:
+              url: https://localhost/api/auth/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              json:
+                username: admin
+                password: werewolf-check-pass-1
+            expect:
+              status: 200
+              json:
+                /token:
+                  matches: .+
+          - name: website
+            fetch:
+              url: https://localhost/api/websites
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              bearer:
+                step: login
+                json: /token
+              json:
+                name:
+                  run: true
+                domain: localhost
+            expect:
+              status: 200
+              json:
+                /id:
+                  matches: '^[0-9a-f-]{36}$'
+          - fetch:
+              url: https://localhost/api/send
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              headers:
+                User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0
+              json:
+                type: event
+                payload:
+                  website:
+                    step: website
+                    json: /id
+                  hostname: localhost
+                  url: /
+                  language: en-US
+                  screen: 1920x1080
+                  title: check
+            expect:
+              status: 200
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, 127.0.0.1, -U, umami, -d, postgres]
+              stdin: |
+                SELECT count(*) >= 1 FROM umami.website_event e
+                  JOIN umami.website w USING (website_id)
+                  WHERE w.name = current_setting('application_name');
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "t\n"
+            await: 30s
+      - name: umami-collect-kept
+        phases: [verify]
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, 127.0.0.1, -U, umami, -d, postgres]
+              stdin: |
+                SELECT count(*) >= 1 FROM umami.website_event e
+                  JOIN umami.website w USING (website_id)
+                  WHERE w.name = current_setting('application_name');
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "t\n"
+      - name: umami-unknown
+        steps:
+          - fetch:
+              url: https://localhost/api/send
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              headers:
+                User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0
+              json:
+                type: event
+                payload:
+                  website: 0e7e1f00-c4ec-4b00-8000-0000000000aa
+                  hostname: localhost
+                  url: /
+                  language: en-US
+                  screen: 1920x1080
+                  title: check
+            expect:
+              status: 400
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, 127.0.0.1, -U, umami, -d, postgres]
+              stdin: |
+                SELECT count(*) FROM umami.website_event
+                  WHERE website_id = '0e7e1f00-c4ec-4b00-8000-0000000000aa';
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+            expect:
+              exit: 0
+              stdout: "0\n"
+      - name: umami-pg-only
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -h, 127.0.0.1, -U, postgres,
+                     -d, postgres, -c, SELECT 1]
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+            expect:
+              exit: 2
+              stderr:
+                matches: 'no pg_hba.conf entry.*user "postgres".*database "postgres"'
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -h, 127.0.0.1, -U, umami,
+                     -d, template1, -c, SELECT 1]
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+            expect:
+              exit: 2
+              stderr:
+                matches: 'no pg_hba.conf entry.*user "umami".*database "template1"'
+      - name: umami-alone
+        steps:
+          - service: umami
+            expect:
+              user: _oci-umami
+              connect_rules: [tcp/5432]

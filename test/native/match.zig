@@ -89,11 +89,14 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
     const operators = [_][]const u8{
         "equals",
         "contains",
+        "contains_all",
+        "contains_none",
         "absent",
         "one_of",
         "min",
         "max",
         "matches",
+        "not_matches",
         "count",
         "occurrences",
         "type",
@@ -115,7 +118,16 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
             try contains(got, value)
         else if (std.mem.eql(u8, op, "absent"))
             !try contains(got, value)
-        else if (std.mem.eql(u8, op, "one_of")) blk: {
+        else if (std.mem.eql(u8, op, "contains_all") or
+            std.mem.eql(u8, op, "contains_none"))
+        blk: {
+            if (value != .array or value.array.items.len == 0) return error.InvalidMatcher;
+            const present = std.mem.eql(u8, op, "contains_all");
+            for (value.array.items) |item| {
+                if (try contains(got, item) != present) break :blk false;
+            }
+            break :blk true;
+        } else if (std.mem.eql(u8, op, "one_of")) blk: {
             if (value != .array) return error.InvalidMatcher;
             for (value.array.items) |allowed| if (equal(got, allowed)) break :blk true;
             break :blk false;
@@ -156,7 +168,7 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
         } else if (std.mem.eql(u8, op, "type")) blk: {
             if (value != .string) return error.InvalidMatcher;
             break :blk std.mem.eql(u8, @tagName(got), value.string);
-        } else if (std.mem.eql(u8, op, "matches")) blk: {
+        } else if (std.mem.eql(u8, op, "matches") or std.mem.eql(u8, op, "not_matches")) blk: {
             if (got != .string or value != .string or value.string.len > 512 or
                 std.mem.findScalar(u8, value.string, 0) != null or
                 std.mem.findScalar(u8, got.string, 0) != null)
@@ -166,7 +178,7 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
                 (try arena.dupeSentinel(u8, got.string, 0)).ptr,
             );
             if (result < 0) return error.InvalidRegex;
-            break :blk result == 1;
+            break :blk result == (if (std.mem.eql(u8, op, "matches")) @as(c_int, 1) else 0);
         } else return error.InvalidMatcher;
         passed = passed and ok;
     }
@@ -206,6 +218,28 @@ test "absence with an incompatible type must not pass" {
     const a = arena.allocator();
     const invalid = try std.json.parseFromSliceLeaky(Json, a, "{\"absent\":1}", .{});
     try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .string = "secret" }, invalid));
+}
+
+test "negative regex rejects matches, malformed patterns and incompatible input" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try std.json.parseFromSliceLeaky(
+        Json,
+        a,
+        "{\"not_matches\":\"[Ii][Nn][Ss][Tt][Aa][Ll][Ll]\"}",
+        .{},
+    );
+    try std.testing.expect(try matches(a, .{ .string = "werewolf check site" }, want));
+    try std.testing.expect(!try matches(a, .{ .string = "Install WordPress" }, want));
+    try std.testing.expect(!try matches(a, .{ .string = "INSTALL WordPress" }, want));
+    try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .integer = 0 }, want));
+    try std.testing.expectError(
+        error.InvalidMatcher,
+        matches(a, .{ .string = "safe\x00Install" }, want),
+    );
+    const invalid = try std.json.parseFromSliceLeaky(Json, a, "{\"not_matches\":\"[\"}", .{});
+    try std.testing.expectError(error.InvalidRegex, matches(a, .{ .string = "safe" }, invalid));
 }
 
 test "literal occurrence counts are exact and do not prove absence in non-text values" {
