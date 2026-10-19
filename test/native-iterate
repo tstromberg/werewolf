@@ -128,7 +128,7 @@ def hash_tree(result, path, exclude_tests=False, exclude_test_sources=False):
         return
     for item in sorted(path.rglob('*')):
         relative = item.relative_to(path)
-        if exclude_test_sources and (item.suffix in {'.zig', '.c', '.h'} or
+        if exclude_test_sources and (item.suffix == '.zig' or
                                      relative.as_posix() in {'tests.yaml', 'native.json'}):
             continue
         if exclude_tests and relative.parts and relative.parts[0] == 'test':

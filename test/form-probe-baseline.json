@@ -1220,6 +1220,17 @@
       "nc-cron-wait": [
         "test-nextcloud-cron/nc-cron"
       ]
+    },
+    "moodle": {
+      "moodle-no-exec": [
+        "test-moodle/moodle-paths-disabled",
+        "test-moodle-database/moodle-paths-kept",
+        "test-moodle-code-denied/moodle-code-write-refused"
+      ],
+      "moodle-private": [
+        "test-moodle/moodle-private-metadata",
+        "test-moodle-private/moodle-private-tree"
+      ]
     }
   }
 }

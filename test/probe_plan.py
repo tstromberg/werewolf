@@ -175,18 +175,21 @@ def references(value, previous, fixtures):
             fields(value, {'run'}, {'run'})
             if value['run'] is not True: raise ValueError('run selector must be true')
         elif 'step' in value:
-            fields(value, {'step', 'json', 'header', 'cookie', 'body'}, {'step'})
+            fields(value, {'step', 'json', 'header', 'cookie', 'body', 'regex'}, {'step'})
             if not isinstance(value['step'], str) or value['step'] not in previous or len(value) != 2:
                 raise ValueError('capture must select an earlier named step')
             selector = next(key for key in value if key != 'step')
             sources = {'json': {'fetch', 'file', 'exec'}, 'body': {'fetch', 'file'},
-                       'header': {'fetch'}, 'cookie': {'fetch'}}
+                       'header': {'fetch'}, 'cookie': {'fetch'}, 'regex': {'fetch', 'file', 'exec'}}
             if previous[value['step']] not in sources[selector]:
                 raise ValueError('capture selector is unavailable for the selected probe')
             for key, selector in value.items():
                 if key == 'json': pointer(selector)
                 elif key == 'body' and selector is not True: raise ValueError('body selector must be true')
                 elif key in ('header', 'cookie'): string(selector)
+                elif key == 'regex':
+                    if not string(selector) or len(selector.encode()) > 512:
+                        raise ValueError('capture regex requires 1..512 bytes')
             if 'header' in value: value['header'] = value['header'].lower()
         elif 'fixture' in value:
             fields(value, {'fixture', 'raw'}, {'fixture'})
@@ -200,7 +203,7 @@ def references(value, previous, fixtures):
         for v in value: references(v, previous, fixtures)
 
 
-MATCHERS = {'equals', 'contains', 'contains_all', 'contains_none', 'absent', 'one_of', 'min', 'max', 'matches', 'not_matches', 'count', 'occurrences', 'type'}
+MATCHERS = {'equals', 'not_equals', 'contains', 'contains_all', 'contains_none', 'absent', 'one_of', 'min', 'max', 'matches', 'not_matches', 'count', 'occurrences', 'type'}
 
 
 def string(value):
@@ -261,6 +264,7 @@ def text_matcher(value):
         if not set(value) & {'run', 'step', 'fixture'}:
             if not value: raise ValueError('empty text matcher')
             fields(value, MATCHERS)
+        if 'not_equals' in value: text_input(value['not_equals'])
     elif value is not None and not isinstance(value, str):
         raise ValueError('text assertion requires a string, null, reference or matcher')
     matcher(value)

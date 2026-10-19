@@ -68,7 +68,8 @@ case on failure; independent cases continue. Name a step to capture its response
 | `listeners` | Protocol string or `{protocol: tcp, port: 636}` | `contains`, `absent`, `equals` address/port maps |
 | `mount` | Exact mount path | `type`, `source`, `flags`, `absent_flags` |
 
-Scalar and array assertions mean equality. Matcher maps support `equals`, `contains`,
+Scalar/array assertions mean equality; `not_equals` checks literal inequality, including
+nonempty binary bodies; types must match. Matchers support `equals`, `contains`,
 `absent`, `one_of`, `min`/`max`, regex `matches`/`not_matches`, `count` and `type`.
 `contains_all`/`contains_none` require each match/refusal; regexes use POSIX ERE.
 `^`/`$` anchor the whole text; YAML `"\n"` supplies a literal newline.
@@ -121,11 +122,12 @@ steps:
       bearer: {step: login, json: /token}
     expect: {status: 200, json: {'/results': []}}
 ```
-
-References select an earlier step's `json` pointer, `header`, `cookie`, or `body: true`.
+References select prior `json`, `header`, `cookie`, `body: true`, or `regex` captures.
+`{step: form, regex: 'name="csrf" value="([^" ]+)"'}` requires one nonempty group
+in one unambiguous body/stdout match (512-byte POSIX ERE); it returns raw text.
 For `exec`, JSON assertions and captures parse stdout after checking the expected exit.
 `{fixture: NAME}` reads a declared `/run/config/` fixture, trimming terminal newlines.
-Use `{fixture: NAME, raw: true}` to preserve every byte, including binary HTTP bodies.
+Raw `{fixture: NAME, raw: true}` preserves bytes; file captures need a body assertion.
 `{run: true}` supplies the shared run ID. References preserve types; putting an object
 in a bearer token or argv fails the case. Captured values are not string templates.
 Top-level `timeout: 1200s` bounds each phase (default `300s`, range `1s..1800s`).
@@ -135,7 +137,6 @@ fetch/client call without retries (default `10s`, maximum `300s`). Clean runs an
 SSH iteration use the same phase budget, including readiness and native drivers.
 Text assertions use named matchers such as `contains`, `absent` or `matches`;
 unknown matcher names fail plan validation before an image is built.
-
 `service.connect_rules` reads explicit fence connect declarations for each process's
 effective UID, including global grants. Rules use form syntax (`tcp/443 public`);
 literal lists compare without order. DNS grants are separate; test actual refusals too.
@@ -168,8 +169,7 @@ stable or record split/renamed replacements in `test/form-probe-baseline.json`.
 `--mapping` shows their current implementations. Native code does not count as YAML.
 Keep host attacks and supplied-code gates until their replacements pass too.
 Jellyfin retains `legacy: true` for SSH host tests. The 80% target is not yet met.
-
 The harness compares production policies, accounts and runtime bytes before boot,
 then records kernel, image, plan and log hashes. Clean tests add no BusyBox, shell
 or SSH. A form may already ship a restricted shell adapter as part of its own contract.
-Run both boot phases and the actual shipping-image check before retiring old coverage.
+Run both phases and the shipping-image check before retiring old coverage.

@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import platform
 import ssl
 from pathlib import Path
 import subprocess
@@ -76,6 +77,23 @@ class Plans(unittest.TestCase):
     def plan(self):
         return dict(version=1, suites=[dict(name='web', cases=[dict(name='health', steps=[
             dict(fetch=dict(url='http://localhost/'), expect=dict(status=200))])])])
+
+    def test_regex_capture_patterns_are_bounded_text_and_select_earlier_text(self):
+        for pattern in ('', 'x' * 513, 'x\x00', 3, {'run': True}):
+            plan = self.plan()
+            steps = plan['suites'][0]['cases'][0]['steps']
+            steps[0]['name'] = 'form'
+            steps.append(dict(fetch=dict(url='http://localhost/', bearer={
+                'step': 'form', 'regex': pattern}), expect=dict(status=200)))
+            with self.subTest(pattern=pattern), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
+
+    def test_text_inequality_cannot_pass_with_an_incompatible_operand(self):
+        for value in (False, 42, None, {}, []):
+            plan = self.plan()
+            plan['suites'][0]['cases'][0]['steps'][0]['expect']['body'] = {'not_equals': value}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize(plan, Path('tests.yaml'))
 
     def test_normalizes_case_names_and_pinned_transport(self):
         plan = normalize(self.plan(), Path('tests.yaml'))
@@ -336,6 +354,14 @@ class Server(BaseHTTPRequestHandler):
         self.calls[self.path] = self.calls.get(self.path, 0) + 1
         if self.path == '/path-value':
             self.reply(200, {'id': 'a/b ?#%é', 'number': 42})
+        elif self.path in ('/html-token', '/html-missing', '/html-duplicate'):
+            field = b'<input name="csrf" value="secret-token">'
+            body = field if self.path == '/html-token' else field * 2 if self.path == '/html-duplicate' else b'<form></form>'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == '/membership':
             self.reply(200, {'items':['network','zeroconf'],'text':'hello world'})
         elif self.path.startswith('/path/'):
@@ -439,6 +465,39 @@ class Workflows(unittest.TestCase):
             return subprocess.run([os.environ['HOWL_PROBE_TEST_BINARY'], 'test-web', 'probes', str(root/'context'), str(root/'plan.json')], capture_output=True, text=True, timeout=20)
 
     def fetch(self, path, **options): return dict(url=self.base+path, **options)
+
+    def test_html_capture_supports_workflows_and_fails_before_dependent_requests(self):
+        pattern = 'name="csrf" value="([^"]+)"'
+        for path, status, error in (('/html-token', 0, None),
+                                    ('/html-missing', 1, 'MissingCapture'),
+                                    ('/html-duplicate', 1, 'AmbiguousCapture')):
+            Server.calls = {}
+            result = self.run_plan([dict(name='csrf', steps=[
+                dict(name='form', fetch=self.fetch(path), expect={'status': 200}),
+                dict(fetch=self.fetch('/protected', bearer={'step': 'form', 'regex': pattern}),
+                     expect={'status': 200})])])
+            self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+            self.assertEqual(Server.calls.get('/protected', 0), 1 if status == 0 else 0)
+            if error: self.assertIn(error, result.stdout)
+            self.assertNotIn('secret-token', result.stdout + result.stderr)
+
+    def test_capture_handles_file_bodies_and_client_stdout_without_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'form'
+            path.write_text('name="csrf" value="secret-token"')
+            for probe in (dict(file=str(path)), dict(exec=dict(argv=[sys.executable, '-c',
+                    'print(\'name="csrf" value="secret-token"\')']))):
+                if 'file' in probe and platform.system() != 'Linux': continue
+                first = dict(name='form', **probe, expect={'type': 'file', 'body': {'contains': 'csrf'}} if 'file' in probe else {'exit': 0})
+                result = self.run_plan([dict(name='text-capture', steps=[first,
+                    dict(fetch=self.fetch('/protected', bearer={'step': 'form',
+                        'regex': 'name="csrf" value="([^"]+)"'}), expect={'status': 200})])])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nonempty_binary_body_uses_literal_inequality(self):
+        result = self.run_plan([dict(name='bytes', steps=[dict(
+            fetch=self.fetch('/binary-body'), expect={'status': 200, 'body': {'not_equals': ''}})])])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_path_capture_is_one_escaped_segment_under_the_literal_origin(self):
         result = self.run_plan([dict(name='paths', steps=[

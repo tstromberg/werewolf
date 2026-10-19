@@ -235,22 +235,24 @@ class IterationInputs(unittest.TestCase):
             root = Path(temporary)
             directory = root / 'forms/gatus/test'
             directory.mkdir(parents=True)
-            photo = directory / 'photo.jpg'
             source = directory / 'helper.zig'
-            photo.write_bytes(b'first fixture')
             source.write_text('first test helper')
             plan = native.read_plan('gatus')
             with patch.object(iteration, 'ROOT', root), \
                     patch.object(iteration.NATIVE, 'read_plan', return_value=plan), \
                     patch.object(iteration, 'call', return_value=type('Dirs', (), {'stdout': ''})()):
                 fingerprint = lambda: iteration.fingerprint('gatus', directory / 'tests.yaml', root / 'generated')
-                original = fingerprint()
-                source.write_text('edited test helper')
-                self.assertEqual(original, fingerprint())
-                photo.write_bytes(b'edited fixture')
-                self.assertNotEqual(original, fingerprint())
-                photo.unlink()
-                self.assertNotEqual(original, fingerprint())
+                for name in ('photo.jpg', 'payload.c', 'protocol.h'):
+                    with self.subTest(fixture=name):
+                        fixture = directory / name
+                        fixture.write_bytes(b'first fixture')
+                        original = fingerprint()
+                        source.write_text('edited test helper')
+                        self.assertEqual(original, fingerprint())
+                        fixture.write_bytes(b'edited fixture')
+                        self.assertNotEqual(original, fingerprint())
+                        fixture.unlink()
+                        self.assertNotEqual(original, fingerprint())
 
     def test_first_build_records_resolved_locks(self):
         with tempfile.TemporaryDirectory() as temporary:

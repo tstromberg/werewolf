@@ -167,6 +167,13 @@ const Workflow = struct {
                     const cookies = prior.object.get("cookies") orelse return error.MissingCapture;
                     return capture(cookies.object.get(cookie.string));
                 }
+                if (value.object.get("regex")) |pattern| {
+                    return system.text(try match.extract(
+                        w.a,
+                        pattern.string,
+                        try jsonOutput(prior),
+                    ));
+                }
                 if (value.object.get(
                     "body",
                 )) |_| return prior.object.get("body") orelse error.MissingCapture;

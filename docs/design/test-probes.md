@@ -65,8 +65,8 @@ steps:
 ```
 
 Each case is an ordered workflow; steps reference prior responses using typed selectors.
-Missing/ambiguous captures fail; sessions and captures stay within a case/phase.
-Allow cookies, CSRF/token capture and read-only polling; use Zig for branching or
+Missing/ambiguous captures fail; `regex` selects one nonempty group from one match.
+Sessions and captures stay within a case/phase. Use Zig for branching or
 computation. No loops or functions. PostgreSQL uses `psql`; expose a built-in run ID.
 The host retains run ID and disks for reboot; verify reads state before setup writes.
 Use existing native drivers for Greenbone GMP/OSP, inference, WebSockets, MQTT/NATS
