@@ -68,7 +68,7 @@ test "private tree includes nested files and directories but ignores symbolic li
     try file.setPermissions(io, .fromMode(0o666));
     try std.testing.expect(!try private(io, std.testing.allocator, tmp.dir));
     try file.setPermissions(io, .fromMode(0o600));
-    var dir = try tmp.dir.openDir(io, "nested", .{});
+    var dir = try tmp.dir.openDir(io, "nested", .{ .iterate = true });
     defer dir.close(io);
     try dir.setPermissions(io, .fromMode(0o777));
     try std.testing.expect(!try private(io, std.testing.allocator, tmp.dir));
