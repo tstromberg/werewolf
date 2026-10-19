@@ -4,16 +4,15 @@
 --build enrolls a bundle signed with the caller's keys, kept in a private
 XDG_DATA_HOME here, never the caller's own."""
 import hashlib
-import http.client
 import json
 import os
 from pathlib import Path
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
 import time
+from publisher_transport import connection as publisher_connection
 
 howl, kernel, key, cert, stub, output = sys.argv[1:]
 howl, kernel, key, cert, stub = [str(Path(p).resolve()) for p in (howl, kernel, key, cert, stub)]
@@ -156,8 +155,7 @@ try:
     assert_no_build(operations()[before:], live=True)
     # The machine is registered with the host's one shared publisher.
     config = json.loads((Path(json.loads(config_file.read_text())['service']) / 'publisher.json').read_text())
-    connection = http.client.HTTPSConnection('127.0.0.1', config['port'], timeout=5,
-        context=ssl.create_default_context(cafile=config['certificate']))
+    connection = publisher_connection(config, timeout=5)
     try:
         connection.request('GET', '/_health', headers={'X-Werewolf-Control': config['token']})
         response = connection.getresponse()

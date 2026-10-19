@@ -49,9 +49,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Focused builds do not queue behind the full catalog. The publish job
-  # separately serializes all writers of the shared signed catalog.
-  group: form-images-build-${{ inputs.target || (github.event_name == 'schedule' && 'all' || 'base') }}
+  # Keep the published head stable until this run's public consumers finish.
+  # Base, all and focused runs write the same catalog and share this lock.
+  group: form-images-release
   cancel-in-progress: false
 
 env:
@@ -336,6 +336,15 @@ jobs:
           name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}
           path: lifecycle
       # Self-hosted runners keep these tools installed (docs/releases.md).
+      - name: Ensure macOS protected runtime
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          for package in python@3.14 swtpm qemu lima osslsigncode zstd; do
+            brew list --versions "$package" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install "$package"
+          done
+          echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"
+          echo "$(brew --prefix python@3.14)/libexec/bin" >>"$GITHUB_PATH"
       - name: Install pinned runtime and host tools
         if: runner.environment == 'github-hosted'
         run: sudo test/ci-setup

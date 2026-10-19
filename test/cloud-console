@@ -15,6 +15,9 @@ if __name__ == '__main__':
         assert clean(split) == wanted
         assert clean(wanted) == wanted
         assert clean(b'ordinary [1, 2] data\n') == b'ordinary [1, 2] data\n'
+        key = b'{"event":"host-key","key":"/run/svc/sshd/host-key","fingerprint":"SHA256:abc123","detail":"kept in /data"}\n'
+        split = key.replace(b'abc123', b'abc[    1.551356] audit: type=1423 blockers=fs.write_file path=\r\n123')
+        assert clean(split) == key
         print("pass   cloud-console: kernel interleaving preserves complete userspace records")
     else:
         sys.stdout.buffer.write(clean(sys.stdin.buffer.read()))
