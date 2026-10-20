@@ -1,0 +1,72 @@
+version: 1
+timeout: 600s
+suites:
+  - name: minecraft-ready
+    source: driver.zig
+    mode: ready
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - mc-up
+      verify:
+        - mc-up
+    readiness: true
+  - name: minecraft
+    cases:
+      - name: mc-files
+        steps:
+          - file: /data/svc/minecraft/server.properties
+            expect:
+              body:
+                contains_all:
+                  - "white-list=true\n"
+                  - "enforce-whitelist=true\n"
+                  - "online-mode=true\n"
+                  - "enable-rcon=false\n"
+                  - "enable-query=false\n"
+          - file: /data/svc/minecraft/eula.txt
+            expect:
+              body:
+                equals: "eula=true\n"
+          - file: /data/svc/minecraft/whitelist.json
+            expect:
+              json:
+                '': {count: 1}
+                /0/name:
+                  matches: ^[Ss][Tt][Ee][Vv][Ee]$
+                /0/uuid:
+                  matches: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+          - file: /data/svc/minecraft
+            expect:
+              type: directory
+              uid: minecraft
+      - name: mc-no-rcon-listener
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 25575
+      - name: mc-user
+        steps:
+          - service: minecraft
+            expect:
+              user: minecraft
+              capabilities: []
+              no_new_privileges: true
+  - name: minecraft-game
+    source: driver.zig
+    mode: game
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - mc-ping
+        - mc-stranger
+        - mc-no-rcon
+      verify:
+        - mc-ping
+        - mc-stranger
+        - mc-no-rcon

@@ -1,0 +1,107 @@
+version: 1
+timeout: 600s
+suites:
+  - name: mox-ready
+    source: smtp.zig
+    mode: ready
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - mox-smtp
+      verify:
+        - mox-smtp
+    readiness: true
+  - name: mox
+    cases:
+      - name: mox-listening
+        steps:
+          - listeners: tcp
+            expect:
+              contains:
+                - port: 25
+                - port: 443
+                - port: 465
+                - port: 587
+                - port: 993
+              absent:
+                - port: 80
+      - name: mox-web
+        steps:
+          - fetch:
+              url: https://mail.example.com/webmail/
+              ca: /run/config/mox/tls-cert
+              resolve:
+                - mail.example.com:443:127.0.0.1
+            expect:
+              status: 200
+          - fetch:
+              url: https://mta-sts.example.com/.well-known/mta-sts.txt
+              ca: /run/config/mox/tls-cert
+              resolve:
+                - mta-sts.example.com:443:127.0.0.1
+            expect:
+              status: 200
+              body:
+                matches: "(^|\n)mode: enforce(\n|$)"
+      - name: mox-setup
+        steps:
+          - file: /data/svc/mox/config/adminpasswd
+            expect:
+              type: file
+              uid: mox
+              mode: '600'
+              body:
+                matches: ^\$2b\$10\$
+          - file: /data/svc/mox/config/mox.conf
+            expect:
+              type: file
+              uid: mox
+              mode: '600'
+              body:
+                matches: "(^|\n)[ \t]*Host: smtp[.]example[.]net(\n|$)"
+          - file: /data/svc/mox/config/domains.conf
+            expect:
+              body:
+                matches: "(^|\n)Routes:"
+          - file: /run/svc/mox/admin-password
+            expect:
+              exists: false
+          - file: /run/svc/mox/relay-password
+            expect:
+              exists: false
+  - name: mox-mail
+    source: smtp.zig
+    mode: mail
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - mox-inbound
+      verify:
+        - mox-inbound
+  - name: mox-relay
+    source: smtp.zig
+    mode: relay
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed:
+        - mox-no-relay
+      verify:
+        - mox-no-relay
+  - name: mox-submitted
+    source: submit.zig
+    mode: submitted
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet unix connect proc exec
+    cases:
+      seed:
+        - mox-submitted
+      verify:
+        - mox-submitted
+    memory: 256
