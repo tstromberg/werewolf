@@ -2,6 +2,7 @@
 const std = @import("std");
 const Io = std.Io;
 pub const fetch = @import("fetch.zig");
+pub const exec = @import("exec.zig");
 pub const system = @import("system.zig");
 pub const udp = @import("udp.zig");
 

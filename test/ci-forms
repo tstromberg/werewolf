@@ -53,6 +53,7 @@ def clean(build, name):
     discard(Path('build/native-tests') / build.name / name)
     # No other form is building; its pinned layers can be fetched again.
     discard(build / 'oci')
+    discard(build / 'tmp' / name)
 
 
 def run(group, arch, shard):
@@ -66,6 +67,9 @@ def run(group, arch, shard):
     build = Path('build') / arch
     if build.is_symlink() or Path('build').is_symlink():
         raise ValueError('redirected build directory')
+    scratch = build / 'tmp'
+    if scratch.is_symlink():
+        raise ValueError('redirected temporary directory')
     check = build / 'check'
     if check.is_symlink():
         raise ValueError('redirected check directory')
@@ -82,6 +86,10 @@ def run(group, arch, shard):
     if group in ('forms', 'all'):
         subprocess.run(make + ['_test/form-coverage'], env=env, check=True)
     for name in names:
+        temporary = scratch / name
+        discard(temporary)
+        temporary.mkdir(parents=True, mode=0o700)
+        env['TMPDIR'] = str(temporary.resolve())
         targets = ([] if group == 'shellfree' else ['check-' + name])
         if group in ('shellfree', 'all'):
             targets.append('check-shellfree-' + name)

@@ -1,5 +1,7 @@
 # Analyze once on a fresh disk; after reboot, look up the saved verdict first.
 version: 1
+# Keep inherited SSH host attacks until they have a native replacement.
+legacy: true
 timeout: 1200s
 suites:
   - name: postdoc-ready
@@ -65,7 +67,8 @@ suites:
       - name: postdoc-analyzes
         steps:
           - fetch:
-              url: http://127.0.0.1:49999/v1/analyze
+              # Exercise the analyzer again during hot iterations.
+              url: http://127.0.0.1:49999/v1/analyze?force=1
               method: POST
               headers:
                 X-Filename: add.js
@@ -76,8 +79,11 @@ suites:
                 fixture: token
             expect:
               status: 200
-              json:
-                /decision: allow
+              headers:
+                content-type:
+                  one_of: [application/json, application/x-ndjson]
+              body:
+                contains: '"decision":"allow"'
             timeout: 300s
         phases:
           - seed

@@ -713,6 +713,47 @@ class Payload(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'production etc/sv'):
             self.compare(PRODUCTION_OUT=str(before), TEST_OUT=str(after))
 
+    def test_added_library_cannot_replace_a_production_command_alias(self):
+        for root in (self.base, self.test):
+            with tarfile.open(root / 'rootfs.tar', 'a') as output:
+                directory = tarfile.TarInfo('usr/bin')
+                directory.type, directory.mode = tarfile.DIRTYPE, 0o755
+                output.addfile(directory)
+                item = tarfile.TarInfo('usr/bin/clear')
+                if root == self.base:
+                    item.type, item.mode, item.linkname = tarfile.SYMTYPE, 0o777, '/bin/busybox'
+                    output.addfile(item)
+                else:
+                    item.size, item.mode = 7, 0o755
+                    output.addfile(item, io.BytesIO(b'ncurses'))
+        with self.assertRaisesRegex(ValueError, 'runtime file: usr/bin/clear'):
+            self.compare()
+        generated = self.root / 'clients'
+        native.command_links(self.base, generated)
+        self.assertEqual(os.readlink(generated / 'usr/bin/clear'), '/bin/busybox')
+        with tarfile.open(self.test / 'overlay.tar', 'a') as output:
+            directory = tarfile.TarInfo('usr/bin')
+            directory.type, directory.mode = tarfile.DIRTYPE, 0o755
+            output.addfile(directory)
+            item = tarfile.TarInfo('usr/bin/clear')
+            item.type, item.mode, item.linkname = tarfile.SYMTYPE, 0o755, '/bin/busybox'
+            output.addfile(item)
+        self.compare()
+        for uid, target in ((123, '/bin/busybox'), (0, '/usr/bin/changed')):
+            with tarfile.open(self.test / 'overlay.tar', 'a') as output:
+                item.uid, item.linkname = uid, target
+                output.addfile(item)
+            with self.assertRaisesRegex(ValueError, 'runtime file: usr/bin/clear'):
+                self.compare()
+
+    def test_runtime_change_hidden_by_overlay_is_still_refused(self):
+        with tarfile.open(self.test / 'overlay.tar', 'a') as output:
+            item = tarfile.TarInfo('usr/bin/postgres')
+            item.size = 7
+            output.addfile(item, io.BytesIO(b'changed'))
+        with self.assertRaisesRegex(ValueError, 'runtime file: usr/bin/postgres'):
+            self.compare()
+
     def test_replaced_runtime_or_overlay_refused(self):
         for archive, files in [('rootfs.tar', {'usr/bin/postgres': b'changed server'}),
                                ('overlay.tar', {'usr/lib/werewolf/init': b'changed init'})]:

@@ -30,20 +30,19 @@ pub fn main(init: std.process.Init) !void {
     const launch = try std.json.parseFromSliceLeaky(Launch, gpa, launch_raw, .{});
     if (std.mem.eql(u8, args[1], "install")) {
         const temporary = try gpa.print("/run/howl-dev/.{s}.new", .{name});
-        const file = try Io.Dir.cwd().openFile(io, temporary, .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
-        try Io.Dir.cwd().rename(
+        try installFile(
+            io,
+            .cwd(),
             temporary,
-            Io.Dir.cwd(),
             try gpa.print("/run/howl-dev/{s}", .{name}),
-            io,
+            0o755,
         );
-        if (launch.probes) try Io.Dir.cwd().rename(
-            try gpa.print("/run/howl-dev/.{s}.json.new", .{name}),
-            Io.Dir.cwd(),
-            try gpa.print("/run/howl-dev/{s}.json", .{name}),
+        if (launch.probes) try installFile(
             io,
+            .cwd(),
+            try gpa.print("/run/howl-dev/.{s}.json.new", .{name}),
+            try gpa.print("/run/howl-dev/{s}.json", .{name}),
+            0o644,
         );
         try Io.Dir.cwd().rename(
             "/run/config/.native-iterate-context.new",
@@ -88,4 +87,31 @@ test "driver names cannot select an uploaded descriptor" {
     try std.testing.expect(driverName("test-postgres"));
     for ([_][]const u8{ "", "../test-postgres", "/run/x", "test;id", "test/x" }) |name|
         try std.testing.expect(!driverName(name));
+}
+
+fn installFile(io: Io, dir: Io.Dir, temporary: []const u8, target: []const u8, mode: u16) !void {
+    const file = try dir.openFile(io, temporary, .{});
+    defer file.close(io);
+    try file.setPermissions(io, .fromMode(mode));
+    try dir.rename(temporary, dir, target, io);
+}
+
+test "uploaded plans are readable data, binaries executable, and contexts private" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "program.new", "plan.new", "context" }) |name| {
+        const file = try tmp.dir.createFile(io, name, .{ .permissions = .fromMode(0o600) });
+        file.close(io);
+    }
+    try installFile(io, tmp.dir, "program.new", "program", 0o755);
+    try installFile(io, tmp.dir, "plan.new", "plan", 0o644);
+    for ([_]struct { name: []const u8, mode: u16 }{
+        .{ .name = "program", .mode = 0o755 },
+        .{ .name = "plan", .mode = 0o644 },
+        .{ .name = "context", .mode = 0o600 },
+    }) |expected| {
+        const stat = try tmp.dir.statFile(io, expected.name, .{});
+        try std.testing.expectEqual(expected.mode, stat.permissions.toMode() & 0o777);
+    }
 }
