@@ -491,12 +491,13 @@ pub const Posture = struct {
                 var lang_it = langs.iterate();
                 while (lang_it.next(p.io) catch null) |lang| {
                     if (lang.kind != .directory) continue;
-                    if (std.meta.stringToEnum(allow.Runtime, lang.name) == null) continue;
+                    if (!allow.RuntimeAllowance.isName(lang.name)) continue;
                     var feats = langs.openDir(p.io, lang.name, .{ .iterate = true }) catch continue;
                     defer feats.close(p.io);
                     var feat_it = feats.iterate();
                     while (feat_it.next(p.io) catch null) |feat| {
-                        if (feat.kind != .file) continue;
+                        if (feat.kind != .file or
+                            !allow.RuntimeAllowance.isName(feat.name)) continue;
                         try names.append(p.gpa, if (blanket)
                             try p.gpa.print("{s}:{s}", .{ lang.name, feat.name })
                         else

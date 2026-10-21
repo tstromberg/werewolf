@@ -45,15 +45,15 @@ After resolution, howl and the updater require covered names, versions and contr
 checksums in the signed index. Bad or unavailable feeds and replacements fail before
 image or slot commit. Explicit older streams and OCI runtimes need separate migrations.
 
-**Allowances.** Pledge-style capability groups cover classes of functions: `exec`
-spawns programs; `native` permits native code or memory (`ctypes`, `dl`, `Unsafe`,
-FFM, JNI); `deserialize` rebuilds objects (`ObjectInputStream`, `unserialize`,
-`pickle`); `phar` permits its wrapper; `inline` permits argv/stdin code;
-`writable-source` permits scripts on writable mounts. Renaming an API needs no grant.
+**Allowances.** Capability groups cover classes of functions: `exec` spawns programs;
+`native` permits native code or memory; `deserialize` rebuilds objects; `phar` its
+wrapper; `inline` argv/stdin code; `writable-source` scripts on writable mounts.
 
 A service grants `[java:native]` in `services.NAME.allow`; top-level `allow` is
-image-wide. Unknown groups fail the build. The builder writes an empty regular file:
-`/etc/runtime-hardening/allow/<ns>/RUNTIME/GROUP`, read with `lstat`, fail closed.
+image-wide. Forms validate `PACKAGE:NAME`: both parts nonempty, using only `a-z`,
+`0-9` and `-`. Packages define supported names; unrecognized names have no effect.
+The builder writes an empty regular file:
+`/etc/runtime-hardening/allow/<ns>/PACKAGE/NAME`, read with `lstat`, fail closed.
 
 `<ns>` is the service's `/proc/self/cgroup` leaf: leash joins it as root; the service
 cannot leave or forge it. Runtimes check that namespace, then `all`. Service grants

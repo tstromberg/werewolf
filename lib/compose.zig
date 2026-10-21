@@ -157,7 +157,7 @@ pub fn compose(
         try put(io, ro, try gpa.print("{s}/service", .{dir}), s.text);
         for (s.allow) |word| {
             const grant = allow.RuntimeAllowance.parse(word).?;
-            const path = try gpa.print("etc/runtime-hardening/allow/{s}/{t}", .{
+            const path = try gpa.print("etc/runtime-hardening/allow/{s}/{s}", .{
                 s.name, grant.runtime,
             });
             try ro.createDirPath(io, path);
@@ -201,7 +201,7 @@ pub fn compose(
     for (allowed) |a| {
         if (allow.RuntimeAllowance.parse(a)) |r| {
             const d = try gpa.print(
-                "etc/runtime-hardening/allow/{s}/{t}",
+                "etc/runtime-hardening/allow/{s}/{s}",
                 .{ allow.runtime_blanket, r.runtime },
             );
             try ro.createDirPath(io, d);
@@ -2095,8 +2095,10 @@ test "compose: service runtime grants stay scoped and follow whole-service repla
     const io = testing.io;
     for ([_][2][]const u8{
         .{ "base", "services:\n  search:\n    exec: /search\n    user: search\n" ++
-            "    pledge: stdio\n    allow: [java:native]\n  n8n:\n    exec: /n8n\n" ++
-            "    user: n8n\n    pledge: stdio\n    allow: [node:native]\n" },
+            "    pledge: stdio\n    allow: [java:native, glibc:dlopen, glibc:ifunc]\n" ++
+            "  n8n:\n    exec: /n8n\n" ++
+            "    user: n8n\n    pledge: stdio\n" ++
+            "    allow: [node:native, php:upload-progress, future-package2:feature-3]\n" },
         .{ "site", "base: base\nservices:\n  search:\n    exec: /search\n    user: search\n" ++
             "    pledge: stdio\n  runner:\n    exec: /runner\n    user: runner\n    pledge: " ++
             "stdio\n" },
@@ -2120,14 +2122,20 @@ test "compose: service runtime grants stay scoped and follow whole-service repla
         var meta = try tmp.dir.createDirPathOpen(io, try gpa.print("{s}-meta", .{name}), .{});
         defer meta.close(io);
         try compose(io, gpa, tmp.dir, forms, image, ro, meta, .{ .arch = .aarch64 }, &f);
-        try testing.expectEqualStrings("", try ro.readFileAlloc(
-            io,
+        for ([_][]const u8{
             "etc/runtime-hardening/allow/n8n/node/native",
+            "etc/runtime-hardening/allow/n8n/php/upload-progress",
+            "etc/runtime-hardening/allow/n8n/future-package2/feature-3",
+        }) |path| try testing.expectEqualStrings("", try ro.readFileAlloc(
+            io,
+            path,
             gpa,
             .limited(1),
         ));
         if (mem.eql(u8, name, "base")) {
             try ro.access(io, "etc/runtime-hardening/allow/search/java/native", .{});
+            try ro.access(io, "etc/runtime-hardening/allow/search/glibc/dlopen", .{});
+            try ro.access(io, "etc/runtime-hardening/allow/search/glibc/ifunc", .{});
         } else {
             try testing.expectError(error.FileNotFound, ro.access(
                 io,
@@ -2163,7 +2171,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     ;
     const web_form =
         \\base: minimal
-        \\allow: [jit, php:exec]
+        \\allow: [jit, php:exec, glibc:ifunc, future-package2:feature-3]
         \\net:
         \\  - listen tcp/80
         \\  - connect web tcp/443
@@ -2207,6 +2215,8 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         .{ "etc/werewolf/allow/jit", "" },
         // A runtime's allowance, in the portable tree, blanket (namespace all).
         .{ "etc/runtime-hardening/allow/all/php/exec", "" },
+        .{ "etc/runtime-hardening/allow/all/glibc/ifunc", "" },
+        .{ "etc/runtime-hardening/allow/all/future-package2/feature-3", "" },
         // The chain's accounts are added as apko adds them; only root is in group 0.
         .{ "usr/share/werewolf/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n" ++
             "sync:x:5:65533:sync:/sbin:/bin/sync\n" ++ added },
