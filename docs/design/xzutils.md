@@ -2,17 +2,15 @@
 
 ## Summary
 
-Remove glibc's audit callback machinery and require review of early-executing
-native dependencies. Keep compression code outside authentication processes.
-Implement loader changes in `../hardened-packages`, with native regression tests.
+Remove glibc audit callbacks, constrain native loading and keep compression outside
+authentication processes. Implement and test loader policy in `../hardened-packages`.
 
 ## Background
 
-The [xz backdoor][xz] entered liblzma through release build scripts. Some sshd
-packages loaded it through libsystemd. An indirect function (IFUNC) resolver,
-normally used to select CPU-specific code, ran during relocation. It forged
-loader audit state and intercepted a cryptographic function before relocation
-tables became read-only. No environment-controlled injection was necessary.
+The [xz backdoor][xz] reached liblzma through release scripts and some sshd packages
+through libsystemd. An indirect function (IFUNC) resolver, used for CPU dispatch,
+forged audit state during relocation and intercepted a cryptographic function
+before relocation tables became read-only. No environment injection was necessary.
 
 Our glibc rejects audit registration, preload and loader search overrides.
 Registration denial leaves callback dispatch reachable through forged state.
@@ -20,7 +18,7 @@ Registration denial leaves callback dispatch reachable through forged state.
 ## Goals
 
 - No production loader audit callback runs, even with forged registration state.
-- Existing libc CPU dispatch and ordinary library loading continue to work.
+- Services grant optional loading and additional IFUNCs; core CPU dispatch remains.
 - Package checks identify new IFUNCs and unexpected SSH native dependencies.
 - Native probes fail independently of the upstream suite's failure allowance.
 
@@ -28,72 +26,75 @@ Registration denial leaves callback dispatch reachable through forged state.
 
 - Isolating malicious libraries inside one native address space.
 - Removing libc's optimized functions or adding an audit compatibility allowance.
+- Timed grants, clock selection, restart budgets or automatic permission learning.
 
 ## Detailed design
 
 **First: audit dispatch.** Extend glibc's fixed loader policy. Remove callback
-dispatch bodies, retaining neutral internal entry points where callers need them.
-Do not consult a mutable enable bit or trust a zero callback count. Preserve
-ordinary symbol binding and reject explicit audit requests as before. Check all
-audit entry points, including symbol lookup, object lifecycle and PLT callbacks.
-Any remaining audit bookkeeping must not invoke pointers supplied by audit state.
+dispatch bodies, retaining neutral internal entry points and ordinary binding.
+Do not trust a mutable enable bit or zero callback count. Reject explicit audit
+requests; no symbol lookup, object lifecycle, PLT or bookkeeping path may call
+pointers supplied by audit state.
 
-Add a native test using glibc's own internal types. Supply forged callback state
-and exercise the dispatch entry points; no callback may run or change a binding.
-Run a positive control against unmodified dispatch to prove the fixture works.
-Exercise normal IFUNC dispatch, startup and later library loading separately.
-Keep the full upstream suite and its existing failure ceiling.
+Test every entry point with forged state using glibc's internal types; no callback
+may run or change a binding. Use unmodified dispatch as a positive control. Keep
+IFUNC and loading probes, the full upstream suite and its existing failure ceiling.
 
-**Next: IFUNC admission.** Inventory ELF dynamic symbols and architecture-specific
-IRELATIVE relocations in the built image. Approve a small core baseline and
-explicit additional objects. New resolver use fails image review; a library's
-SONAME or self-declared metadata cannot authorize itself. Approval comes from
-reviewed policy, bound to the image's verified files. Packages cannot silently
-expand it during refresh.
+**Next: service allowances.** Add `glibc:dlopen` and `glibc:ifunc` to
+`services.NAME.allow`, using existing root-held regular-file grants under
+`/etc/runtime-hardening/allow/<ns>/glibc/`. The supervisor assigns the service's
+cgroup namespace. Grants authorize the service and its descendants across restarts;
+fork and exec neither add nor remove them. Missing grants deny the capability;
+malformed policy fails closed. No durations, symlink grants or deadline state.
 
-Runtime enforcement is later work. Check the defining object before invoking a
-resolver, including startup, dlopen, dlmopen, dlsym and dlvsym on both architectures.
-Policy must be available before non-core relocation code runs. Constructors are
-too late. Reject forbidden resolvers; never guess an implementation to substitute.
-Static executables need separate build checks because they can bypass ld.so.
+`glibc:dlopen` permits runtime loading through dlopen, dlmopen and libc's internal
+loading paths. Initial linked dependencies remain supported. Allowed operations
+retain upstream semantics. Keep shell execution under the existing exec allowlist.
 
-**Dependencies and permissions.** Check the SSH dependency closure at image build:
-no liblzma or unnecessary libsystemd. Inspect binaries without executing them.
-For services needing compression, prefer a separate worker with bounded resources,
-explicit inputs and outputs, no secrets, network or child execution. The current
-`narrow` floor is broader than a descriptor-only worker and needs separate review.
+`glibc:ifunc` permits resolvers beyond a small reviewed core baseline, bound to
+verified object identity rather than SONAME or self-declared metadata. Inventory
+IFUNC symbols and IRELATIVE relocations. Enforcement must precede resolver execution
+at startup, loading and dlsym/dlvsym on both architectures; constructors are too late.
+Reject forbidden resolvers; never substitute an implementation. Static executables
+need separate build checks because they can bypass ld.so. These gates are later work.
+
+Remove foreign stdio vtable compatibility exceptions without an allowance. Preserve
+upstream supported stream behavior; do not rewrite logging or general stdio dispatch.
+
+**Dependencies and permissions.** Check SSH's native dependency closure at build:
+no liblzma or unnecessary libsystemd; inspect binaries without executing them.
+Compression workers need bounded resources, explicit I/O, no secrets, network or
+child execution. Review `narrow` before claiming descriptor-only isolation.
 
 **Delivery.** Bump the glibc policy revision for changed package bytes. Validate
 patch application at the locked source, then native probes, upstream results and
-ABI on x86_64 and aarch64. Publish only validated packages. Update Werewolf's source
-pins after the reviewed package commit is published, as CONTRIBUTING.md requires.
+ABI on x86_64 and aarch64. Publish only validated packages. Advance Werewolf's pins
+after publishing the reviewed package commit, as CONTRIBUTING.md requires.
 
 ## Drawbacks
 
-Removing audit dispatch adds downstream maintenance and prevents loader profilers
-from working. IFUNC admission needs an inventory and explicit exceptions. Loader
-startup has few safe APIs; runtime policy parsing would enlarge trusted code.
+Audit removal adds maintenance and prevents loader profilers from working. Loading
+and IFUNC gates require service declarations. Early policy reads enlarge loader code.
 
 ## Alternatives Considered
 
 - Disable LD_AUDIT alone: the backdoor fabricated registration in memory.
 - Add an audit allowance: retains unused callbacks in every production loader.
 - Disable every IFUNC: breaks CPU dispatch without isolating ordinary native code.
-- Move RELRO earlier: initialization still needs writes; ordering changes are
-  larger and do not establish a boundary against malicious code in the process.
-- Trust reproducible builds: compromised inputs can reproduce a compromised output.
+- Timed grants: defer until a concrete threat justifies clock and restart semantics.
+- Earlier RELRO or reproducibility does not establish trust in loaded native code.
 
 ## Security Considerations
 
 Native code inherits its process's authority. Constructors and ordinary functions
 remain execution routes; a loader check is admission policy, not a library sandbox.
-RELRO and W^X do not make arbitrary data immutable against an already compromised
-process. Preserve kernel confinement before exec, including loader initialization.
+RELRO and W^X do not stop data corruption by native code already in the process.
+Preserve kernel confinement before exec, including loader initialization.
 
 ## Reliability Considerations
 
-Land audit removal separately from IFUNC restrictions. Failed validation retains
-the previous release. Check denials and useful behavior on both architectures;
-patch application and host unit tests alone do not establish runtime protection.
+Land audit removal separately. Failed validation retains the previous release.
+Check denials and useful behavior on both architectures; patch application and
+host tests alone do not establish runtime protection.
 
 [xz]: https://www.openwall.com/lists/oss-security/2024/03/29/4

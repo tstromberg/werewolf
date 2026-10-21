@@ -850,7 +850,7 @@ pub fn loadIn(
                 if (s.value.get("allow")) |grants| {
                     if (!isScalars(grants)) return f.fail(
                         gpa,
-                        "{s}: services: {s}: allow is a list of RUNTIME:NAME allowances",
+                        "{s}: services: {s}: allow is a list of PACKAGE:NAME allowances",
                         .{ path, s.key },
                     );
                     if (grants.list.len > 0 and (mem.eql(u8, s.key, allow.runtime_blanket) or
@@ -865,7 +865,8 @@ pub fn loadIn(
                     ) == null)
                         return f.fail(
                             gpa,
-                            "{s}: services: {s}: allow {s}: no such RUNTIME:NAME allowance",
+                            "{s}: services: {s}: allow {s}: expected PACKAGE:NAME, each " ++
+                                "nonempty and using only a-z, 0-9 and dash",
                             .{ path, s.key, grant.scalar.text },
                         );
                 }
@@ -907,7 +908,8 @@ pub fn loadIn(
             ) == null and allow.RuntimeAllowance.parse(a.scalar.text) == null)
                 return f.fail(
                     gpa,
-                    "{s}: allow {s}: no such allowance, or RUNTIME:NAME (lib/allow.zig lists them)",
+                    "{s}: allow {s}: expected a general allowance (lib/allow.zig) or " ++
+                        "PACKAGE:NAME, each nonempty and using only a-z, 0-9 and dash",
                     .{ path, a.scalar.text },
                 );
         } else if (mem.eql(u8, e.key, "weaknesses")) {
@@ -2070,8 +2072,11 @@ test "load: allow names allowances; app is an absolute path" {
         .{ "php", "allow: [jit, php:exec]\n" },
         .{ "root", "allow: [root]\n" },
         .{ "scalar", "allow: jit\n" },
-        .{ "runtime", "allow: [php:fpassthru]\n" },
-        .{ "language", "allow: [perl:exec]\n" },
+        .{ "runtime", "allow: [php:upload-progress, glibc:dlopen, future-package2:feature-3]\n" },
+        .{ "empty", "allow: ['php:']\n" },
+        .{ "underscore", "allow: [php:proc_open]\n" },
+        .{ "uppercase", "allow: [PHP:exec]\n" },
+        .{ "traversal", "allow: [../php:exec]\n" },
         .{ "relative", "app: usr/lib/app\n" },
         .{ "up", "app: /usr/../etc\n" },
     }) |form| {
@@ -2086,7 +2091,25 @@ test "load: allow names allowances; app is an absolute path" {
     try testing.expectEqualStrings("jit", (try node.items(gpa, "allow"))[0]);
     const php = try load(io, gpa, tmp.dir, "php", &f);
     try testing.expectEqualStrings("php:exec", (try php.items(gpa, "allow"))[1]);
-    for ([_][]const u8{ "root", "scalar", "runtime", "language", "relative", "up" }) |name|
+    const runtime = try load(io, gpa, tmp.dir, "runtime", &f);
+    const grants = try runtime.items(gpa, "allow");
+    try testing.expectEqual(3, grants.len);
+    for ([_][]const u8{
+        "php:upload-progress",
+        "glibc:dlopen",
+        "future-package2:feature-3",
+    }, grants) |want, got|
+        try testing.expectEqualStrings(want, got);
+    for ([_][]const u8{
+        "root",
+        "scalar",
+        "empty",
+        "underscore",
+        "uppercase",
+        "traversal",
+        "relative",
+        "up",
+    }) |name|
         try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
 }
 
@@ -2162,10 +2185,14 @@ test "service runtime allowances reject invalid grants and blanket namespaces" {
     try tmp.dir.createDirPath(io, "forms/site");
     for ([_][]const u8{
         "  app:\n    allow: java:native\n",
-        "  app:\n    allow: [java:unknown]\n",
-        "  app:\n    allow: [perl:native]\n",
+        "  app:\n    allow: ['java:']\n",
+        "  app:\n    allow: [':native']\n",
+        "  app:\n    allow: [php:proc_open]\n",
+        "  app:\n    allow: [PHP:exec]\n",
+        "  app:\n    allow: [java:native:extra]\n",
         "  app:\n    allow: [jit]\n",
         "  app:\n    allow: [java:../native]\n",
+        "  app:\n    allow: [glibc:dlopen:15]\n",
         "  all:\n    allow: [java:native]\n",
         "  app:\n    image: ghcr.io/x/app:1\n    allow: [java:native]\n",
         "  app:\n    root: /oci/app\n    allow: [java:native]\n",
@@ -2175,6 +2202,7 @@ test "service runtime allowances reject invalid grants and blanket namespaces" {
             .data = try mem.concat(gpa, u8, &.{ "services:\n", spec }),
         });
         var f: Failure = .{};
+        errdefer std.debug.print("{s}: {s}\n", .{ spec, f.text });
         try testing.expectError(error.Form, load(io, gpa, tmp.dir, "site", &f));
         try testing.expect(mem.find(u8, f.text, "allow") != null);
     }

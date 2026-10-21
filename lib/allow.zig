@@ -52,59 +52,27 @@ pub const runtime_dir = "/etc/runtime-hardening/allow";
 /// that service's cgroup namespace instead.
 pub const runtime_blanket = "all";
 
-/// Runtime is a language runtime werewolf rebuilds with its protections
-/// compiled in (docs/design/hardened-interpreters.md). A form takes one back
-/// as RUNTIME:NAME, and the image holds it under runtime_dir.
-pub const Runtime = enum {
-    java,
-    python,
-    php,
-    node,
-
-    /// names lists what a form may take back from the runtime's build. Every
-    /// runtime also takes back `inline` (code given inline or on stdin, not
-    /// read from a file on the root) and `writable-source` (a script whose
-    /// file is on a writable mount). Both are denied by default, so only code
-    /// already on the read-only root runs.
-    pub fn names(r: Runtime) []const []const u8 {
-        // Capability groups, in the manner of pledge promises: a form grants
-        // the class, not each function, so moving within a class (popen to
-        // system) needs no new grant. Shared names mean one vocabulary.
-        //   deserialize  rebuild objects from untrusted bytes
-        //   native       leave the managed runtime for native code or memory
-        //   exec         spawn external programs
-        //   phar         the phar:// archive wrapper
-        return switch (r) {
-            // deserialize: ObjectInputStream. native: sun.misc.Unsafe, the
-            // Foreign Function and Memory API, and JNI native access.
-            .java => &.{ "deserialize", "inline", "native", "writable-source" },
-            // deserialize: pickle (and what builds on it). native: ctypes,
-            // with which Python code writes its own memory.
-            .python => &.{ "deserialize", "inline", "native", "writable-source" },
-            // exec: the disable_functions floor. native: dl loading an
-            // extension. deserialize: unserialize making objects.
-            .php => &.{ "deserialize", "exec", "inline", "native", "phar", "writable-source" },
-            // exec: child processes and package scripts. native: addons, FFI,
-            // WASI and SQLite extensions. inline also covers worker eval.
-            .node => &.{ "exec", "inline", "native", "writable-source" },
-        };
-    }
-};
-
-/// RuntimeAllowance is RUNTIME:NAME, one thing a form takes back from a runtime.
+/// RuntimeAllowance is PACKAGE:NAME, a capability granted to a hardened package.
+/// Packages define their own capability names; forms validate only the shape.
 pub const RuntimeAllowance = struct {
-    runtime: Runtime,
+    runtime: []const u8,
     name: []const u8,
 
-    /// parse returns word as a runtime allowance, or null unless it is
-    /// RUNTIME:NAME with a NAME that runtime defines.
+    /// parse requires exactly one colon between two nonempty names made of
+    /// a-z, 0-9 and dash, safe as single components of the allowance path.
     pub fn parse(word: []const u8) ?RuntimeAllowance {
         const colon = std.mem.findScalar(u8, word, ':') orelse return null;
-        const runtime = std.meta.stringToEnum(Runtime, word[0..colon]) orelse return null;
+        const runtime = word[0..colon];
         const name = word[colon + 1 ..];
-        for (runtime.names()) |n| if (std.mem.eql(u8, n, name))
-            return .{ .runtime = runtime, .name = n };
-        return null;
+        if (!isName(runtime) or !isName(name)) return null;
+        return .{ .runtime = runtime, .name = name };
+    }
+
+    pub fn isName(name: []const u8) bool {
+        if (name.len == 0) return false;
+        for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-')
+            return false;
+        return true;
     }
 };
 
@@ -167,33 +135,31 @@ fn upper(comptime s: []const u8) []const u8 {
 
 test "RuntimeAllowance.parse" {
     const t = std.testing;
-    const a = RuntimeAllowance.parse("php:exec").?;
-    try t.expectEqual(Runtime.php, a.runtime);
-    try t.expectEqualStrings("exec", a.name);
-    try t.expectEqual(Runtime.java, RuntimeAllowance.parse("java:deserialize").?.runtime);
-    for ([_][]const u8{ "exec", "native", "inline", "writable-source" }) |name| {
-        const word = try t.allocator.print("node:{s}", .{name});
+    for ([_][2][]const u8{
+        .{ "php", "exec" },
+        .{ "php", "upload-progress" },
+        .{ "glibc", "dlopen" },
+        .{ "glibc", "ifunc" },
+        .{ "future-package2", "feature-3" },
+        .{ "0123456789", "abcdefghijklmnopqrstuvwxyz-" },
+    }) |parts| {
+        const word = try t.allocator.print("{s}:{s}", .{ parts[0], parts[1] });
         defer t.allocator.free(word);
-        try t.expectEqual(Runtime.node, RuntimeAllowance.parse(word).?.runtime);
+        const grant = RuntimeAllowance.parse(word).?;
+        try t.expectEqualStrings(parts[0], grant.runtime);
+        try t.expectEqualStrings(parts[1], grant.name);
     }
-    try t.expectEqual(null, RuntimeAllowance.parse("node:environment"));
-    try t.expectEqual(null, RuntimeAllowance.parse("node:root"));
-    try t.expectEqual(null, RuntimeAllowance.parse("node:deserialize"));
     for ([_][]const u8{
-        "php",        "php:",        ":exec",              "php:fpassthru", "perl:exec",
-        "jit",        "php:exec:x",  "php:../exec",        "PHP:exec",
-        // The old per-function names, now folded into capability groups.
-             "php:proc_open",
-        "php:system", "java:unsafe", "java:native-access", "python:ctypes",
+        "",              "php",            "jit",            ":",
+        "php:",          ":exec",          "php:exec:x",     "php::exec",
+        "php:../exec",   "../php:exec",    "php:.",          ".:exec",
+        "php:/exec",     "php/other:exec", "php:exec/other", "php:exec\\other",
+        "PHP:exec",      "php:Exec",       "php_name:exec",  "php:proc_open",
+        "php.name:exec", "php:exec.name",  " php:exec",      "php:exec ",
+        "php:ex ec",     "php:exec\n",     "php:exec\x00",
+        "phé:exec",
+        "php:éxec",
     }) |w| try t.expectEqual(null, RuntimeAllowance.parse(w));
-}
-
-test "runtime allowance names are plain file names, listed once" {
-    for (std.enums.values(Runtime)) |r| for (r.names(), 0..) |n, i| {
-        try std.testing.expect(n.len > 0);
-        for (n) |c| try std.testing.expect(std.ascii.isLower(c) or c == '_' or c == '-');
-        for (r.names()[i + 1 ..]) |m| try std.testing.expect(!std.mem.eql(u8, n, m));
-    };
 }
 
 test "Cap.name" {

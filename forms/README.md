@@ -40,7 +40,7 @@ These are APK packages, not bootable qcow2 images; disk publication has separate
 | `recipes` | Melange recipe paths relative to this form, usually `../../../packages/NAME/NAME.yaml`; their directories supply the complete build context. Without this key, `melange/*.yaml` beside the form is discovered for distro-specific packages | added to, base first, once per resolved path |
 | `accounts`, `paths` | what apko installs beyond packages: `accounts` its `groups` and `users`, with ids optional, for an account something depends on by number or shell (a login account, a program's fixed uid); a service's user needs none, its id being its name's hash. `paths` its permissions. `repositories`, `keyring` and `archs` are minimal's alone | added to; `archs` the last form's |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `sh-shim` | added to |
-| `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim); and `RUNTIME:NAME`, what a hardened runtime gives back (`php:exec`, `java:deserialize`; docs/design/hardened-interpreters.md). General grants live in `/etc/werewolf/allow`; runtime grants in `/etc/runtime-hardening/allow/all/RUNTIME/NAME` | added to |
+| `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim); and `PACKAGE:NAME`, what a hardened package gives back (`php:exec`, `java:deserialize`; docs/design/hardened-interpreters.md). General grants live in `/etc/werewolf/allow`; package grants in `/etc/runtime-hardening/allow/all/PACKAGE/NAME` | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
 | `services` | its leashed services, one a name: leash's directives as keys ([cmd/leash](../cmd/leash/leash.zig) lists them), a value one line, a list one line each, which the build writes as `etc/sv/NAME/service` with `run` and `finish` on leash. `listen` and `connect` take a net line's words (`tcp/PORT`, `udp/PORT`, `icmp`, `public`, `loopback`, `lan`, `dns`): leash holds the TCP, fence the rest, so a service's network is said once. `image: REF` runs it in that image's tree, baked at `/oci/NAME` as `_oci-NAME` with the image's own command and environment, or `exec`'s; a tag is followed, the build baking its digest of the day ([docs/design/oci.md](../docs/design/oci.md)); `run DIR/` runs what is beneath DIR in it; `link: [NAME...]` reaches those services' ports on loopback | whole, last by name |
 | `users` | the machine's people, the top manifest's alone (a form others take may name none): each a name with `keys:` (lines of a `.pub`, security keys' unless `sshd:` takes key files) and `admin: true`, whose keys are root's too. Never in the image: `howl` packs them into the boot config, and init makes each an account (uid its name's hash in 1000-60000, home `/data/home/NAME`, ash where busybox gives one) and its keys file; `howl --users.NAME.keys LINE`, `--users.NAME.admin` | the top form's |
@@ -57,9 +57,12 @@ A service's `allow: [java:native]` grants a hardened runtime capability to that
 service's cgroup alone. The builder generates its read-only marker under
 `/etc/runtime-hardening/allow/NAME/java/native`; no rootfs file is needed.
 The CLI equivalent is `--services.NAME.allow java:native` (repeat for more grants).
-Unknown groups and general allowances such as `jit` are refused here; use top-level
-`allow` for image-wide grants. Service grants require the machine's root (no `image`
-or `root`), and `all` is reserved. Replacing a service replaces its grants too.
+Both parts of `PACKAGE:NAME` must be nonempty and use only `a-z`, `0-9` and `-`.
+Packages define their own names; forms validate the shape without a package or
+capability list. Unrecognized names have no effect in the package. General allowances
+such as `jit` require top-level `allow` for image-wide grants.
+Service grants require the machine's root (no `image` or `root`), and `all` is
+reserved. Replacing a service replaces its grants too.
 
 A service may declare `listen: tcp/0 loopback` for a kernel-assigned temporary
 port. This grants that service's bind request only: no port is published or
