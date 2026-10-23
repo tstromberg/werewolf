@@ -113,6 +113,10 @@ pub const Db = struct {
     /// The worker's private mount namespace supplies the writable directory.
     /// The caller must restrict the path to that directory before opening.
     pub fn open(path: [*:0]const u8) !Db {
+        return openWith(path, true);
+    }
+
+    fn openWith(path: [*:0]const u8, require_wal: bool) !Db {
         if (sqlite3_libversion_number() != 3054001) return error.UnexpectedSQLite;
         var handle: ?*sqlite3 = null;
         if (sqlite3_open_v2(
@@ -128,6 +132,13 @@ pub const Db = struct {
         errdefer db.close();
         try db.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;" ++
             " PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL;");
+        if (require_wal) {
+            var s = try db.prepare("PRAGMA journal_mode");
+            defer s.close();
+            if (sqlite3_step(s.handle) != row or
+                !std.mem.eql(u8, columnText(s.handle, 0) orelse "", "wal"))
+                return error.NotWal;
+        }
         try db.exec(@embedFile("age.sql"));
         return db;
     }
@@ -228,13 +239,30 @@ pub const Db = struct {
     }
 
     /// Read dated evidence only. The verdict is always recomputed against now.
-    pub fn verdict(db: *Db, domain: []const u8, now: i64) !age.Verdict {
+    /// Touch an LRU row at most once per hour to avoid one WAL write per DNS
+    /// query while keeping active domains in the 20,000-row cache.
+    pub fn decision(db: *Db, domain: []const u8, now: i64) !age.Decision {
+        const found = try db.readDecision(domain, now) orelse
+            return .{ .source = .none, .verdict = .unknown };
+        if (now >= 3600) {
+            var s = try db.prepare("UPDATE domain_age SET last_used_at=?2 " ++
+                "WHERE domain=?1 AND last_used_at<=?3");
+            defer s.close();
+            try s.text(1, domain);
+            try s.integer(2, now);
+            try s.integer(3, now - 3600);
+            try s.run();
+        }
+        return found;
+    }
+
+    fn readDecision(db: *Db, domain: []const u8, now: i64) !?age.Decision {
         var s = try db.prepare("SELECT source,status,registered_at,effective_at," ++
             "ct_first_seen_at,fetched_at FROM domain_age WHERE domain=?1");
         defer s.close();
         try s.text(1, domain);
         const rc = sqlite3_step(s.handle);
-        if (rc == done) return .unknown;
+        if (rc == done) return null;
         if (rc != row) return error.SQLite;
         const source = columnText(s.handle, 0) orelse return error.Corrupt;
         const status = columnText(s.handle, 1) orelse return error.Corrupt;
@@ -263,7 +291,14 @@ pub const Db = struct {
             .ct_first_seen_at = columnOptionalInt(s.handle, 4),
             .fetched_at = sqlite3_column_int64(s.handle, 5),
         };
-        return age.cachedVerdict(evidence, domain, now);
+        return .{
+            .source = switch (evidence.source) {
+                .rdap => .rdap,
+                .crtsh => .crtsh,
+                .none => .none,
+            },
+            .verdict = age.cachedVerdict(evidence, domain, now),
+        };
     }
 };
 
@@ -279,7 +314,8 @@ fn columnOptionalInt(s: *sqlite3_stmt, index: c_int) ?i64 {
 }
 
 test "pinned static SQLite opens the age schema with foreign keys" {
-    var db = try Db.open(":memory:");
+    try std.testing.expectError(error.NotWal, Db.open(":memory:"));
+    var db = try Db.openWith(":memory:", false);
     defer db.close();
     try db.exec(
         "INSERT INTO age_check (domain,started_at,cause,request_id,dns_id,qname,qtype," ++
@@ -310,7 +346,7 @@ fn scalar(db: *Db, sql: [*:0]const u8) !i64 {
 
 test "age check provenance and evidence complete atomically" {
     const t = std.testing;
-    var db = try Db.open(":memory:");
+    var db = try Db.openWith(":memory:", false);
     defer db.close();
     const trigger: Trigger = .{
         .domain = "example.com",
@@ -361,12 +397,16 @@ test "age check provenance and evidence complete atomically" {
         "d.last_check_id=c.id " ++
         "WHERE d.domain='example.com' AND c.request_id=77 AND c.service_uid=1001 " ++
         "AND c.provenance='uid_only' AND c.process_pid IS NULL"));
-    try t.expectEqual(age.Verdict.young, try db.verdict("example.com", 120));
+    try t.expectEqual(age.Verdict.young, (try db.decision("example.com", 120)).verdict);
     try t.expectEqual(
         age.Verdict.unknown,
-        try db.verdict("example.com", 120 + age.rdap_cache_s + 1),
+        (try db.decision("example.com", 120 + age.rdap_cache_s + 1)).verdict,
     );
-    try t.expectEqual(age.Verdict.unknown, try db.verdict("absent.com", 120));
+    try t.expectEqual(
+        @as(i64, 120 + age.rdap_cache_s + 1),
+        try scalar(&db, "SELECT last_used_at FROM domain_age WHERE domain='example.com'"),
+    );
+    try t.expectEqual(age.Verdict.unknown, (try db.decision("absent.com", 120)).verdict);
     try t.expectError(error.CheckMismatch, db.finishCheck(id, good));
 
     var newer_trigger = trigger;
@@ -390,5 +430,7 @@ test "age check provenance and evidence complete atomically" {
         fast,
         try scalar(&db, "SELECT last_check_id FROM domain_age WHERE domain='example.com'"),
     );
-    try t.expectEqual(age.Verdict.mature, try db.verdict("example.com", newer.fetched_at));
+    const decision = try db.decision("example.com", newer.fetched_at);
+    try t.expectEqual(age.Verdict.mature, decision.verdict);
+    try t.expectEqual(.rdap, decision.source);
 }

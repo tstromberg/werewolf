@@ -6,7 +6,18 @@ const wire = @import("wire.zig");
 
 pub const header_len = 23;
 pub const max_len = header_len + 253;
+pub const response_header_len = 12;
+pub const response_max = response_header_len + 253;
 pub const Transport = enum(u8) { udp = 0, tcp = 1 };
+pub const Verdict = enum(u8) { unknown = 0, young = 1, mature = 2 };
+pub const Source = enum(u8) { none = 0, rdap = 1, crtsh = 2 };
+
+pub const Response = struct {
+    request_id: u64,
+    verdict: Verdict,
+    source: Source,
+    domain: ?wire.Name = null,
+};
 
 pub const Request = struct {
     request_id: u64,
@@ -54,6 +65,36 @@ pub fn decode(packet: []const u8) ?Request {
         .policy_generation = std.mem.readInt(u32, packet[18..22], .big),
         .transport = transport,
         .name = name,
+    };
+}
+
+pub fn encodeResponse(out: *[response_max]u8, response: *const Response) []const u8 {
+    out[0] = 1;
+    out[1] = @backingInt(response.verdict);
+    out[2] = @backingInt(response.source);
+    out[3] = if (response.domain) |domain| domain.len else 0;
+    std.mem.writeInt(u64, out[4..12], response.request_id, .big);
+    if (response.domain) |domain|
+        @memcpy(out[response_header_len..][0..domain.len], domain.text());
+    return out[0 .. response_header_len + out[3]];
+}
+
+pub fn decodeResponse(packet: []const u8) ?Response {
+    if (packet.len < response_header_len or packet.len > response_max or
+        packet[0] != 1 or packet.len != response_header_len + @as(usize, packet[3]))
+        return null;
+    const verdict: Verdict = std.enums.fromInt(Verdict, packet[1]) orelse return null;
+    const source: Source = std.enums.fromInt(Source, packet[2]) orelse return null;
+    const domain: ?wire.Name = if (packet[3] == 0)
+        null
+    else
+        wire.Name.fromText(packet[response_header_len..]) catch return null;
+    if (verdict != .unknown and (source == .none or domain == null)) return null;
+    return .{
+        .request_id = std.mem.readInt(u64, packet[4..12], .big),
+        .verdict = verdict,
+        .source = source,
+        .domain = domain,
     };
 }
 
@@ -111,4 +152,35 @@ test "age request rejects forged versions, types and names" {
     buf[15] = 1;
     buf[header_len] = 'A';
     try t.expect(decode(buf[0..len]) == null);
+}
+
+test "age replies bind a verdict, evidence source and registered domain" {
+    const t = std.testing;
+    var buf: [response_max]u8 = undefined;
+    const sent: Response = .{
+        .request_id = 123456,
+        .verdict = .mature,
+        .source = .rdap,
+        .domain = try wire.Name.fromText("example.com"),
+    };
+    const len = encodeResponse(&buf, &sent).len;
+    const got = decodeResponse(buf[0..len]).?;
+    try t.expectEqual(sent.request_id, got.request_id);
+    try t.expectEqual(sent.verdict, got.verdict);
+    try t.expectEqual(sent.source, got.source);
+    try t.expectEqualStrings(sent.domain.?.text(), got.domain.?.text());
+    try t.expect(decodeResponse(buf[0 .. len - 1]) == null);
+    buf[2] = 0;
+    try t.expect(decodeResponse(buf[0..len]) == null);
+    buf[2] = 1;
+    buf[response_header_len] = 'A';
+    try t.expect(decodeResponse(buf[0..len]) == null);
+    const missing: Response = .{
+        .request_id = 4,
+        .verdict = .unknown,
+        .source = .none,
+        .domain = try wire.Name.fromText("example.com"),
+    };
+    const absent = encodeResponse(&buf, &missing);
+    try t.expect(decodeResponse(absent) != null);
 }
