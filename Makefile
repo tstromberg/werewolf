@@ -777,6 +777,20 @@ check-lan: $(call program_bin,fence)
 # check-unwound runs the real fence and unwound against a fixture resolver
 # in private namespaces, as root, on Linux (cmd/unwound/README.md).
 .PHONY: check-unwound check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels fuzz-unwound
+
+# The age writer is statically linked with a hash-pinned SQLite amalgamation.
+# This host test exercises the real schema before the writer joins unwound.
+UNWOUND_SQLITE = out/third-party/sqlite-3540100
+$(UNWOUND_SQLITE)/sqlite3.c: tools/checkout-unwound-sqlite
+	python3 tools/checkout-unwound-sqlite
+build/host/unwound-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
+	@mkdir -p $(dir $@)
+	zig cc -O2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=0 -c $< -o $@
+.PHONY: check-unwound-age-store
+check-unwound-age-store: build/host/unwound-sqlite.o
+	zig test -lc cmd/unwound/age_db.zig $<
+	python3 test/check-unwound-age-db
+
 check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
 	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
 # Lab check with a freshly signed local TLSA zone and a deliberately invalid
