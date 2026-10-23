@@ -1,7 +1,7 @@
 # caddy: prod, with Caddy serving a site from the image and getting its
 # own certificates. leash starts it (etc/sv/caddy/service) as the caddy
 # user, able to bind :80 and :443 and nothing else, to reach the ACME CA
-# and a resolver, and to write only its own directories: the certificates
+# by name through unwound, and to write only its own directories: the certificates
 # and ACME account live in /data/svc/caddy. Its admin API is off. The
 # site's name is a setting (--domain); without one it serves plain HTTP on
 # :80. A form of your own includes this one and lays its Caddyfile over
@@ -13,8 +13,7 @@ packages:
 
 services:
   # Caddy, as its own user: it may bind :80 and :443 and no other port,
-  # reach the ACME CA over HTTPS and a resolver over TCP (UDP is not a
-  # port Landlock names; fence holds it to 53), read its configuration and
+  # reach the ACME CA over HTTPS after a screened lookup, read its configuration and
   # the site, and write only its own directories. The site's name comes
   # from the machine's settings as DOMAIN, which the Caddyfile reads;
   # without one it is :80, plain HTTP.
@@ -24,7 +23,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53]
+    connect: [tcp/443]
+    lookup: "*"
     read: /etc/caddy /usr/share/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname as DOMAIN

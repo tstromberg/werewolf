@@ -34,10 +34,10 @@ and a `detail` for each question that gets no answer; a lost one is counted.
    that UID send from it to 127.0.0.53. Others, root included, get EACCES;
    forged loopback over a veth is a martian; passed sockets keep their label.
 2. **The forwarder**, with exact, `*.NAME` and `* unfiltered` grants. Done.
-3. **Werewolf integration.** Done: `lookup:` in forms and compose, fence's
-   label rules, `_unwound` and `_unwoundnet` in minimal, `/etc/resolv.conf`
-   → 127.0.0.53, `dns USER` and port 53 grants refused at build, qemu-host
-   and playground moved to `lookup root * all unfiltered`, `check-unwound`.
+3. **Werewolf integration.** Core done: `lookup:` in forms and compose,
+   fence labels, `_unwound` and `_unwoundnet` in minimal, resolver at
+   127.0.0.53, direct DNS grants refused, and `check-unwound`. Existing
+   applications still need migration; see [rollout](unwound-rollout.md).
 4. **Screening `*`**, below. Done, including `check-unwound-tunnels`.
 5. **A cache for every grant**, below. Done.
 6. **DNS over TCP framing.** Done: one connection may carry successive or
