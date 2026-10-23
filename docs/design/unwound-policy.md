@@ -69,10 +69,11 @@ The builder derives the user ID; the compiled policy's `dns-direct UID` line
 is an internal fence instruction, not form syntax. A top-level `net:` exception
 and a shared service user are refused.
 
-## Deferred: age and endpoint evidence
+## Planned: age and endpoint evidence
 
-The following is research for a later updater; none of it authorizes current
-queries. A reviewed endpoint list may identify known out-of-band DNS endpoints,
+The [age design](unwound-age.md) specifies the next implementation stage;
+none of it authorizes current queries. A reviewed endpoint list may identify
+known out-of-band DNS endpoints,
 but an entry would express risk policy rather than prove maliciousness.
 
 Age defaults to 30 days from the current registry [RDAP] registration event. Match the
