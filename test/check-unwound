@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qs, urlsplit
 
 UPSTREAM = '10.53.0.2'
 AGE_HTTPS = '8.8.8.8'
@@ -100,6 +101,8 @@ def answer(query, tcp):
     a = lambda ip: socket.inet_aton(ip)
     if name in ('rdap.verisign.com', 'rdap.publicinterestregistry.org', 'crt.sh') and qtype == 1:
         return [reply([record(qname, 1, a(AGE_HTTPS))])]
+    if name in ('expires.com', 'ctexpires.com') and qtype == 1:
+        return [reply([record(qname, 1, a('192.0.2.60'))])]
     if name == 'slow.example.test':
         return []
     if name == 'spoof.example.test':
@@ -220,20 +223,23 @@ def age_https(cert, key, log_path):
                              if x.lower().startswith('host: ')), '')
                 path = line.split(' ')[1]
                 log.write(json.dumps({'host': host, 'path': path}) + '\n')
+                recent = (datetime.datetime.now(datetime.timezone.utc) -
+                          datetime.timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
                 if host == 'crt.sh':
-                    assert 'q=outage.com' in path, path
-                    body = json.dumps([{'name_value': 'outage.com',
-                                        'min_entry_timestamp': '2020-01-01T00:00:00'}]).encode()
+                    domain = parse_qs(urlsplit(path).query)['q'][0]
+                    assert domain in ('outage.com', 'ctexpires.com'), path
+                    when = recent if domain == 'ctexpires.com' else '2020-01-01T00:00:00'
+                    body = json.dumps([{'name_value': domain,
+                                        'min_entry_timestamp': when}]).encode()
                     status = '200 OK'
                 else:
                     domain = path.rsplit('/', 1)[-1]
                     if domain == 'timeout.com':
                         time.sleep(16)
                         continue
-                    status = ('503 Service Unavailable' if domain == 'outage.com' else
+                    status = ('503 Service Unavailable' if domain in ('outage.com', 'ctexpires.com') else
                               '302 Found' if domain == 'redirect.com' else '200 OK')
-                    when = (datetime.datetime.now(datetime.timezone.utc) -
-                            datetime.timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%SZ') if domain == 'young.com' else '2020-01-01T00:00:00Z'
+                    when = recent if domain in ('young.com', 'expires.com') else '2020-01-01T00:00:00Z'
                     name = 'wrong.com' if domain == 'invalid.com' else domain
                     body = json.dumps({'objectClassName': 'domain', 'ldhName': name,
                                        'events': [{'eventAction': 'registration',
@@ -476,6 +482,21 @@ connect 55 tcp 443 public
                     VALUES (?,?,?,?,?,?,?,?,?,?)''',
                     (domain, 'rdap', status, effective, effective, now,
                      now + 86400, now, 'fixture', 'fixture'))
+            if age_live:
+                # Evidence expires while the screened DNS answers remain cached.
+                expires = now + 30
+                for domain, source, status, lifetime in (
+                    ('expires.com', 'rdap', 'valid', 7 * 86400),
+                    ('ctexpires.com', 'crtsh', 'history', 86400),
+                ):
+                    date = 946684800
+                    age_db.execute('''INSERT INTO domain_age
+                        (domain,source,status,registered_at,effective_at,ct_first_seen_at,
+                         fetched_at,retry_after,last_used_at,psl_generation,bootstrap_generation)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                        (domain, source, status, date if source == 'rdap' else None,
+                         date if source == 'rdap' else None, date if source == 'crtsh' else None,
+                         expires - lifetime, expires + 1, now, 'fixture', 'fixture'))
             age_db.commit()
             age_db.close()
             os.chown(age_dir, 55, 55)
@@ -639,13 +660,16 @@ def age_checks(client, work):
 
 
 def age_live_checks(client, work, age_dir):
-    def ask(name, timeout=15):
+    def ask(name, timeout=15, **extra):
         client.stdin.write(json.dumps({'uid': 2002, 'name': name, 'type': 1,
-                                       'timeout': timeout}) + '\n')
+                                       'timeout': timeout, **extra}) + '\n')
         client.stdin.flush()
         assert select.select([client.stdout], [], [], timeout + 3)[0], name
         return json.loads(client.stdout.readline())
 
+    for domain in ('expires.com', 'ctexpires.com'):
+        assert ask(domain)['answers'] == ['192.0.2.60']
+        assert ask(domain, tcp=True)['answers'] == ['192.0.2.60']
     assert ask('a.mature.com')['rcode'] == 3
     assert ask('b.mature.com')['rcode'] == 3
     assert ask('young.com')['rcode'] == 5
@@ -669,12 +693,27 @@ def age_live_checks(client, work, age_dir):
                           ('invalid.com',)).fetchone() == ('rdap', 'unknown')
         assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
                           ('invalidtls.org',)).fetchone() == ('rdap', 'unknown')
+        refresh_at = db.execute('SELECT retry_after FROM domain_age WHERE domain=?',
+                                ('expires.com',)).fetchone()[0]
     https = [json.loads(line) for line in (work / 'age-https.log').read_text().splitlines()]
     assert sum(x['host'] == 'rdap.verisign.com' and x['path'].endswith('/mature.com')
                for x in https) == 1, https
     assert sum(x['host'] == 'crt.sh' for x in https) == 1, https
+    assert not any('expires.com' in x['path'] for x in https), https
     assert 'young.com' not in [json.loads(x)['name'] for x in
                                (work / 'upstream.log').read_text().splitlines()], 'young reached upstream'
+    time.sleep(max(0, refresh_at - time.time()))
+    for domain in ('expires.com', 'ctexpires.com'):
+        assert ask(domain, tcp=True)['rcode'] == 5, domain
+    with contextlib.closing(sqlite3.connect(f'file:{age_dir}/age.db?mode=ro', uri=True)) as db:
+        for domain in ('expires.com', 'ctexpires.com'):
+            assert db.execute('SELECT cause,qname,transport FROM age_check WHERE domain=?',
+                              (domain,)).fetchall() == [('retry', domain, 'tcp')]
+        assert db.execute('SELECT rdap_result,crtsh_result FROM age_check WHERE domain=?',
+                          ('ctexpires.com',)).fetchone() == ('error', 'history')
+    upstream = [json.loads(line)['name'].lower()
+                for line in (work / 'upstream.log').read_text().splitlines()]
+    assert upstream.count('expires.com') == upstream.count('ctexpires.com') == 1, upstream
     timed = ask('timeout.com', timeout=13)
     assert 'error' in timed, timed
     client.stdin.write(json.dumps({'restart_unwound': True}) + '\n')

@@ -106,6 +106,8 @@ and requires HTTPS. `make check-unwound-age-store`, `check-unwound-age`,
 `check-unwound-age-authority` cover storage, live DNS decisions, provider
 failures and the Linux mount boundary. The shared native image check tries
 root writes and remounts on the booted cache, and checks for mount aliases.
+The live fixture also checks that expired RDAP and CT evidence cannot
+release a positive DNS answer already in the DNS cache.
 Old domains still face the other screens.
 
 [RFC 9083](https://www.rfc-editor.org/rfc/rfc9083.html#section-4.5) defines
