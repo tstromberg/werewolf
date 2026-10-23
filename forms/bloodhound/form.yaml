@@ -7,12 +7,10 @@
 # this form's package, on Java 11. See forms/bloodhound/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/bloodhound/neo4j.yaml
-
 with: [postgresql, caddy]
 
 packages:
+  - neo4j-4.4
   # pg_trgm, which BloodHound's first migration creates. The postgresql
   # form ships the server alone.
   - postgresql-17-contrib

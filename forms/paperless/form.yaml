@@ -8,12 +8,10 @@
 # forms/paperless/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/paperless/paperless.yaml
-
 with: [postgresql, valkey, caddy]
 
 packages:
+  - paperless
   # The interpreter, and what the wheels link. howl build-apk names the rest.
   - python-3.15
   - libstdc++

@@ -20,7 +20,7 @@ no ACLs, an open egress proxy, a log cluster with its default password.
 Its machines live for years, so updates and audit trails matter more.
 
 By our reading of cloud and virtualization surveys, the ten below lead.
-A form need not wait for Wolfi: melange builds from a pinned source,
+A form need not wait for Wolfi: werewolf's application feed builds from a pinned source,
 and `image:` runs a project's OCI image ([oci.md](oci.md)).
 
 ## Goals

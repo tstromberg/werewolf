@@ -1,11 +1,8 @@
 # Shared CPU inference runtime; applications supply their own service and models.
 base: app
-with: [libffi]
-
-recipes:
-  - ../../../packages/onnx/onnxruntime.yaml
 
 packages:
+  - py3.15-onnxruntime
   - python-3.15>=3.15.0_git20261010-r2000
   - libstdc++
 

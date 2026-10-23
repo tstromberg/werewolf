@@ -4,13 +4,14 @@
 # Keycloak, on loopback, keeps its tables in a schema of its own, reached
 # by PostgreSQL's socket. Its links name the base URL alone, whatever a
 # request's Host says. Its first administrator comes from the config
-# before it serves. Wolfi's Keycloak is old and brings bash: melange
-# builds upstream's release (../packages/keycloak/keycloak.yaml), and
+# before it serves. Wolfi's Keycloak is old and brings bash: werewolf's
+# application feed builds upstream's release
+# (../packages/keycloak/keycloak.yaml), and
 # java starts it, without kc.sh. See forms/keycloak/README.md.
 base: jre
 
-recipes:
-  - ../../../packages/keycloak/keycloak.yaml
+packages:
+  - keycloak-werewolf
 
 with: [postgresql, caddy]
 

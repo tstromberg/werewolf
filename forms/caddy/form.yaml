@@ -8,8 +8,10 @@
 # etc/caddy/Caddyfile. See forms/caddy/README.md.
 base: prod
 
+# Wolfi's Caddy loads at a fixed address; werewolf's application feed
+# builds it as a PIE, which ASLR moves (../packages/caddy).
 packages:
-  - caddy
+  - caddy-werewolf
 
 services:
   # Caddy, as its own user: it may bind :80 and :443 and no other port,

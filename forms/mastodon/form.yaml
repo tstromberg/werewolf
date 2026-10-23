@@ -1,7 +1,7 @@
 # mastodon: Mastodon, on ruby, with PostgreSQL, Valkey, Caddy, supercronic
 # and sh-shim beside it (form.yaml's with). Wolfi does not ship Mastodon:
-# melange builds it from a pinned release in Wolfi's environment
-# (../packages/mastodon/mastodon.yaml, cmd/howl/melange.zig) into
+# werewolf's application feed builds it from a pinned release in Wolfi's
+# environment (../packages/mastodon/mastodon.yaml) into
 # /usr/lib/mastodon, its assets compiled and its gems vendored. The
 # libraries they link are named below, so the updater keeps them current.
 # Three services run it: the web (etc/sv/mastodon), the streaming server
@@ -9,10 +9,8 @@
 # its own leash. See forms/mastodon/README.md.
 base: ruby
 
-recipes:
-  - ../../../packages/mastodon/mastodon.yaml
-
 packages:
+  - mastodon
   - nodejs-24
   - jemalloc
   # Media: libvips in the web and jobs, by FFI; ffmpeg, ffprobe and file

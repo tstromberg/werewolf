@@ -1,9 +1,6 @@
 # The real Log4Shell-era application on the same hardened JVM as current Solr.
 base: jre
 
-recipes:
-  - ../../../packages/solr-vuln-demo/solr.yaml
-
 updates: off
 
 weaknesses:
@@ -32,4 +29,5 @@ services:
     env: [HOME=/data/svc/solr, LANG=C.UTF-8]
 
 packages:
+  - solr-vuln-demo
   - coreutils

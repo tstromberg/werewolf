@@ -589,6 +589,7 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         }
         try Dir.cwd().deleteFile(b.io, programs);
     }
+    try checkPrograms(b, root_tar);
     Dir.cwd().deleteFile(b.io, target) catch {};
     try checkErofs(b);
     // -T0 dates every file and the image 1970, and the UUID is fixed
@@ -622,6 +623,51 @@ fn takes(b: *B, program: []const u8) !bool {
         while (it.next()) |p| if (mem.eql(u8, p, program)) return true;
     };
     return false;
+}
+
+/// checkPrograms refuses a root that holds a program image.judgeElf
+/// refuses: one with an executable stack, or one at a fixed address that
+/// image.elf_exceptions does not list, each of which it logs. An OCI
+/// service's tree is its publisher's build, and is not judged.
+fn checkPrograms(b: *B, root_tar: []const u8) !void {
+    const machine: std.elf.EM = switch (b.arch) {
+        .aarch64 => .AARCH64,
+        .x86_64 => .X86_64,
+    };
+    const file = try Dir.cwd().openFile(b.io, root_tar, .{});
+    defer file.close(b.io);
+    var rbuf: [64 << 10]u8 = undefined;
+    var r = file.readerStreaming(b.io, &rbuf);
+    var name_buf: [Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [Dir.max_path_bytes]u8 = undefined;
+    // Hard links and device nodes hold no bytes of their own: a hard link's
+    // file came earlier in the tar. The diagnostics collect them, skipped.
+    var skipped: std.tar.Diagnostics = .{ .allocator = b.gpa };
+    var it: std.tar.Iterator = .init(&r.interface, .{
+        .file_name_buffer = &name_buf,
+        .link_name_buffer = &link_buf,
+        .diagnostics = &skipped,
+    });
+    var head: [image.elf_head_len]u8 = undefined;
+    var refused: std.ArrayList(u8) = .empty;
+    while (try it.next()) |e| {
+        if (e.kind != .file) continue;
+        const name = mem.cutPrefix(u8, e.name, "./") orelse e.name;
+        if (mem.startsWith(u8, name, "oci/")) continue;
+        const n: usize = @intCast(@min(e.size, head.len));
+        try it.reader.readSliceAll(head[0..n]);
+        it.unread_file_bytes = e.size - n;
+        const problem = image.judgeElf(head[0..n], machine) orelse continue;
+        if (problem == .fixed_address) if (image.elfExcused(name, b.name, machine)) |why| {
+            try b.steps.note("/{s} loads at a fixed address, excused: {s}", .{ name, why });
+            continue;
+        };
+        try refused.print(b.gpa, "\n  /{s} {s}", .{ name, problem.text() });
+    }
+    if (refused.items.len > 0) return b.fail(
+        "the root holds programs ASLR cannot protect (lib/image.zig, elf_exceptions):{s}",
+        .{refused.items},
+    );
 }
 
 /// checkErofs refuses a mkfs.erofs that would write a bad root.

@@ -7,14 +7,17 @@
 # and has no shell: forms that log people in add busybox-full, as does any
 # form built with DEV=1. Every other form includes this one.
 #
-# Hardened Wolfi replacements share one signed feed (glibc and the runtimes).
-# howl and the updater verify that every installed package whose name the feed
-# covers matches its signed index; an unavailable feed or Wolfi fallback fails.
-# Explicit older runtime streams and OCI-contained runtimes remain separate.
-# Wolfi stays first: the updater reads its CVE feed there.
+# Hardened Wolfi replacements share one signed feed (glibc and the runtimes);
+# applications Wolfi does not ship, or ships unfit for a form, another
+# (../packages). howl and the updater verify that every installed package whose
+# name either feed covers matches its signed index; an unavailable feed or a
+# Wolfi fallback fails. Explicit older runtime streams and OCI-contained
+# runtimes remain separate. Wolfi stays first: the updater reads its CVE feed
+# there.
 repositories:
   - https://packages.wolfi.dev/os
   - https://dist.werewolf-linux.org/apk/hardened
+  - https://dist.werewolf-linux.org/apk/packages
   - https://dist.werewolf-linux.org/apk
 keyring:
   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub

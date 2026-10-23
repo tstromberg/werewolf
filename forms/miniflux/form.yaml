@@ -2,13 +2,14 @@
 # (with): Caddy serves it over HTTPS at the machine's base URL, with a
 # certificate from Let's Encrypt; Miniflux, on loopback, keeps its tables
 # in a schema of its own and fetches feeds from public addresses alone.
-# Wolfi does not ship Miniflux: melange builds it from a pinned release
-# (../packages/miniflux/miniflux.yaml). Its administrator comes from the
-# config before it serves. See forms/miniflux/README.md.
+# Wolfi does not ship Miniflux: werewolf's application feed builds it
+# from a pinned release (../packages/miniflux/miniflux.yaml). Its
+# administrator comes from the config before it serves. See
+# forms/miniflux/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/miniflux/miniflux.yaml
+packages:
+  - miniflux
 
 with: [postgresql, caddy]
 

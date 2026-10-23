@@ -4,16 +4,14 @@
 # other site under DOMAIN, with certificates from Let's Encrypt. Users and
 # secrets come from the config before it serves; nobody signs up, and
 # nothing is reachable without a rule. Wolfi does not ship Authelia:
-# melange builds it from a pinned release
+# werewolf's application feed builds it from a pinned release
 # (../packages/authelia/authelia.yaml). See forms/authelia/README.md.
 base: prod
-
-recipes:
-  - ../../../packages/authelia/authelia.yaml
 
 with: [caddy]
 
 packages:
+  - authelia
   # What ../packages/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 

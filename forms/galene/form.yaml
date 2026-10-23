@@ -4,12 +4,13 @@
 # Galène, on loopback, carries the media itself over one UDP port. Its
 # groups, their operator and the others' password come from the config,
 # hashed by galene-setup before it serves; no group is listed or open to
-# strangers. Wolfi does not ship Galène: melange builds it from a pinned
-# release (../packages/galene/galene.yaml). See forms/galene/README.md.
+# strangers. Wolfi does not ship Galène: werewolf's application feed
+# builds it from a pinned release (../packages/galene/galene.yaml). See
+# forms/galene/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/galene/galene.yaml
+packages:
+  - galene
 
 with: [caddy]
 

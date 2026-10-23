@@ -9,7 +9,7 @@ base: prod
 
 packages:
   - loki-3.7
-  - caddy
+  - caddy-werewolf
 
 services:
   # Loki, as its own user: it serves on loopback alone, behind Caddy, keeps

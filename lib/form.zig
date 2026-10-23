@@ -2057,12 +2057,12 @@ test "recipes resolve sibling contexts and retain distro source discovery" {
     fm.spec = try testParse(gpa,
         \\recipes:
         \\  - ../../../packages/solr/solr.yaml
-        \\  - ../../../hardened-packages/ports/libffi/libffi.yaml
+        \\  - ../../../packages/zot/zot.yaml
     );
     const declared = try fm.recipes(io, gpa, tmp.dir);
     try testing.expectEqual(2, declared.len);
     try testing.expectEqualStrings("../packages/solr/solr.yaml", declared[0]);
-    try testing.expectEqualStrings("../hardened-packages/ports/libffi/libffi.yaml", declared[1]);
+    try testing.expectEqualStrings("../packages/zot/zot.yaml", declared[1]);
     fm.spec = try testParse(gpa, "recipes: []");
     try testing.expectEqual(0, (try fm.recipes(io, gpa, tmp.dir)).len);
 }

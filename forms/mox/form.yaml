@@ -1,22 +1,20 @@
 # mox: prod, with Mox serving a domain's mail: SMTP on :25, submission on
 # :465 and :587, IMAP over TLS on :993, and on :443 its webmail, account
 # and admin pages, MTA-STS and autoconfig, with certificates it gets
-# itself. Wolfi does not ship Mox: melange builds it from a pinned release
-# (../packages/mox/mox.yaml), with one patch so it starts as its own
-# user. leash starts it (etc/sv/mox/service) as the mox user, after
-# mox-setup (forms/mox/cmd/mox-setup) writes its configuration from the
-# machine's settings. See forms/mox/README.md.
+# itself. Wolfi does not ship Mox: werewolf's application feed builds it
+# from a pinned release (../packages/mox/mox.yaml), with one patch so it
+# starts as its own user. leash starts it (etc/sv/mox/service) as the mox
+# user, after mox-setup (forms/mox/cmd/mox-setup) writes its
+# configuration from the machine's settings. See forms/mox/README.md.
 base: prod
 
 # Mox needs authenticated DNSSEC answers for DANE. Unbound validates locally;
 # unwound still applies Mox's lookup policy before forwarding to it.
 with: [unbound]
 
-recipes:
-  - ../../../packages/mox/mox.yaml
-
-# No packages beyond prod's: melange's mox is laid over the image
-# (cmd/howl/melange.zig), and, static, it links nothing.
+# Static, Mox links nothing beyond prod's packages.
+packages:
+  - mox
 
 # make check's, for this form alone (forms/README.md): its mail ports speak
 # SMTP and IMAP, not HTTP, and its own test/checks speaks to them.

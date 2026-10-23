@@ -46,7 +46,7 @@ def main():
                 root / (name + '.key'), '-pubout'))
         vendor = run('openssl', 'x509', '-in', root / 'vendor.crt', '-outform', 'DER')
         probe = root / 'init'
-        run('zig', 'build-exe', '-O', 'ReleaseSafe', '-target', args.arch + '-linux-musl',
+        run('zig', 'build-exe', '-O', 'ReleaseSafe', '-fPIE', '-target', args.arch + '-linux-musl',
             '--dep', 'authority', '--dep', 'apk', '-Mroot=test/boot-authority-init.zig',
             '--dep', 'apk', '-Mauthority=lib/boot-authority.zig', '--dep', 'package',
             '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe))

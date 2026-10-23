@@ -13,10 +13,8 @@
 # site; nginx refuses every dotfile, and the image is larger for it.
 base: php
 
-recipes:
-  - ../../../packages/wordpress-sqlite/wordpress-sqlite.yaml
-
 packages:
+  - wordpress-sqlite-integration
   - wordpress
   - php-8.5               # the php command, for the installer
   - php-8.5-pdo

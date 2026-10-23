@@ -410,8 +410,8 @@ pub fn apko(
     extra: []const []const u8,
     f: *Failure,
 ) !form.Node {
-    // werewolf's key, which signs minimal's hardened feed and, published,
-    // werewolf's own.
+    // werewolf's key, which signs minimal's hardened and application feeds
+    // and, published, werewolf's own.
     const key = try gpa.dupe(
         form.Node,
         &.{.{ .scalar = .{ .raw = package.keyring, .text = package.keyring } }},

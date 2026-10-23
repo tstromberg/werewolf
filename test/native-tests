@@ -264,10 +264,15 @@ def form_config(form, plan, pins=()):
     return yaml
 
 
+PROBE_FLAGS = ('-lc', '-O', 'ReleaseSafe', '-fstrip', '-fPIE')
+
+
 def probe_binary(arch):
     target = arch + '-linux-gnu' if arch in ('aarch64', 'x86_64') else None
     sources = sorted(Path('test/native').glob('*.zig')) + [Path('test/native/regex.c')]
-    identity = hashlib.sha256((str(target) + call('zig', 'version', capture_output=True, text=True).stdout +
+    # The flags are in the identity: a cached probe built otherwise is not this one.
+    identity = hashlib.sha256((str(target) + ' '.join(PROBE_FLAGS) +
+                               call('zig', 'version', capture_output=True, text=True).stdout +
                                ''.join(digest(p) for p in sources)).encode()).hexdigest()
     cache = Path('build/test-probes') / (arch + '-' + identity[:20])
     binary = cache / 'test-probes'
@@ -278,7 +283,7 @@ def probe_binary(arch):
         flags = ['-target', target] if target else []
         with tempfile.TemporaryDirectory(dir=cache) as directory:
             temporary = Path(directory) / 'test-probes'
-            call('zig', 'build-exe', '-lc', '-O', 'ReleaseSafe', '-fstrip', *flags,
+            call('zig', 'build-exe', *PROBE_FLAGS, *flags,
                  'test/native/probes.zig', 'test/native/regex.c', '-femit-bin=' + str(temporary))
             temporary.replace(binary)
     return binary
@@ -313,7 +318,7 @@ def prepare(form, arch):
         binary.parent.mkdir(parents=True, exist_ok=True)
         flags = ['-lc'] if transport else []
         target = arch + ('-linux-gnu' if transport else '-linux-musl')
-        call('zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target', target, *flags,
+        call('zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-fPIE', '-target', target, *flags,
              '--dep', 'test-driver', '-Mroot=' + str(source), '-Mtest-driver=test/native/driver.zig',
              '-femit-bin=' + str(binary))
 

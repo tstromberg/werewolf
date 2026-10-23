@@ -197,7 +197,7 @@ try:
     run(['openssl', 'req', '-newkey', 'rsa:4096', '-nodes', '-x509', '-sha256', '-days', '2',
          '-subj', '/CN=werewolf-shared-vendor', '-keyout', code_key, '-out', code_cert], 'vendor-key')
     run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', ssh_key], 'ssh-key')
-    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', 'aarch64-linux-musl',
+    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fPIE', '-target', 'aarch64-linux-musl',
          '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
          '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig', '-Mipe=lib/ipe.zig',
          '--dep', 'apk', '-Mtpm=lib/tpm.zig', '--dep', 'package', '-Mapk=lib/apk.zig',

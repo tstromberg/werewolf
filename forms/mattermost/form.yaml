@@ -4,13 +4,14 @@
 # made the system admin from the config, so no visitor claims it. Nobody
 # signs up without an invitation, and plugins, which are code, are off.
 # Mattermost keeps its tables and its configuration in a schema of its
-# own, and its files in /data/svc/mattermost. melange packages upstream's
-# release (../packages/mattermost/mattermost-team.yaml). See
+# own, and its files in /data/svc/mattermost. werewolf's application feed
+# packages upstream's release
+# (../packages/mattermost/mattermost-team.yaml). See
 # forms/mattermost/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/mattermost/mattermost-team.yaml
+packages:
+  - mattermost-team
 
 with: [postgresql, caddy]
 

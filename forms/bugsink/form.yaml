@@ -8,12 +8,10 @@
 # forms/bugsink/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/bugsink/bugsink.yaml
-
 with: [caddy]
 
 packages:
+  - bugsink
   # Revision 2 introduced the capability-group policy used by these forms.
   - python-3.15>=3.15.0_git20261010-r2000
   - tzdata

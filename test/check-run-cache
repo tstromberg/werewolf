@@ -121,7 +121,7 @@ try:
     label = form / 'rootfs/usr/share/werewolf/ab-release'
     label.parent.mkdir(parents=True)
     label.write_text('A\n')
-    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', 'aarch64-linux-musl',
+    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fPIE', '-target', 'aarch64-linux-musl',
          '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
          '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
          '-Mipe=lib/ipe.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig', '--dep', 'package',

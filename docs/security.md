@@ -86,6 +86,15 @@ script from writable storage. Images built with [IPE](design/ipe.md) hold native
 executables and mappings to one verified filesystem named by a signed policy; IPE does
 not authenticate scripts either.
 
+Address randomization covers the kernel and every program's code, data, stack and heap.
+werewolf's programs are static PIEs; the build refuses an executable stack, or a program
+at a fixed address that `lib/image.zig` does not name with its reason: Wolfi's runit, Go
+programs Wolfi builds without `-buildmode=pie` (gitea, prometheus and others) and
+upstream binaries shipped as they are, whose code an exploit finds without a leak.
+posture fails a kernel not randomized (arm64 with no boot seed) or booted with an
+argument turning it off. On x86_64, timing side channels can still reveal the kernel's
+base to local code.
+
 Persistent state lives on `/data`, LUKS2 when a key is supplied. init
 formats only blank storage; a volume it cannot open is left untouched,
 `/data` becomes an empty read-only tmpfs, and the trial slot cannot

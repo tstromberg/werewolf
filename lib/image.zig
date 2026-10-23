@@ -1,6 +1,6 @@
 //! image holds the steps of making a slot that the build host and the
-//! updater share: gunzip, the kernel unwraps, the kernel config check and
-//! mkfs.erofs's options. See lib/README.md.
+//! updater share: gunzip, the kernel unwraps, the kernel config check,
+//! the program check and mkfs.erofs's options. See lib/README.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -202,6 +202,127 @@ fn configValue(text: []const u8, name: []const u8) []const u8 {
     return "";
 }
 
+/// ElfProblem is what a root refuses in a program built for its machine.
+pub const ElfProblem = enum {
+    /// fixed_address is an executable linked to load at one address
+    /// (ET_EXEC), whose code and data ASLR cannot move.
+    fixed_address,
+    /// executable_stack asks the kernel for a stack code can run from.
+    executable_stack,
+    /// unreadable_headers puts the program headers past elf_head_len, where
+    /// no linker does, so neither of the others can be ruled out.
+    unreadable_headers,
+
+    pub fn text(p: ElfProblem) []const u8 {
+        return switch (p) {
+            .fixed_address => "loads at a fixed address, which ASLR cannot move " ++
+                "(build it as a PIE: -buildmode=pie, -fPIE, -pie)",
+            .executable_stack => "asks for an executable stack",
+            .unreadable_headers => "has its program headers too far in to check",
+        };
+    }
+};
+
+/// elf_head_len is how much of a file judgeElf needs: the ELF header and
+/// the program headers every linker puts right after it.
+pub const elf_head_len = 4096;
+
+/// judgeElf returns what a root refuses in a file, given its first
+/// elf_head_len bytes, or null. It judges only a 64-bit little-endian ELF
+/// executable or shared object for machine. Other files pass, and so do
+/// other machines' ELF files, such as the firmware QEMU loads into guests.
+pub fn judgeElf(head: []const u8, machine: std.elf.EM) ?ElfProblem {
+    if (head.len < 64 or !mem.startsWith(u8, head, "\x7fELF\x02\x01")) return null;
+    if (mem.readInt(u16, head[18..20], .little) != @backingInt(machine)) return null;
+    const exec = switch (mem.readInt(u16, head[16..18], .little)) {
+        @backingInt(std.elf.ET.EXEC) => true,
+        @backingInt(std.elf.ET.DYN) => false,
+        else => return null,
+    };
+    const phoff = mem.readInt(u64, head[32..40], .little);
+    const phentsize = mem.readInt(u16, head[54..56], .little);
+    const phnum = mem.readInt(u16, head[56..58], .little);
+    if (phentsize < 8 or phoff > head.len or phnum > (head.len - phoff) / phentsize)
+        return .unreadable_headers;
+    for (0..phnum) |i| {
+        const ph = head[@intCast(phoff + i * phentsize)..][0..8];
+        if (mem.readInt(u32, ph[0..4], .little) == @backingInt(std.elf.PT.GNU_STACK) and
+            mem.readInt(u32, ph[4..8], .little) & std.elf.PF_X != 0) return .executable_stack;
+    }
+    return if (exec) .fixed_address else null;
+}
+
+/// ElfException is a program a root may hold at a fixed address, and why.
+pub const ElfException = struct {
+    /// path is where the root holds it, without a leading slash.
+    path: []const u8,
+    why: []const u8,
+    /// form limits it to one form's root, for an application's path.
+    form: ?[]const u8 = null,
+    /// machine limits it to one architecture.
+    machine: ?std.elf.EM = null,
+};
+
+const wolfi_go = "Wolfi builds Go programs without -buildmode=pie";
+const upstream_binary = "upstream's own release binary, which ../packages fetches as it is";
+const typescript = "TypeScript's prebuilt compiler, from npm, among n8n's dependencies";
+
+/// elf_exceptions are the fixed-address programs forms take today. A new
+/// one fails the build until it is a PIE or listed here with its reason.
+pub const elf_exceptions = [_]ElfException{
+    .{ .path = "usr/bin/runit", .why = "Wolfi's static runit supervises; it reads no one's input" },
+    .{ .path = "usr/bin/runit-init", .why = "Wolfi's static runit, as runit's PID 1 handoff" },
+    .{ .path = "usr/bin/cloudflared", .why = wolfi_go },
+    .{ .path = "usr/bin/gatus", .why = wolfi_go },
+    .{ .path = "usr/bin/gitea", .why = wolfi_go },
+    .{ .path = "usr/bin/grype", .why = wolfi_go },
+    .{ .path = "usr/bin/loki", .why = wolfi_go },
+    .{ .path = "usr/bin/minio", .why = wolfi_go },
+    .{ .path = "usr/bin/nats-server", .why = wolfi_go },
+    .{ .path = "usr/bin/oauth2-proxy", .why = wolfi_go },
+    .{ .path = "usr/bin/ollama", .why = wolfi_go },
+    .{ .path = "usr/bin/bao", .why = wolfi_go },
+    .{ .path = "usr/bin/otelcol-contrib", .why = wolfi_go },
+    .{ .path = "usr/bin/prometheus", .why = wolfi_go },
+    .{ .path = "usr/bin/promtool", .why = wolfi_go },
+    .{ .path = "usr/bin/sftpgo", .why = wolfi_go },
+    .{ .path = "usr/bin/step-ca", .why = wolfi_go },
+    .{ .path = "usr/bin/supercronic", .why = wolfi_go },
+    .{ .path = "usr/bin/containerboot", .why = wolfi_go },
+    .{ .path = "usr/bin/tailscale", .why = wolfi_go },
+    .{ .path = "usr/bin/tailscaled", .why = wolfi_go },
+    .{ .path = "usr/bin/velociraptor", .why = upstream_binary },
+    .{ .path = "usr/lib/mattermost/bin/mattermost", .why = upstream_binary },
+    .{
+        .path = "usr/lib/n8n/node_modules/@typescript/typescript-linux-arm64/lib/tsc",
+        .machine = .AARCH64,
+        .why = typescript,
+    },
+    .{
+        .path = "usr/lib/n8n/node_modules/@typescript/typescript-linux-x64/lib/tsc",
+        .machine = .X86_64,
+        .why = typescript,
+    },
+    .{
+        .path = "usr/lib/app/server",
+        .form = "rust-example",
+        .machine = .AARCH64,
+        .why = "rustc's aarch64-unknown-linux-musl target links no static PIE",
+    },
+};
+
+/// elfExcused returns why form's root may hold path at a fixed address on
+/// machine, or null. Nothing excuses the other problems.
+pub fn elfExcused(path: []const u8, form: []const u8, machine: std.elf.EM) ?[]const u8 {
+    for (elf_exceptions) |e| {
+        if (!mem.eql(u8, e.path, path)) continue;
+        if (e.form) |f| if (!mem.eql(u8, f, form)) continue;
+        if (e.machine) |m| if (m != machine) continue;
+        return e.why;
+    }
+    return null;
+}
+
 const testing = std.testing;
 
 /// hello_gz is `printf 'hello\n' | gzip -n`.
@@ -287,6 +408,54 @@ test checkErofs {
         "mkfs.erofs (erofs-utils) 1.9.4\navailable compressors: lz4, lz4hc, deflate\n",
         &v,
     ));
+}
+
+/// testElf returns the head of an ELF file of type and machine with one
+/// PT_GNU_STACK program header of flags, as linkers lay one out.
+fn testElf(@"type": std.elf.ET, machine: std.elf.EM, stack_flags: u32) [64 + 56]u8 {
+    var h: [64 + 56]u8 = @splat(0);
+    @memcpy(h[0..6], "\x7fELF\x02\x01");
+    mem.writeInt(u16, h[16..18], @backingInt(@"type"), .little);
+    mem.writeInt(u16, h[18..20], @backingInt(machine), .little);
+    mem.writeInt(u64, h[32..40], 64, .little); // e_phoff
+    mem.writeInt(u16, h[54..56], 56, .little); // e_phentsize
+    mem.writeInt(u16, h[56..58], 1, .little); // e_phnum
+    mem.writeInt(u32, h[64..68], @backingInt(std.elf.PT.GNU_STACK), .little);
+    mem.writeInt(u32, h[68..72], stack_flags, .little);
+    return h;
+}
+
+test judgeElf {
+    const rw = std.elf.PF_R | std.elf.PF_W;
+    const pie = testElf(.DYN, .AARCH64, rw);
+    try testing.expectEqual(null, judgeElf(&pie, .AARCH64));
+    const exe = testElf(.EXEC, .AARCH64, rw);
+    try testing.expectEqual(.fixed_address, judgeElf(&exe, .AARCH64));
+    try testing.expectEqual(.fixed_address, judgeElf(&testElf(.EXEC, .X86_64, rw), .X86_64));
+    // A fixed address is excusable, so an executable stack is found first.
+    const rwx = rw | std.elf.PF_X;
+    try testing.expectEqual(.executable_stack, judgeElf(&testElf(.EXEC, .AARCH64, rwx), .AARCH64));
+    try testing.expectEqual(.executable_stack, judgeElf(&testElf(.DYN, .AARCH64, rwx), .AARCH64));
+    // Another machine's firmware, an object file and a script are not programs here.
+    try testing.expectEqual(null, judgeElf(&testElf(.EXEC, .ALPHA, rw), .AARCH64));
+    try testing.expectEqual(null, judgeElf(&testElf(.EXEC, .X86_64, rw), .AARCH64));
+    try testing.expectEqual(null, judgeElf(&testElf(.REL, .AARCH64, rw), .AARCH64));
+    try testing.expectEqual(null, judgeElf("#!/bin/sh\necho not elf\n", .AARCH64));
+    try testing.expectEqual(null, judgeElf(exe[0..63], .AARCH64));
+    var far = pie;
+    mem.writeInt(u64, far[32..40], elf_head_len, .little);
+    try testing.expectEqual(.unreadable_headers, judgeElf(&far, .AARCH64));
+    // Headers that would run past the bytes read are not read.
+    try testing.expectEqual(.unreadable_headers, judgeElf(pie[0..100], .AARCH64));
+}
+
+test elfExcused {
+    try testing.expect(elfExcused("usr/bin/runit", "minimal", .X86_64) != null);
+    try testing.expectEqual(null, elfExcused("usr/bin/runitx", "minimal", .X86_64));
+    try testing.expectEqual(null, elfExcused("/usr/bin/runit", "minimal", .X86_64));
+    try testing.expect(elfExcused("usr/lib/app/server", "rust-example", .AARCH64) != null);
+    try testing.expectEqual(null, elfExcused("usr/lib/app/server", "rust-example", .X86_64));
+    try testing.expectEqual(null, elfExcused("usr/lib/app/server", "go-example", .AARCH64));
 }
 
 test configMisses {

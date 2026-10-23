@@ -14,6 +14,13 @@ pub const repository = "https://dist.werewolf-linux.org/apk";
 /// hardened_repository combines every hardened Wolfi replacement, signed by
 /// repository_key. Package-specific release snapshots remain separate.
 pub const hardened_repository = repository ++ "/hardened";
+/// packages_repository holds werewolf's builds of applications Wolfi does
+/// not ship, or ships unfit for a form (../packages), signed by repository_key.
+pub const packages_repository = repository ++ "/packages";
+/// pinned_repositories are the feeds whose names an image takes from that
+/// feed's signed index or not at all: a newer version elsewhere, Wolfi's,
+/// must not replace a hardened runtime or a werewolf build.
+pub const pinned_repositories = [_][]const u8{ hardened_repository, packages_repository };
 
 /// repository_key is the file name apk knows release/packages.pub by, in
 /// /etc/apk/keys: the index's signature names it, so it must match.

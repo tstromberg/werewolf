@@ -93,7 +93,7 @@ def prepare(form, arch, plan):
         NATIVE.application_overlay(form, ROOT / 'build' / arch / form, root)
     control = root / CONTROL.removeprefix('/')
     control.parent.mkdir(parents=True, exist_ok=True)
-    call(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip',
+    call(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-fPIE',
           '-target', arch + '-linux-musl', str(ROOT / 'test/native/iterate.zig'),
           '-femit-bin=' + str(control)])
     write(root / 'usr/share/werewolf/test-image', 'werewolf-native-iteration/1\n')
@@ -282,7 +282,7 @@ def compile_driver(form, arch, driver, work):
     output.parent.mkdir(parents=True, exist_ok=True)
     transport = 'libcurl-openssl4' in NATIVE.read_plan(form)['packages']
     call([
-        'zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target',
+        'zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-fPIE', '-target',
         arch + ('-linux-gnu' if transport else '-linux-musl'), *(['-lc'] if transport else []),
         '--dep', 'test-driver',
         '-Mroot=' + str(ROOT / 'forms' / form / 'test' / driver['source']),

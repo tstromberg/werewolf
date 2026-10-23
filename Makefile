@@ -195,13 +195,22 @@ ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep p
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
-# program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 # Every guest binary is a static PIE, so ASLR moves its code and data, not only its
-# stack and heap; lib/elf.zig refuses an image with a fixed-address executable.
+# stack and heap; howl refuses a root with a fixed-address program (lib/image.zig).
+PROGRAM_FLAGS = -O ReleaseSafe -fstrip -fPIE
+# A change of flags rebuilds every program, as a change of its source does.
+PROGRAM_FLAGS_STAMP = build/$(ARCH)/program-flags
+.PHONY: _program-flags
+_program-flags:
+$(PROGRAM_FLAGS_STAMP): _program-flags
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(PROGRAM_FLAGS)' >$@.new
+	@cmp -s $@.new $@ && rm -f $@.new || mv -f $@.new $@
+# program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 define program
-$(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wildcard lib/*.zig)
+$(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wildcard lib/*.zig) $(PROGRAM_FLAGS_STAMP)
 	$$(zig_check)
-	zig build-exe -O ReleaseSafe -fstrip -fPIE -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
+	zig build-exe $(PROGRAM_FLAGS) -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
 $(foreach p,$(CMDS),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))

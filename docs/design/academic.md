@@ -19,7 +19,7 @@ read the internal network. The breaches are a Moodle the first visitor
 installed, a wiki the world can edit, and a notebook server that runs
 student code as the hub.
 
-A form need not wait for Wolfi. melange builds from a pinned source,
+A form need not wait for Wolfi. werewolf's application feed builds from a pinned source,
 and `image:` runs a project's OCI image ([oci.md](oci.md)).
 
 ## Goals

@@ -1,5 +1,0 @@
-# Static callback trampolines keep foreign-function callbacks compatible with MDWE.
-base: app
-
-recipes:
-  - ../../../hardened-packages/ports/libffi/libffi.yaml

@@ -52,9 +52,12 @@ pub fn compile(b: *B) !void {
             try env.put("CGO_ENABLED", "0");
             try env.put("GOOS", "linux");
             try env.put("GOARCH", if (arm) "arm64" else "amd64");
+            // PIE, so ASLR moves its code too (lib/image.zig). Without cgo, Go
+            // has the image's loader (glibc-neutered's) relocate it.
             try b.run(&.{
                 "go",
                 "build",
+                "-buildmode=pie",
                 "-trimpath",
                 "-buildvcs=false",
                 "-ldflags=-s -w",

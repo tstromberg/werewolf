@@ -2,21 +2,19 @@
 # university, with PostgreSQL, Caddy and cron beside it (with): Caddy
 # serves it over HTTPS at the machine's base URL, with a certificate from
 # Let's Encrypt, and hands its PHP to php-fpm; Moodle's cron runs every
-# minute. Wolfi does not ship Moodle: melange lays the release in
-# /usr/share/moodle (../packages/moodle/moodle.yaml), which no one on
-# the machine can change, with the form's config.php beside it. Course
-# files, sessions and caches are in /data/svc/moodle, its tables in the
-# schema moodle. It is installed, with its administrator from the config,
-# before it serves, and upgraded by the image, never the web. See
-# forms/moodle/README.md.
+# minute. Wolfi does not ship Moodle: werewolf's application feed lays
+# the release in /usr/share/moodle (../packages/moodle/moodle.yaml),
+# which no one on the machine can change, with the form's config.php
+# beside it. Course files, sessions and caches are in /data/svc/moodle,
+# its tables in the schema moodle. It is installed, with its
+# administrator from the config, before it serves, and upgraded by the
+# image, never the web. See forms/moodle/README.md.
 base: prod
-
-recipes:
-  - ../../../packages/moodle/moodle.yaml
 
 with: [postgresql, caddy, cron, sh-shim]
 
 packages:
+  - moodle
   - php-8.5
   - php-8.5-fpm
   - php-8.5-ctype
