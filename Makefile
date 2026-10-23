@@ -32,7 +32,7 @@ HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
 FORM_TOOL = build/host/form
-FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
+FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
 compose_modules = --dep allow --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
@@ -96,7 +96,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-platform check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
-	check-lease check-dns check-lan check-static check-verity check-deadman check-metadata check-persist \
+	check-lease check-dns check-lan check-unwound check-static check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
 
 all: image
@@ -270,7 +270,7 @@ $(TEST_SK): tools/test-sk.zig
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
-	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
+	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
@@ -762,6 +762,36 @@ check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordi
 
 check-lan: $(call program_bin,fence)
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
+
+# check-unwound runs the real fence and unwound against a fixture resolver
+# in private namespaces, as root, on Linux (cmd/unwound/README.md).
+.PHONY: check-unwound check-unwound-tunnels fuzz-unwound
+check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
+	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
+# Optional lab check: real iodine, dns2tcp and shellack clients against their
+# local servers, first directly and then through the screened resolver.
+SHELLACK ?= $(HOME)/src/shellack
+check-unwound-tunnels: $(call program_bin,fence) $(call program_bin,unwound)
+	@test -f "$(SHELLACK)/shellack.sh" || { echo "set SHELLACK to a shellack checkout" >&2; exit 1; }
+	mkdir -p $(BUILD)
+	cd "$(SHELLACK)" && GOOS=linux GOARCH=$(if $(filter aarch64,$(ARCH)),arm64,amd64) \
+		go build -o "$(CURDIR)/$(BUILD)/shellack-server" ./cmd/server
+	$(DNS_TEST_RUNNER) python3 $(CURDIR)/test/check-unwound-tunnels \
+		$(CURDIR)/$(call program_bin,fence) $(CURDIR)/$(call program_bin,unwound) \
+		$(CURDIR)/$(BUILD)/shellack-server "$(SHELLACK)/shellack.sh"
+UNWOUND_FUZZ_RUNS ?= 1000000
+fuzz-unwound:
+	@# zig build --fuzz succeeds even when a target crashes; the input it
+	@# saves is how a crash shows.
+	@for target in 'fuzz queries' 'fuzz responses' 'fuzz policy' 'fuzz cache'; do \
+		rm -f cmd/unwound/.zig-cache/f/crash; \
+		zig build --build-file cmd/unwound/build.zig test -Dfilter="$$target" \
+			--fuzz=$(UNWOUND_FUZZ_RUNS) --summary all || exit; \
+		if [ -e cmd/unwound/.zig-cache/f/crash ]; then \
+			echo "fuzz-unwound: $$target crashed; input in cmd/unwound/.zig-cache/f/crash" >&2; \
+			exit 1; \
+		fi; \
+	done
 
 # These remaining console checks need their own debug image; check-prod is clean.
 .PHONY: _check-prod-console-image

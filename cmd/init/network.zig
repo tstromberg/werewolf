@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const network_file = @import("network");
+const dns = @import("dns");
 const linux = std.os.linux;
 const init = @import("init.zig");
 const Machine = init.Machine;
@@ -20,9 +21,11 @@ const writeFile = init.writeFile;
 /// the form has it, dhcp-client gets a lease; init starts its renewal later.
 pub fn network(m: *Machine) void {
     // Keep the directory present even when DHCP has not acquired a lease.
-    // Service bindings follow future atomic replacements of the resolver file.
+    // Every program asks unwound; only it, fence and DHCP read upstream,
+    // which DHCP atomically replaces (docs/design/unwound.md).
     mkdir("/run/werewolf/network", 0o755);
-    m.write("/run/werewolf/network/resolv.conf", "", 0o644);
+    m.write(dns.resolv_path, dns.resolv_text, 0o644);
+    m.write(dns.upstream_path, "", 0o644);
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);
     routerAdvertisements(m, nic);
@@ -44,19 +47,15 @@ pub fn network(m: *Machine) void {
             else
                 say("network: {s} {s} refused", .{ nic, c.ip });
         }
-        // /etc/resolv.conf links here; it must be a file, since /run is
-        // nosymfollow. Check the resolver here because nothing checked the
-        // command line's (lib/network.zig checked the config tar's).
+        // upstream must be a file, since /run is nosymfollow. Check the
+        // resolver here because nothing checked the command line's
+        // (lib/network.zig checked the config tar's).
         const dns_ok = if (network_file.ip4(c.dns)) |d| network_file.usable(d) else |_| false;
         if (c.dns.len > 0 and !dns_ok) {
             say("network: dns {s} refused: not a usable IPv4 address", .{c.dns});
         } else if (c.dns.len > 0) {
             mkdir("/run/werewolf/network", 0o755);
-            m.write(
-                "/run/werewolf/network/resolv.conf",
-                m.fmt("nameserver {s}\n", .{c.dns}),
-                0o644,
-            );
+            m.write(dns.upstream_path, m.fmt("nameserver {s}\n", .{c.dns}), 0o644);
         }
         say(
             "{s} {s} via {s} dns {s}, from {s}",

@@ -47,7 +47,8 @@ pub fn main(init: std.process.Init) !void {
         "/proc/net/if_inet6",
         std.os.linux.F_OK,
     )) == .SUCCESS;
-    try posture.network.rootEgress(&p, resolv, v6);
+    // check-dns links resolv.conf to the upstream file itself.
+    try posture.network.rootEgress(&p, resolv, "", v6);
     try writeJson(gpa, p.checks.items, false);
 }
 

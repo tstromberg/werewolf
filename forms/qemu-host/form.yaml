@@ -13,17 +13,16 @@ packages:
 # which cannot run virtual machines of their own (no nested-kvm).
 allow: [kvm]
 
-# QEMU's user-mode network, as root: the guests' names and HTTP and HTTPS,
-# through the host's own sockets.
+# QEMU's user-mode network, as root: the guests' names, through unwound,
+# which audits each one, and HTTP and HTTPS, through the host's own sockets.
 net:
-  - dns root
-  - connect root udp/53 tcp/53 tcp/80 tcp/443
+  - lookup root * all unfiltered
+  - connect root tcp/80 tcp/443
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-root-dns-assigned: root forwards its guests' DNS queries to the assigned resolvers
-  network-root-dns-arbitrary: root forwards its guests' DNS queries to other servers
+  network-root-dns-assigned: root forwards its guests' DNS queries to unwound, which may resolve any name for them, audited
   network-root-https-arbitrary: root forwards its guests' HTTPS connections
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet

@@ -105,11 +105,11 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         io,
         dns_policy.policy_path,
         gpa,
-        .limited(4096),
+        .limited(64 << 10),
     ));
     const dns_servers = if (mode == .keep) try dns_policy.resolvers(Dir.cwd().readFileAlloc(
         io,
-        dns_policy.resolv_path,
+        dns_policy.upstream_path,
         gpa,
         .limited(1024),
     ) catch |err| switch (err) {
@@ -1029,7 +1029,7 @@ const Link = struct {
                 "nameserver {d}.{d}.{d}.{d}\n",
                 .{ d[0], d[1], d[2], d[3] },
             );
-            try writeFile(dir, "resolv.conf", tw.buffered());
+            try writeFile(dir, "upstream", tw.buffered());
         }
     }
 

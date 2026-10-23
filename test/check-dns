@@ -225,13 +225,16 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
         policy = Path('/usr/share/werewolf/net')
         policy.parent.mkdir()
         policy.write_text('dns 69\nconnect 69 tcp 443\n')
-        resolv = Path('/run/werewolf/network/resolv.conf')
+        # fence and DHCP keep a dns user's grants on the upstream file's
+        # resolvers: on a machine, unwound's upstream user. The probes here
+        # read that file as their resolv.conf, to reach them directly.
+        resolv = Path('/run/werewolf/network/upstream')
         resolv.parent.mkdir(parents=True)
         # The OCI resolver view binds the directory, never the old file inode.
         Path('/etc/werewolf-network').mkdir()
         run(['mount', '--bind', str(resolv.parent), '/etc/werewolf-network'])
         run(['mount', '-o', 'remount,bind,ro', '/etc/werewolf-network'])
-        Path('/etc/resolv.conf').symlink_to('/etc/werewolf-network/resolv.conf')
+        Path('/etc/resolv.conf').symlink_to('/etc/werewolf-network/upstream')
         old = 'nameserver ' + FIRST + '\n'
         resolv.write_text(old)
         run(['ip', 'link', 'set', 'lo', 'up'])
@@ -352,7 +355,8 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
             posture_check('skip')
             check(69, 'udp', GCP, False)
             check(69, 'tcp', AZURE, False)
-            # Playground's root declaration gets the same narrow DNS access.
+            # A dns line for root gets the same narrow access (forms may no
+            # longer write one: only unwound's upstream user has it).
             policy.write_text('dns 0\ndns 69\nconnect 69 tcp 443\n')
             renew([FIRST])
             check(0, 'udp', FIRST, True)
@@ -361,13 +365,15 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
             check(0, 'http', FIRST, False)
             posture_check('fail')
             if posture_bin:
+                # Broad grants open HTTPS, but never DNS past unwound: fence
+                # refuses port 53 and 853 before any connect grant.
                 if ipv6:
                     run([driver, '--root-https-v6'])
                     posture_check('fail', 'pass', 'fail')
                     run([driver, '--root-dns-v6'])
-                    posture_check('fail', 'fail', 'fail')
+                    posture_check('fail', 'pass', 'fail')
                 run([driver, '--broad-root'])
-                posture_check('fail', 'fail', 'fail')
+                posture_check('fail', 'pass', 'fail')
             print('pass: %d real-kernel DNS/HTTPS allow-deny checks, including renewal and cloud resolvers' % count)
         finally:
             if watcher:

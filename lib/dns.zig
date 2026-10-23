@@ -1,5 +1,7 @@
 //! DNS grants name immutable users and only the current IPv4 resolvers.
-//! DHCP's trusted parent replaces these rules before publishing resolv.conf.
+//! Every program asks unwound, at 127.0.0.53; its upstream user alone has a
+//! `dns` grant, to the resolvers in upstream_path. DHCP's trusted parent
+//! replaces those rules before publishing a new upstream file.
 const std = @import("std");
 const linux = std.os.linux;
 const network = @import("network");
@@ -7,10 +9,17 @@ const route = @import("net-rule");
 const sandbox = @import("sandbox");
 
 pub const max_servers = 3;
-const max_users = 64;
+pub const max_users = 64;
 const max_rules = max_servers * (max_users * 4 + 2);
 pub const policy_path = "/usr/share/werewolf/net";
+/// resolv_path is what /etc/resolv.conf links to: unwound, never upstream.
 pub const resolv_path = "/run/werewolf/network/resolv.conf";
+pub const resolv_text = "nameserver 127.0.0.53\n";
+/// upstream_path names the resolvers DHCP or the command line gave, as
+/// nameserver lines, for fence, DHCP and unwound alone.
+pub const network_dir = "/run/werewolf/network";
+pub const upstream_name = "upstream";
+pub const upstream_path = network_dir ++ "/" ++ upstream_name;
 
 pub const Users = struct {
     ids: [max_users]u32 = undefined,
@@ -37,6 +46,51 @@ pub fn users(text: []const u8) !Users {
         try result.add(id);
     }
     return result;
+}
+
+/// resolver is unwound's address, the one nameserver every program reads.
+pub const resolver = [4]u8{ 127, 0, 0, 53 };
+/// labels is the loopback network unwound's clients send from, one address
+/// per user, chosen by the kernel: fence routes each user's queries through
+/// a table of its own, whose one route gives that address as the source.
+pub const labels = [4]u8{ 127, 53, 0, 0 };
+pub const label_table_base: u32 = 0x5300;
+
+/// lookupUsers returns the users of lookup lines in the order they first
+/// appear. The nth (from 0) sends from label(n) through table labelTable(n);
+/// fence and unwound read the same immutable file, so they agree.
+pub fn lookupUsers(text: []const u8) !Users {
+    var result: Users = .{};
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeScalar(u8, line, ' ');
+        if (!std.mem.eql(u8, words.next() orelse "", "lookup")) continue;
+        const id = std.fmt.parseInt(u32, words.next() orelse "", 10) catch return error.BadPolicy;
+        try result.add(id);
+    }
+    return result;
+}
+
+/// label_ips holds every label, so rules can point at them for good.
+pub const label_ips = ips: {
+    var ips: [max_users][4]u8 = undefined;
+    for (&ips, 0..) |*ip, n| ip.* = .{ labels[0], labels[1], 0, n + 1 };
+    break :ips ips;
+};
+
+pub fn label(n: usize) [4]u8 {
+    return label_ips[n];
+}
+
+pub fn labelTable(n: usize) u32 {
+    return label_table_base + @as(u32, @intCast(n + 1));
+}
+
+/// labelIndex returns the n whose label is ip, if it is one.
+pub fn labelIndex(u: Users, ip: [4]u8) ?usize {
+    if (ip[0] != labels[0] or ip[1] != labels[1] or ip[2] != 0 or ip[3] == 0) return null;
+    const n: usize = ip[3] - 1;
+    return if (n < u.len) n else null;
 }
 
 pub const Resolvers = struct {
@@ -176,6 +230,26 @@ test "resolver and user input is bounded, deduplicated and fails closed" {
     const servers = try resolvers("nameserver 1.1.1.1\nnameserver 2.2.2.2\nnameserver 3.3.3.3\n");
     var buf: [max_rules]route.Rule = undefined;
     try testing.expectEqual(max_rules, plan(full, &servers, &buf).len);
+}
+
+test "lookup users get labels in the order they first appear" {
+    const u = try lookupUsers("dns 69\nlookup 1001 a.example A\nconnect 5 tcp 443\n" ++
+        "lookup 7 * A unfiltered\nlookup 1001 b.example TXT\n");
+    try testing.expectEqualSlices(u32, &.{ 1001, 7 }, u.ids[0..u.len]);
+    try testing.expectEqualSlices(u8, &.{ 127, 53, 0, 2 }, &label(1));
+    try testing.expectEqual(0x5302, labelTable(1));
+    try testing.expectEqual(1, labelIndex(u, .{ 127, 53, 0, 2 }).?);
+    for ([_][4]u8{
+        .{ 127, 53, 0, 0 },
+        .{ 127, 53, 0, 3 },
+        .{ 127, 53, 1, 1 },
+        .{ 127, 0, 0, 1 },
+    }) |ip|
+        try testing.expectEqual(null, labelIndex(u, ip));
+    try testing.expectError(error.BadPolicy, lookupUsers("lookup x a.example A\n"));
+    var full: Users = .{};
+    for (0..max_users) |i| try full.add(@intCast(i));
+    try testing.expectEqualSlices(u8, &.{ 127, 53, 0, max_users }, &label(max_users - 1));
 }
 
 test "DHCP renewal revokes first, skips unchanged leases, and stops on errors" {

@@ -17,26 +17,25 @@ recipes:
 with: [postgresql, caddy, cron, sh-shim]
 
 packages:
-  - php-8.4
-  - php-8.4-fpm
-  - php-8.4-ctype
-  - php-8.4-curl
-  - php-8.4-dom
-  - php-8.4-exif          # photos' orientation
-  - php-8.4-fileinfo
-  - php-8.4-gd            # images, badges, PDF annotation
-  - php-8.4-iconv
-  - php-8.4-intl
-  - php-8.4-mbstring
-  - php-8.4-opcache
-  - php-8.4-openssl
-  - php-8.4-pgsql         # the database
-  - php-8.4-simplexml
-  - php-8.4-soap
-  - php-8.4-sodium
-  - php-8.4-xml
-  - php-8.4-xmlreader
-  - php-8.4-zip           # backups, imports, plugins' packages
+  - php-8.5
+  - php-8.5-fpm
+  - php-8.5-ctype
+  - php-8.5-curl
+  - php-8.5-dom
+  - php-8.5-exif          # photos' orientation
+  - php-8.5-fileinfo
+  - php-8.5-gd            # images, badges, PDF annotation
+  - php-8.5-iconv
+  - php-8.5-intl
+  - php-8.5-mbstring
+  - php-8.5-openssl
+  - php-8.5-pgsql         # the database
+  - php-8.5-simplexml
+  - php-8.5-soap
+  - php-8.5-sodium
+  - php-8.5-xml
+  - php-8.5-xmlreader
+  - php-8.5-zip           # backups, imports, plugins' packages
 
 # make check's (forms/README.md): Moodle's install makes some 500 tables.
 check:
@@ -83,6 +82,7 @@ services:
   # time, installs Moodle with the administrator the config names; Moodle's
   # own upgrade.php upgrades it when the image brought a newer release.
   moodle:
+    allow: [php:upload, php:inline, php:writable-source]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/moodle -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=256 -d opcache.interned_strings_buffer=32 -d opcache.max_accelerated_files=20000
     before:
@@ -129,6 +129,7 @@ services:
   # on /data, logs in to the database as its own role, which acts as
   # Moodle's, and sends the mail the web queued.
   cron:
+    allow: [php:inline, php:writable-source]
     exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
     user: moodle-cron
     group: moodle

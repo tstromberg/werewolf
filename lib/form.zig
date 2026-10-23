@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const allow = @import("allow");
 const sshd = @import("sshd");
+const lookup = @import("lookup.zig");
 
 pub const Node = union(enum) {
     scalar: Scalar,
@@ -1160,15 +1161,36 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                             .{ user, try mem.join(gpa, " ", udp.items), if (lan) " lan" else "" },
                         ));
                     }
+                } else if (mem.eql(u8, d.key, "lookup")) {
+                    for (values) |v| {
+                        // Grants are a UID's: root's would be everyone's, and a
+                        // shared user's every sharer's.
+                        if (user.len == 0 or mem.eql(u8, user, "root") or
+                            mem.eql(u8, scalarOf(s.value, "shared-user") orelse "", "true"))
+                            return f.fail(gpa, "{s}/form.yaml: services: {s}: lookup needs a " ++
+                                "user of the service's own", .{ form.dir, s.key });
+                        var why: []const u8 = "";
+                        try out.append(gpa, lookup.compile(
+                            gpa,
+                            user,
+                            v.scalar.text,
+                            &why,
+                        ) catch |err| switch (err) {
+                            error.Invalid => return f.fail(gpa, "{s}/form.yaml: services: {s}: " ++
+                                "lookup {s}: {s}", .{
+                                form.dir, s.key, v.scalar.text, why,
+                            }),
+                            else => |e| return e,
+                        });
+                    }
                 } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
                     var net: std.ArrayList([]const u8) = .empty;
                     var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
                     while (it.next()) |w| {
                         if (mem.eql(u8, w, "dns")) {
-                            if (user.len == 0) return f.fail(gpa, "{s}/form.yaml: services: " ++
-                                "{s}: connect dns needs the service's " ++
-                                "user", .{ form.dir, s.key });
-                            try out.append(gpa, try gpa.print("dns {s}", .{user}));
+                            return f.fail(gpa, "{s}/form.yaml: services: {s}: connect dns " ++
+                                "is gone: name what it looks up, lookup: NAME " ++
+                                "(docs/design/unwound-policy.md)", .{ form.dir, s.key });
                         } else if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w) or
                             mem.eql(u8, w, "any"))
                             try net.append(gpa, w);
@@ -1197,13 +1219,40 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
         const key = it.next() orelse "";
-        if (mem.eql(u8, key, "connect") or mem.eql(u8, key, "listen") or mem.eql(u8, key, "dns")) {
+        // dns USER would reach the resolvers past unwound; only the builder
+        // grants that, to unwound's own upstream user (compose.net).
+        if (mem.eql(u8, key, "dns")) return f.fail(
+            gpa,
+            "{s}/form.yaml: net: {s}: dns is gone: lookup USER NAME names what USER " ++
+                "looks up (docs/design/unwound-policy.md)",
+            .{ form.dir, line },
+        );
+        if (mem.eql(u8, key, "connect") or mem.eql(u8, key, "listen") or
+            mem.eql(u8, key, "lookup"))
+        {
             const user = it.next() orelse "";
             if (runs_as.get(user)) |svc| return f.fail(
                 gpa,
                 "{s}/form.yaml: net: {s}: {s} runs as {s}: say its network in the service",
                 .{ form.dir, line, svc, user },
             );
+            if (mem.eql(u8, key, "lookup")) {
+                var why: []const u8 = "";
+                try out.append(gpa, lookup.compile(
+                    gpa,
+                    user,
+                    it.rest(),
+                    &why,
+                ) catch |err| switch (err) {
+                    error.Invalid => return f.fail(
+                        gpa,
+                        "{s}/form.yaml: net: {s}: {s}",
+                        .{ form.dir, line, why },
+                    ),
+                    else => |e| return e,
+                });
+                continue;
+            }
         }
         try out.append(gpa, line);
     };
@@ -2685,7 +2734,7 @@ test bastionService {
     );
 }
 
-test "service DNS compiles for its user and direct service grants are refused" {
+test "service lookups compile for its user; dns grants are refused" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -2693,19 +2742,22 @@ test "service DNS compiles for its user and direct service grants are refused" {
     var failure: Failure = .{};
     const spec = try parse(
         gpa,
-        "services:\n  web:\n    exec: /web\n    user: web\n    connect: dns tcp/443\n",
+        "services:\n  web:\n    exec: /web\n    user: web\n    lookup: api.example.com\n    " ++
+            "connect: tcp/443\n",
         &diag,
     );
     const forms = [_]Form{.{ .name = "site", .dir = "site", .spec = spec }};
     try testing.expectEqualStrings(
-        "dns web\nconnect web tcp/443",
+        "lookup web api.example.com A AAAA\nconnect web tcp/443",
         try mem.join(gpa, "\n", try netLines(gpa, &forms, &failure)),
     );
-    const bad = try parse(
-        gpa,
+    for ([_][]const u8{
         "net: [dns web]\nservices:\n  web:\n    exec: /web\n    user: web\n",
-        &diag,
-    );
-    const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
-    try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
+        "net: [lookup web a.example]\nservices:\n  web:\n    exec: /web\n    user: web\n",
+        "services:\n  web:\n    exec: /web\n    user: web\n    connect: dns tcp/443\n",
+    }) |yaml| {
+        const bad = try parse(gpa, yaml, &diag);
+        const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
+        try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
+    }
 }

@@ -240,7 +240,10 @@ fn imageNetwork(p: *Posture, v6_on: bool) !void {
 /// rootEgress measures root's DNS and HTTPS permissions without waiting for a
 /// server. UDP connect sends nothing; TCP is nonblocking and closes at once.
 /// Unknown routing failures are skipped, never treated as proof of restriction.
-pub fn rootEgress(p: *Posture, resolv: []const u8, v6_on: bool) !void {
+/// rootEgress probes root's DNS: to what resolv.conf names, which is
+/// unwound, and to anything else, the resolvers unwound asks (upstream)
+/// among them.
+pub fn rootEgress(p: *Posture, resolv: []const u8, upstream: []const u8, v6_on: bool) !void {
     const assigned = configuredResolvers(resolv);
     var dns_assigned: EgressEvidence = .{ .unknown = assigned.incomplete };
     var dns_other: EgressEvidence = .{};
@@ -250,6 +253,12 @@ pub fn rootEgress(p: *Posture, resolv: []const u8, v6_on: bool) !void {
             try dns_assigned.probe(p.gpa, target.address, .udp);
             try dns_assigned.probe(p.gpa, target.address, .tcp);
         }
+        // unwound's resolvers are its upstream user's alone.
+        const behind = configuredResolvers(upstream);
+        for (behind.targets[0..behind.len]) |target| if (!assigned.contains(target.address)) {
+            try dns_other.probe(p.gpa, target.address, .udp);
+            try dns_other.probe(p.gpa, target.address, .tcp);
+        };
         // TEST-NET addresses need no responding public service. Exclude any
         // configured resolver, so an assigned-only grant cannot fail this check.
         for ([_][]const u8{ "192.0.2.1", "198.51.100.1", "203.0.113.1" }) |ip| {
@@ -277,14 +286,15 @@ pub fn rootEgress(p: *Posture, resolv: []const u8, v6_on: bool) !void {
         .{
             .id = "network-root-dns-assigned",
             .name = "Root DNS to assigned resolvers blocked",
-            .why = "Root cannot issue arbitrary DNS queries through the assigned resolvers; " ++
-                "network fetchers have their own user permissions.",
+            .why = "Root cannot ask unwound, the one resolver every program is assigned; " ++
+                "network fetchers have their own lookup grants.",
             .evidence = dns_assigned,
         },
         .{
             .id = "network-root-dns-arbitrary",
             .name = "Root DNS to arbitrary servers blocked",
-            .why = "Root cannot send DNS queries to servers outside the configured resolver set.",
+            .why = "Root cannot send DNS queries past unwound: not to its upstream resolvers, " ++
+                "nor to any other server.",
             .evidence = dns_other,
         },
         .{
@@ -448,7 +458,7 @@ test "root egress checks skip instead of measuring a non-root user" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var p: Posture = .{ .io = testing.io, .gpa = arena.allocator(), .root = false };
-    try rootEgress(&p, "nameserver 192.168.5.3\n", false);
+    try rootEgress(&p, "nameserver 192.168.5.3\n", "", false);
     try testing.expectEqual(3, p.checks.items.len);
     for (p.checks.items) |c| {
         try testing.expectEqual(.skip, c.result);
@@ -741,7 +751,7 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
 
     p.work("network-metadata: TCP probe (1 s timeout):", "169.254.169.254:80");
     const md = probeMetadata();
-    try rootEgress(p, p.read("/etc/resolv.conf"), v6_on);
+    try rootEgress(p, p.read("/etc/resolv.conf"), p.read("/run/werewolf/network/upstream"), v6_on);
     try p.add(.{
         .id = "network-metadata",
         .area = "network",
