@@ -56,11 +56,11 @@ Landlock lets a process bind only the policy's ports (and 0), and connect
 only to declared, served, DNS, loopback and metadata ports: rule 200 lets a
 served port answer anyone, so a listener could otherwise reach anywhere.
 
-UDP `lan` lines restrict requests and replies to connected subnets detected at
-boot, plus the standard mDNS multicast destination for port 5353. Other ports
-add no multicast. They add no general multicast or Internet
-access. A changed address plan requires a reboot. Devices on the LAN still need
-authentication.
+`lan` listeners admit only clients on connected subnets detected at boot, for
+both TCP and UDP. UDP `lan` connections also stay on those subnets, with the
+standard mDNS multicast destination on port 5353. Other ports add no
+multicast. A changed address plan requires a reboot. Devices on the LAN still
+need authentication.
 
 ### Files
 

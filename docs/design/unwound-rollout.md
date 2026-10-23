@@ -13,9 +13,15 @@ request was made. `test/check-unwound-caddy` reproduces that audit in a Linux
 lab with Caddy installed. Other ACME endpoints and later Caddy versions still
 need observation before changing the provisional entropy threshold.
 
-Other application forms still declare direct port 53 access and fail the new
-builder rule. Migrate them per service and test their actual query types; a
-blanket A/AAAA grant is insufficient for Mox's mail lookups. Unbound, Pi-hole,
-AdGuard Home and Blocky are DNS servers themselves and need a separate design
-for upstream access and binding alongside unwound. Do not mark the form rollout
-complete until those cases are resolved.
+Other application forms still need migration per service and testing of their
+actual query types; a blanket A/AAAA grant is insufficient for Mox's mail
+lookups. Unbound, Pi-hole, AdGuard Home and Blocky are DNS servers: their
+service-local `dns-direct: true`
+grant lets their declared upstream DNS connections through while their ordinary
+`lookup:` calls use unwound. The grant derives its UID from the service user.
+Their listeners must avoid unwound's 127.0.0.53 socket. Unbound, AdGuard Home
+and Blocky bind loopback and the machine's current IPv4 address; Pi-hole binds
+the network interface through dnsmasq. Fence limits their TCP and UDP DNS
+listeners to connected subnets. All four DNS server forms pass their native
+checks. Address plan changes require a reboot so fence can load the new LAN
+prefixes and the DNS services can bind the new address.

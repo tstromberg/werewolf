@@ -19,6 +19,7 @@ const first = "/opt/adguardhome/werewolf.yaml";
 const conf = "/data/AdGuardHome.yaml";
 /// settings is service-config's rendering of the machine's settings.
 const settings = "/tmp/adguard.json";
+const service_address = "/etc/werewolf-network/service-address";
 const max_file = 4 << 20;
 
 pub fn main(init: std.process.Init) void {
@@ -55,6 +56,11 @@ fn run(io: Io, gpa: Allocator) !void {
         given,
         .{ .ignore_unknown_fields = true },
     );
+    const lan_ip = try lanAddress(io, gpa);
+    text = try replace(gpa, text, "dns", "bind_hosts", try gpa.print(
+        "  bind_hosts:\n    - 127.0.0.1\n    - {s}\n",
+        .{lan_ip},
+    ));
     if (s.upstreams) |u| text = try replace(
         gpa,
         text,
@@ -63,16 +69,22 @@ fn run(io: Io, gpa: Allocator) !void {
         try upstreams(gpa, u),
     );
     if (s.blocklists) |b| text = try replace(gpa, text, null, "filters", try filters(gpa, b));
-    if (!fresh and s.upstreams == null and s.blocklists == null) {
-        say(io, "configuration as AdGuard Home left it", .{});
-        return;
-    }
     try write(io, conf, text);
-    say(io, "{s}{s}{s}", .{
+    say(io, "{s}; DNS on loopback and {s}{s}{s}", .{
         if (fresh) "first start: configuration copied to /data" else "configuration kept",
+        lan_ip,
         if (s.upstreams) |u| try gpa.print("; {d} upstreams from settings", .{u.len}) else "",
         if (s.blocklists) |b| try gpa.print("; {d} blocklists from settings", .{b.len}) else "",
     });
+}
+
+fn lanAddress(io: Io, gpa: Allocator) ![]const u8 {
+    const ip = try Dir.cwd().readFileAlloc(io, service_address, gpa, .limited(64));
+    if (ip.len < 7 or ip.len > 15 or std.mem.startsWith(u8, ip, "127.") or
+        std.mem.eql(u8, ip, "0.0.0.0") or std.mem.findScalar(u8, ip, ':') != null)
+        return error.NoLanAddress;
+    _ = Io.net.IpAddress.parse(ip, 0) catch return error.NoLanAddress;
+    return ip;
 }
 
 const Settings = struct {

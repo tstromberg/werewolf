@@ -29,10 +29,12 @@ services:
     before: /usr/lib/werewolf/adguard-home-setup
     exec: /opt/adguardhome/AdGuardHome --no-check-update -c /data/AdGuardHome.yaml -w /data
     pledge: stdio rpath wpath inet netlink connect listen proc
-    listen: [tcp/53 udp/53, tcp/3000 loopback]
+    listen: [tcp/53 udp/53 lan, tcp/3000 loopback]
+    dns-direct: true
     connect:
       - tcp/853 tcp/443 public
       - udp/53 tcp/53 public
+    lookup: "*"
     config: settings /run/config/adguard-home/settings.json
     setting:
       - upstreams string...
@@ -53,7 +55,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/3000]
+    connect: [tcp/443 tcp/3000]
+    lookup: "*"
     read: /etc/caddy
     secret: ADMIN_HASH /run/config/caddy/admin-hash
     config: settings /run/config/caddy/settings.json

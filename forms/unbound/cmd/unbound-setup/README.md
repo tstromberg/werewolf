@@ -42,9 +42,10 @@ service-config has checked the settings, and parks the service if it fails.
    (hostname) and `forward-to` (ip) settings. Each value is checked again:
    a zone is letters, digits, dashes and dots; a server a literal address,
    with no port or scope. One without the other is refused.
-3. **The include**, `/run/svc/unbound/unbound-setup.conf`, written as the
-   anchor is: `interface: 0.0.0.0`, and `::0` with `do-ip6: yes` while
-   `/proc/net/if_inet6` exists; for each zone `domain-insecure` and
+3. **The include**, `/run/svc/unbound/unbound-setup.conf`, binds
+   `127.0.0.1` and the machine's `/run/werewolf/network/service-address` on
+   port 53, leaving 127.0.0.53 to unwound. It also binds `::0` with
+   `do-ip6: yes` while `/proc/net/if_inet6` exists; for each zone `domain-insecure` and
    `local-zone ... nodefault`, then a `forward-zone` to every server.
 4. **Logging**: one console line for the anchor, seeded or kept, and one
    for the include, naming the zones and servers, or why it failed.

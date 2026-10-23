@@ -36,7 +36,8 @@ and a `detail` for each question that gets no answer; a lost one is counted.
 2. **The forwarder**, with exact, `*.NAME` and `* unfiltered` grants. Done.
 3. **Werewolf integration.** Core done: `lookup:` in forms and compose,
    fence labels, `_unwound` and `_unwoundnet` in minimal, resolver at
-   127.0.0.53, direct DNS grants refused, and `check-unwound`. Existing
+   127.0.0.53, direct DNS grants refused unless a DNS service declares
+   `dns-direct: true`, and `check-unwound`. Existing
    applications still need migration; see [rollout](unwound-rollout.md).
 4. **Screening `*`**, below. Done, including `check-unwound-tunnels`.
 5. **A cache for every grant**, below. Done.

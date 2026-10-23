@@ -12,7 +12,8 @@ plan](../../docs/design/unwound-plan.md).
 ## Background
 
 A service that may resolve anything can send data to anyone who runs a name server.
-Fence keeps port 53 from every user but unwound's; unwound decides what each asks.
+Fence reserves direct DNS transport for unwound's upstream user and DNS server
+services with `dns-direct: true`; ordinary hostname lookups use unwound.
 
 ## Goals
 

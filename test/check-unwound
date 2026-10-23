@@ -37,6 +37,11 @@ lookup 2001 short.example.test A
 lookup 2001 zero.example.test A
 lookup 2001 gone.example.test A
 lookup 2001 delayed.example.test A
+lookup 2005 * A AAAA
+dns-direct 2005
+connect 2005 udp 53
+connect 2005 tcp 53
+connect 2005 tcp 853
 '''
 
 
@@ -477,6 +482,11 @@ def checks(client, work):
     expect(ask(2003, 'nowhere.example.test'), 3, [], 'NXDOMAIN passes')
     expect(ask(2003, 'open.example.test', 255), 5, [], 'ANY refused')
     expect(ask(2003, 'open.example.test', 252, tcp=True), 5, [], 'AXFR refused')
+    # A DNS server's own host lookup still uses unwound; its explicitly
+    # granted DNS transport may reach another server directly.
+    expect(ask(2005, 'api.example.test'), 0, ['192.0.2.10'], 'DNS service local lookup')
+    expect(ask(2005, 'api.example.test', server=UPSTREAM), 0, ['192.0.2.10'],
+           'DNS service direct upstream')
     # Answers are kept, per service, as long as they say; failures are not.
     first = ask(2001, 'cached.example.test')
     expect(first, 0, ['192.0.2.16'], 'a granted answer')
@@ -520,7 +530,8 @@ def checks(client, work):
     assert ask(2002, 'api.example.test', bind='127.53.0.1')['error'] == 'Permission denied', 'forged label'
     assert ask(2001, 'api.example.test', bind='127.0.0.1')['error'] == 'Permission denied', 'unlabeled source'
     expect(ask(2001, 'api.example.test', bind='127.53.0.1'), 0, ['192.0.2.10'], 'own label, bound')
-    # No one but unwound's upstream user reaches the resolver, or any port 53.
+    # Only unwound's upstream user and the explicit DNS service reach the
+    # resolver directly, or any port 53.
     for uid in (2003, 0):
         for server in (UPSTREAM, '192.0.2.1'):
             got = ask(uid, 'api.example.test', server=server, timeout=1)

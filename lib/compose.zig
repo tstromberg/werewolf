@@ -1270,17 +1270,26 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
     }
     var out: std.ArrayList([]const u8) = .empty;
     var lookups = false;
-    for (try form.netLines(gpa, forms, f)) |item| {
+    const source_lines = try form.netLines(gpa, forms, f);
+    var direct: std.array_hash_map.String(void) = .empty;
+    for (source_lines) |item| {
+        const w = try words(gpa, uncommented(item));
+        if (w.len == 2 and mem.eql(u8, w[0], "dns-direct")) try direct.put(gpa, w[1], {});
+    }
+    for (source_lines) |item| {
         const line = uncommented(item);
         lookups = lookups or mem.startsWith(u8, line, "lookup ");
         const w = try words(gpa, line);
-        // fence refuses these ports to all but unwound's upstream user.
-        if (w.len > 0 and mem.eql(u8, w[0], "connect")) for (w) |t| if (isDnsPort(t)) return f.fail(
-            gpa,
-            "form {s}: DNS goes through unwound, so lookup names what a user may resolve, " ++
-                "never a port 53 or 853 (docs/design/unwound-policy.md): {s}",
-            .{ forms[forms.len - 1].name, line },
-        );
+        // A DNS service alone may contact upstream servers directly, and
+        // only on ports it declared in its own connect rule.
+        if (w.len > 0 and mem.eql(u8, w[0], "connect")) for (w) |t| if (isDnsPort(t)) {
+            if (w.len <= 2 or direct.get(w[1]) == null) return f.fail(
+                gpa,
+                "form {s}: DNS goes through unwound; direct port 53 or 853 needs " ++
+                    "dns-direct: true in the DNS service (docs/design/unwound-policy.md): {s}",
+                .{ forms[forms.len - 1].name, line },
+            );
+        };
         if (!try netLine(gpa, w, &uids, &out)) return f.fail(
             gpa,
             "form {s}: a net line cannot compile: {s}",
@@ -1342,7 +1351,8 @@ fn netLine(
     }
     if (mem.eql(u8, w[0], "listen") and w.len > 1) {
         const lo = mem.eql(u8, w[w.len - 1], "loopback");
-        const ports = w[1 .. w.len - @intFromBool(lo)];
+        const lan = mem.eql(u8, w[w.len - 1], "lan");
+        const ports = w[1 .. w.len - @intFromBool(lo or lan)];
         if (ports.len == 0) return false;
         for (ports) |p| {
             // Fence already allows bind(0), but no external traffic to an
@@ -1350,7 +1360,10 @@ fn netLine(
             if (lo and mem.eql(u8, p, "tcp/0")) continue;
             try out.append(gpa, try gpa.print(
                 "listen tcp {d}{s}",
-                .{ port(p, "tcp/") orelse return false, if (lo) " loopback" else "" },
+                .{
+                    port(p, "tcp/") orelse return false,
+                    if (lo) " loopback" else if (lan) " lan" else "",
+                },
             ));
         }
         return true;
@@ -1360,6 +1373,10 @@ fn netLine(
         try out.append(gpa, try gpa.print("lookup {s} {s}", .{
             uids.get(w[1]) orelse return false, try mem.join(gpa, " ", w[2..]),
         }));
+        return true;
+    }
+    if (mem.eql(u8, w[0], "dns-direct") and w.len == 2) {
+        try out.append(gpa, try gpa.print("dns-direct {s}", .{uids.get(w[1]) orelse return false}));
         return true;
     }
     if (mem.eql(u8, w[0], "metadata") and w.len > 1) {
@@ -1622,8 +1639,25 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         looker,
         "lookup 300 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered\n",
     ) != null);
+    const direct_form = try testForm(gpa, "resolver", "services:\n  resolver:\n" ++
+        "    user: web\n    exec: /resolver\n    listen: [tcp/53 udp/53 lan]\n" ++
+        "    dns-direct: true\n    connect: [udp/53 tcp/53 tcp/853]\n" ++
+        "    lookup: \"*\"\n");
+    const direct_policy = try net(gpa, &.{direct_form}, with_unwound, &f);
+    try testing.expect(mem.find(u8, direct_policy, "dns-direct 300\n") != null);
+    try testing.expect(mem.find(u8, direct_policy, "listen tcp 53 lan\n") != null);
+    try testing.expect(mem.find(u8, direct_policy, "listen 300 udp 53 lan\n") != null);
+    try testing.expect(mem.find(u8, direct_policy, "connect 300 udp 53\n") != null);
+    try testing.expect(mem.find(u8, direct_policy, "connect 300 tcp 853\n") != null);
+    try testing.expect(mem.find(u8, direct_policy, "lookup 300 * A AAAA\n") != null);
+    try testing.expectError(error.Form, net(gpa, &.{try testForm(gpa, "bad", "services:\n" ++
+        "  worker:\n    user: web\n    exec: /worker\n    connect: udp/53\n")}, with_unwound, &f));
+    try testing.expectError(error.Form, net(gpa, &.{try testForm(gpa, "bad", "net:\n" ++
+        "  - dns-direct web\nservices:\n  worker:\n    user: web\n")}, with_unwound, &f));
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
+    const direct_service = try form.services(testing.io, gpa, tmp.dir, &.{direct_form}, &f);
+    try testing.expect(mem.find(u8, direct_service[0].text, "dns-direct") == null);
     const ephemeral = try testForm(
         gpa,
         "worker",
@@ -1663,19 +1697,19 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
     try testing.expectEqualSlices(u16, &.{}, try form.listens(gpa, &.{discovery}, &f));
     _ = try pledge(testing.io, gpa, tmp.dir, &.{discovery}, &f);
     for ([_][]const u8{
-        "listen udp/53",          "listen tcp/0",
-        "listen tcp/65536",       "listen loopback",
-        "connect nobody tcp/443", "connect web icmp public",
-        "connect web public",     "metadata nobody",
-        "serve tcp/80",           "connect web sctp/9",
-        "listen tcp/",            "listen tcp/99999999999999999999",
-        "listen nobody udp/53",   "listen root udp/0",
-        "listen root tcp/53",     "listen root udp/53 loopback",
-        "connect web udp/53",     "connect web tcp/53",
-        "connect web tcp/853",    "connect all udp/853",
-        "listen root lan",        "listen tcp/80 lan",
-        "connect web tcp/80 lan", "connect all udp/5353 lan",
-        "connect web icmp lan",   "connect web udp/5353 public lan",
+        "listen udp/53",                   "listen tcp/0",
+        "listen tcp/65536",                "listen loopback",
+        "connect nobody tcp/443",          "connect web icmp public",
+        "connect web public",              "metadata nobody",
+        "serve tcp/80",                    "connect web sctp/9",
+        "listen tcp/",                     "listen tcp/99999999999999999999",
+        "listen nobody udp/53",            "listen root udp/0",
+        "listen root tcp/53",              "listen root udp/53 loopback",
+        "connect web udp/53",              "connect web tcp/53",
+        "connect web tcp/853",             "connect all udp/853",
+        "listen root lan",                 "connect web tcp/80 lan",
+        "connect all udp/5353 lan",        "connect web icmp lan",
+        "connect web udp/5353 public lan",
     }) |line| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("net:\n  - {s}\n", .{line}))};
         try testing.expectError(error.Form, net(gpa, &forms, passwd, &f));

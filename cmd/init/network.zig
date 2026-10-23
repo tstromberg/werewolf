@@ -25,9 +25,11 @@ pub fn network(m: *Machine) void {
     // which DHCP atomically replaces (docs/design/unwound.md).
     mkdir("/run/werewolf/network", 0o755);
     m.write(dns.resolv_path, dns.resolv_text, 0o644);
+    m.write(dns.service_address_path, "", 0o644);
     m.write(dns.upstream_path, "", 0o644);
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);
+    m.write("/run/werewolf/network/nic", nic, 0o644);
     routerAdvertisements(m, nic);
     var from: []const u8 = "";
     const c = staticNetwork(m, &from);
@@ -46,6 +48,9 @@ pub fn network(m: *Machine) void {
                 say("network: {s} {s} via {s} refused", .{ nic, c.ip, c.gw })
             else
                 say("network: {s} {s} refused", .{ nic, c.ip });
+        } else {
+            const slash = std.mem.findScalar(u8, c.ip, '/') orelse c.ip.len;
+            m.write(dns.service_address_path, c.ip[0..slash], 0o644);
         }
         // upstream must be a file, since /run is nosymfollow. Check the
         // resolver here because nothing checked the command line's

@@ -1,5 +1,5 @@
 # unbound: prod, with Unbound resolving for the private networks around
-# it: recursive and validating, on every address, answering loopback,
+# it: recursive and validating, on its LAN address and loopback,
 # RFC 1918, 100.64/10, link-local and IPv6's unique local addresses alone,
 # and refusing the rest. Its configuration is the image's
 # (/etc/unbound/unbound.conf), and the forward zones the machine's
@@ -51,8 +51,10 @@ services:
     before: /usr/lib/werewolf/unbound-setup
     user: unbound
     pledge: stdio rpath wpath inet unix netlink connect listen
-    listen: [tcp/53 udp/53]
+    listen: [tcp/53 udp/53 lan]
+    dns-direct: true
     connect: [udp/53 tcp/53]
+    lookup: "*"
     read: [/etc/unbound]
     config:
       - settings /run/config/unbound/settings.json

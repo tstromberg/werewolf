@@ -28,6 +28,12 @@ services:
     lookup: "*"                  # arbitrary names, screened A/AAAA
   lab:
     lookup: "* all unfiltered"   # arbitrary names and supported types, unscreened
+  resolver:
+    user: resolver
+    listen: [tcp/53 udp/53 lan]
+    dns-direct: true              # DNS server may contact upstream DNS directly
+    connect: [udp/53 tcp/53]
+    lookup: "*"                   # its ordinary host lookups use unwound
 ```
 `lookup` takes a scalar or list like `connect`: `PATTERN [TYPE...|all] [unfiltered]`.
 Omitted types mean A AAAA; explicit lists replace that line's default. Grants union.
@@ -35,7 +41,8 @@ Omitted types mean A AAAA; explicit lists replace that line's default. Grants un
 Exact names and `*.domain` are deliberate grants without age/endpoint/entropy checks.
 The latter covers descendants, not the apex; it grants the entire subtree's authority.
 Bare `*` screens names; `unfiltered` removes only that line's screening. Require `*`
-with it. Type limits, quotas, parsing, audit and forced use of unwound always apply.
+with it. Type limits, quotas, parsing, audit and local resolution through unwound
+still apply.
 Explicit name/type grants work during screening outages and fix false positives.
 Canonicalize all names to lowercase ASCII/A-labels without one terminal dot; accept
 only exact names, leading `*.` or bare `*`. No regex or substring matching.
@@ -53,6 +60,14 @@ Allow service-scoped lookup grants for native/OCI services; reject shared servic
 Whole-service replacement replaces DNS grants too; do not merge inherited grants back.
 Non-service users use `net: lookup USER PATTERN [TYPE...|all] [unfiltered]`.
 Reject legacy bare `dns USER`/`connect: dns` at migration; never silently grant `*`.
+
+`dns-direct: true` is a service-local exception for a DNS server with its own
+non-root user and a port 53 or 853 listener. It grants only the upstream DNS
+transport explicitly named by that service's `connect` lines, on port 53 or
+853. Ordinary application hostname resolution still uses `lookup` and unwound.
+The builder derives the user ID; the compiled policy's `dns-direct UID` line
+is an internal fence instruction, not form syntax. A top-level `net:` exception
+and a shared service user are refused.
 
 ## Deferred: age and endpoint evidence
 

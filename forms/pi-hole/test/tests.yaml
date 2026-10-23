@@ -20,7 +20,13 @@ suites:
           - file: /data/svc/pi-hole/etc/pihole/pihole.toml
             expect:
               body:
-                contains: listeningMode = "LOCAL"
+                contains: listeningMode = "NONE"
+          - file: /data/svc/pi-hole/etc/dnsmasq.d/99-werewolf.conf
+            expect:
+              body:
+                occurrences:
+                  'except-interface=lo': 1
+                  'bind-dynamic': 1
           - file: /data/svc/pi-hole/etc/pihole/pihole.toml
             expect:
               body:
@@ -86,7 +92,7 @@ suites:
                 - /usr/bin/drill
                 - -Q
                 - example.org
-                - '@127.0.0.1'
+                - '@10.0.2.15'
               readonly: true
             expect:
               exit: 0
@@ -106,7 +112,7 @@ suites:
                 - /usr/bin/drill
                 - -Q
                 - ad.doubleclick.net
-                - '@127.0.0.1'
+                - '@10.0.2.15'
               readonly: true
             expect:
               exit: 0

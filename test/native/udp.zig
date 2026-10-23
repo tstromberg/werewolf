@@ -20,28 +20,42 @@ pub fn squatter(io: Io, a: std.mem.Allocator, service: []const u8) !void {
 
 fn attack(io: Io, a: std.mem.Allocator, path: []const u8) !void {
     try control(io, a, "down", path);
+    const bind_ip = try serviceAddress(io, a);
     const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
     while (true) {
         const entries = try system.listeners(io, a, "udp");
         var held = false;
-        for (entries.array.items) |entry|
-            held = held or entry.object.get("port").?.integer == 53;
+        for (entries.array.items) |entry| {
+            if (entry.object.get("port").?.integer != 53) continue;
+            const address = entry.object.get("address").?.string;
+            // unwound stays on 127.0.0.53 while the DNS server is down.
+            held = held or !std.mem.eql(u8, address, "127.0.0.53");
+        }
         if (!held) break;
         if (Io.Clock.awake.now(io).compare(.gte, deadline)) return error.PortStillHeld;
         try io.sleep(.fromMilliseconds(100), .awake);
     }
     // Root has no arbitrary outbound UDP grant. Prove the bound socket can
     // send locally, then require the external send to fail with EACCES.
-    try sendFromListener(0x7f000001, false);
-    try sendFromListener(0x0a000202, true);
+    try sendFromListener(bind_ip, bind_ip, false);
+    try sendFromListener(bind_ip, 0x0a000202, true);
 }
 
-fn sendFromListener(address: u32, refused: bool) !void {
+fn serviceAddress(io: Io, a: std.mem.Allocator) !u32 {
+    const raw = try system.read(io, a, "/run/werewolf/network/service-address");
+    const parsed = try Io.net.Ip4Address.parse(raw, 0);
+    return std.mem.readInt(u32, &parsed.bytes, .big);
+}
+
+fn sendFromListener(bind_ip: u32, address: u32, refused: bool) !void {
     const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(rc) != .SUCCESS) return error.Socket;
     const fd: linux.fd_t = @intCast(rc);
     defer _ = linux.close(fd);
-    const local: linux.sockaddr.in = .{ .addr = 0, .port = std.mem.nativeToBig(u16, 53) };
+    const local: linux.sockaddr.in = .{
+        .addr = std.mem.nativeToBig(u32, bind_ip),
+        .port = std.mem.nativeToBig(u16, 53),
+    };
     if (linux.errno(linux.bind(fd, @ptrCast(&local), @sizeOf(@TypeOf(local)))) != .SUCCESS)
         return error.Bind;
     const peer: linux.sockaddr.in = .{
@@ -74,12 +88,14 @@ fn control(io: Io, a: std.mem.Allocator, action: []const u8, path: []const u8) !
 
 fn recover(io: Io, a: std.mem.Allocator, path: []const u8) !void {
     try control(io, a, "up", path);
+    const address = try system.read(io, a, "/run/werewolf/network/service-address");
+    const server = try a.print("@{s}", .{address});
     const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
     while (true) {
         const result = command(
             io,
             a,
-            &.{ "/usr/bin/drill", "-Q", "example.org", "@127.0.0.1" },
+            &.{ "/usr/bin/drill", "-Q", "example.org", server },
             5,
         ) catch null;
         if (result) |r| if (r.term == .exited and r.term.exited == 0 and answers(r.stdout)) return;

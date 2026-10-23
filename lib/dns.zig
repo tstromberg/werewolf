@@ -14,6 +14,9 @@ const max_rules = max_servers * (max_users * 4 + 2);
 pub const policy_path = "/usr/share/werewolf/net";
 /// resolv_path is what /etc/resolv.conf links to: unwound, never upstream.
 pub const resolv_path = "/run/werewolf/network/resolv.conf";
+/// service_address_path is the LAN IPv4 address for DNS servers that share
+/// port 53 with unwound's loopback listener.
+pub const service_address_path = "/run/werewolf/network/service-address";
 pub const resolv_text = "nameserver 127.0.0.53\n";
 /// upstream_path names the resolvers DHCP or the command line gave, as
 /// nameserver lines, for fence, DHCP and unwound alone.
@@ -31,6 +34,11 @@ pub const Users = struct {
         if (u.len == max_users) return error.BadPolicy;
         u.ids[u.len] = id;
         u.len += 1;
+    }
+
+    pub fn has(u: Users, id: u32) bool {
+        for (u.ids[0..u.len]) |existing| if (existing == id) return true;
+        return false;
     }
 };
 

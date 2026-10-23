@@ -13,7 +13,7 @@ http:
 users: []
 dns:
   bind_hosts:
-    - 0.0.0.0
+    - 127.0.0.1
   port: 53
   upstream_dns:
     - tls://dns.quad9.net

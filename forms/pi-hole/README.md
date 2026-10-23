@@ -50,7 +50,9 @@ howl create pi-hole --with pi-hole --on proxmox \
 ```
 
 Upstreams and lists are changed in the web interface and kept on `/data`. The password
-and the local-only mode come from the config.
+comes from the config. Fence admits DNS clients only from connected subnets;
+dnsmasq binds the machine's network interface and leaves unwound's loopback
+address free.
 
 ### Importing data
 

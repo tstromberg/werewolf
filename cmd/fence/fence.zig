@@ -65,6 +65,7 @@ const pref = struct {
     /// follows the upstream user's grants (lib/dns.zig, at 99) and precedes
     /// any broad connect.
     const dns_refuse: u32 = 150;
+    const dns_direct_allow: u32 = 149;
     const out_allow: u32 = 200;
     const out_lan_refuse: u32 = 280;
     const in_private: u32 = 290;
@@ -306,6 +307,9 @@ const Policy = struct {
     /// listen holds the served ports, reachable from the network.
     listen: [max_entries]u16 = undefined,
     nlisten: usize = 0,
+    /// listen_lan holds TCP listeners open only to connected subnets.
+    listen_lan: [max_entries]u16 = undefined,
+    nlisten_lan: usize = 0,
     /// loopback holds ports bound and reached only from this machine.
     loopback: [max_entries]u16 = undefined,
     nloopback: usize = 0,
@@ -319,11 +323,13 @@ const Policy = struct {
     metadata: [max_entries]u32 = undefined,
     nmetadata: usize = 0,
     dns: dns.Users = .{},
+    dns_direct: dns.Users = .{},
     /// lookups are unwound's clients, in label order.
     lookups: dns.Users = .{},
     lan: []const Prefix = &.{},
 
     fn needsLan(p: Policy) bool {
+        if (p.nlisten_lan > 0) return true;
         for (p.udp[0..p.nudp]) |u| if (u.lan) return true;
         for (p.connect[0..p.nconnect]) |c| if (c.lan) return true;
         return false;
@@ -351,8 +357,9 @@ const Policy = struct {
     }
 };
 
-/// parsePolicy parses `listen tcp PORT [loopback]`, `listen UID udp PORT [lan]`,
-/// `connect UID|all PROTO [PORT] [public|lan]`, `metadata UID`, `dns UID`
+/// parsePolicy parses `listen tcp PORT [loopback|lan]`, `listen UID udp PORT [lan]`,
+/// `connect UID|all PROTO [PORT] [public|lan]`, `metadata UID`, `dns UID`,
+/// `dns-direct UID`
 /// and `lookup UID ...` lines; the rest of a lookup line is unwound's to
 /// check. Only a named user's UDP accepts lan. Anything else is BadPolicy.
 fn parsePolicy(text: []const u8) !Policy {
@@ -383,6 +390,11 @@ fn parsePolicy(text: []const u8) !Policy {
                 if (p.nloopback == max_entries) return error.BadPolicy;
                 p.loopback[p.nloopback] = l;
                 p.nloopback += 1;
+            } else if (std.mem.eql(u8, words.peek() orelse "", "lan")) {
+                _ = words.next();
+                if (p.nlisten_lan == max_entries) return error.BadPolicy;
+                p.listen_lan[p.nlisten_lan] = l;
+                p.nlisten_lan += 1;
             } else {
                 if (p.nlisten == max_entries) return error.BadPolicy;
                 p.listen[p.nlisten] = l;
@@ -428,6 +440,8 @@ fn parsePolicy(text: []const u8) !Policy {
             p.nconnect += 1;
         } else if (std.mem.eql(u8, key, "dns")) {
             try p.dns.add(try user(words.next() orelse ""));
+        } else if (std.mem.eql(u8, key, "dns-direct")) {
+            try p.dns_direct.add(try user(words.next() orelse ""));
         } else if (std.mem.eql(u8, key, "lookup")) {
             try p.lookups.add(try user(words.next() orelse ""));
             if (words.next() == null) return error.BadPolicy;
@@ -471,7 +485,7 @@ const Rule = net_rule.Rule;
 const policy_max = 64 << 10;
 
 const max_rules = 22 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
-    (32 + 6 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
+    (36 + 8 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
 ///
@@ -662,6 +676,21 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .dport = port_number,
     });
+    for (p.connect[0..p.nconnect]) |c| {
+        if (c.uid == null or !p.dns_direct.has(c.uid.?) or c.any or
+            (c.proto != .udp and c.proto != .tcp) or
+            (c.port != 53 and c.port != 853)) continue;
+        const r: Rule = .{
+            .priority = pref.dns_direct_allow,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_MAIN,
+            .from_here = true,
+            .proto = c.proto,
+            .dport = c.port,
+            .uid = c.uid,
+        };
+        if (c.lan) rules.onLan(r, p.lan, c.port) else rules.add(r);
+    }
     for ([_]Proto{ .udp, .tcp }) |proto| for ([_]u16{ 53, 853 }) |port_number| rules.add(.{
         .priority = pref.dns_refuse,
         .action = FR_ACT_PROHIBIT,
@@ -721,12 +750,22 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     });
     // A forged reply source port must not expose a private listener that
     // binds all interfaces. Local traffic has already matched local_out.
-    for (p.loopback[0..p.nloopback]) |port_number| rules.add(.{
-        .priority = pref.in_private,
-        .action = FR_ACT_BLACKHOLE,
-        .proto = .tcp,
-        .dport = port_number,
-    });
+    for (p.loopback[0..p.nloopback]) |port_number| {
+        // A DNS server can expose the same TCP port on LAN while unwound
+        // owns only its loopback address. The LAN rule below supplies the
+        // off-LAN drop for that port.
+        const served_on_lan = blk: {
+            for (p.listen_lan[0..p.nlisten_lan]) |l|
+                if (l == port_number) break :blk true;
+            break :blk false;
+        };
+        if (!served_on_lan) rules.add(.{
+            .priority = pref.in_private,
+            .action = FR_ACT_BLACKHOLE,
+            .proto = .tcp,
+            .dport = port_number,
+        });
+    }
     // Drop off-LAN traffic before any broad source-port reply allowance.
     // A forged packet from 53/443 must not expose a discovery listener.
     for (p.udp[0..p.nudp]) |u| if (u.lan) {
@@ -744,6 +783,21 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .dport = u.port,
         });
     };
+    for (p.listen_lan[0..p.nlisten_lan]) |port_number| {
+        rules.onLan(.{
+            .priority = pref.in_private,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_LOCAL,
+            .proto = .tcp,
+            .dport = port_number,
+        }, p.lan, port_number);
+        rules.add(.{
+            .priority = pref.in_private,
+            .action = FR_ACT_BLACKHOLE,
+            .proto = .tcp,
+            .dport = port_number,
+        });
+    }
     rules.add(.{ .priority = pref.out_refuse, .action = FR_ACT_PROHIBIT, .from_here = true });
 
     for (p.listen[0..p.nlisten]) |l| rules.add(.{
@@ -940,7 +994,8 @@ fn restrict(p: Policy) !void {
                 try ruleset.port(sandbox.connect_tcp, @intCast(port_num));
         } else try ruleset.port(sandbox.connect_tcp, c.port);
     };
-    if (p.dns.len > 0 or p.lookups.len > 0) try ruleset.port(sandbox.connect_tcp, 53);
+    if (p.dns.len > 0 or p.lookups.len > 0 or p.dns_direct.len > 0)
+        try ruleset.port(sandbox.connect_tcp, 53);
     if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
     // init creates this executable tmpfs only for a checked --dev boot with
@@ -1299,7 +1354,6 @@ test "policies" {
         "connect 0 tcp 443 private\n",
         "connect 0 tcp 443 public public\n",
         "connect 0 icmp public\n",
-        "listen tcp 5353 lan\n",
         "connect all udp 5353 lan\n",
         "connect 0 tcp 5353 lan\n",
         "connect 0 udp 5353 public lan\n",
@@ -1421,6 +1475,26 @@ test "LAN discovery allows on-link peers and groups, refusing other addresses an
         .src_len = 24,
     });
     try std.testing.expectEqual(24, encoded[18]); // fib_rule_hdr.src_len
+}
+
+test "a TCP DNS listener accepts only connected subnets" {
+    var p = try parsePolicy("listen tcp 53 loopback\nlisten tcp 53 lan\n");
+    try std.testing.expect(p.needsLan());
+    var lan: Lan = .{};
+    try lan.add(&.{ 10, 77, 0, 1 }, 24);
+    p.lan = lan.prefixes[0..lan.len];
+    var rules: [max_rules]Rule = undefined;
+    const planned = plan(p, linux.AF.INET, &rules);
+    var allow_lan = false;
+    var deny_other = false;
+    for (planned) |r| {
+        if (r.priority != pref.in_private or r.proto != .tcp or r.dport != 53) continue;
+        if (r.action == FR_ACT_TO_TBL and r.table == RT_TABLE_LOCAL and r.src != null and
+            prefixMatches(&.{ 10, 77, 0, 2 }, r.src.?, r.src_len.?)) allow_lan = true;
+        if (r.action == FR_ACT_BLACKHOLE and r.src == null) deny_other = true;
+    }
+    try std.testing.expect(allow_lan and deny_other);
+    try std.testing.expectError(error.BadPolicy, parsePolicy("listen tcp 53 lan extra\n"));
 }
 
 fn prefixMatches(address: []const u8, prefix: []const u8, bits: u8) bool {
@@ -1755,6 +1829,55 @@ test "lookup users reach unwound from their own labels; DNS elsewhere is refused
     try std.testing.expectEqual(4, refusals);
     try std.testing.expectError(error.BadPolicy, parsePolicy("lookup 1001\n"));
     try std.testing.expectError(error.BadPolicy, parsePolicy("lookup x a.example A\n"));
+}
+
+test "a DNS service reaches only its declared direct upstream ports" {
+    const p = try parsePolicy("lookup 207 * A AAAA\ndns-direct 207\n" ++
+        "connect 207 udp 53\nconnect 207 tcp 853 public\nconnect 208 udp 53\n");
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        const planned = plan(p, family, &rules);
+        var grants: usize = 0;
+        for (planned) |r| if (r.priority == pref.dns_direct_allow and r.action == FR_ACT_TO_TBL) {
+            grants += 1;
+            try std.testing.expectEqual(207, r.uid.?);
+            try std.testing.expect((r.proto == .udp and r.dport == 53) or
+                (r.proto == .tcp and r.dport == 853));
+        };
+        try std.testing.expectEqual(2, grants);
+        try std.testing.expectEqual(
+            FR_ACT_TO_TBL,
+            udpAction(planned, true, 207, &.{ 8, 8, 8, 8 }, 40000, 53),
+        );
+        try std.testing.expectEqual(
+            FR_ACT_PROHIBIT,
+            udpAction(planned, true, 208, &.{ 8, 8, 8, 8 }, 40000, 53),
+        );
+        try std.testing.expectEqual(
+            FR_ACT_PROHIBIT,
+            udpAction(planned, true, 207, &.{ 8, 8, 8, 8 }, 40000, 853),
+        );
+    }
+    try std.testing.expectError(error.BadPolicy, parsePolicy("dns-direct\n"));
+    try std.testing.expectError(error.BadPolicy, parsePolicy("dns-direct 207 extra\n"));
+}
+
+test "a direct LAN DNS grant stays on connected subnets" {
+    var p = try parsePolicy("dns-direct 207\nconnect 207 udp 53 lan\n");
+    var lan: Lan = .{};
+    try lan.add(&.{ 10, 77, 0, 1 }, 24);
+    p.lan = lan.prefixes[0..lan.len];
+    var rules: [max_rules]Rule = undefined;
+    const planned = plan(p, linux.AF.INET, &rules);
+    for (planned) |r| {
+        if (r.priority != pref.dns_direct_allow) continue;
+        try std.testing.expect(r.dst != null);
+        try std.testing.expect(prefixMatches(&.{ 10, 77, 0, 2 }, r.dst.?, r.dst_len.?));
+    }
+    try std.testing.expectEqual(
+        FR_ACT_PROHIBIT,
+        udpAction(planned, true, 207, &.{ 8, 8, 8, 8 }, 40000, 53),
+    );
 }
 
 test "public: refused to every non-public prefix, first, on its port alone" {

@@ -580,6 +580,8 @@ const Parent = struct {
                 );
                 p.dns_servers = servers;
                 try p.link.apply(p.dir, m.lease, &p.log, p.nic);
+                var bind_ip: [16]u8 = undefined;
+                try writeFile(p.dir, "service-address", ipText(&bind_ip, m.lease.addr));
                 p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
                 var a: std.heap.FixedBufferAllocator = .init(&fba);
@@ -604,6 +606,7 @@ const Parent = struct {
                 const ours = if (p.applied) |a| std.mem.eql(u8, &a.addr, &m.lease.addr) else false;
                 if (ours) {
                     try p.link.withdraw();
+                    try writeFile(p.dir, "service-address", "");
                     p.applied = null;
                 }
                 var ip: [16]u8 = undefined;
