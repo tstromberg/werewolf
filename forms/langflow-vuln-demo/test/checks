@@ -2,6 +2,4 @@ ok  langflow-editor i=0; until wget -q -T 10 -O - http://127.0.0.1:7860/ | grep 
 ok  langflow-services wget -q -T 10 -O - http://127.0.0.1:7860/health_check | grep -q '"status":"ok"'
 ok  langflow-api wget -q -T 10 -O - http://127.0.0.1:7860/openapi.json | grep -q '/api/v1/flows/'
 ok  langflow-direct-python grep -q '^exec /usr/lib/langflow/bin/python ' /etc/sv/langflow/service && ! grep -q '^run /bin/sh' /etc/sv/langflow/service
-ok  langflow-local-inference /usr/lib/langflow/bin/python /usr/lib/onnx/check.py inference
-ok  langflow-inference-invalid-shape /usr/lib/langflow/bin/python /usr/lib/onnx/check.py shape
 ok  langflow-state test -s /data/svc/langflow/langflow.db

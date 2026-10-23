@@ -129,6 +129,21 @@ pub fn main(init: std.process.Init) !void {
         inference.term == .exited and inference.term.exited == 0 and
             std.mem.indexOf(u8, inference.stdout, "onnx-inference: ok") != null,
     );
+    // The model refuses an input of the wrong shape rather than reading past it.
+    const shape = try std.process.run(gpa, io, .{
+        .argv = &.{ "/usr/lib/langflow/bin/python", "-B", "/usr/lib/onnx/check.py", "shape" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(16384),
+        .timeout = driver.deadline(io, 30),
+    });
+    try Io.File.stderr().writeStreamingAll(io, shape.stderr);
+    try ctx.result(
+        io,
+        suite,
+        "inference-invalid-shape",
+        shape.term == .exited and shape.term.exited == 0 and
+            std.mem.indexOf(u8, shape.stdout, "onnx-shape: ok") != null,
+    );
     const embedding = try std.process.run(gpa, io, .{
         .argv = &.{ "/usr/lib/langflow/bin/python", "-B", "/usr/lib/langflow/check-embedding.py" },
         .stdout_limit = .limited(4096),
@@ -160,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         "/usr/lib/apk/db/installed",
         gpa,
-        .limited(4 << 20),
+        .limited(64 << 20), // apk lists every file each package installs
     );
     const prefix = "P:python-3.15\nV:";
     const at = std.mem.indexOf(u8, packages, prefix) orelse return error.NoPython;

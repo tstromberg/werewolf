@@ -1244,6 +1244,22 @@
         "test-minecraft/mc-no-rcon-listener",
         "test-minecraft-game/mc-no-rcon"
       ]
+    },
+    "langflow": {
+      "langflow-inference-invalid-shape": [
+        "test-langflow/inference-invalid-shape"
+      ],
+      "langflow-local-inference": [
+        "test-langflow/local-inference"
+      ]
+    },
+    "langflow-vuln-demo": {
+      "langflow-inference-invalid-shape": [
+        "test-langflow/inference-invalid-shape"
+      ],
+      "langflow-local-inference": [
+        "test-langflow/local-inference"
+      ]
     }
   }
 }

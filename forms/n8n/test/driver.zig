@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         "/usr/lib/apk/db/installed",
         gpa,
-        .limited(4 << 20),
+        .limited(64 << 20), // apk lists every file each package installs
     );
     const at = std.mem.indexOf(u8, packages, "P:nodejs-26\nV:") orelse return error.NoNode;
     const rest = packages[at + "P:nodejs-26\nV:".len ..];
