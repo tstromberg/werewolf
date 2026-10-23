@@ -1,6 +1,7 @@
 //! Single-writer SQLite foundation for the isolated domain-age worker.
 //! Only that worker may construct a Db; the DNS frontend never links SQLite.
 const std = @import("std");
+const age = @import("age.zig");
 
 const sqlite3 = opaque {};
 const sqlite3_stmt = opaque {};
@@ -29,10 +30,14 @@ extern "c" fn sqlite3_finalize(*sqlite3_stmt) c_int;
 extern "c" fn sqlite3_last_insert_rowid(*sqlite3) i64;
 extern "c" fn sqlite3_changes(*sqlite3) c_int;
 extern "c" fn sqlite3_column_int64(*sqlite3_stmt, c_int) i64;
+extern "c" fn sqlite3_column_type(*sqlite3_stmt, c_int) c_int;
+extern "c" fn sqlite3_column_text(*sqlite3_stmt, c_int) ?[*]const u8;
+extern "c" fn sqlite3_column_bytes(*sqlite3_stmt, c_int) c_int;
 
 const ok = 0;
 const done = 101;
 const row = 100;
+const null_type = 5;
 const open_readwrite = 0x00000002;
 const open_create = 0x00000004;
 const open_nomutex = 0x00008000;
@@ -221,7 +226,57 @@ pub const Db = struct {
         }
         try db.exec("COMMIT");
     }
+
+    /// Read dated evidence only. The verdict is always recomputed against now.
+    pub fn verdict(db: *Db, domain: []const u8, now: i64) !age.Verdict {
+        var s = try db.prepare("SELECT source,status,registered_at,effective_at," ++
+            "ct_first_seen_at,fetched_at FROM domain_age WHERE domain=?1");
+        defer s.close();
+        try s.text(1, domain);
+        const rc = sqlite3_step(s.handle);
+        if (rc == done) return .unknown;
+        if (rc != row) return error.SQLite;
+        const source = columnText(s.handle, 0) orelse return error.Corrupt;
+        const status = columnText(s.handle, 1) orelse return error.Corrupt;
+        const evidence: age.Cached = .{
+            .domain = domain,
+            .source = if (std.mem.eql(u8, source, "rdap"))
+                .rdap
+            else if (std.mem.eql(u8, source, "crtsh"))
+                .crtsh
+            else if (std.mem.eql(u8, source, "none"))
+                .none
+            else
+                return error.Corrupt,
+            .status = if (std.mem.eql(u8, status, "valid"))
+                .valid
+            else if (std.mem.eql(u8, status, "history"))
+                .history
+            else if (std.mem.eql(u8, status, "unknown"))
+                .unknown
+            else if (std.mem.eql(u8, status, "error"))
+                .@"error"
+            else
+                return error.Corrupt,
+            .registered_at = columnOptionalInt(s.handle, 2),
+            .effective_at = columnOptionalInt(s.handle, 3),
+            .ct_first_seen_at = columnOptionalInt(s.handle, 4),
+            .fetched_at = sqlite3_column_int64(s.handle, 5),
+        };
+        return age.cachedVerdict(evidence, domain, now);
+    }
 };
+
+fn columnText(s: *sqlite3_stmt, index: c_int) ?[]const u8 {
+    const ptr = sqlite3_column_text(s, index) orelse return null;
+    const len = sqlite3_column_bytes(s, index);
+    if (len < 0) return null;
+    return ptr[0..@intCast(len)];
+}
+
+fn columnOptionalInt(s: *sqlite3_stmt, index: c_int) ?i64 {
+    return if (sqlite3_column_type(s, index) == null_type) null else sqlite3_column_int64(s, index);
+}
 
 test "pinned static SQLite opens the age schema with foreign keys" {
     var db = try Db.open(":memory:");
@@ -306,6 +361,12 @@ test "age check provenance and evidence complete atomically" {
         "d.last_check_id=c.id " ++
         "WHERE d.domain='example.com' AND c.request_id=77 AND c.service_uid=1001 " ++
         "AND c.provenance='uid_only' AND c.process_pid IS NULL"));
+    try t.expectEqual(age.Verdict.young, try db.verdict("example.com", 120));
+    try t.expectEqual(
+        age.Verdict.unknown,
+        try db.verdict("example.com", 120 + age.rdap_cache_s + 1),
+    );
+    try t.expectEqual(age.Verdict.unknown, try db.verdict("absent.com", 120));
     try t.expectError(error.CheckMismatch, db.finishCheck(id, good));
 
     var newer_trigger = trigger;
@@ -314,19 +375,20 @@ test "age check provenance and evidence complete atomically" {
     newer_trigger.request_id = 79;
     const fast = try db.beginCheck(newer_trigger);
     var newer = good;
-    newer.finished_at = 200;
-    newer.fetched_at = 200;
+    newer.finished_at = age.threshold_s + 200;
+    newer.fetched_at = newer.finished_at;
     try db.finishCheck(fast, newer);
     var older = good;
-    older.finished_at = 210;
+    older.finished_at = newer.finished_at + 10;
     older.fetched_at = 130;
     try db.finishCheck(slow, older);
     try t.expectEqual(
-        @as(i64, 200),
+        newer.fetched_at,
         try scalar(&db, "SELECT fetched_at FROM domain_age WHERE domain='example.com'"),
     );
     try t.expectEqual(
         fast,
         try scalar(&db, "SELECT last_check_id FROM domain_age WHERE domain='example.com'"),
     );
+    try t.expectEqual(age.Verdict.mature, try db.verdict("example.com", newer.fetched_at));
 }

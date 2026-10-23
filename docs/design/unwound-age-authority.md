@@ -35,9 +35,10 @@ archive by SHA3-256 before extracting its amalgamation into `out/`. The age
 writer will link it statically. `cmd/unwound/age_db.zig` opens the schema with
 foreign keys, trusted schema disabled and WAL requested. It records a check's
 first request, then atomically stores the provider result and cache row. A
-late response cannot replace newer evidence. Its host test uses the pinned
-SQLite code; run `make check-unwound-age-store`. The worker process and IPC
-are still to be built.
+late response cannot replace newer evidence. Reads recompute the age verdict
+from dated evidence. Its host test uses the pinned SQLite code; run
+`make check-unwound-age-store`. The worker process and IPC are still to be
+built.
 
 `test/check-unwound-age-mount` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers
