@@ -23,10 +23,37 @@ pub const resolv_text = "nameserver 127.0.0.53\n";
 pub const network_dir = "/run/werewolf/network";
 pub const upstream_name = "upstream";
 pub const upstream_path = network_dir ++ "/" ++ upstream_name;
+pub const dhcp_domain_name = "dhcp-domain";
+pub const config_domain_name = "config-domain";
+pub const dhcp_domain_path = network_dir ++ "/" ++ dhcp_domain_name;
+pub const config_domain_path = network_dir ++ "/" ++ config_domain_name;
 /// A form that ships this immutable file runs a DNSSEC-validating resolver
 /// on 127.0.0.1. DHCP cannot substitute a remote server for it.
 pub const local_validator_path = "/usr/share/werewolf/dnssec-local";
 pub const local_validator_text = "nameserver 127.0.0.1\n";
+
+/// normalizeSystemDomain accepts one assigned DNS suffix for the automatic
+/// age exemption. A single label or a malformed value cannot widen policy.
+pub fn normalizeSystemDomain(raw: []const u8, out: *[253]u8) ?[]const u8 {
+    if (raw.len == 0 or raw.len > 254) return null;
+    const n = raw.len - @intFromBool(raw[raw.len - 1] == '.');
+    if (n == 0 or n > out.len) return null;
+    var dots: usize = 0;
+    var first: usize = 0;
+    for (raw[0..n], 0..) |c, i| {
+        const lower = std.ascii.toLower(c);
+        if (lower == '.') {
+            if (i == first or i - first > 63 or out[i - 1] == '-') return null;
+            dots += 1;
+            first = i + 1;
+        } else if (!std.ascii.isLower(lower) and !std.ascii.isDigit(lower) and lower != '-') {
+            return null;
+        } else if (i == first and lower == '-') return null;
+        out[i] = lower;
+    }
+    if (dots == 0 or n == first or n - first > 63 or out[n - 1] == '-') return null;
+    return out[0..n];
+}
 
 pub const Users = struct {
     ids: [max_users]u32 = undefined,
@@ -227,6 +254,18 @@ pub fn replace(socket: anytype, u: Users, old: Resolvers, new: Resolvers) !void 
 }
 
 const testing = std.testing;
+
+test "assigned system domain is canonical and bounded" {
+    var out: [253]u8 = undefined;
+    try testing.expectEqualStrings(
+        "corp.example.com",
+        normalizeSystemDomain("Corp.Example.COM.", &out).?,
+    );
+    for ([_][]const u8{
+        "",              "local",           ".example.com",   "example..com",   "example.com..",
+        "*.example.com", "a_b.example.com", "-a.example.com", "a-.example.com",
+    }) |bad| try testing.expect(normalizeSystemDomain(bad, &out) == null);
+}
 
 test "resolver and user input is bounded, deduplicated and fails closed" {
     const u = try users("connect 69 tcp 443\ndns 69\ndns 0\ndns 69\n");

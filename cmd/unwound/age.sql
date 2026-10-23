@@ -81,3 +81,19 @@ CREATE TABLE IF NOT EXISTS age_check (
 
 CREATE INDEX IF NOT EXISTS age_check_domain_time ON age_check(domain, started_at DESC);
 CREATE INDEX IF NOT EXISTS age_check_time ON age_check(started_at);
+
+-- Check history is bounded independently of the indefinitely retained LRU
+-- evidence rows. Prune a batch only when the table grows past 120,000 checks;
+-- never remove a cached domain's latest check. The single writer also caps
+-- database bytes and checkpoints WAL during maintenance.
+CREATE TRIGGER IF NOT EXISTS age_check_limit AFTER INSERT ON age_check
+WHEN (SELECT count(*) FROM age_check) > 120000
+BEGIN
+    DELETE FROM age_check WHERE id IN (
+        SELECT id FROM age_check
+        WHERE id NOT IN (
+            SELECT last_check_id FROM domain_age WHERE last_check_id IS NOT NULL
+        )
+        ORDER BY id LIMIT 1024
+    );
+END;

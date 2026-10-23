@@ -68,6 +68,14 @@ rejected(
 db.execute("DELETE FROM domain_age WHERE domain = 'example.com'")
 assert db.execute("SELECT qname FROM age_check WHERE id = ?", (check_id,)).fetchone() == (
     "www.example.com",)
+db.execute(
+    """INSERT INTO domain_age
+       (domain, source, status, fetched_at, retry_after, last_used_at,
+        psl_generation, bootstrap_generation, last_check_id)
+       VALUES ('example.com', 'none', 'unknown', 1790000000, 1790003600,
+               9999999, 'psl-1', 'bootstrap-1', ?)""",
+    (check_id,),
+)
 
 db.executemany(
     """INSERT INTO domain_age
@@ -79,4 +87,13 @@ db.executemany(
 assert db.execute("SELECT count(*) FROM domain_age").fetchone() == (20000,)
 assert db.execute("SELECT 1 FROM domain_age WHERE domain='d0.example'").fetchone() is None
 assert db.execute("SELECT 1 FROM domain_age WHERE domain='d20000.example'").fetchone() == (1,)
+assert db.execute("SELECT 1 FROM domain_age WHERE domain='example.com'").fetchone() == (1,)
+
+db.executemany(
+    """INSERT INTO age_check (domain, started_at, cause, provenance)
+       VALUES ('example.org', ?, 'refresh', 'scheduled')""",
+    ((i,) for i in range(120001)),
+)
+assert db.execute("SELECT count(*) FROM age_check").fetchone()[0] <= 120000
+assert db.execute("SELECT 1 FROM age_check WHERE id = ?", (check_id,)).fetchone() == (1,)
 print("age database: provenance, evidence and eviction constraints pass")

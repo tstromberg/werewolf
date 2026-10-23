@@ -27,6 +27,8 @@ pub fn network(m: *Machine) void {
     mkdir("/run/werewolf/network", 0o755);
     m.write(dns.resolv_path, dns.resolv_text, 0o644);
     m.write(dns.service_address_path, "", 0o644);
+    m.write(dns.dhcp_domain_path, "", 0o644);
+    m.write(dns.config_domain_path, "", 0o644);
     m.write(dns.upstream_path, if (local_validator) dns.local_validator_text else "", 0o644);
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);

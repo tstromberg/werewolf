@@ -107,34 +107,51 @@ fn run() !void {
         0,
         &pair,
     ), "upstream channel");
+    var domain_pair: [2]i32 = undefined;
+    _ = try sys(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+        &domain_pair,
+    ), "system domain channel");
     const parent = linux.getpid();
     if (try sys(linux.fork(), "fork upstream") == 0) {
         sandbox.tieTo(parent);
-        try sandbox.closeAllBut(&.{ pair[1], network, log });
-        upstream.run(pair[1], network, log, local_validator);
+        try sandbox.closeAllBut(&.{ pair[1], domain_pair[1], network, log });
+        upstream.run(pair[1], domain_pair[1], network, log, local_validator);
     }
     _ = linux.close(pair[1]);
+    _ = linux.close(domain_pair[1]);
     _ = linux.close(network);
-    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], log });
+    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], domain_pair[0], log });
     log_fd = log;
     side = "frontend";
     if (try sys(
         linux.getrandom(&screen_key, screen_key.len, 0),
         "screen key",
     ) != screen_key.len) return error.ShortKey;
-    try sandbox.limit(.NOFILE, 16 + max_conns);
+    try sandbox.limit(.NOFILE, 17 + max_conns);
     try sandbox.dropTo(frontend_id, "/var/empty");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
-    try confine(udp, tcp, pair[0], log);
+    try confine(udp, tcp, pair[0], domain_pair[0], log);
     var f: Frontend = .{
         .udp = udp,
         .tcp = tcp,
         .channel = pair[0],
+        .domain_channel = domain_pair[0],
         .log = log,
         .trust_ad = local_validator,
         .last_stats = now(),
     };
+    var ready: [1]linux.pollfd = .{.{
+        .fd = domain_pair[0],
+        .events = linux.POLL.IN,
+        .revents = 0,
+    }};
+    if (linux.poll(&ready, 1, 5000) != 1 or ready[0].revents & linux.POLL.IN == 0)
+        f.fail("initial system domain");
+    f.domainUpdate();
     f.say("{{\"event\":\"start\",\"services\":{d},\"grants\":{d},\"generation\":\"{x:0>8}\"}}", .{
         policy.users.len, policy.n, policy.generation,
     });
@@ -265,13 +282,14 @@ fn openLog() !i32 {
 
 /// confine allows the frontend reads and writes on what it holds, accepts
 /// on its listener, and nothing that opens a file or makes a socket.
-fn confine(udp: i32, tcp: i32, channel: i32, log: i32) !void {
+fn confine(udp: i32, tcp: i32, channel: i32, domain_channel: i32, log: i32) !void {
     var f: sandbox.Filter = .{};
     f.allowArg("recvfrom", 0, @intCast(udp));
     f.allowArg("sendto", 0, @intCast(udp));
     f.allowArg("accept4", 0, @intCast(tcp));
     f.allowArg("recvfrom", 0, @intCast(channel));
     f.allowArg("sendto", 0, @intCast(channel));
+    f.allowArg("recvfrom", 0, @intCast(domain_channel));
     f.allowArg("write", 0, @intCast(log));
     // TCP clients' descriptors are made by accept4; nothing else can be.
     inline for (.{
@@ -351,6 +369,7 @@ const Frontend = struct {
     udp: i32,
     tcp: i32,
     channel: i32,
+    domain_channel: i32,
     log: i32,
     trust_ad: bool,
     slots: [max_slots]Slot = @splat(.{}),
@@ -367,7 +386,7 @@ const Frontend = struct {
     records: [wire.max_records]wire.Record = undefined,
 
     fn serve(f: *Frontend) noreturn {
-        var fds: [3 + max_conns]linux.pollfd = undefined;
+        var fds: [4 + max_conns]linux.pollfd = undefined;
         var which: [max_conns]u8 = undefined;
         while (true) {
             // A read may have brought in the start of another TCP query.
@@ -378,20 +397,43 @@ const Frontend = struct {
             fds[0] = .{ .fd = f.channel, .events = linux.POLL.IN, .revents = 0 };
             fds[1] = .{ .fd = f.udp, .events = linux.POLL.IN, .revents = 0 };
             fds[2] = .{ .fd = f.tcp, .events = linux.POLL.IN, .revents = 0 };
-            var n: usize = 3;
+            fds[3] = .{ .fd = f.domain_channel, .events = linux.POLL.IN, .revents = 0 };
+            var n: usize = 4;
             for (&f.conns, 0..) |*c, i| if (c.fd >= 0 and !c.waiting) {
                 fds[n] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
-                which[n - 3] = @intCast(i);
+                which[n - 4] = @intCast(i);
                 n += 1;
             };
             const rc = linux.poll(&fds, n, 1000);
             if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .INTR) f.fail("poll");
+            if (fds[3].revents != 0) f.domainUpdate();
             if (fds[0].revents != 0) f.answers();
             if (fds[1].revents != 0) f.datagrams();
             if (fds[2].revents != 0) f.accept();
-            for (fds[3..n], which[0 .. n - 3]) |p, i| if (p.revents != 0) f.readConn(i);
+            for (fds[4..n], which[0 .. n - 4]) |p, i| if (p.revents != 0) f.readConn(i);
             f.expire();
         }
+    }
+
+    fn domainUpdate(f: *Frontend) void {
+        var buf: [255]u8 = undefined;
+        const rc = linux.recvfrom(f.domain_channel, &buf, buf.len, linux.MSG.TRUNC, null, null);
+        if (linux.errno(rc) != .SUCCESS or rc < 1 or rc > buf.len or
+            buf[0] != rc - 1 or !policy.setSystemDomain(buf[1..rc]))
+        {
+            f.say("{{\"event\":\"system_domain_error\",\"rc\":{d},\"errno\":\"{t}\",\"length\":{" ++
+                "d}}}", .{
+                rc,
+                linux.errno(
+                    rc,
+                ),
+                if (linux.errno(rc) == .SUCCESS and rc > 0 and rc <= buf.len) buf[0] else 0,
+            });
+            f.fail("system domain channel");
+        }
+        f.say("{{\"event\":\"system_domain\",\"name\":\"{s}\"}}", .{
+            if (policy.system_domain) |*d| d.text() else "",
+        });
     }
 
     fn fail(f: *Frontend, comptime what: []const u8) noreturn {
@@ -517,7 +559,7 @@ const Frontend = struct {
         const d = policy.decide(s, &q.name, q.type);
         if (!d.allow) return f.refuse(client, s, &q, @tagName(d.why), d.line, .{});
         const t = wire.Type.from(q.type).?;
-        const screened = d.why == .screened;
+        const screened = d.why == .screened or d.why == .system_domain;
         if (screened) if (screens[s].ask(&screen_key, q.name.text(), now())) |r| {
             if (r.sign.tunnel()) f.stats.tunnel += 1;
             const why = if (r.sign.tunnel()) "tunnel" else "budget";

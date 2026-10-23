@@ -226,6 +226,44 @@ pub fn classifyCt(history: CtHistory, fetched: i64, now: i64) Verdict {
     return .mature;
 }
 
+pub const Lookup = union(enum) {
+    /// Transport failure, timeout, rate limit or server failure.
+    unavailable,
+    /// A registry response, including a semantically invalid one.
+    body: []const u8,
+};
+
+pub const Decision = struct {
+    source: enum { rdap, crtsh, none },
+    verdict: Verdict,
+};
+
+/// decide allows CT fallback only when the RDAP service was unavailable.
+/// A registry response with young or ambiguous events is never replaced.
+pub fn decide(
+    gpa: mem.Allocator,
+    name: []const u8,
+    lookup: Lookup,
+    rdap_fetched: i64,
+    ct_body: ?[]const u8,
+    ct_fetched: i64,
+    now: i64,
+) Decision {
+    switch (lookup) {
+        .body => |body| {
+            const evidence = rdap(gpa, name, body, rdap_fetched) orelse
+                return .{ .source = .rdap, .verdict = .unknown };
+            return .{ .source = .rdap, .verdict = classify(evidence, rdap_fetched, now) };
+        },
+        .unavailable => {
+            const body = ct_body orelse return .{ .source = .none, .verdict = .unknown };
+            const history = crtsh(gpa, name, body, ct_fetched) orelse
+                return .{ .source = .crtsh, .verdict = .unknown };
+            return .{ .source = .crtsh, .verdict = classifyCt(history, ct_fetched, now) };
+        },
+    }
+}
+
 fn ctTimestamp(value: []const u8) ?i64 {
     if (value.len < 19 or value.len + 1 > 48) return null;
     if (value[value.len - 1] == 'Z') return timestamp(value);
@@ -390,4 +428,48 @@ test "crt.sh fallback uses matching log-entry time and expires in one day" {
         Verdict.young,
         classifyCt(crtsh(t.allocator, "example.com", young, fetched).?, fetched, fetched),
     );
+}
+
+test "CT never overrides a young or malformed RDAP response" {
+    const t = std.testing;
+    const fetched = timestamp("2026-10-23T00:00:00Z").?;
+    const ct =
+        "[{\"name_value\":\"example.com\",\"min_entry_timestamp\":\"2020-01-01T00:00:00\"}]";
+    const young =
+        "{\"objectClassName\":\"domain\",\"ldhName\":\"example.com\",\"events\":[" ++
+        "{\"eventAction\":\"registration\",\"eventDate\":\"2026-10-01T00:00:00Z\"}]}";
+    try t.expectEqual(
+        Verdict.young,
+        decide(
+            t.allocator,
+            "example.com",
+            .{ .body = young },
+            fetched,
+            ct,
+            fetched,
+            fetched,
+        ).verdict,
+    );
+    const ambiguous = decide(
+        t.allocator,
+        "example.com",
+        .{ .body = "{}" },
+        fetched,
+        ct,
+        fetched,
+        fetched,
+    );
+    try t.expectEqual(.rdap, ambiguous.source);
+    try t.expectEqual(Verdict.unknown, ambiguous.verdict);
+    const fallback = decide(
+        t.allocator,
+        "example.com",
+        .unavailable,
+        fetched,
+        ct,
+        fetched,
+        fetched,
+    );
+    try t.expectEqual(.crtsh, fallback.source);
+    try t.expectEqual(Verdict.mature, fallback.verdict);
 }

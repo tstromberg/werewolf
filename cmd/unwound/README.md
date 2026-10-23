@@ -11,9 +11,8 @@ plan](../../docs/design/unwound-plan.md).
 
 ## Background
 
-A service that may resolve anything can send data to anyone who runs a name server.
-Fence reserves direct DNS transport for unwound's upstream user and DNS server
-services with `dns-direct: true`; ordinary hostname lookups use unwound.
+Arbitrary DNS can carry data. Fence reserves direct DNS transport for unwound
+and `dns-direct: true` DNS servers; ordinary lookups use unwound.
 
 ## Goals
 
@@ -40,6 +39,10 @@ holds and `accept4` on its listener. It parses each query strictly, decides it,
 screens it, audits it, and passes it over a `SOCK_SEQPACKET` pair. The upstream
 side becomes `_unwoundnet` (54), the one user fence lets reach the resolvers on
 port 53; it may make IPv4 sockets and read `/run/werewolf/network/upstream`.
+It sends the assigned domain to the frontend on a separate private channel.
+Every DNS-enabled service can query it and its descendants with supported
+types, subject to tunnel screening. Boot metadata's FQDN takes precedence over
+DHCP option 15; renewal or removal updates the grant without a restart.
 
 Each upstream attempt uses a fresh socket and source port, a random ID and
 0x20 case; an answer must repeat the question exactly. Two tries per resolver
@@ -75,25 +78,23 @@ An answer from the cache is marked `cached`; one that waited, `merged`. A
 per-minute `stats` record counts queries, cached, merged, refusals, tunnel
 signs, failures, busy and lost audit lines.
 
-TCP connections accept successive or pipelined queries. Unwound answers one
-frame at a time and buffers the next frame until the prior answer is ready.
+TCP connections accept pipelined queries, answering one frame at a time.
 
 ## Drawbacks
 
-Screening refuses some generated names (AWS's, in long regions) that need an
-exact grant. A service granted a name trusts whoever controls it.
+Screening may refuse generated names that need an exact grant. A service
+granted a name trusts whoever controls it.
 
 ## Security Considerations
 
-Neither side can exec or open files after setup; the frontend cannot open a socket.
-Each side treats the other's messages as untrusted input. Budgets hash names with
-SipHash under a key drawn at start. Policy is decided before the cache is looked at,
-and no service's cache answers another.
+Neither side can exec after setup. The frontend cannot open files or sockets;
+the upstream can open only the preopened network state directory's files.
+Both treat IPC as untrusted. Budgets use keyed SipHash. Policy is decided
+before cache lookup, and services have separate caches.
 
 ## Reliability Considerations
 
 256 questions in flight, 32 per service, 64 TCP clients, 8 per service; past
-those, SERVFAIL, counted. If either side dies, the other exits and runit
-restarts both. `make check-unwound` runs the real fence and unwound in Linux
-namespaces against a fixture resolver; `make fuzz-unwound` runs the four fuzz
-targets: queries, responses, policy and the cache.
+those, SERVFAIL. If either side dies, runit restarts both. `make check-unwound`
+uses Linux namespaces and a fixture resolver; `make fuzz-unwound` covers
+queries, responses, policy and cache.

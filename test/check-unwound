@@ -320,6 +320,17 @@ for line in sys.stdin:
         os.rename('/run/werewolf/network/upstream.new', '/run/werewolf/network/upstream')
         time.sleep(1.1)
         print('{}', flush=True)
+    elif r.get('system_domain') is not None:
+        source = r.get('domain_source', 'dhcp')
+        assert source in ('dhcp', 'config')
+        base = '/run/werewolf/network/' + source + '-domain'
+        with open(base + '.new', 'w') as f:
+            f.write(r['system_domain'])
+        os.chown(base + '.new', 73 if source == 'dhcp' else 0,
+                 73 if source == 'dhcp' else 0)
+        os.rename(base + '.new', base)
+        time.sleep(1.1)
+        print('{}', flush=True)
     elif r.get('kill_upstream'):
         children = open(f'/proc/{daemon.pid}/task/{daemon.pid}/children').read().split()
         os.kill(int(children[0]), 9)
@@ -434,6 +445,20 @@ def checks(client, work):
     expect(ask(2001, 'api.example.test', 28), 0, [28], 'granted AAAA')
     expect(ask(2001, 'api.example.test', 16), 5, [], 'TXT not granted')
     expect(ask(2001, 'denied.example.test'), 5, [], 'name not granted')
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'system domain absent')
+    assert send(dict(system_domain='corp.lan.test')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 3, [], 'DHCP domain shared with DNS-enabled service')
+    expect(ask(2001, 'corp.lan.test'), 3, [], 'system domain apex')
+    expect(ask(2001, 'host.corp.lan.test', 16), 3, [], 'system domain supports DNS types')
+    expect(ask(2001, 'host.corp.lan.test.evil'), 5, [], 'system domain label boundary')
+    expect(ask(2001, 'a' * 41 + '.corp.lan.test'), 5, [], 'system domain still screened')
+    assert send(dict(system_domain='config.lan.test', domain_source='config')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'config domain overrides DHCP')
+    expect(ask(2001, 'host.config.lan.test'), 3, [], 'config FQDN domain')
+    assert send(dict(system_domain='', domain_source='config')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 3, [], 'DHCP domain restored')
+    assert send(dict(system_domain='')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'domain revoked')
     # *.NAME: below it, never NAME.
     expect(ask(2001, 'x.cdn.example.test'), 0, ['192.0.2.11'], 'subtree grant')
     expect(ask(2001, 'cdn.example.test'), 5, [], 'subtree grant excludes its apex')
@@ -567,6 +592,7 @@ def checks(client, work):
         return [a for a in queries if all(a.get(k) == v for k, v in want.items())]
     assert find(uid=2001, name='denied.example.test', decision='deny', why='no_grant'), queries
     assert find(uid=2001, name='api.example.test', type='A', decision='allow', rcode='noerror', rule=3)
+    assert find(uid=2001, name='host.corp.lan.test', decision='allow', why='system_domain')
     assert find(uid=2001, name='alias-bad.example.test', decision='deny', why='alias', alias='evil.example.net')
     assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', rule=10)
     assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', cached=True, rule=10)

@@ -26,8 +26,9 @@ const cookie = [4]u8{ 99, 130, 83, 99 };
 const max_routes = 8;
 const max_dns = 3;
 /// wanted lists the options we ask for: subnet mask, router, DNS, MTU, lease
-/// time, server, renewal and rebinding times, classless static routes.
-const wanted = [_]u8{ 1, 3, 6, 26, 51, 54, 58, 59, 121 };
+/// time, server, renewal and rebinding times, classless static routes and
+/// the system domain used by Unwound.
+const wanted = [_]u8{ 1, 3, 6, 15, 26, 51, 54, 58, 59, 121 };
 
 const Ip4 = [4]u8;
 const zero: Ip4 = .{ 0, 0, 0, 0 };
@@ -606,6 +607,11 @@ const Parent = struct {
                 try p.link.apply(p.dir, m.lease, &p.log, p.nic, p.local_validator);
                 var bind_ip: [16]u8 = undefined;
                 try writeFile(p.dir, "service-address", ipText(&bind_ip, m.lease.addr));
+                try writeFile(
+                    p.dir,
+                    dns_policy.dhcp_domain_name,
+                    m.lease.domain[0..m.lease.domain_len],
+                );
                 p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
                 var a: std.heap.FixedBufferAllocator = .init(&fba);
@@ -631,6 +637,7 @@ const Parent = struct {
                 if (ours) {
                     try p.link.withdraw();
                     try writeFile(p.dir, "service-address", "");
+                    try writeFile(p.dir, dns_policy.dhcp_domain_name, "");
                     p.applied = null;
                 }
                 var ip: [16]u8 = undefined;
@@ -727,6 +734,8 @@ const Wire = extern struct {
     dns: [max_dns]Ip4 = @splat(zero),
     routes: [max_routes]Route = @splat(.{ .dst = zero, .gw = zero, .prefix = 0 }),
     ndns: u8 = 0,
+    domain: [253]u8 = @splat(0),
+    domain_len: u8 = 0,
     nroutes: u8 = 0,
     mtu: u16 = 0,
     lease: u32 = 0,
@@ -765,6 +774,14 @@ fn valid(w: Wire) bool {
     }
     if (!usableGateway(w.router, w.addr)) return false;
     if (w.ndns > max_dns or w.nroutes > max_routes) return false;
+    if (w.domain_len > 0) {
+        var canonical: [253]u8 = undefined;
+        const normalized = dns_policy.normalizeSystemDomain(
+            w.domain[0..w.domain_len],
+            &canonical,
+        ) orelse return false;
+        if (!std.mem.eql(u8, normalized, w.domain[0..w.domain_len])) return false;
+    }
     for (w.dns[0..w.ndns]) |d| if (!usable(d)) return false;
     for (w.routes[0..w.nroutes]) |r| {
         if (r.prefix > 32 or !std.mem.eql(u8, &masked(r.dst, r.prefix), &r.dst)) return false;
@@ -807,6 +824,7 @@ const Lease = struct {
     /// routes holds "10.128.0.1/32" (on the link) or "0.0.0.0/0 via 10.128.0.1".
     routes: []const []const u8 = &.{},
     dns: []const []const u8 = &.{},
+    domain: ?[]const u8 = null,
     mtu: u16 = 0,
     lease: u32,
     t1: u32,
@@ -842,6 +860,7 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
         .gw = if (std.mem.eql(u8, &w.router, &zero)) null else try ipString(gpa, w.router),
         .routes = routes.items,
         .dns = dns.items,
+        .domain = if (w.domain_len == 0) null else try gpa.dupe(u8, w.domain[0..w.domain_len]),
         .mtu = w.mtu,
         .lease = w.lease,
         .t1 = w.t1,
@@ -870,6 +889,13 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
         .t2 = l.t2,
         .bound = l.bound,
     };
+    if (l.domain) |domain| {
+        var canonical: [253]u8 = undefined;
+        const normalized = dns_policy.normalizeSystemDomain(domain, &canonical) orelse return null;
+        if (!std.mem.eql(u8, domain, normalized)) return null;
+        @memcpy(w.domain[0..normalized.len], normalized);
+        w.domain_len = @intCast(normalized.len);
+    }
     if (l.routes.len > max_routes) return null;
     for (l.routes, 0..) |text, i| w.routes[i] = parseRoute(text) orelse return null;
     w.nroutes = @intCast(l.routes.len);
@@ -1255,6 +1281,13 @@ fn parseReply(msg: []const u8, xid: u32, mac: [6]u8) ?Reply {
                     w.ndns += 1;
                 }
             },
+            15 => {
+                var canonical: [253]u8 = undefined;
+                if (dns_policy.normalizeSystemDomain(v, &canonical)) |domain| {
+                    @memcpy(w.domain[0..domain.len], domain);
+                    w.domain_len = @intCast(domain.len);
+                } else w.domain_len = 0;
+            },
             26 => {
                 if (len != 2) return null;
                 const mtu = std.mem.readInt(u16, v[0..2], .big);
@@ -1500,7 +1533,7 @@ fn testReply(buf: []u8, kind: u8, yiaddr: Ip4, options: []const u8) []const u8 {
 
 // GCP's server: a /32 address, the router reached by a classless route on
 // the link, the metadata server for DNS, and VPC's 1460-byte MTU. The
-// hostname and domain it also sends are ignored.
+// hostname is ignored; its option 15 domain becomes the system DNS suffix.
 const gcp_options = [_]u8{
     54, 4, 169, 254, 169, 254,
     51, 4, 0,   0,   0x0e, 0x10, // 3600 s
@@ -1612,6 +1645,7 @@ test "GCP's lease" {
     try std.testing.expectEqualStrings("10.128.0.1/32", l.routes[0]);
     try std.testing.expectEqualStrings("0.0.0.0/0 via 10.128.0.1", l.routes[1]);
     try std.testing.expectEqualStrings("169.254.169.254", l.dns[0]);
+    try std.testing.expectEqualStrings("c.project.internal", l.domain.?);
 }
 
 test "QEMU's lease" {
@@ -1626,6 +1660,38 @@ test "QEMU's lease" {
     try std.testing.expectEqual(0, l.mtu);
 }
 
+test "DHCP domain is normalized and malformed option 15 is ignored" {
+    const upper = qemu_options ++
+        [_]u8{
+            15,
+            17,
+            'C',
+            'o',
+            'r',
+            'p',
+            '.',
+            'E',
+            'x',
+            'a',
+            'm',
+            'p',
+            'l',
+            'e',
+            '.',
+            'C',
+            'O',
+            'M',
+            '.',
+        };
+    const assigned = testLease(&upper, .{ 10, 0, 2, 15 });
+    try std.testing.expectEqualStrings("corp.example.com", assigned.domain[0..assigned.domain_len]);
+    const bad = qemu_options ++
+        [_]u8{ 15, 12, 'c', 'o', 'r', 'p', '.', '.', 'e', 'x', 'a', 'm', 'p', 'l' };
+    const ignored = testLease(&bad, .{ 10, 0, 2, 15 });
+    try std.testing.expectEqual(0, ignored.domain_len);
+    try std.testing.expect(valid(ignored));
+}
+
 test "lease.json round trip" {
     var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer a.deinit();
@@ -1638,6 +1704,7 @@ test "lease.json round trip" {
     try std.testing.expectEqualSlices(u8, &w.server, &h.server);
     try std.testing.expectEqual(1234, h.bound);
     try std.testing.expectEqual(3600, h.lease);
+    try std.testing.expectEqualStrings("c.project.internal", h.domain[0..h.domain_len]);
     try std.testing.expectEqual(null, heldFrom(a.allocator(), "{\"ip\":"));
     try std.testing.expectEqual(
         null,
@@ -1919,7 +1986,8 @@ test "socket filter jumps" {
 
 test "messages between the processes are fixed" {
     try std.testing.expectEqual(0, @sizeOf(Msg) % 8);
-    try std.testing.expect(@sizeOf(Msg) < 256);
+    // A full 253-byte DNS domain still fits in one bounded seqpacket.
+    try std.testing.expect(@sizeOf(Msg) < 512);
 }
 
 test "fuzz: anything off the wire" {

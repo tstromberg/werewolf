@@ -8,6 +8,10 @@ active in unwound. This builds on the [allowance policy](unwound-policy.md).
 Only a screened `lookup: "*"` uses age. Exact and `*.NAME` grants remain the
 operator's explicit trust. Age is one more screen after local name shape and
 endpoint checks. The default cutoff is 90 days after effective registration.
+The currently assigned system domain and its descendants are automatically
+available to DNS-enabled services and bypass this age gate. They still pass
+the existing tunnel screen. Boot metadata's FQDN suffix takes precedence over
+DHCP option 15; a domain assignment can change during DHCP renewal.
 Unknown evidence is refused once enforcement is enabled. The first release
 measures coverage without changing answers; enforcement follows only after
 native boot, restart and integrity checks pass.
@@ -68,7 +72,8 @@ rates. Bound database bytes as well as rows, since QNAMEs and URIs vary.
 SQLite WAL, `-wal` and `-shm` files all live in the worker's private directory
 and have one writer. Keep the check history independent of domain eviction for
 a bounded audit period; pin each cached domain's `last_check_id` row while
-pruning older audit rows. The SQL trigger enforces the 20,000-domain limit.
+pruning older audit rows. SQL triggers enforce 20,000 domain and 120,000 check
+row limits.
 
 RDAP evidence fetched after the 90-day boundary is fresh for one day. Mature
 RDAP evidence may remain usable for at most seven days from fetch during a
@@ -89,7 +94,9 @@ exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, staleness and clock boundaries with the
 90-day default. It accepts only
 normalized ASCII PSL input. The updater must convert Unicode PSL rules to
-A-labels before using it. Run fetchers against fixture HTTPS servers and
+A-labels before using it. `cmd/unwound/bootstrap.zig` selects a pinned IANA
+entry by label-wise longest match and requires HTTPS. Run fetchers against
+fixture HTTPS servers and
 inspect audit records in observe mode. Enable the gate after native tests
 cover initial boot, renewal, restart, outage, rollback, CT fallback, LRU
 eviction, provenance, file authority and bounded miss floods. Audit records

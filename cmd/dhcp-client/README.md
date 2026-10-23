@@ -2,9 +2,8 @@
 
 ## Summary
 
-dhcp-client gets and keeps an IPv4 address, routes, MTU and resolvers.
-`dhcp up NIC` gets a lease within 30 seconds or exits 1; `dhcp keep`
-renews it, or gets a new one.
+dhcp-client keeps an IPv4 address, routes, MTU, resolvers and DNS domain.
+`dhcp up NIC` gets a lease within 30 seconds; `dhcp keep` renews it.
 
 ## Background
 
@@ -50,7 +49,8 @@ before either touches the network.
   server that gave the lease. Addresses must be unicast, routes masked, and
   lease times are at least a minute. Only these options are used: message
   type, server, subnet mask, router, classless static routes (RFC 3442,
-  which GCP sends with a /32 address), DNS servers, MTU and lease times.
+  which GCP sends with a /32 address), DNS servers, domain name (option 15),
+  MTU and lease times. A malformed domain is ignored.
 - **Retries are fast at first.** The first broadcasts of a boot often go
   unheard (Lima's vzNAT, Azure), so they repeat every 0.25 s for 5 s, then
   back off to 8 s, with RFC 2131 jitter. Up to 2 s waits for carrier

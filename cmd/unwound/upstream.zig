@@ -70,6 +70,7 @@ const TcpBuf = struct {
 
 const Upstream = struct {
     channel: i32,
+    domain_channel: i32,
     network: i32,
     log: i32,
     local_validator: bool,
@@ -77,6 +78,10 @@ const Upstream = struct {
     stamp: [3]u64 = .{ 0, 0, 0 },
     /// checked is when the resolver file was last looked at, if ever.
     checked: ?i64 = null,
+    domain_checked: ?i64 = null,
+    domain_sent: bool = false,
+    domain: [253]u8 = undefined,
+    domain_len: u8 = 0,
     rng: std.Random.DefaultCsprng,
     pending: [unwound.max_slots]Pending = @splat(.{}),
     tcp: [max_tcp]TcpBuf = @splat(.{}),
@@ -87,8 +92,14 @@ const Upstream = struct {
 var u: Upstream = undefined;
 
 /// run confines this process and serves the frontend until it goes away.
-pub fn run(channel: i32, network: i32, log: i32, local_validator: bool) noreturn {
-    setup(channel, network, log, local_validator) catch |err| {
+pub fn run(
+    channel: i32,
+    domain_channel: i32,
+    network: i32,
+    log: i32,
+    local_validator: bool,
+) noreturn {
+    setup(channel, domain_channel, network, log, local_validator) catch |err| {
         var buf: [256]u8 = undefined;
         const why = std.mem.print(&buf, "setup: {s} ({s}: {t})", .{
             @errorName(err), sandbox.failed, sandbox.failed_errno,
@@ -111,7 +122,7 @@ fn die(log: i32, why: []const u8) noreturn {
     linux.exit_group(1);
 }
 
-fn setup(channel: i32, network: i32, log: i32, local_validator: bool) !void {
+fn setup(channel: i32, domain_channel: i32, network: i32, log: i32, local_validator: bool) !void {
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
     if (try sys(
         linux.getrandom(&seed, seed.len, 0),
@@ -119,6 +130,7 @@ fn setup(channel: i32, network: i32, log: i32, local_validator: bool) !void {
     ) != seed.len) return error.ShortSeed;
     u = .{
         .channel = channel,
+        .domain_channel = domain_channel,
         .network = network,
         .log = log,
         .local_validator = local_validator,
@@ -126,7 +138,7 @@ fn setup(channel: i32, network: i32, log: i32, local_validator: bool) !void {
     };
     unwound.log_fd = log;
     unwound.side = "upstream";
-    try sandbox.limit(.NOFILE, 16 + unwound.max_slots);
+    try sandbox.limit(.NOFILE, 17 + unwound.max_slots);
     try sandbox.dropTo(unwound.upstream_id, "/var/empty");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{.{ .fd = network, .access = sandbox.read_file }}, &.{53});
@@ -136,7 +148,9 @@ fn setup(channel: i32, network: i32, log: i32, local_validator: bool) !void {
     f.allowTwo("socket", 0, linux.AF.INET, 1, linux.SOCK.STREAM | flags);
     f.allowArg("openat", 0, @intCast(network));
     f.allowArg("statx", 0, @intCast(network));
+    f.allowArg("statx", 2, linux.AT.EMPTY_PATH);
     f.allowArg("write", 0, @intCast(log));
+    f.allowArg("sendto", 0, @intCast(domain_channel));
     inline for (.{
         "connect",
         "sendto",
@@ -161,6 +175,7 @@ fn serve() noreturn {
     var fds: [1 + unwound.max_slots]linux.pollfd = undefined;
     var which: [unwound.max_slots]u8 = undefined;
     while (true) {
+        refreshDomain();
         fds[0] = .{ .fd = u.channel, .events = linux.POLL.IN, .revents = 0 };
         var n: usize = 1;
         var wake: i64 = 1000;
@@ -185,6 +200,55 @@ fn serve() noreturn {
         for (&u.pending, 0..) |*p, i| if (p.used and after >= p.deadline)
             next(@intCast(i), if (p.phase == .udp) .timeout else .tcp_failed);
     }
+}
+
+/// refreshDomain sends only a validated suffix over a separate private
+/// channel. A config FQDN takes precedence over DHCP; removing both clears
+/// the runtime grant. Neither file is a client-controlled policy message.
+fn refreshDomain() void {
+    const t = unwound.now();
+    if (u.domain_checked) |last| if (t - last < reread_ms) return;
+    u.domain_checked = t;
+    var chosen: [253]u8 = undefined;
+    const configured = readDomain(dns.config_domain_name, &chosen);
+    const len = if (configured > 0) configured else readDomain(dns.dhcp_domain_name, &chosen);
+    if (u.domain_sent and len == u.domain_len and
+        std.mem.eql(u8, chosen[0..len], u.domain[0..u.domain_len])) return;
+    var packet: [254]u8 = undefined;
+    packet[0] = @intCast(len);
+    @memcpy(packet[1..][0..len], chosen[0..len]);
+    const rc = linux.sendto(u.domain_channel, &packet, len + 1, 0, null, 0);
+    if (linux.errno(rc) != .SUCCESS or rc != len + 1) return;
+    @memcpy(u.domain[0..len], chosen[0..len]);
+    u.domain_len = @intCast(len);
+    u.domain_sent = true;
+}
+
+fn readDomain(comptime file: [:0]const u8, out: *[253]u8) usize {
+    const fd = linux.openat(
+        u.network,
+        file,
+        .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(fd) != .SUCCESS) return 0;
+    defer _ = linux.close(@intCast(fd));
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(
+        @intCast(fd),
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
+        &st,
+    )) != .SUCCESS or
+        st.mode & linux.S.IFMT != linux.S.IFREG or st.mode & 0o022 != 0 or
+        st.uid != (if (std.mem.eql(u8, file, dns.config_domain_name)) @as(u32, 0) else 73) or
+        st.size > 254) return 0;
+    var raw: [255]u8 = undefined;
+    const rc = linux.read(@intCast(fd), &raw, raw.len);
+    if (linux.errno(rc) != .SUCCESS or rc != st.size) return 0;
+    const name = dns.normalizeSystemDomain(raw[0..rc], out) orelse return 0;
+    return name.len;
 }
 
 /// questions reads the frontend's questions. They were written by
