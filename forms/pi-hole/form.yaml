@@ -19,8 +19,9 @@ check:
 services:
   # pihole-FTL, in its image, as _oci-pi-hole: it answers DNS on :53, TCP
   # and UDP, from anywhere fence lets in, but only clients on the
-  # machine's own networks get an answer (listeningMode LOCAL), so it is
-  # never an open resolver. Its web interface and API are on loopback,
+  # machine's own networks get an answer (fence's LAN listener), so it is
+  # never an open resolver. dnsmasq binds the NIC and excludes loopback to
+  # leave 127.0.0.53 to unwound. Its web interface and API are on loopback,
   # behind Caddy. It asks its upstreams over :53 and fetches blocklists
   # from public addresses over HTTPS. pi-hole-setup runs first: it seeds
   # the default blocklist and upstreams once, and runs gravity when the
@@ -36,9 +37,11 @@ services:
     # watch: FTL/dnsmasq watches its generated DNS configuration with
     # inotify. Landlock does not mediate watches, so keep this explicit.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
-    listen: [tcp/53 udp/53, tcp/8080 loopback]
+    listen: [tcp/53 udp/53 lan, tcp/8080 loopback]
+    dns-direct: true
     connect: [udp/53 tcp/53, tcp/443 tcp/80 public]
-    write: [/etc/pihole, /var/log/pihole, /dev/shm]
+    lookup: "*"
+    write: [/etc/pihole, /etc/dnsmasq.d, /var/log/pihole, /dev/shm]
     run:
       - /bin/bash
       - /bin/busybox
@@ -52,7 +55,8 @@ services:
     memory: 512
     nofile: 4096
     env:
-      - FTLCONF_dns_listeningMode=LOCAL
+      - FTLCONF_dns_listeningMode=NONE
+      - FTLCONF_misc_etc_dnsmasq_d=true
       # Quad9: no logs of who asked, and it refuses known malware domains.
       - FTLCONF_dns_upstreams=9.9.9.9;149.112.112.112
       - FTLCONF_dhcp_active=false
@@ -75,7 +79,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    connect: [tcp/443 tcp/8080]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

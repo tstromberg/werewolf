@@ -8,7 +8,7 @@
 base: nginx
 
 packages:
-  - php-8.4-fpm
+  - php-8.5-fpm
 
 # Taken back of werewolf's defaults (lib/allow.zig): PCRE2 compiles each
 # pattern to machine code.

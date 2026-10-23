@@ -35,6 +35,8 @@ archs:
 # _seal is seal-watch's, once it gives up root: an account no service
 # shares, so none may signal it (cmd/seal-watch). _update is the updater's
 # network half, which fetches the packages and CVE sources it reads.
+# _unwound answers every program's DNS at 127.0.0.53, and _unwoundnet asks
+# the resolvers for it: the one user that may (cmd/unwound).
 accounts:
   groups:
     - groupname: tty
@@ -53,6 +55,10 @@ accounts:
       gid: 75
     - groupname: _logfile
       gid: 76
+    - groupname: _unwound
+      gid: 53
+    - groupname: _unwoundnet
+      gid: 54
   users:
     - username: _updater
       uid: 77
@@ -89,6 +95,16 @@ accounts:
       gid: 76
       homedir: /var/empty
       shell: /sbin/nologin
+    - username: _unwound
+      uid: 53
+      gid: 53
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _unwoundnet
+      uid: 54
+      gid: 54
+      homedir: /var/empty
+      shell: /sbin/nologin
 
 # werewolf's programs from cmd/ every form's machines run beyond the ones
 # every image has (docs/programs.md): the updater.
@@ -100,7 +116,9 @@ programs: [slot-update]
 # builds and installs the slot, has no network at all.
 net:
   - connect _update tcp/443
-  - dns _update
+  - lookup _update packages.wolfi.dev
+  - lookup _update dist.werewolf-linux.org
+  - lookup _update git.kernel.org
 
 # make check's, for this form alone (forms/README.md): its checks boot the
 # slot offline, so the updater finds nothing.

@@ -322,12 +322,14 @@ fn policyPorts(a: Allocator, raw: []const u8) ![]const Port {
         if (port == 0) return error.NetworkPolicy;
         const scope = words.next();
         const tcp = std.mem.eql(u8, protocol, "tcp");
-        if (scope != null and !std.mem.eql(u8, scope.?, if (tcp) "loopback" else "lan"))
+        if (scope != null and !std.mem.eql(u8, scope.?, "lan") and
+            !(tcp and std.mem.eql(u8, scope.?, "loopback")))
             return error.NetworkPolicy;
         if (words.next() != null) return error.NetworkPolicy;
         try ports.append(
             a,
-            .{ .protocol = protocol, .port = port, .loopback = tcp and scope != null },
+            .{ .protocol = protocol, .port = port, .loopback = tcp and scope != null and
+                std.mem.eql(u8, scope.?, "loopback") },
         );
     }
     return ports.toOwnedSlice(a);
@@ -511,19 +513,21 @@ test "listener policy keeps protocols and loopback scopes distinct" {
     defer arena.deinit();
     const ports = try policyPorts(
         arena.allocator(),
-        "listen tcp 443\nlisten 65536 udp 53\nlisten tcp 5432 loopback\nlisten 65537 udp 5353 " ++
+        "listen tcp 443\nlisten tcp 53 lan\nlisten 65536 udp 53\nlisten tcp 5432 " ++
+            "loopback\nlisten 65537 udp 5353 " ++
             "lan\n",
     );
     try std.testing.expect(allowedListener(ports, "tcp", "0.0.0.0", 443));
     try std.testing.expect(!allowedListener(ports, "udp", "0.0.0.0", 443));
     try std.testing.expect(allowedListener(ports, "udp", "0:0:0:0:0:0:0:0", 53));
     try std.testing.expect(allowedListener(ports, "udp", "0.0.0.0", 5353));
+    try std.testing.expect(allowedListener(ports, "tcp", "10.0.2.15", 53));
     try std.testing.expect(!allowedListener(ports, "tcp", "0.0.0.0", 5432));
     try std.testing.expect(allowedListener(ports, "tcp", "127.0.0.2", 5432));
     try std.testing.expect(!allowedListener(ports, "tcp", "0.0.0.0", 1111));
     for ([_][]const u8{
         "listen tcp 80 public junk",
-        "listen tcp 80 lan",
+        "listen tcp 80 lan junk",
         "listen 65536 udp 53 loopback",
     }) |bad| try std.testing.expectError(
         error.NetworkPolicy,

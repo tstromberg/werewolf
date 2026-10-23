@@ -15,7 +15,7 @@ with: [postgresql, valkey, caddy]
 
 packages:
   # The interpreter, and what the wheels link. howl build-apk names the rest.
-  - python-3.13
+  - python-3.15
   - libstdc++
   - libgcc
   - libpq-17
@@ -58,11 +58,12 @@ services:
   # off: Wolfi does not package unpaper. It reaches the local Valkey and
   # PostgreSQL sockets; neither needs a network listener.
   paperless:
-    exec: /usr/lib/paperless/bin/python3 -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1 paperless.asgi:application
+    allow: [python:native]
+    exec: /usr/lib/paperless/bin/python3 -B -u -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1 paperless.asgi:application
     before:
       - /usr/lib/werewolf/paperless-init
-      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py migrate --skip-checks --no-input
-      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py manage_superuser --skip-checks
+      - /usr/lib/paperless/bin/python3 -B -u /usr/lib/paperless/app/manage.py migrate --skip-checks --no-input
+      - /usr/lib/paperless/bin/python3 -B -u /usr/lib/paperless/app/manage.py manage_superuser --skip-checks
       - /usr/lib/werewolf/paperless-init ready
     user: paperless
     shared-user: true
@@ -83,9 +84,6 @@ services:
     memory: 768
     nofile: 16384
     env:
-      - PYTHONPATH=/usr/lib/paperless/app
-      - PYTHONDONTWRITEBYTECODE=1
-      - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
       - PAPERLESS_DBENGINE=postgresql
       - PAPERLESS_DBHOST=/run/svc/postgres
@@ -111,7 +109,8 @@ services:
   # Django's startup check runs Tesseract, so the scheduler may too.
   # The worker is one process: a pool would need shared memory.
   paperless-consumer:
-    exec: /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py document_consumer
+    allow: [python:native]
+    exec: /usr/lib/paperless/bin/python3 -B -u /usr/lib/paperless/app/manage.py document_consumer
     before: /usr/lib/werewolf/paperless-init wait
     user: paperless
     shared-user: true
@@ -140,9 +139,6 @@ services:
     memory: 768
     nofile: 4096
     env:
-      - PYTHONPATH=/usr/lib/paperless/app
-      - PYTHONDONTWRITEBYTECODE=1
-      - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
       - PAPERLESS_DBENGINE=postgresql
       - PAPERLESS_DBHOST=/run/svc/postgres
@@ -162,7 +158,8 @@ services:
       - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
 
   paperless-worker:
-    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless worker --loglevel INFO --pool=solo --without-mingle --without-gossip
+    allow: [python:native]
+    exec: /usr/lib/paperless/bin/python3 -B -u -m celery --app paperless worker --loglevel INFO --pool=solo --without-mingle --without-gossip
     before: /usr/lib/werewolf/paperless-init wait
     user: paperless
     shared-user: true
@@ -191,9 +188,6 @@ services:
     memory: 768
     nofile: 4096
     env:
-      - PYTHONPATH=/usr/lib/paperless/app
-      - PYTHONDONTWRITEBYTECODE=1
-      - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
       - PAPERLESS_DBENGINE=postgresql
       - PAPERLESS_DBHOST=/run/svc/postgres
@@ -213,7 +207,8 @@ services:
       - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
 
   paperless-beat:
-    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless beat --loglevel INFO --schedule /data/svc/paperless/celerybeat-schedule
+    allow: [python:native]
+    exec: /usr/lib/paperless/bin/python3 -B -u -m celery --app paperless beat --loglevel INFO --schedule /data/svc/paperless/celerybeat-schedule
     before: /usr/lib/werewolf/paperless-init wait
     user: paperless
     shared-user: true
@@ -233,9 +228,6 @@ services:
     memory: 256
     nofile: 1024
     env:
-      - PYTHONPATH=/usr/lib/paperless/app
-      - PYTHONDONTWRITEBYTECODE=1
-      - PYTHONUNBUFFERED=1
       - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
       - PAPERLESS_DBENGINE=postgresql
       - PAPERLESS_DBHOST=/run/svc/postgres

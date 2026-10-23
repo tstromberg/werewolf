@@ -10,8 +10,8 @@ base: wordpress
 with: [mariadb-local]
 
 packages:
-  - php-8.4-mysqlnd
-  - php-8.4-mysqli
+  - php-8.5-mysqlnd
+  - php-8.5-mysqli
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -32,6 +32,7 @@ services:
   # directory (not /tmp, which the leash does not grant), and no looking
   # for changed files, since the image cannot change.
   php-fpm:
+    allow: [php:upload, php:writable-source]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16
     before:

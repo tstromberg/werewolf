@@ -22,10 +22,12 @@ const include = "/run/svc/unbound/unbound-setup.conf";
 /// inet6 exists while the kernel has IPv6: werewolf boots without it
 /// unless the form allows ipv6.
 const inet6 = "/proc/net/if_inet6";
+const service_address = "/run/werewolf/network/service-address";
 /// max_list is service-config's longest list.
 const max_list = 32;
 
 const Settings = struct {
+    lan_ip: []const u8,
     zones: []const []const u8 = &.{},
     servers: []const []const u8 = &.{},
     ipv6: bool = false,
@@ -50,6 +52,7 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     }
 
     const s: Settings = .{
+        .lan_ip = try lanAddress(io, gpa),
         .zones = try list(gpa, setting(gpa, environ, "UNBOUND_FORWARD_ZONES"), zone),
         .servers = try list(gpa, setting(gpa, environ, "UNBOUND_FORWARD_TO"), address),
         .ipv6 = try exists(io, inet6),
@@ -65,7 +68,8 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     for (s.zones, 0..) |z, i| try names.print(gpa, "{s}{s}", .{ if (i > 0) ", " else "", z });
     var to: std.ArrayList(u8) = .empty;
     for (s.servers, 0..) |a, i| try to.print(gpa, "{s}{s}", .{ if (i > 0) ", " else "", a });
-    say(io, "unbound-setup.conf written: {s} on :53, {s}{s}{s}", .{
+    say(io, "unbound-setup.conf written: loopback and {s} ({s}) on :53, {s}{s}{s}", .{
+        s.lan_ip,
         if (s.ipv6) "IPv4 and IPv6" else "IPv4",
         if (s.zones.len == 0) "no forward zones" else names.items,
         if (s.zones.len == 0) "" else " forwarded to ",
@@ -82,8 +86,9 @@ fn render(gpa: Allocator, s: Settings) ![]const u8 {
     try o.writeAll(
         "# Written by unbound-setup at each start, from the machine's settings\n" ++
             "# (forms/unbound/README.md): change those, not this file.\n" ++
-            "server:\n\tinterface: 0.0.0.0\n",
+            "server:\n\tinterface: 127.0.0.1\n",
     );
+    try o.print("\tinterface: {s}\n", .{s.lan_ip});
     try o.writeAll(if (s.ipv6) "\tinterface: ::0\n\tdo-ip6: yes\n" else "\tdo-ip6: no\n");
     for (s.zones) |z| try o.print(
         "\tdomain-insecure: \"{s}.\"\n\tlocal-zone: \"{s}.\" nodefault\n",
@@ -94,6 +99,14 @@ fn render(gpa: Allocator, s: Settings) ![]const u8 {
         for (s.servers) |a| try o.print("\tforward-addr: {s}\n", .{a});
     }
     return w.written();
+}
+
+fn lanAddress(io: Io, gpa: Allocator) ![]const u8 {
+    const ip = try Dir.cwd().readFileAlloc(io, service_address, gpa, .limited(64));
+    if (!address(ip) or std.mem.findScalar(u8, ip, ':') != null or
+        std.mem.startsWith(u8, ip, "127.") or std.mem.eql(u8, ip, "0.0.0.0"))
+        return error.NoLanAddress;
+    return ip;
 }
 
 /// list splits a list service-config rendered, joined by commas, and
@@ -187,13 +200,13 @@ test "list splits the rendered list and refuses what Unbound could misread" {
 test "render: IPv4 alone, no forward zones" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const conf = try render(arena.allocator(), .{});
+    const conf = try render(arena.allocator(), .{ .lan_ip = "10.0.2.15" });
     try testing.expect(std.mem.find(
         u8,
         conf,
-        "server:\n\tinterface: 0.0.0.0\n\tdo-ip6: no\n",
+        "server:\n\tinterface: 127.0.0.1\n\tinterface: 10.0.2.15\n\tdo-ip6: no\n",
     ) != null);
-    for ([_][]const u8{ "::0", "forward-zone", "domain-insecure" }) |absent|
+    for ([_][]const u8{ "::0", "0.0.0.0", "forward-zone", "domain-insecure" }) |absent|
         try testing.expect(std.mem.find(u8, conf, absent) == null);
 }
 
@@ -201,12 +214,13 @@ test "render: forward zones, each insecure, to every server" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const conf = try render(arena.allocator(), .{
+        .lan_ip = "10.0.2.15",
         .zones = &.{ "corp.example", "10.in-addr.arpa" },
         .servers = &.{ "10.0.0.2", "10.0.0.3" },
         .ipv6 = true,
     });
     for ([_][]const u8{
-        "\tinterface: 0.0.0.0\n\tinterface: ::0\n\tdo-ip6: yes\n",
+        "\tinterface: 127.0.0.1\n\tinterface: 10.0.2.15\n\tinterface: ::0\n\tdo-ip6: yes\n",
         "\tdomain-insecure: \"corp.example.\"\n\tlocal-zone: \"corp.example.\" nodefault\n",
         "\tlocal-zone: \"10.in-addr.arpa.\" nodefault\n",
         "forward-zone:\n\tname: \"corp.example.\"\n" ++

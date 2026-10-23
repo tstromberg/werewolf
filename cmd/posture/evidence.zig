@@ -238,11 +238,11 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     .{ "network-outbound", "connect(AF_INET UDP, 192.0.2.1:9), no packets sent" },
     .{
         "network-root-dns-assigned",
-        "/etc/resolv.conf nameserver lines; root UDP/TCP connect(port 53)",
+        "/etc/resolv.conf nameserver lines (unwound); root UDP/TCP connect(port 53)",
     },
     .{
         "network-root-dns-arbitrary",
-        "root UDP/TCP connect(TEST-NET:53), excluding configured resolvers",
+        "root UDP/TCP connect(port 53) to unwound's upstream resolvers and TEST-NET",
     },
     .{
         "network-root-https-arbitrary",

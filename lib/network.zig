@@ -147,6 +147,61 @@ pub fn mask(prefix: u6) u32 {
     return if (prefix == 0) 0 else ~@as(u32, 0) << @intCast(32 - prefix);
 }
 
+/// Prefix is an address, of 4 or 16 bytes, and its prefix length.
+pub const Prefix = struct { addr: []const u8, len: u8 };
+
+/// non_public4 and non_public6 are what no public service is at: fence's
+/// `public` refuses them, and unwound drops them from screened answers.
+pub const non_public4 = [_]Prefix{
+    .{ .addr = &.{ 0, 0, 0, 0 }, .len = 8 }, // "this" network
+    .{ .addr = &.{ 10, 0, 0, 0 }, .len = 8 }, // private
+    .{ .addr = &.{ 100, 64, 0, 0 }, .len = 10 }, // shared: carrier NAT, Tailscale
+    .{ .addr = &.{ 127, 0, 0, 0 }, .len = 8 }, // loopback
+    .{ .addr = &.{ 169, 254, 0, 0 }, .len = 16 }, // link-local: the metadata server
+    .{ .addr = &.{ 172, 16, 0, 0 }, .len = 12 }, // private
+    .{ .addr = &.{ 192, 0, 0, 0 }, .len = 24 }, // IETF protocol assignments
+    .{ .addr = &.{ 192, 168, 0, 0 }, .len = 16 }, // private
+    .{ .addr = &.{ 198, 18, 0, 0 }, .len = 15 }, // benchmarking
+    .{ .addr = &.{ 224, 0, 0, 0 }, .len = 3 }, // multicast and reserved, to 255
+};
+pub const non_public6 = [_]Prefix{
+    .{ .addr = &v6(&.{0}, 1), .len = 128 }, // loopback
+    .{ .addr = &v6(&.{0}, 0), .len = 96 }, // unspecified, and IPv4-compatible
+    .{ .addr = &v6(&.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff }, 0), .len = 96 }, // IPv4-mapped
+    .{ .addr = &v6(&.{ 0, 0x64, 0xff, 0x9b }, 0), .len = 96 }, // NAT64, to IPv4 behind it
+    .{ .addr = &v6(&.{ 0x01, 0x00 }, 0), .len = 64 }, // discard-only (RFC 6666)
+    .{ .addr = &v6(&.{ 0x20, 0x01 }, 0), .len = 23 }, // IETF protocol assignments and Teredo
+    .{ .addr = &v6(&.{ 0x20, 0x01, 0x0d, 0xb8 }, 0), .len = 32 }, // documentation (RFC 3849)
+    .{ .addr = &v6(&.{ 0x20, 0x02 }, 0), .len = 16 }, // 6to4
+    .{ .addr = &v6(&.{0xfc}, 0), .len = 7 }, // unique local: AWS's metadata
+    .{ .addr = &v6(&.{ 0xfe, 0x80 }, 0), .len = 10 }, // link-local
+    .{ .addr = &v6(&.{ 0xfe, 0xc0 }, 0), .len = 10 }, // site-local, deprecated
+    .{ .addr = &v6(&.{0xff}, 0), .len = 8 }, // multicast
+};
+
+/// v6 returns an IPv6 address of head, then zeros, then last.
+pub fn v6(comptime head: []const u8, comptime last: u8) [16]u8 {
+    var a: [16]u8 = @splat(0);
+    @memcpy(a[0..head.len], head);
+    a[15] = last;
+    return a;
+}
+
+/// public reports whether addr, of 4 or 16 bytes, is outside every
+/// non-public prefix.
+pub fn public(addr: []const u8) bool {
+    const prefixes: []const Prefix = if (addr.len == 4) &non_public4 else &non_public6;
+    for (prefixes) |p| {
+        const whole = p.len / 8;
+        if (!std.mem.eql(u8, addr[0..whole], p.addr[0..whole])) continue;
+        const bits = p.len % 8;
+        if (bits == 0) return false;
+        const m = @as(u8, 0xff) << @intCast(8 - bits);
+        if (addr[whole] & m == p.addr[whole] & m) return false;
+    }
+    return true;
+}
+
 fn refuse(why: *[]const u8, text: []const u8) ?Network {
     why.* = text;
     return null;
@@ -212,6 +267,41 @@ test cidr {
     for ([_][]const u8{ "10.0.0.1", "10.0.0.1/33", "10.0.0.1/+8", "10.0.0.1/08", "1.2.3/8" }) |s|
         try testing.expectError(error.Address, cidr(s));
     try testing.expectError(error.Address, address("10.0.0.5/0"));
+}
+
+test public {
+    for ([_][]const u8{
+        &.{ 1, 1, 1, 1 },
+        &.{ 100, 63, 255, 255 },
+        &.{ 100, 128, 0, 0 },
+        &.{ 172, 32, 0, 1 },
+        &.{ 192, 0, 2, 1 },
+        &.{ 223, 255, 255, 255 },
+        &v6(&.{ 0x20, 0x01, 0x48, 0x60 }, 0x88),
+        &v6(&.{ 0x20, 0x01, 0x02, 0x00 }, 1),
+    }) |a|
+        try testing.expect(public(a));
+    for ([_][]const u8{
+        &.{ 0, 1, 2, 3 },
+        &.{ 10, 9, 8, 7 },
+        &.{ 100, 64, 0, 1 },
+        &.{ 100, 127, 255, 255 },
+        &.{ 127, 0, 0, 53 },
+        &.{ 169, 254, 169, 254 },
+        &.{ 172, 31, 255, 255 },
+        &.{ 192, 168, 1, 1 },
+        &.{ 198, 19, 0, 1 },
+        &.{ 224, 0, 0, 251 },
+        &.{ 255, 255, 255, 255 },
+        &v6(&.{0}, 1),
+        &v6(&.{0}, 0),
+        &v6(&.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0 }, 1),
+        &v6(&.{ 0x20, 0x01, 0x01, 0xff }, 1),
+        &v6(&.{ 0xfd, 0, 0x0e, 0xc2 }, 0x54),
+        &v6(&.{ 0xfe, 0xbf }, 1),
+        &v6(&.{ 0xff, 0x02 }, 0xfb),
+    }) |a|
+        try testing.expect(!public(a));
 }
 
 test format {

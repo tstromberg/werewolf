@@ -22,9 +22,12 @@ services:
   blocky:
     image: ghcr.io/0xerr0r/blocky:latest
     exec: /app/blocky --config /tmp/config.yml
+    before: /usr/lib/werewolf/blocky-bind
     pledge: stdio rpath inet netlink connect listen proc
-    listen: [tcp/53 udp/53]
+    listen: [tcp/53 udp/53 lan]
+    dns-direct: true
     connect: [tcp/853 tcp/443 public]
+    lookup: "*"
     config: settings /run/config/blocky/settings.json
     setting:
       - upstreams string... as upstreams.groups.default

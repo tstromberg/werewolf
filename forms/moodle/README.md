@@ -65,7 +65,7 @@ service after it is up.
 - No path to a program can be set from the web, so no LaTeX filter and no antivirus scan
   until a form of your own adds one.
 - There is no LDAP or SAML package in the image. Use Keycloak in front, or add
-  `php-8.4-ldap` in a form of your own.
+  `php-8.5-ldap` in a form of your own.
 - Wolfi does not ship Moodle, so a new release is this form's recipe to bump.
 
 ### Network Exposure

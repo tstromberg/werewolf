@@ -16,24 +16,23 @@ recipes:
   - ../../../packages/mediawiki/mediawiki.yaml
 
 packages:
-  - php-8.4               # the php command, for the setup and updates
-  - php-8.4-pdo
-  - php-8.4-pdo_sqlite    # the database
-  - php-8.4-apcu          # the cache, which also counts failed logins
-  - php-8.4-apcu-config
-  - php-8.4-calendar
-  - php-8.4-ctype
-  - php-8.4-dom
-  - php-8.4-fileinfo      # uploads' types, by content
-  - php-8.4-gd            # thumbnails
-  - php-8.4-iconv
-  - php-8.4-intl
-  - php-8.4-mbstring
-  - php-8.4-opcache
-  - php-8.4-openssl
-  - php-8.4-simplexml
-  - php-8.4-xml
-  - php-8.4-xmlreader
+  - php-8.5               # the php command, for the setup and updates
+  - php-8.5-pdo
+  - php-8.5-pdo_sqlite    # the database
+  - php-8.5-apcu          # the cache, which also counts failed logins
+  - php-8.5-apcu-config
+  - php-8.5-calendar
+  - php-8.5-ctype
+  - php-8.5-dom
+  - php-8.5-fileinfo      # uploads' types, by content
+  - php-8.5-gd            # thumbnails
+  - php-8.5-iconv
+  - php-8.5-intl
+  - php-8.5-mbstring
+  - php-8.5-openssl
+  - php-8.5-simplexml
+  - php-8.5-xml
+  - php-8.5-xmlreader
 
 # make check's (forms/README.md): the installer and VisualEditor's parser
 # want more than the default.
@@ -73,6 +72,7 @@ services:
   # does not grant), and no looking for changed files, since the image
   # cannot change.
   php-fpm:
+    allow: [php:upload, php:writable-source]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000 -d
       apc.shm_size=64M

@@ -17,26 +17,25 @@ recipes:
 with: [mariadb-local]
 
 packages:
-  - php-8.4               # the php command, for the installer
-  - php-8.4-pdo
-  - php-8.4-pdo_mysql     # the database
-  - php-8.4-mysqlnd
-  - php-8.4-mbstring
-  - php-8.4-gd            # charts, captchas, image questions
-  - php-8.4-zip           # survey and theme archives
-  - php-8.4-sodium        # encrypted answers and participant fields
-  - php-8.4-ldap          # sign-in against the institution's directory
-  - php-8.4-dom
-  - php-8.4-xml
-  - php-8.4-simplexml
-  - php-8.4-xmlreader
-  - php-8.4-xmlwriter
-  - php-8.4-fileinfo      # uploads' types
-  - php-8.4-iconv
-  - php-8.4-ctype
-  - php-8.4-openssl
-  - php-8.4-intl
-  - php-8.4-opcache
+  - php-8.5               # the php command, for the installer
+  - php-8.5-pdo
+  - php-8.5-pdo_mysql     # the database
+  - php-8.5-mysqlnd
+  - php-8.5-mbstring
+  - php-8.5-gd            # charts, captchas, image questions
+  - php-8.5-zip           # survey and theme archives
+  - php-8.5-sodium        # encrypted answers and participant fields
+  - php-8.5-ldap          # sign-in against the institution's directory
+  - php-8.5-dom
+  - php-8.5-xml
+  - php-8.5-simplexml
+  - php-8.5-xmlreader
+  - php-8.5-xmlwriter
+  - php-8.5-fileinfo      # uploads' types
+  - php-8.5-iconv
+  - php-8.5-ctype
+  - php-8.5-openssl
+  - php-8.5-intl
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -73,6 +72,7 @@ services:
   # directory (not /tmp, which the leash does not grant), and no looking
   # for changed files, since the image cannot change.
   php-fpm:
+    allow: [php:upload, php:inline, php:writable-source]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=192 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000
     before:

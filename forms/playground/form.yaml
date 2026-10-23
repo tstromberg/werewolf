@@ -3,8 +3,10 @@
 # security keys, and bash, for Lima's readiness probes, so Lima manages it.
 base: prod
 
+# Root, who logs in, may look up any name, of any type unwound forwards;
+# every lookup is audited, and DNS past unwound stays closed.
 net:
-  - dns root
+  - lookup root * all unfiltered
 
 packages:
   - bash
@@ -18,7 +20,7 @@ sshd:
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-root-dns-assigned: interactive root tools may query the detected resolvers; other DNS servers and HTTPS remain restricted
+  network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers and HTTPS remain restricted
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet

@@ -24,7 +24,8 @@ pub const Service = struct {
     /// service that scans. Fence still refuses its loopback except the
     /// ports in connect.
     connect_any: bool = false,
-    /// dns permits UDP and TCP 53 to the detected resolvers alone.
+    /// dns is a `lookup` line: TCP 53, for answers too large for UDP from
+    /// unwound, which decides what it may resolve (cmd/unwound).
     dns: bool = false,
     /// sockets are the pathname UNIX sockets a `connect` line names.
     sockets: []const []const u8 = &.{},
@@ -242,8 +243,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 if (connect_any) return invalid(bad, "connect any twice");
                 connect_any = true;
             } else if (std.mem.eql(u8, a, "dns")) {
-                dns = true;
+                return invalid(bad, "connect dns is gone: lookup NAME says what it resolves");
             } else try connect.append(gpa, try tcpPort(a, bad));
+        } else if (std.mem.eql(u8, key, "lookup")) {
+            // fence and unwound hold the names; leash lets it reach unwound.
+            if (args.len == 0) return invalid(bad, "lookup names what it resolves");
+            dns = true;
         } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
             std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
         {
@@ -1121,10 +1126,15 @@ test "DNS is explicit and includes TCP fallback in a service" {
     var bad: Bad = .{};
     const s = try parse(
         arena.allocator(),
-        "exec /a\nuser x\npledge stdio inet connect\nconnect dns tcp/443\n",
+        "exec /a\nuser x\npledge stdio inet connect\nlookup api.example.com\nconnect tcp/443\n",
         &bad,
     );
     try testing.expect(s.dns);
+    try testing.expectError(error.Invalid, parse(
+        arena.allocator(),
+        "exec /a\nuser x\npledge stdio inet connect\nconnect dns tcp/443\n",
+        &bad,
+    ));
     try testing.expectEqualSlices(u16, &.{443}, s.connect);
     try testing.expect(!s.connect_any);
     const none = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);

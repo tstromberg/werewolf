@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
         init.io,
         dns.policy_path,
         gpa,
-        .limited(4096),
+        .limited(64 << 10),
     ));
     var socket = try dns.Socket.open();
     defer socket.close();

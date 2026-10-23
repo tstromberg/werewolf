@@ -53,6 +53,8 @@ jobs:
           make FORM=minimal DEV=1 check-updater-installer LINUX_TEST_RUNNER=sudo
       - name: DNS permissions, DHCP renewal, HTTPS and LAN discovery
         run: make check-dns DNS_TEST_RUNNER=sudo
+      - name: unwound behind fence, against a misbehaving resolver
+        run: make check-unwound DNS_TEST_RUNNER=sudo
 
   check:
     strategy:

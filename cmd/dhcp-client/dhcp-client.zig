@@ -105,11 +105,11 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         io,
         dns_policy.policy_path,
         gpa,
-        .limited(4096),
+        .limited(64 << 10),
     ));
     const dns_servers = if (mode == .keep) try dns_policy.resolvers(Dir.cwd().readFileAlloc(
         io,
-        dns_policy.resolv_path,
+        dns_policy.upstream_path,
         gpa,
         .limited(1024),
     ) catch |err| switch (err) {
@@ -580,6 +580,8 @@ const Parent = struct {
                 );
                 p.dns_servers = servers;
                 try p.link.apply(p.dir, m.lease, &p.log, p.nic);
+                var bind_ip: [16]u8 = undefined;
+                try writeFile(p.dir, "service-address", ipText(&bind_ip, m.lease.addr));
                 p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
                 var a: std.heap.FixedBufferAllocator = .init(&fba);
@@ -604,6 +606,7 @@ const Parent = struct {
                 const ours = if (p.applied) |a| std.mem.eql(u8, &a.addr, &m.lease.addr) else false;
                 if (ours) {
                     try p.link.withdraw();
+                    try writeFile(p.dir, "service-address", "");
                     p.applied = null;
                 }
                 var ip: [16]u8 = undefined;
@@ -1029,7 +1032,7 @@ const Link = struct {
                 "nameserver {d}.{d}.{d}.{d}\n",
                 .{ d[0], d[1], d[2], d[3] },
             );
-            try writeFile(dir, "resolv.conf", tw.buffered());
+            try writeFile(dir, "upstream", tw.buffered());
         }
     }
 

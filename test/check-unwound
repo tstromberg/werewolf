@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+"""Exercise unwound behind the real fence, on Linux, end to end.
+
+Usage: python3 test/check-unwound FENCE UNWOUND
+The binaries must be Linux builds for this machine. Everything runs in private
+mount and network namespaces, as root; nothing on the host changes. A fixture
+resolver in a peer namespace answers, stays silent, forges and truncates on
+cue, and records every question that reaches it.
+"""
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+UPSTREAM = '10.53.0.2'
+POLICY = '''listen tcp 53 loopback
+dns 54
+lookup 2001 api.example.test A AAAA
+lookup 2001 *.cdn.example.test A AAAA
+lookup 2001 big.example.test TXT
+lookup 2001 alias-ok.example.test A
+lookup 2001 alias-bad.example.test A
+lookup 2001 slow.example.test A
+lookup 2001 spoof.example.test A
+lookup 2002 * A AAAA
+lookup 2003 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered
+lookup 2001 cached.example.test A
+lookup 2001 short.example.test A
+lookup 2001 zero.example.test A
+lookup 2001 gone.example.test A
+lookup 2001 delayed.example.test A
+lookup 2005 * A AAAA
+dns-direct 2005
+connect 2005 udp 53
+connect 2005 tcp 53
+connect 2005 tcp 853
+'''
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def encode(name):
+    return b''.join(bytes([len(l)]) + l.encode() for l in name.split('.') if l) + b'\0'
+
+
+def read_name(msg, at):
+    labels = []
+    while msg[at]:
+        if msg[at] >= 0xc0:
+            labels.append(read_name(msg, ((msg[at] & 0x3f) << 8) | msg[at + 1])[0])
+            return '.'.join(labels), at + 2
+        labels.append(msg[at + 1:at + 1 + msg[at]].decode())
+        at += 1 + msg[at]
+    return '.'.join(labels), at + 1
+
+
+# --- the fixture resolver ----------------------------------------------------
+
+# polls counts the questions for poll.example.test, which each get a new address.
+polls = [0]
+
+def record(name, kind, data, ttl=300):
+    return encode(name) + struct.pack('!HHIH', kind, 1, ttl, len(data)) + data
+
+
+# SOA for example.test: a negative answer may be kept min(300, 60) seconds.
+SOA = record('example.test', 6, encode('ns.example.test') + encode('admin.example.test') +
+             struct.pack('!IIIII', 1, 7200, 900, 86400, 60))
+
+
+def answer(query, tcp):
+    """answer returns the datagrams to send for query: usually one."""
+    qname, end = read_name(query, 12)
+    qtype = struct.unpack('!H', query[end:end + 2])[0]
+    question = query[12:end + 4]
+    name = qname.lower()
+
+    def reply(records, rcode=0, flags=0x8180, ident=query[:2], q=question, authority=()):
+        return (ident + struct.pack('!HHHHH', flags | rcode, 1, len(records), len(authority), 0) + q +
+                b''.join(records) + b''.join(authority))
+
+    a = lambda ip: socket.inet_aton(ip)
+    if name == 'slow.example.test':
+        return []
+    if name == 'spoof.example.test':
+        wrong_id = bytes([query[0] ^ 0xff, query[1]])
+        lowered = encode(name) + query[end:end + 4]
+        return [reply([record(qname, 1, a('192.0.2.66'))], ident=wrong_id),
+                reply([record(name, 1, a('192.0.2.66'))], q=lowered),
+                reply([record(qname, 1, a('192.0.2.14'))])]
+    if name == 'poll.example.test':
+        polls[0] += 1
+        return [reply([record(qname, 1, a('198.51.100.%d' % polls[0]))])]
+    if name == 'short.example.test':
+        return [reply([record(qname, 1, a('192.0.2.30'), ttl=1)])]
+    if name == 'zero.example.test':
+        return [reply([record(qname, 1, a('192.0.2.31'), ttl=0)])]
+    if name == 'gone.example.test':
+        return [reply([], rcode=3, authority=[SOA])]
+    if name.endswith('.fill.example.test'):
+        return [reply([record(qname, 1, a('192.0.2.40'))])]
+    if name == 'big.example.test' and qtype == 16:
+        if not tcp:
+            return [reply([], flags=0x8380)]
+        txt = bytes([255]) + b'x' * 255
+        return [reply([record(qname, 16, txt)] * 3)]
+    table = {
+        ('api.example.test', 1): [record(qname, 1, a('192.0.2.10'))],
+        ('api.example.test', 28): [record(qname, 28, socket.inet_pton(socket.AF_INET6, '2001:db8::10'))],
+        ('x.cdn.example.test', 1): [record(qname, 1, a('192.0.2.11'))],
+        ('alias-ok.example.test', 1): [record(qname, 5, encode('edge.cdn.example.test')),
+                                       record('edge.cdn.example.test', 1, a('192.0.2.12'))],
+        ('alias-bad.example.test', 1): [record(qname, 5, encode('evil.example.net')),
+                                        record('evil.example.net', 1, a('192.0.2.13'))],
+        ('open.example.test', 1): [record(qname, 1, a('192.0.2.15'))],
+        ('cached.example.test', 1): [record(qname, 1, a('192.0.2.16'))],
+        ('delayed.example.test', 1): [record(qname, 1, a('192.0.2.17'))],
+        # Seven addresses behind an alias, two of them private.
+        ('screened.example.test', 1): [record(qname, 5, encode('edge.cdn.example.test'))] + [
+            record('edge.cdn.example.test', 1, a(ip)) for ip in
+            ['10.0.0.1', '127.0.0.1', '192.0.2.20', '192.0.2.21', '192.0.2.22', '192.0.2.23', '192.0.2.24']],
+        ('rebind.example.test', 1): [record(qname, 1, a('127.0.0.1')), record(qname, 1, a('192.168.1.1'))],
+    }
+    if (name, qtype) in table:
+        return [reply(table[(name, qtype)])]
+    return [reply([], rcode=3)]
+
+
+def server(log_path):
+    log = open(log_path, 'a', buffering=1)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind((UPSTREAM, 53))
+    tcp = socket.socket()
+    tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tcp.bind((UPSTREAM, 53))
+    tcp.listen()
+
+    def note(query, proto):
+        qname, end = read_name(query, 12)
+        log.write(json.dumps({'name': qname, 'proto': proto, 'flags': query[2] << 8 | query[3],
+                              'arcount': struct.unpack('!H', query[10:12])[0]}) + '\n')
+
+    def streams():
+        while True:
+            client, _ = tcp.accept()
+            with client:
+                size = struct.unpack('!H', client.recv(2))[0]
+                query = b''
+                while len(query) < size:
+                    query += client.recv(size - len(query))
+                note(query, 'tcp')
+                for out in answer(query, True):
+                    client.sendall(struct.pack('!H', len(out)) + out)
+
+    threading.Thread(target=streams, daemon=True).start()
+    print('ready', flush=True)
+    def later(query, addr):
+        for out in answer(query, False):
+            udp.sendto(out, addr)
+
+    while True:
+        query, addr = udp.recvfrom(2048)
+        note(query, 'udp')
+        # delayed.example.test is answered half a second later, so the same
+        # question asked meanwhile finds it out.
+        if read_name(query, 12)[0].lower() == 'delayed.example.test':
+            threading.Timer(0.5, later, (query, addr)).start()
+        else:
+            later(query, addr)
+
+
+# --- the driver, under fence -------------------------------------------------
+
+DRIVER = r'''
+import json, os, socket, struct, subprocess, sys, threading, time
+
+audit = open(sys.argv[2], 'a', buffering=1)
+os.makedirs('/run/syslog', exist_ok=True)
+sink = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+sink.bind('/run/syslog/dev-log')
+def drain():
+    while True:
+        audit.write(sink.recv(4096).decode().rstrip('\n') + '\n')
+threading.Thread(target=drain, daemon=True).start()
+daemon = subprocess.Popen([sys.argv[1]], stderr=open(sys.argv[3], 'w'))
+
+def encode(name):
+    return b''.join(bytes([len(l)]) + l.encode() for l in name.split('.') if l) + b'\0'
+
+def read_name(msg, at):
+    labels = []
+    while msg[at]:
+        labels.append(msg[at + 1:at + 1 + msg[at]].decode())
+        at += 1 + msg[at]
+    return '.'.join(labels), at + 1
+
+def ask(r):
+    query = r.get('raw')
+    query = bytes.fromhex(query) if query else (struct.pack('!HHHHHH', 0x4242, 0x0100, 1, 0, 0, 0) +
+                                                encode(r['name']) + struct.pack('!HH', r['type'], 1))
+    kind = socket.SOCK_STREAM if r.get('tcp') else socket.SOCK_DGRAM
+    s = socket.socket(socket.AF_INET, kind)
+    s.settimeout(r.get('timeout', 8))
+    server = r.get('server', '127.0.0.53')
+    try:
+        if r.get('bind'):
+            s.bind((r['bind'], 0))
+        if r.get('tcp'):
+            s.connect((server, 53))
+            s.sendall(struct.pack('!H', len(query)) + query)
+            size = struct.unpack('!H', s.recv(2))[0]
+            msg = b''
+            while len(msg) < size:
+                msg += s.recv(size - len(msg))
+        else:
+            s.sendto(query, (server, 53))
+            msg = s.recv(4096)
+    except OSError as e:
+        return {'error': e.errno and os.strerror(e.errno) or str(e)}
+    return parse(msg)
+
+def pipeline(r):
+    """Put two complete DNS frames in one write, then read both replies."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(8)
+    def query(ident, name):
+        msg = struct.pack('!HHHHHH', ident, 0x0100, 1, 0, 0, 0) + encode(name) + b'\0\1\0\1'
+        return struct.pack('!H', len(msg)) + msg
+    def exact(n):
+        out = b''
+        while len(out) < n:
+            part = s.recv(n - len(out))
+            if not part:
+                raise EOFError('TCP connection closed between pipelined replies')
+            out += part
+        return out
+    s.connect(('127.0.0.53', 53))
+    s.sendall(query(0x4242, r['name']) + query(0x4243, r['second']))
+    answers = []
+    for _ in range(2):
+        size = struct.unpack('!H', exact(2))[0]
+        answers.append(parse(exact(size)))
+    s.close()
+    return {'results': answers}
+
+def many(r):
+    """many asks the same question from r['parallel'] sockets at once."""
+    socks = []
+    for i in range(r['parallel']):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(8)
+        s.sendto(struct.pack('!HHHHHH', 0x4300 + i, 0x0100, 1, 0, 0, 0) + encode(r['name']) +
+                 struct.pack('!HH', r['type'], 1), ('127.0.0.53', 53))
+        socks.append(s)
+    return {'results': [parse(s.recv(4096)) for s in socks]}
+
+def parse(msg):
+    flags, qd, an = struct.unpack('!HHH', msg[2:8])
+    at = 12
+    for _ in range(qd):
+        at = read_name(msg, at)[1] + 4
+    answers, ttls = [], []
+    for _ in range(an):
+        name, at = read_name(msg, at)
+        kind, _, ttl, size = struct.unpack('!HHIH', msg[at:at + 10])
+        data = msg[at + 10:at + 10 + size]
+        at += 10 + size
+        answers.append(socket.inet_ntoa(data) if kind == 1 else kind)
+        ttls.append(ttl)
+    return {'id': msg[0] << 8 | msg[1], 'rcode': flags & 0xf, 'tc': bool(flags & 0x200), 'answers': answers,
+            'ttls': ttls}
+
+def probe(r):
+    reader, writer = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(reader)
+        try:
+            if r['uid']:
+                os.setgroups([])
+                os.setgid(r['uid'])
+                os.setuid(r['uid'])
+            start = time.monotonic()
+            result = (pipeline(r) if r.get('pipeline') else
+                      many(r) if r.get('parallel') else ask(r))
+            result['ms'] = int((time.monotonic() - start) * 1000)
+        except Exception as e:
+            result = {'error': repr(e)}
+        os.write(writer, json.dumps(result).encode())
+        os._exit(0)
+    os.close(writer)
+    out = b''
+    while chunk := os.read(reader, 65536):
+        out += chunk
+    os.close(reader)
+    os.waitpid(pid, 0)
+    return json.loads(out)
+
+for _ in range(100):
+    if ':0035 ' in open('/proc/net/udp').read():
+        break
+    time.sleep(0.05)
+print('ready', flush=True)
+for line in sys.stdin:
+    r = json.loads(line)
+    if r.get('upstream') is not None:
+        with open('/run/werewolf/network/upstream.new', 'w') as f:
+            f.write(r['upstream'])
+        os.rename('/run/werewolf/network/upstream.new', '/run/werewolf/network/upstream')
+        time.sleep(1.1)
+        print('{}', flush=True)
+    elif r.get('kill_upstream'):
+        children = open(f'/proc/{daemon.pid}/task/{daemon.pid}/children').read().split()
+        os.kill(int(children[0]), 9)
+        try:
+            print(json.dumps({'exit': daemon.wait(timeout=3)}), flush=True)
+        except subprocess.TimeoutExpired:
+            print(json.dumps({'exit': None}), flush=True)
+    else:
+        print(json.dumps(probe(r)), flush=True)
+'''
+
+
+def inside(fence, unwound, parent_net):
+    assert os.readlink('/proc/self/ns/net') != parent_net
+    run(['mount', '--make-rprivate', '/'])
+    with tempfile.TemporaryDirectory(prefix='werewolf-unwound-') as name:
+        work = Path(name)
+        work.chmod(0o755)
+        binaries = work / 'bin'
+        binaries.mkdir(mode=0o755)
+        shutil.copyfile(unwound, binaries / 'unwound')
+        (binaries / 'unwound').chmod(0o755)
+        driver = work / 'driver.py'
+        driver.write_text(DRIVER)
+        driver.chmod(0o644)
+        for f in ['audit', 'stderr', 'upstream.log']:
+            (work / f).touch(mode=0o666)
+        run(['mount', '--bind', str(binaries), '/usr/local/bin'])
+        for directory in ['/run', '/etc', '/usr/share', '/var']:
+            run(['mount', '-t', 'tmpfs', 'tmpfs', directory])
+        Path('/var/empty').mkdir(mode=0o755)
+        policy = Path('/usr/share/werewolf/net')
+        policy.parent.mkdir()
+        policy.write_text(POLICY)
+        network = Path('/run/werewolf/network')
+        network.mkdir(parents=True)
+        (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
+        (network / 'upstream').write_text('nameserver ' + UPSTREAM + '\n')
+        Path('/etc/resolv.conf').symlink_to('/run/werewolf/network/resolv.conf')
+        run(['ip', 'link', 'set', 'lo', 'up'])
+        run(['ip', 'netns', 'add', 'unwound-peer'])
+        run(['ip', 'link', 'add', 'client', 'type', 'veth', 'peer', 'name', 'peer'])
+        run(['ip', 'link', 'set', 'peer', 'netns', 'unwound-peer'])
+        run(['ip', 'addr', 'add', '10.53.0.1/24', 'dev', 'client'])
+        run(['ip', 'link', 'set', 'client', 'up'])
+        # werewolf leaves reverse-path filtering off (cmd/posture): its check
+        # would look up a reply's reverse as unlabeled DNS, which fence refuses.
+        # RP_FILTER=1 or 2 tries reverse-path filtering anyway.
+        for scope in ['all', 'default', 'client']:
+            Path('/proc/sys/net/ipv4/conf/' + scope + '/rp_filter').write_text(os.environ.get('RP_FILTER', '0') + '\n')
+        run(['ip', '-n', 'unwound-peer', 'addr', 'add', UPSTREAM + '/24', 'dev', 'peer'])
+        run(['ip', '-n', 'unwound-peer', 'link', 'set', 'peer', 'up'])
+        run(['ip', '-n', 'unwound-peer', 'link', 'set', 'lo', 'up'])
+        peer = subprocess.Popen(['ip', 'netns', 'exec', 'unwound-peer', sys.executable,
+                                 str(Path(__file__).resolve()), '--server', str(work / 'upstream.log')],
+                                stdout=subprocess.PIPE, text=True)
+        client = None
+        try:
+            assert select.select([peer.stdout], [], [], 10)[0] and peer.stdout.readline().strip() == 'ready'
+            client = subprocess.Popen([fence, '/usr/bin/python3', '-u', str(driver), '/usr/local/bin/unwound',
+                                       str(work / 'audit'), str(work / 'stderr')],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            assert select.select([client.stdout], [], [], 10)[0], 'fence timeout'
+            announcement = client.stdout.readline()
+            assert '"event":"fence"' in announcement, announcement
+            assert select.select([client.stdout], [], [], 10)[0], 'unwound timeout'
+            assert client.stdout.readline().strip() == 'ready', (work / 'stderr').read_text()
+            checks(client, work)
+            print('check-unwound: passed')
+        except BaseException:
+            for f in ['stderr', 'audit', 'upstream.log']:
+                print('--- ' + f + '\n' + (work / f).read_text(), file=sys.stderr)
+            for args in (['ip', 'rule'], ['ip', 'route', 'show', 'table', 'all'], ['ss', '-uanp']):
+                print('--- ' + ' '.join(args), file=sys.stderr)
+                subprocess.run(args, stdout=sys.stderr)
+            raise
+        finally:
+            if client and client.poll() is None:
+                client.kill()
+                client.wait()
+            peer.terminate()
+            peer.wait(timeout=5)
+            run(['ip', 'netns', 'delete', 'unwound-peer'])
+
+
+def checks(client, work):
+    def send(request):
+        client.stdin.write(json.dumps(request) + '\n')
+        client.stdin.flush()
+        assert select.select([client.stdout], [], [], 15)[0], ('timeout', request)
+        line = client.stdout.readline()
+        assert line, ('driver exited', request, (work / 'stderr').read_text())
+        return json.loads(line)
+
+    def ask(uid, name, kind=1, **extra):
+        return send(dict(uid=uid, name=name, type=kind, **extra))
+
+    def expect(result, rcode, answers=None, why=''):
+        assert result.get('rcode') == rcode, (why, result)
+        if answers is not None:
+            assert result['answers'] == answers, (why, result)
+
+    # unwound's upstream user reaches the resolver; fence lets it.
+    expect(ask(54, 'api.example.test', server=UPSTREAM), 0, ['192.0.2.10'], 'the upstream user')
+    # Exact grants, by type, over UDP and TCP.
+    expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'granted A')
+    expect(ask(2001, 'API.Example.Test', tcp=True), 0, ['192.0.2.10'], 'granted A over TCP, any case')
+    piped = ask(2001, 'api.example.test', pipeline=True, second='x.cdn.example.test')['results']
+    assert [r['id'] for r in piped] == [0x4242, 0x4243], piped
+    assert [r['answers'] for r in piped] == [['192.0.2.10'], ['192.0.2.11']], piped
+    expect(ask(2001, 'api.example.test', 28), 0, [28], 'granted AAAA')
+    expect(ask(2001, 'api.example.test', 16), 5, [], 'TXT not granted')
+    expect(ask(2001, 'denied.example.test'), 5, [], 'name not granted')
+    # *.NAME: below it, never NAME.
+    expect(ask(2001, 'x.cdn.example.test'), 0, ['192.0.2.11'], 'subtree grant')
+    expect(ask(2001, 'cdn.example.test'), 5, [], 'subtree grant excludes its apex')
+    # An alias's target must be granted too.
+    expect(ask(2001, 'alias-ok.example.test'), 0, [5, '192.0.2.12'], 'granted alias target')
+    expect(ask(2001, 'alias-bad.example.test'), 5, [], 'alias to an ungranted name')
+    # Too large for UDP: truncated, then whole over TCP; upstream asked over TCP too.
+    big = ask(2001, 'big.example.test', 16)
+    assert big['rcode'] == 0 and big['tc'] and big['answers'] == [], big
+    expect(ask(2001, 'big.example.test', 16, tcp=True), 0, [16, 16, 16], 'large answer over TCP')
+    # Forged answers are ignored; the real one still arrives.
+    expect(ask(2001, 'spoof.example.test'), 0, ['192.0.2.14'], 'forgeries ignored')
+    # Silence is SERVFAIL, in two tries of a second.
+    slow = ask(2001, 'slow.example.test')
+    assert slow['rcode'] == 2 and slow['ms'] < 4000, slow
+    # A screened * resolves names shaped like names, and keeps little of their
+    # answers: up to four public addresses, the question's own, no aliases.
+    expect(ask(2002, 'api.example.test'), 0, ['192.0.2.10'], 'screened *')
+    expect(ask(2002, 'api.example.test', 28), 0, [], 'a documentation address dropped')
+    expect(ask(2002, 'api.example.test', 16), 5, [], 'TXT not granted, screened or not')
+    expect(ask(2002, 'screened.example.test'), 0, ['192.0.2.20', '192.0.2.21', '192.0.2.22', '192.0.2.23'],
+           'four public addresses, no alias')
+    expect(ask(2002, 'rebind.example.test'), 0, [], 'private and loopback addresses dropped')
+    # A poller learns nothing new while an answer stands; unfiltered, it does.
+    first = ask(2002, 'poll.example.test')
+    assert first['rcode'] == 0 and len(first['answers']) == 1, first
+    expect(ask(2002, 'poll.example.test'), 0, first['answers'], 'a standing answer')
+    expect(ask(2002, 'poll.example.test', tcp=True), 0, first['answers'], 'a standing answer, over TCP')
+    assert ask(2003, 'poll.example.test')['answers'] != first['answers'], 'unfiltered, a new answer'
+    # Names shaped like data never leave.
+    expect(ask(2002, '9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test'), 5, [], 'a name shaped like data')
+    expect(ask(2002, 'a.b.c.d.e.tunnel.test'), 5, [], 'seven labels')
+    # A low-and-slow tunnel gets 32 new names of a site within the hour, then
+    # none; names it already asked about still resolve.
+    for i in range(32):
+        expect(ask(2002, 'n%d.tunnel.test' % i), 3, [], 'within the budget')
+    expect(ask(2002, 'n32.tunnel.test'), 5, [], 'past the budget')
+    expect(ask(2002, 'n0.tunnel.test'), 3, [], 'a name already asked about')
+    # Silence is not kept: whether a name fails is not the resolver's to say.
+    asked = lambda name: sum(json.loads(l)['name'].lower() == name
+                             for l in (work / 'upstream.log').read_text().splitlines())
+    before = asked('slow.example.test')
+    expect(ask(2002, 'slow.example.test'), 2, [], 'silence, screened')
+    expect(ask(2002, 'slow.example.test'), 2, [], 'silence, screened, asked again')
+    assert asked('slow.example.test') >= before + 4, 'silence was kept'
+    # Unfiltered grants all unwound forwards, never ANY or AXFR.
+    expect(ask(2003, 'open.example.test'), 0, ['192.0.2.15'], 'unfiltered *')
+    expect(ask(2003, 'nowhere.example.test'), 3, [], 'NXDOMAIN passes')
+    expect(ask(2003, 'open.example.test', 255), 5, [], 'ANY refused')
+    expect(ask(2003, 'open.example.test', 252, tcp=True), 5, [], 'AXFR refused')
+    # A DNS server's own host lookup still uses unwound; its explicitly
+    # granted DNS transport may reach another server directly.
+    expect(ask(2005, 'api.example.test'), 0, ['192.0.2.10'], 'DNS service local lookup')
+    expect(ask(2005, 'api.example.test', server=UPSTREAM), 0, ['192.0.2.10'],
+           'DNS service direct upstream')
+    # Answers are kept, per service, as long as they say; failures are not.
+    first = ask(2001, 'cached.example.test')
+    expect(first, 0, ['192.0.2.16'], 'a granted answer')
+    time.sleep(1.1)
+    again = ask(2001, 'cached.example.test')
+    expect(again, 0, ['192.0.2.16'], 'a kept answer')
+    assert again['ttls'][0] < first['ttls'][0], ('the time left', first, again)
+    expect(ask(2003, 'cached.example.test'), 0, ['192.0.2.16'], "another service's own answer")
+    assert asked('cached.example.test') == 2, 'one question per service'
+    expect(ask(2001, 'short.example.test'), 0, ['192.0.2.30'], 'a TTL of a second')
+    expect(ask(2001, 'short.example.test'), 0, ['192.0.2.30'], 'kept within its second')
+    time.sleep(1.1)
+    expect(ask(2001, 'short.example.test'), 0, ['192.0.2.30'], 'asked again once it expired')
+    assert asked('short.example.test') == 2, asked('short.example.test')
+    for _ in range(2):
+        expect(ask(2001, 'zero.example.test'), 0, ['192.0.2.31'], 'a TTL of 0')
+    assert asked('zero.example.test') == 2, 'a TTL of 0 was kept'
+    for _ in range(2):
+        expect(ask(2001, 'gone.example.test'), 3, [], 'NXDOMAIN with an SOA')
+    assert asked('gone.example.test') == 1, 'a negative answer with an SOA was not kept'
+    expect(ask(2003, 'nowhere.example.test'), 3, [], 'NXDOMAIN without an SOA, again')
+    assert asked('nowhere.example.test') == 2, 'a negative answer without an SOA was kept'
+    # The same question, asked while it is out, waits for its answer.
+    together = ask(2001, 'delayed.example.test', parallel=3)['results']
+    assert [r['answers'] for r in together] == [['192.0.2.17']] * 3, together
+    assert asked('delayed.example.test') == 1, 'the same question asked twice'
+    # A full cache lets the answer least recently given go; it never fails.
+    for i in range(257):
+        expect(ask(2003, 'n%d.fill.example.test' % i), 0, ['192.0.2.40'], 'filling the cache')
+    expect(ask(2003, 'n0.fill.example.test'), 0, ['192.0.2.40'], 'asked again, once let go')
+    assert asked('n0.fill.example.test') == 2 and asked('n256.fill.example.test') == 1
+    # Malformed queries: FORMERR with the ID; a response is not answered.
+    bad = struct.pack('!HHHHHH', 0x5151, 0x0100, 2, 0, 0, 0) + encode('a.test') + b'\0\1\0\1'
+    expect(send(dict(uid=2001, raw=bad.hex())), 1, [], 'two questions')
+    response = struct.pack('!HHHHHH', 0x5151, 0x8180, 1, 0, 0, 0) + encode('a.test') + b'\0\1\0\1'
+    assert 'timed out' in send(dict(uid=2001, raw=response.hex(), timeout=1))['error'], 'a response answered'
+    expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'still answering after bad input')
+    # Only granted users reach unwound, each from its own label.
+    for uid in (2004, 0):
+        assert send(dict(uid=uid, name='api.example.test', type=1))['error'] == 'Permission denied', uid
+    assert ask(2002, 'api.example.test', bind='127.53.0.1')['error'] == 'Permission denied', 'forged label'
+    assert ask(2001, 'api.example.test', bind='127.0.0.1')['error'] == 'Permission denied', 'unlabeled source'
+    expect(ask(2001, 'api.example.test', bind='127.53.0.1'), 0, ['192.0.2.10'], 'own label, bound')
+    # Only unwound's upstream user and the explicit DNS service reach the
+    # resolver directly, or any port 53.
+    for uid in (2003, 0):
+        for server in (UPSTREAM, '192.0.2.1'):
+            got = ask(uid, 'api.example.test', server=server, timeout=1)
+            assert got.get('error') == 'Permission denied', (uid, server, got)
+    # No upstream: a kept answer is still given; anything else is SERVFAIL,
+    # at once. Restored, it answers again.
+    assert send(dict(upstream='')) == {}
+    expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'a kept answer, with no upstream')
+    expect(ask(2001, 'y.cdn.example.test'), 2, [], 'no upstream fails closed')
+    assert send(dict(upstream='nameserver ' + UPSTREAM + '\n')) == {}
+    expect(ask(2001, 'y.cdn.example.test'), 3, [], 'upstream restored')
+
+    # Upstream saw only what was allowed: canonical questions, no EDNS, in
+    # mixed case, and never a denied name.
+    seen = [json.loads(l) for l in (work / 'upstream.log').read_text().splitlines()]
+    names = {s['name'].lower() for s in seen}
+    for denied in ['denied.example.test', 'cdn.example.test', 'n32.tunnel.test', 'a.b.c.d.e.tunnel.test',
+                   '9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test']:
+        assert denied not in names, denied
+    # A standing answer was asked for once; unfiltered, once more.
+    assert asked('poll.example.test') == 2, asked('poll.example.test')
+    assert 'evil.example.net' not in names
+    assert all(s['arcount'] == 0 and s['flags'] == 0x0100 for s in seen), seen
+    assert any(s['name'] != s['name'].lower() for s in seen), 'no 0x20 case'
+    assert {'udp', 'tcp'} <= {s['proto'] for s in seen}
+
+    # Every decision is audited: who, what, why and the rule.
+    audit = [json.loads(l.split(': ', 1)[1]) for l in (work / 'audit').read_text().splitlines()]
+    queries = [a for a in audit if a.get('event') == 'query']
+    def find(**want):
+        return [a for a in queries if all(a.get(k) == v for k, v in want.items())]
+    assert find(uid=2001, name='denied.example.test', decision='deny', why='no_grant'), queries
+    assert find(uid=2001, name='api.example.test', type='A', decision='allow', rcode='noerror', rule=3)
+    assert find(uid=2001, name='alias-bad.example.test', decision='deny', why='alias', alias='evil.example.net')
+    assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', rule=10)
+    assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', cached=True, rule=10)
+    assert find(uid=2001, name='cached.example.test', why='granted', cached=True)
+    assert len(find(uid=2001, name='delayed.example.test', why='granted', merged=True)) == 2
+    # Every question that gets no answer, or less of one, says why.
+    assert find(uid=2002, name='n32.tunnel.test', decision='deny', why='budget', detail='new_names', rule=10)
+    assert find(uid=2002, name='a.b.c.d.e.tunnel.test', decision='deny', why='tunnel', detail='many_labels')
+    data = find(uid=2002, name='9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test', why='tunnel',
+                detail='random_label')
+    assert data and data[0]['bits'] >= 3.5, data
+    assert find(uid=2002, name='screened.example.test', why='screened', dropped_nonpublic=2, dropped_room=1)
+    assert find(uid=2002, name='rebind.example.test', why='screened', answers=0, dropped_nonpublic=2)
+    assert find(uid=2002, name='slow.example.test', decision='allow', why='unanswered', detail='timeout',
+                rcode='servfail')
+    assert find(uid=2001, name='y.cdn.example.test', why='unanswered', detail='no_resolvers')
+    assert find(uid=2003, type='255', decision='deny', why='unsupported')
+    assert find(uid=2001, why='malformed', detail='format')
+    assert find(uid=2001, why='malformed', detail='response')
+    assert any(a.get('event') == 'start' for a in audit), audit
+
+    # If the upstream side dies, the frontend goes too, for runit to restart.
+    assert send(dict(kill_upstream=True))['exit'] == 1
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--server':
+        server(sys.argv[2])
+    elif len(sys.argv) == 5 and sys.argv[1] == '--inside':
+        inside(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif len(sys.argv) == 3:
+        if sys.platform != 'linux':
+            sys.exit('check-unwound requires Linux to create private namespaces')
+        if os.geteuid() != 0:
+            sys.exit('check-unwound needs root: fence sets routing rules and unwound drops to its users')
+        run(['unshare', '--net', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
+             '--inside', str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
+             os.readlink('/proc/self/ns/net')])
+    else:
+        sys.exit(__doc__)

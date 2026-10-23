@@ -4,6 +4,16 @@
 # start, then gravity when the lists are missing or a week old. A failed
 # fetch keeps the lists Pi-hole has, and FTL starts anyway.
 dir=/etc/pihole
+# Bind only the machine's NIC, leaving 127.0.0.53:53 to unwound. dnsmasq's
+# bind-dynamic follows address changes on the same NIC. Fence restricts the
+# listener to connected subnets, including when the NIC has a public address.
+IFS= read -r nic </etc/werewolf-network/nic || [[ -n $nic ]] || exit 1
+if [[ ! $nic =~ ^[a-zA-Z0-9_.-]{1,15}$ || $nic == lo ]]; then
+	echo 'pi-hole-setup: no usable network interface' >&2
+	exit 1
+fi
+printf '%s\n' "interface=$nic" 'except-interface=lo' 'bind-dynamic' \
+	>/etc/dnsmasq.d/99-werewolf.conf
 # On a first start, with no pihole.toml and no backup of one, pihole-FTL
 # writes its defaults and ignores FTLCONF_ variables; an empty file is a
 # config it reads, so the form's settings hold from the first start.
