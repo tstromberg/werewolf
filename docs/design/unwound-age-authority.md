@@ -1,6 +1,7 @@
 # Authority for domain-age evidence
 
-Status: planned. Age decisions remain offline; see the
+Status: planned. Root-resistant cache storage is required before the age gate
+can affect DNS answers; see the
 [domain-age design](unwound-age.md).
 
 ## Request provenance
@@ -43,6 +44,12 @@ source label, UID and policy generation. A full channel increments `age_lost`;
 assigned system domains and explicit grants bypass it. Database access and
 external checks are not connected.
 
+The bounded fetcher stream and writer-side evidence conversion now have host
+tests; `make check-unwound-age-transport` checks its framing in Linux. The
+frontend's reply validator independently derives the PSL boundary and refuses
+a mature reply naming another registered domain. These pieces do not yet
+change DNS answers.
+
 `test/check-unwound-age-mount` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers
 its directory in the main namespace. SQLite can create its database, WAL and
@@ -57,10 +64,17 @@ and WAL behavior in the Linux lab.
 Landlock restricts a task and its descendants; it cannot impose a new rule
 on another root task. Fence currently permits writes under `/data`, and a
 sufficiently privileged root process can bypass ordinary file ownership.
-This design does **not** claim a root-proof SQLite cache. Before enforcement,
-native tests must demonstrate that root login and every service cannot
+The protected writer must start after init's seal but before `fence` drops
+`CAP_SYS_ADMIN`. Init must give it a private writable mount view, then bind
+the age directory read-only in the main view before runit starts services.
+Its listening socket must also be on an immutable path in the main view so
+root cannot replace the age authority on an unwound restart. The writer and
+its supervisor must be non-dumpable and have no surviving mount capability.
+
+This design does **not yet** claim a root-proof SQLite cache. Before enforcement,
+native boot tests must demonstrate that root login and every service cannot
 replace the database or its WAL files, or the worker needs a separate
-read-only mount view or stronger trusted storage. The namespace boundary still
-needs native boot checks for the capability drop, mount broker calls, and
+trusted storage. The namespace boundary needs native boot checks for the
+capability drop, mount broker calls, OCI bind aliases, and
 forms that retain `CAP_SYS_ADMIN`. An integrity or
 generation failure makes age unknown, never mature.

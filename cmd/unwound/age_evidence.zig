@@ -3,8 +3,38 @@
 const std = @import("std");
 const age = @import("age.zig");
 const age_db = @import("age_db.zig");
+const fetch_ipc = @import("age_fetch_ipc.zig");
 
 const retry_s: i64 = 3600;
+
+/// Interpret the fetcher's framed raw bytes. An invalid RDAP response stays
+/// RDAP unknown; only an explicit outage permits the CT fallback.
+pub fn fromFetcher(
+    allocator: std.mem.Allocator,
+    domain: []const u8,
+    kind: fetch_ipc.Kind,
+    body: []const u8,
+    rdap_url: ?[]const u8,
+    now: i64,
+    psl_generation: []const u8,
+    bootstrap_generation: []const u8,
+) age_db.Result {
+    const lookup: age.Lookup = switch (kind) {
+        .rdap => .{ .body = body },
+        .invalid => .{ .body = &.{} },
+        .crtsh, .unavailable => .unavailable,
+    };
+    return result(
+        allocator,
+        domain,
+        lookup,
+        rdap_url,
+        if (kind == .crtsh) body else null,
+        now,
+        psl_generation,
+        bootstrap_generation,
+    );
+}
 
 pub fn result(
     allocator: std.mem.Allocator,
@@ -112,4 +142,33 @@ test "an RDAP outage may use dated CT history" {
     try t.expect(r.source == .crtsh);
     try t.expect(r.status == .history);
     try t.expectEqual(now + age.ct_fresh_s, r.retry_after);
+}
+
+test "fetcher response kinds cannot turn invalid RDAP into CT authority" {
+    const t = std.testing;
+    const now: i64 = 1_792_716_800;
+    const invalid = fromFetcher(
+        t.allocator,
+        "example.com",
+        .invalid,
+        &.{},
+        null,
+        now,
+        "psl",
+        "iana",
+    );
+    try t.expect(invalid.source == .rdap);
+    try t.expect(invalid.status == .unknown);
+    const outage = fromFetcher(
+        t.allocator,
+        "example.com",
+        .unavailable,
+        &.{},
+        null,
+        now,
+        "psl",
+        "iana",
+    );
+    try t.expect(outage.source == .none);
+    try t.expect(outage.status == .@"error");
 }

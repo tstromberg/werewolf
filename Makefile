@@ -281,7 +281,7 @@ $(TEST_SK): tools/test-sk.zig
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
-	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_fetch_ipc.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
+	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_fetch_ipc.zig cmd/unwound/age_http.zig cmd/unwound/age_fetcher.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
@@ -794,6 +794,15 @@ check-unwound-age-store: build/host/unwound-sqlite.o
 
 _test/cmd/unwound/age_evidence.zig: build/host/unwound-sqlite.o
 	zig test -lc cmd/unwound/age_evidence.zig $<
+
+# Run the framed age-fetch IPC test in a native Linux runner, like
+# check-unwound; it deliberately splits a response into single-byte writes.
+build/$(ARCH)/check-unwound-age-transport: cmd/unwound/age_fetch_transport.zig cmd/unwound/age_fetch_ipc.zig
+	@mkdir -p $(dir $@)
+	zig test -target $(ARCH)-linux-musl --test-no-exec $< -femit-bin=$@
+.PHONY: check-unwound-age-transport
+check-unwound-age-transport: build/$(ARCH)/check-unwound-age-transport
+	$(DNS_TEST_RUNNER) ./build/$(ARCH)/check-unwound-age-transport
 
 check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
 	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
