@@ -65,23 +65,22 @@ in observe mode before enabling this weaker fallback.
 
 Keep the most recently used 20,000 registered domains. A domain row has no
 fixed lifetime: it can remain indefinitely if it stays in the LRU set, but
-each verdict is recomputed from dated evidence and refreshed daily with
-jitter. Eviction means unknown, never allow. Cache unknown/errors for one hour
-or a longer server Retry-After, with bounded per-service and per-registry miss
-rates. Bound database bytes as well as rows, since QNAMEs and URIs vary.
+each verdict is recomputed from dated evidence. Refresh expired evidence
+before it authorizes another query. Eviction means unknown, never allow.
+Cache unknown/errors for one hour or a longer server Retry-After. Bound miss
+rates per service and registry, and database bytes as well as rows.
 SQLite WAL, `-wal` and `-shm` files all live in the worker's private directory
 and have one writer. Keep the check history independent of domain eviction for
 a bounded audit period; pin each cached domain's `last_check_id` row while
 pruning older audit rows. SQL triggers enforce 20,000 domain and 120,000 check
 row limits.
 
-RDAP evidence fetched after the 90-day boundary is fresh for one day. Mature
-RDAP evidence may remain usable for at most seven days from fetch during a
-registry outage, logged as stale. Stale RDAP and provisional CT require an
-RDAP failure recorded in the last hour. At the boundary evidence must be fresh.
-crt.sh provisional evidence is fresh for at most 24 hours and never gets the
-seven-day stale allowance. A clock behind fetch or bootstrap publication
-makes evidence unknown. The current name/site budgets still apply.
+RDAP evidence can authorize for seven days after fetch. Data fetched before
+the 90-day boundary cannot become mature merely because time passes; it needs
+a new RDAP check at the boundary. crt.sh fallback can authorize for only 24
+hours after an RDAP availability failure. Its result remains marked `crtsh`.
+A clock behind fetch makes evidence unknown. The current name/site budgets
+still apply.
 
 ## Request provenance and file authority
 
@@ -92,16 +91,16 @@ request fields can be trusted and how the SQLite files must be protected.
 
 The offline classifier in `cmd/unwound/age.zig` covers PSL exact, wildcard,
 exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
-history parsing; and threshold, staleness and clock boundaries with the
-90-day default. Cached evidence is reclassified against pinned data
-generations and recent RDAP failures. It accepts only normalized ASCII PSL
-input. The updater must convert Unicode PSL rules to
-A-labels before using it. `cmd/unwound/bootstrap.zig` selects a pinned IANA
-entry by label-wise longest match and requires HTTPS. Run fetchers against
-fixture HTTPS servers and inspect audit records in observe mode. Enable the
-gate after native tests
-cover initial boot, renewal, restart, outage, rollback, CT fallback, LRU
-eviction, provenance, file authority and bounded miss floods. Audit records
+history parsing; and threshold, expiry and clock boundaries with the
+90-day default. Cached evidence is reclassified by its fetch date and domain.
+PSL and IANA versions are retained for audit, not cache invalidation. It
+accepts only normalized ASCII PSL input. The updater must convert Unicode
+PSL rules to A-labels before using it. `cmd/unwound/bootstrap.zig` selects a
+pinned IANA entry by label-wise longest match and requires HTTPS. Run fetchers
+against fixture HTTPS servers and inspect audit records in observe mode.
+Enable the gate after native tests cover initial boot, renewal, restart,
+outage, rollback, CT fallback, LRU eviction, provenance, file authority and
+bounded miss floods. Audit records
 name the derived domain, evidence generation and decision, never the RDAP
 response body. Old domains still face the other screens.
 

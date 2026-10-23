@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS domain_age (
     effective_at INTEGER,
     ct_first_seen_at INTEGER,
     fetched_at INTEGER NOT NULL,
-    last_rdap_failure_at INTEGER CHECK (last_rdap_failure_at >= 0),
     retry_after INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL,
     evidence_uri TEXT,

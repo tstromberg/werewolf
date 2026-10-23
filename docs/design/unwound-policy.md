@@ -81,6 +81,8 @@ known out-of-band DNS endpoints,
 but an entry would express risk policy rather than prove maliciousness.
 
 Age defaults to 90 days from the current registry [RDAP] registration event.
+An RDAP answer can authorize from cache for seven days; the row can remain
+stored after that but needs a new check to authorize again.
 The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants
 need their own grant. On RDAP availability failure, crt.sh may provide a
 marked, 24-hour provisional decision from old CT history. It cannot override
