@@ -731,7 +731,7 @@ check-adhoc: $(HOWL) | _check-shared
 	@$(HOWL) form --build --with prod --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
-	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
+	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci FORM_CHECKS=test/checks-oci _check-form
 
 # Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
 # People uses 22199, below the forms' ports, so check-cloud and check-forms can run together.

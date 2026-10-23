@@ -105,7 +105,8 @@ def inside(fence, unwound, parent_net, source, mox=None):
         network.mkdir(parents=True)
         (network / 'upstream').write_text(MARKER)
         (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
-        Path('/etc/resolv.conf').symlink_to(network / 'resolv.conf')
+        # BIND's dig in the lab VM rejects this fixture's /etc tmpfs symlink.
+        Path('/etc/resolv.conf').write_text('nameserver 127.0.0.53\n')
         image = Path('/usr/share/werewolf')
         image.mkdir()
         (image / 'net').write_text(POLICY)

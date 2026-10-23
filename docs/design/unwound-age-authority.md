@@ -80,5 +80,7 @@ replace the database, WAL or socket through its normal filesystem view. The
 shared native image check also tries root writes and remounts on boot and
 reboot, and refuses extra mounts exposing the age directory. Init protects
 the age mount before constructing OCI roots; image composition reserves its
-service name. The cache is not protected against tampering before this boot;
+service name. `make check-adhoc` boots an OCI nginx service, confirms its data
+bind exists, and tries to bind and write the age cache as root. The cache is
+not protected against tampering before this boot;
 unknown or expired evidence never gives a mature verdict.
