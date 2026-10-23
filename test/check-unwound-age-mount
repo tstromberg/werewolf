@@ -30,12 +30,15 @@ def denied(path):
 
 
 def denied_without_ptrace(path):
-    probe = (
-        'import os,sys; '
-        'p=sys.argv[1]; '
-        'exec("try:\\n os.open(p, os.O_WRONLY)\\n raise AssertionError(p)\\n'
-        'except PermissionError:\\n pass")'
-    )
+    probe = '''import os, sys
+try:
+    fd = os.open(sys.argv[1], os.O_WRONLY)
+except PermissionError:
+    pass
+else:
+    os.close(fd)
+    raise AssertionError('private writer path was writable')
+'''
     subprocess.run(
         ['setpriv', '--bounding-set=-sys_ptrace', sys.executable, '-c', probe, str(path)],
         check=True,
@@ -89,6 +92,11 @@ def inside():
                 denied_without_ptrace(
                     Path(f'/proc/{writer_pid}/root') / directory.relative_to('/') / suffix
                 )
+            held = [entry for entry in Path(f'/proc/{writer_pid}/fd').iterdir()
+                    if 'age.db' in os.readlink(entry)]
+            assert held, 'SQLite did not keep a database descriptor'
+            for entry in held:
+                denied_without_ptrace(entry)
             worker.stdin.write('close\n')
             worker.stdin.flush()
             assert worker.wait(timeout=5) == 0

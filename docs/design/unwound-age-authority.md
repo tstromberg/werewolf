@@ -34,8 +34,12 @@ SQLite's WAL, shared-memory and main files all need the same protection.
 start the writer in a private mount namespace before a read-only bind covers
 its directory in the main namespace. SQLite can create its database, WAL and
 shared-memory files through the writer's normal path, while root in the main
-namespace gets `EROFS` for those paths. A retained directory descriptor alone
-did not work with SQLite's file opening and WAL behavior in the Linux lab.
+namespace gets `EROFS` for those paths. With `CAP_SYS_PTRACE` removed from
+root's bounding set, the fixture also denies paths through the writer's
+`/proc/PID/root` and `/proc/PID/fd`; init already drops that capability.
+With it retained, root reached the writable namespace through `/proc/PID/root`.
+A retained directory descriptor alone did not work with SQLite's file opening
+and WAL behavior in the Linux lab.
 
 Landlock restricts a task and its descendants; it cannot impose a new rule
 on another root task. Fence currently permits writes under `/data`, and a
@@ -44,6 +48,6 @@ This design does **not** claim a root-proof SQLite cache. Before enforcement,
 native tests must demonstrate that root login and every service cannot
 replace the database or its WAL files, or the worker needs a separate
 read-only mount view or stronger trusted storage. The namespace boundary still
-needs native checks against `/proc` descriptor and root-path access, tracing,
-mount broker calls, and forms that retain `CAP_SYS_ADMIN`. An integrity or
+needs native boot checks for the capability drop, mount broker calls, and
+forms that retain `CAP_SYS_ADMIN`. An integrity or
 generation failure makes age unknown, never mature.
