@@ -20,7 +20,8 @@ services:
     user: ollama
     pledge: stdio rpath wpath inet unix connect listen proc exec
     listen: [tcp/11434]
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     run: /usr/bin/ollama
     memory: 8192
     nofile: 65536

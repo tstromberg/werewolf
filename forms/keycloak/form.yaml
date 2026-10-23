@@ -4,13 +4,14 @@
 # Keycloak, on loopback, keeps its tables in a schema of its own, reached
 # by PostgreSQL's socket. Its links name the base URL alone, whatever a
 # request's Host says. Its first administrator comes from the config
-# before it serves. Wolfi's Keycloak is old and brings bash: melange
-# builds upstream's release (../packages/keycloak/keycloak.yaml), and
+# before it serves. Wolfi's Keycloak is old and brings bash: werewolf's
+# application feed builds upstream's release
+# (../packages/keycloak/keycloak.yaml), and
 # java starts it, without kc.sh. See forms/keycloak/README.md.
 base: jre
 
-recipes:
-  - ../../../packages/keycloak/keycloak.yaml
+packages:
+  - keycloak-werewolf
 
 with: [postgresql, caddy]
 
@@ -37,7 +38,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8180]
+    connect: [tcp/443 tcp/8180]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
@@ -69,8 +71,8 @@ services:
     listen: [tcp/8180 tcp/9180 loopback]
     connect:
       - tcp/443 tcp/389 tcp/636 tcp/587 tcp/465
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
+    lookup: "*"
     secret: KC_BOOTSTRAP_ADMIN_PASSWORD /run/config/keycloak/admin-password
     config: settings /run/config/keycloak/settings.json
     setting:

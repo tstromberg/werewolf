@@ -30,8 +30,6 @@ limactl shell --workdir / "$vm" sh -euc "
 	command -v rsync >/dev/null || sudo apt-get install -y -q rsync
 	rsync -a --delete --exclude /build --exclude /out --exclude /config --exclude /.git '$repo/' ~/werewolf/
 	rsync -a --delete --exclude /build --exclude /out --exclude /.git '$repo/../packages/' ~/packages/
-	mkdir -p ~/hardened-packages/ports
-	rsync -a --delete '$repo/../hardened-packages/ports/libffi/' ~/hardened-packages/ports/libffi/
 	cd ~/werewolf
 	sudo test/ci-setup
 	make -j\$(nproc) test

@@ -10,7 +10,8 @@
 //! queries, decides them, and answers. Its child is upstream.zig: as
 //! _unwoundnet, the one user fence lets reach the resolvers, it forwards
 //! what the frontend allowed. Each side treats the other's messages as
-//! input to check. See docs/design/unwound.md and cmd/unwound/README.md.
+//! input to check. An observe-only age child classifies screened requests
+//! without changing answers. See docs/design/unwound.md and cmd/unwound/README.md.
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
@@ -20,12 +21,17 @@ const Policy = @import("policy.zig").Policy;
 const screen = @import("screen.zig");
 const cache = @import("cache.zig");
 const upstream = @import("upstream.zig");
+const age_ipc = @import("age_ipc.zig");
+const age_gate = @import("age_gate.zig");
+const age_worker = @import("age_worker.zig");
 const sys = sandbox.sys;
 
 const frontend_id = 53;
 pub const upstream_id = 54;
 const policy_path = dns.policy_path;
 const log_socket = "/run/syslog/dev-log";
+const age_marker = "/usr/share/werewolf/age-enforce";
+const age_marker_text = "enforce\n";
 const max_policy = 256 * 1024;
 
 /// max_slots bounds the questions waiting on the upstream side; a service
@@ -89,6 +95,8 @@ fn run() !void {
         "close inherited files",
     );
     try policy.parse(try readPolicy());
+    const local_validator = try readLocalValidator();
+    const enforce_age = try readAgeMarker();
     const udp = try listener(linux.SOCK.DGRAM);
     const tcp = try listener(linux.SOCK.STREAM);
     _ = try sys(linux.listen(tcp, 64), "listen");
@@ -106,37 +114,127 @@ fn run() !void {
         0,
         &pair,
     ), "upstream channel");
+    var domain_pair: [2]i32 = undefined;
+    _ = try sys(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+        &domain_pair,
+    ), "system domain channel");
+    var age_pair: [2]i32 = .{ -1, -1 };
+    if (enforce_age) {
+        age_pair[0] = try connectAge();
+    } else _ = try sys(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+        &age_pair,
+    ), "age observation channel");
     const parent = linux.getpid();
     if (try sys(linux.fork(), "fork upstream") == 0) {
         sandbox.tieTo(parent);
-        try sandbox.closeAllBut(&.{ pair[1], network, log });
-        upstream.run(pair[1], network, log);
+        try sandbox.closeAllBut(&.{ pair[1], domain_pair[1], network, log });
+        upstream.run(pair[1], domain_pair[1], network, log, local_validator);
     }
     _ = linux.close(pair[1]);
+    _ = linux.close(domain_pair[1]);
     _ = linux.close(network);
-    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], log });
+    if (!enforce_age) {
+        if (try sys(linux.fork(), "fork age observer") == 0) {
+            sandbox.tieTo(parent);
+            try sandbox.closeAllBut(&.{ age_pair[1], log });
+            age_worker.run(age_pair[1], log, &policy);
+        }
+        _ = linux.close(age_pair[1]);
+    }
+    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], domain_pair[0], age_pair[0], log });
     log_fd = log;
     side = "frontend";
     if (try sys(
         linux.getrandom(&screen_key, screen_key.len, 0),
         "screen key",
     ) != screen_key.len) return error.ShortKey;
-    try sandbox.limit(.NOFILE, 16 + max_conns);
+    try sandbox.limit(.NOFILE, 17 + max_conns);
     try sandbox.dropTo(frontend_id, "/var/empty");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
-    try confine(udp, tcp, pair[0], log);
+    try confine(udp, tcp, pair[0], domain_pair[0], age_pair[0], log, enforce_age);
     var f: Frontend = .{
         .udp = udp,
         .tcp = tcp,
         .channel = pair[0],
+        .domain_channel = domain_pair[0],
+        .age_channel = age_pair[0],
         .log = log,
+        .trust_ad = local_validator,
+        .enforce_age = enforce_age,
         .last_stats = now(),
     };
+    var ready: [1]linux.pollfd = .{.{
+        .fd = domain_pair[0],
+        .events = linux.POLL.IN,
+        .revents = 0,
+    }};
+    if (linux.poll(&ready, 1, 5000) != 1 or ready[0].revents & linux.POLL.IN == 0)
+        f.fail("initial system domain");
+    f.domainUpdate();
     f.say("{{\"event\":\"start\",\"services\":{d},\"grants\":{d},\"generation\":\"{x:0>8}\"}}", .{
         policy.users.len, policy.n, policy.generation,
     });
     f.serve();
+}
+
+/// An absent image marker keeps observations only. A present marker must be
+/// immutable image data; a malformed marker fails startup rather than
+/// silently disabling the gate.
+fn readAgeMarker() !bool {
+    const fd = linux.open(age_marker, .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    switch (linux.errno(fd)) {
+        .NOENT => return false,
+        .SUCCESS => {},
+        else => return error.AgeMarker,
+    }
+    defer _ = linux.close(@intCast(fd));
+    var st: linux.Statx = undefined;
+    _ = try sys(
+        linux.statx(
+            @intCast(fd),
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
+            &st,
+        ),
+        "stat age marker",
+    );
+    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
+        st.size != age_marker_text.len) return error.AgeMarker;
+    var buf: [age_marker_text.len]u8 = undefined;
+    const n = try sys(linux.read(@intCast(fd), &buf, buf.len), "read age marker");
+    if (n != buf.len or !std.mem.eql(u8, &buf, age_marker_text)) return error.AgeMarker;
+    return true;
+}
+
+fn connectAge() !i32 {
+    const fd: i32 = @intCast(try sys(
+        linux.socket(
+            linux.AF.UNIX,
+            linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+            0,
+        ),
+        "age authority socket",
+    ));
+    errdefer _ = linux.close(fd);
+    var address: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(address.path[0..dns.age_socket_path.len], dns.age_socket_path);
+    _ = try sys(
+        linux.connect(fd, @ptrCast(&address), @intCast(2 + dns.age_socket_path.len + 1)),
+        "connect age authority",
+    );
+    return fd;
 }
 
 /// readPolicy reads the image's compiled network policy, which must be
@@ -173,6 +271,44 @@ fn readPolicy() ![]const u8 {
     }
     if (got != st.size) return error.UnsafePolicy;
     return policy_text[0..got];
+}
+
+/// readLocalValidator accepts only a root-owned immutable form marker. The
+/// upstream file must independently name the same loopback resolver.
+fn readLocalValidator() !bool {
+    const fd = linux.open(dns.local_validator_path, .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    switch (linux.errno(fd)) {
+        .NOENT => return false,
+        .SUCCESS => {},
+        else => return error.LocalValidator,
+    }
+    defer _ = linux.close(@intCast(fd));
+    var st: linux.Statx = undefined;
+    _ = try sys(linux.statx(
+        @intCast(fd),
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
+        &st,
+    ), "stat local validator");
+    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
+        st.size != dns.local_validator_text.len) return error.LocalValidator;
+    var buf: [dns.local_validator_text.len]u8 = undefined;
+    var have: usize = 0;
+    while (have < buf.len) {
+        const n = try sys(
+            linux.read(@intCast(fd), buf[have..].ptr, buf.len - have),
+            "read local validator",
+        );
+        if (n == 0) return error.LocalValidator;
+        have += n;
+    }
+    if (!std.mem.eql(u8, &buf, dns.local_validator_text)) return error.LocalValidator;
+    return true;
 }
 
 fn listener(kind: u32) !i32 {
@@ -225,13 +361,24 @@ fn openLog() !i32 {
 
 /// confine allows the frontend reads and writes on what it holds, accepts
 /// on its listener, and nothing that opens a file or makes a socket.
-fn confine(udp: i32, tcp: i32, channel: i32, log: i32) !void {
+fn confine(
+    udp: i32,
+    tcp: i32,
+    channel: i32,
+    domain_channel: i32,
+    age_channel: i32,
+    log: i32,
+    enforce_age: bool,
+) !void {
     var f: sandbox.Filter = .{};
     f.allowArg("recvfrom", 0, @intCast(udp));
     f.allowArg("sendto", 0, @intCast(udp));
     f.allowArg("accept4", 0, @intCast(tcp));
     f.allowArg("recvfrom", 0, @intCast(channel));
     f.allowArg("sendto", 0, @intCast(channel));
+    f.allowArg("recvfrom", 0, @intCast(domain_channel));
+    f.allowArg("sendto", 0, @intCast(age_channel));
+    if (enforce_age) f.allowArg("recvfrom", 0, @intCast(age_channel));
     f.allowArg("write", 0, @intCast(log));
     // TCP clients' descriptors are made by accept4; nothing else can be.
     inline for (.{
@@ -261,6 +408,8 @@ const Client = union(enum) {
     tcp: u8,
 };
 
+const Stage = enum { age, upstream };
+
 const Slot = struct {
     used: bool = false,
     /// gen changes each time the slot is reused, so a late answer for its
@@ -275,6 +424,9 @@ const Slot = struct {
     line: u16 = 0,
     /// screened is a question only a screened `*` allowed.
     screened: bool = false,
+    age_required: bool = false,
+    age_source: age_ipc.Source = .none,
+    stage: Stage = .upstream,
     /// follows is a question asked while the same one was out: it waits
     /// for that one's answer rather than asking again.
     follows: bool = false,
@@ -301,6 +453,7 @@ const Stats = struct {
     busy: u64 = 0,
     malformed: u64 = 0,
     lost: u64 = 0,
+    age_lost: u64 = 0,
     /// cached counts questions answered from the cache; merged, those that
     /// waited on the same question already out.
     cached: u64 = 0,
@@ -311,12 +464,17 @@ const Frontend = struct {
     udp: i32,
     tcp: i32,
     channel: i32,
+    domain_channel: i32,
+    age_channel: i32,
     log: i32,
+    trust_ad: bool,
+    enforce_age: bool,
     slots: [max_slots]Slot = @splat(.{}),
     pending: [dns.max_users]u16 = @splat(0),
     conns: [max_conns]Conn = @splat(.{}),
     open: [dns.max_users]u8 = @splat(0),
     seq: u64 = 0,
+    age_seq: u64 = 0,
     stats: Stats = .{},
     reported: Stats = .{},
     last_stats: i64,
@@ -326,7 +484,7 @@ const Frontend = struct {
     records: [wire.max_records]wire.Record = undefined,
 
     fn serve(f: *Frontend) noreturn {
-        var fds: [3 + max_conns]linux.pollfd = undefined;
+        var fds: [5 + max_conns]linux.pollfd = undefined;
         var which: [max_conns]u8 = undefined;
         while (true) {
             // A read may have brought in the start of another TCP query.
@@ -337,20 +495,51 @@ const Frontend = struct {
             fds[0] = .{ .fd = f.channel, .events = linux.POLL.IN, .revents = 0 };
             fds[1] = .{ .fd = f.udp, .events = linux.POLL.IN, .revents = 0 };
             fds[2] = .{ .fd = f.tcp, .events = linux.POLL.IN, .revents = 0 };
-            var n: usize = 3;
+            fds[3] = .{ .fd = f.domain_channel, .events = linux.POLL.IN, .revents = 0 };
+            fds[4] = .{
+                .fd = f.age_channel,
+                .events = if (f.enforce_age) linux.POLL.IN else 0,
+                .revents = 0,
+            };
+            var n: usize = 5;
             for (&f.conns, 0..) |*c, i| if (c.fd >= 0 and !c.waiting) {
                 fds[n] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
-                which[n - 3] = @intCast(i);
+                which[n - 5] = @intCast(i);
                 n += 1;
             };
             const rc = linux.poll(&fds, n, 1000);
             if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .INTR) f.fail("poll");
+            if (fds[3].revents != 0) f.domainUpdate();
+            if (fds[4].revents & (linux.POLL.HUP | linux.POLL.ERR) != 0)
+                f.fail("age worker closed");
+            if (f.enforce_age and fds[4].revents & linux.POLL.IN != 0) f.ageAnswers();
             if (fds[0].revents != 0) f.answers();
             if (fds[1].revents != 0) f.datagrams();
             if (fds[2].revents != 0) f.accept();
-            for (fds[3..n], which[0 .. n - 3]) |p, i| if (p.revents != 0) f.readConn(i);
+            for (fds[5..n], which[0 .. n - 5]) |p, i| if (p.revents != 0) f.readConn(i);
             f.expire();
         }
+    }
+
+    fn domainUpdate(f: *Frontend) void {
+        var buf: [255]u8 = undefined;
+        const rc = linux.recvfrom(f.domain_channel, &buf, buf.len, linux.MSG.TRUNC, null, null);
+        if (linux.errno(rc) != .SUCCESS or rc < 1 or rc > buf.len or
+            buf[0] != rc - 1 or !policy.setSystemDomain(buf[1..rc]))
+        {
+            f.say("{{\"event\":\"system_domain_error\",\"rc\":{d},\"errno\":\"{t}\",\"length\":{" ++
+                "d}}}", .{
+                rc,
+                linux.errno(
+                    rc,
+                ),
+                if (linux.errno(rc) == .SUCCESS and rc > 0 and rc <= buf.len) buf[0] else 0,
+            });
+            f.fail("system domain channel");
+        }
+        f.say("{{\"event\":\"system_domain\",\"name\":\"{s}\"}}", .{
+            if (policy.system_domain) |*d| d.text() else "",
+        });
     }
 
     fn fail(f: *Frontend, comptime what: []const u8) noreturn {
@@ -476,7 +665,7 @@ const Frontend = struct {
         const d = policy.decide(s, &q.name, q.type);
         if (!d.allow) return f.refuse(client, s, &q, @tagName(d.why), d.line, .{});
         const t = wire.Type.from(q.type).?;
-        const screened = d.why == .screened;
+        const screened = d.why == .screened or d.why == .system_domain;
         if (screened) if (screens[s].ask(&screen_key, q.name.text(), now())) |r| {
             if (r.sign.tunnel()) f.stats.tunnel += 1;
             const why = if (r.sign.tunnel()) "tunnel" else "budget";
@@ -485,16 +674,30 @@ const Frontend = struct {
                 .bits = r.bits,
             });
         };
-        if (caches[s].find(q.name.text(), t, now())) |e| {
-            f.stats.cached += 1;
-            const records = e.records(&q.name, now(), &f.records);
-            f.audit(s, &q.name, q.type, true, @tagName(d.why), d.line, .{
-                .rcode = e.rcode,
-                .answers = records.len,
-                .cached = true,
-                .dropped = e.dropped,
-            });
-            return f.answer(client, q.id, q.rd, e.rcode, &q.name, q.type, records);
+        const age_required = @import("policy.zig").needsAge(d.why);
+        if (age_required and !f.enforce_age) f.observeAge(s, &q, d.line, t, client);
+        if (!age_required or !f.enforce_age) {
+            if (caches[s].find(q.name.text(), t, now())) |e| {
+                f.stats.cached += 1;
+                const records = e.records(&q.name, now(), &f.records);
+                f.audit(s, &q.name, q.type, true, @tagName(d.why), d.line, .{
+                    .rcode = e.rcode,
+                    .answers = records.len,
+                    .cached = true,
+                    .dropped = e.dropped,
+                    .authenticated = e.authenticated,
+                });
+                return f.answer(
+                    client,
+                    q.id,
+                    q.rd,
+                    e.rcode,
+                    &q.name,
+                    q.type,
+                    records,
+                    e.authenticated,
+                );
+            }
         }
         const free = for (&f.slots, 0..) |*slot, i| {
             if (!slot.used) break i;
@@ -520,6 +723,8 @@ const Frontend = struct {
             .type = t,
             .line = d.line,
             .screened = screened,
+            .age_required = age_required and f.enforce_age,
+            .stage = if (age_required and f.enforce_age) .age else .upstream,
             .follows = out,
             .start = now(),
             .seq = f.seq,
@@ -529,11 +734,147 @@ const Frontend = struct {
             f.stats.merged += 1;
             return;
         }
+        if (slot.stage == .age) f.sendAge(i) else f.sendUpstream(i);
+    }
+
+    fn sendUpstream(f: *Frontend, i: usize) void {
+        const slot = &f.slots[i];
         var buf: [wire.query_max]u8 = undefined;
         const ask = wire.writeQuery(&buf, ipcId(i, slot.gen), &slot.name, slot.type, null);
         if (linux.errno(linux.sendto(f.channel, ask.ptr, ask.len, 0, null, 0)) != .SUCCESS) {
             f.stats.busy += 1;
             f.settle(i, true, .servfail, &.{}, "busy", .{ .detail = "channel" });
+        }
+    }
+
+    fn slotAgeRequest(slot: *const Slot) age_ipc.Request {
+        return .{
+            .request_id = slot.seq,
+            .dns_id = slot.id,
+            .qtype = slot.type,
+            .service = slot.service,
+            .line = slot.line,
+            .policy_generation = policy.generation,
+            .transport = switch (slot.client) {
+                .udp => .udp,
+                .tcp => .tcp,
+            },
+            .name = slot.name,
+        };
+    }
+
+    fn sendAge(f: *Frontend, i: usize) void {
+        const request = slotAgeRequest(&f.slots[i]);
+        var buf: [age_ipc.max_len]u8 = undefined;
+        const packet = age_ipc.encode(&buf, &request);
+        const sent = linux.sendto(
+            f.age_channel,
+            packet.ptr,
+            packet.len,
+            linux.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        if (linux.errno(sent) == .AGAIN) {
+            f.stats.age_lost += 1;
+            f.settle(i, false, .refused, &.{}, "age", .{ .detail = "queue_full" });
+        } else if (linux.errno(sent) != .SUCCESS or sent != packet.len) {
+            f.fail("age worker channel");
+        }
+    }
+
+    fn ageAnswers(f: *Frontend) void {
+        const psl = @embedFile("data/public_suffix_list.ascii.dat");
+        for (0..64) |_| {
+            var packet: [age_ipc.response_max + 1]u8 = undefined;
+            const rc = linux.recvfrom(
+                f.age_channel,
+                &packet,
+                packet.len,
+                linux.MSG.TRUNC,
+                null,
+                null,
+            );
+            if (linux.errno(rc) == .AGAIN) return;
+            if (linux.errno(rc) != .SUCCESS or rc == 0 or rc > age_ipc.response_max)
+                f.fail("age worker reply");
+            const age_reply = age_ipc.decodeResponse(packet[0..rc]) orelse
+                f.fail("age worker reply");
+            const i = for (&f.slots, 0..) |*slot, index| {
+                if (slot.used and !slot.follows and slot.stage == .age and
+                    slot.seq == age_reply.request_id) break index;
+            } else continue;
+            const slot = &f.slots[i];
+            const request = slotAgeRequest(slot);
+            switch (age_gate.decide(&request, &age_reply, psl)) {
+                .ignore => continue,
+                .refuse_young => f.settle(i, false, .refused, &.{}, "age", .{ .detail = "young" }),
+                .refuse_unknown => f.settle(
+                    i,
+                    false,
+                    .refused,
+                    &.{},
+                    "age",
+                    .{ .detail = "unknown" },
+                ),
+                .allow => {
+                    slot.stage = .upstream;
+                    slot.age_source = age_reply.source;
+                    if (caches[slot.service].find(slot.name.text(), slot.type, now())) |e| {
+                        f.stats.cached += 1;
+                        const records = e.records(&slot.name, now(), &f.records);
+                        if (forbiddenAlias(slot, records)) |to| {
+                            f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
+                            continue;
+                        }
+                        f.settle(i, true, e.rcode, records, "screened", .{
+                            .detail = @tagName(age_reply.source),
+                            .cached = true,
+                            .dropped = e.dropped,
+                            .authenticated = e.authenticated,
+                        });
+                    } else f.sendUpstream(i);
+                },
+            }
+        }
+    }
+
+    fn observeAge(
+        f: *Frontend,
+        s: u8,
+        q: *const wire.Query,
+        line: u16,
+        t: wire.Type,
+        client: Client,
+    ) void {
+        f.age_seq +%= 1;
+        const request: age_ipc.Request = .{
+            .request_id = f.age_seq,
+            .dns_id = q.id,
+            .qtype = t,
+            .service = s,
+            .line = line,
+            .policy_generation = policy.generation,
+            .transport = switch (client) {
+                .udp => .udp,
+                .tcp => .tcp,
+            },
+            .name = q.name,
+        };
+        var buf: [age_ipc.max_len]u8 = undefined;
+        const packet = age_ipc.encode(&buf, &request);
+        const sent = linux.sendto(
+            f.age_channel,
+            packet.ptr,
+            packet.len,
+            linux.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        if (linux.errno(sent) == .AGAIN) {
+            f.stats.age_lost += 1;
+        } else if (linux.errno(sent) != .SUCCESS or sent != packet.len) {
+            f.fail("age observer channel");
         }
     }
 
@@ -548,7 +889,7 @@ const Frontend = struct {
     ) void {
         f.stats.refused += 1;
         f.audit(s, &q.name, q.type, false, why, line, x);
-        f.answer(client, q.id, q.rd, .refused, &q.name, q.type, &.{});
+        f.answer(client, q.id, q.rd, .refused, &q.name, q.type, &.{}, false);
     }
 
     /// busy answers SERVFAIL for want of room: detail names which.
@@ -563,11 +904,27 @@ const Frontend = struct {
         f.stats.busy += 1;
         f.stats.servfail += 1;
         f.audit(s, &q.name, q.type, false, "busy", line, .{ .detail = detail });
-        f.answer(client, q.id, q.rd, .servfail, &q.name, q.type, &.{});
+        f.answer(client, q.id, q.rd, .servfail, &q.name, q.type, &.{}, false);
     }
 
     fn ipcId(i: usize, gen: u8) u16 {
         return @as(u16, gen) << 8 | @as(u16, @intCast(i));
+    }
+
+    fn forbiddenAlias(slot: *const Slot, records: []const wire.Record) ?wire.Name {
+        if (slot.type == .cname) return null;
+        for (records) |*record| {
+            if (record.type != .cname) continue;
+            const to = wire.target(record);
+            if (!policy.decide(slot.service, &to, @backingInt(slot.type)).allow or
+                (slot.age_required and
+                    !age_gate.sameRegistered(
+                        slot.name.text(),
+                        to.text(),
+                        @embedFile("data/public_suffix_list.ascii.dat"),
+                    ))) return to;
+        }
+        return null;
     }
 
     /// answers reads the upstream side's answers. Each must answer a slot's
@@ -588,7 +945,7 @@ const Frontend = struct {
             const i: usize = id & 0xff;
             const slot = &f.slots[i];
             // Late, for a slot that timed out and moved on: drop it.
-            if (!slot.used or slot.gen != id >> 8) continue;
+            if (!slot.used or slot.gen != id >> 8 or slot.stage != .upstream) continue;
             if (msg.len == wire.header_len + 1) {
                 const why = std.enums.fromInt(upstream.Silence, msg[wire.header_len]) orelse
                     f.fail("upstream sent garbage");
@@ -599,13 +956,8 @@ const Frontend = struct {
             const asked = wire.writeQuery(&buf, id, &slot.name, slot.type, null);
             var a: wire.Answer = undefined;
             wire.parseResponse(msg, asked, &a) catch f.fail("upstream sent garbage");
-            const t = @backingInt(slot.type);
-            const refused: ?wire.Name = if (slot.type == .cname) null else for (a.slice()) |*r| {
-                if (r.type != .cname) continue;
-                const to = wire.target(r);
-                if (!policy.decide(slot.service, &to, t).allow) break to;
-            } else null;
-            if (refused) |to| {
+            a.authenticated = a.authenticated and f.trust_ad;
+            if (forbiddenAlias(slot, a.slice())) |to| {
                 f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
                 continue;
             }
@@ -620,11 +972,13 @@ const Frontend = struct {
         const slot = &f.slots[i];
         const s = slot.service;
         const why = if (slot.screened) "screened" else "granted";
+        const age_detail: ?[]const u8 = if (slot.age_required) @tagName(slot.age_source) else null;
         const ttl = cache.lifetime(a, slot.type, slot.screened);
         const dropped: screen.Dropped = if (slot.screened)
             screen.trim(a, &slot.name, slot.type)
         else
             .{};
+        if (slot.screened) a.authenticated = false;
         const kept = if (ttl) |keep| caches[s].put(
             &screens[s],
             &screen_key,
@@ -642,10 +996,17 @@ const Frontend = struct {
             a.rcode,
             a.slice(),
             why,
-            .{ .dropped = dropped },
+            .{ .detail = age_detail, .dropped = dropped, .authenticated = a.authenticated },
         );
         const records = e.records(&slot.name, now(), &f.records);
-        f.settle(i, true, e.rcode, records, why, .{ .dropped = e.dropped });
+        f.settle(
+            i,
+            true,
+            e.rcode,
+            records,
+            why,
+            .{ .detail = age_detail, .dropped = e.dropped, .authenticated = e.authenticated },
+        );
     }
 
     /// settle finishes slot i's question and every question following it.
@@ -689,7 +1050,7 @@ const Frontend = struct {
         done.ms = now() - slot.start;
         const t = @backingInt(slot.type);
         f.audit(slot.service, &slot.name, t, allow, why, slot.line, done);
-        f.answer(slot.client, slot.id, slot.rd, rcode, &slot.name, t, records);
+        f.answer(slot.client, slot.id, slot.rd, rcode, &slot.name, t, records, x.authenticated);
         f.pending[slot.service] -= 1;
         slot.used = false;
     }
@@ -698,8 +1059,12 @@ const Frontend = struct {
     /// closes idle TCP clients.
     fn expire(f: *Frontend) void {
         const t = now();
-        for (&f.slots, 0..) |*s, i| if (s.used and t - s.start > slot_ms)
-            f.settle(i, true, .servfail, &.{}, "timeout", .{});
+        for (&f.slots, 0..) |*s, i| if (s.used and t - s.start > slot_ms) {
+            if (s.stage == .age)
+                f.settle(i, false, .refused, &.{}, "age", .{ .detail = "timeout" })
+            else
+                f.settle(i, true, .servfail, &.{}, "timeout", .{});
+        };
         for (&f.conns, 0..) |*c, i| if (c.fd >= 0 and !c.waiting and
             t > c.deadline) f.closeConn(@intCast(i));
         if (t - f.last_stats >= stats_ms) {
@@ -710,9 +1075,9 @@ const Frontend = struct {
                 f.say("{{\"event\":\"stats\",\"queries\":{d},\"cached\":{d},\"merged\":{d},\"" ++
                     "refused\":{d},\"tunnel\":{d},\"servfail\":{d},\"busy\":{d},\"malformed\":{d" ++
                     "},\"" ++
-                    "lost\":{d}}}", .{
+                    "lost\":{d},\"age_lost\":{d}}}", .{
                     s.queries,  s.cached, s.merged,    s.refused, s.tunnel,
-                    s.servfail, s.busy,   s.malformed, s.lost,
+                    s.servfail, s.busy,   s.malformed, s.lost,    s.age_lost,
                 });
             }
         }
@@ -734,11 +1099,12 @@ const Frontend = struct {
         name: *const wire.Name,
         t: u16,
         records: []const wire.Record,
+        authenticated: bool,
     ) void {
         const limit: usize = if (client == .udp) wire.udp_max else wire.response_max;
         f.reply(
             client,
-            wire.writeResponse(
+            wire.writeResponseWithAd(
                 f.out[2..],
                 id,
                 rd,
@@ -747,6 +1113,7 @@ const Frontend = struct {
                 records,
                 null,
                 limit,
+                authenticated,
             ),
         );
     }
@@ -806,6 +1173,7 @@ const Frontend = struct {
         /// question asked while this one was out.
         cached: bool = false,
         merged: bool = false,
+        authenticated: bool = false,
     };
 
     /// audit records one decision: who asked what, the answer and why.
@@ -847,6 +1215,7 @@ const Frontend = struct {
         if (x.alias) |a| w.print(",\"alias\":\"{s}\"", .{a.text()}) catch {};
         if (x.cached) w.writeAll(",\"cached\":true") catch {};
         if (x.merged) w.writeAll(",\"merged\":true") catch {};
+        if (x.authenticated) w.writeAll(",\"dnssec\":true") catch {};
         inline for (comptime std.meta.fieldNames(screen.Dropped)) |field| {
             const n = @field(x.dropped, field);
             if (n > 0) w.print(",\"dropped_" ++ field ++ "\":{d}", .{n}) catch {};

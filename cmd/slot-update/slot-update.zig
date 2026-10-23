@@ -719,34 +719,30 @@ pub const Update = struct {
             .arch = arch,
             .packages = try u.words(try u.read("/etc/apk/world")),
         });
-        if (std.mem.find(
-            u8,
-            try u.read("/etc/apk/repositories"),
-            @import("package").hardened_repository,
-        ) != null) {
-            u.step = "hardened-packages";
+        const repositories = try u.read("/etc/apk/repositories");
+        for (@import("package").pinned_repositories) |feed| {
+            if (std.mem.find(u8, repositories, feed) == null) continue;
+            u.step = "pinned-feed";
             try u.netRoot();
-            const index_path = work_dir ++ "/hardened-index.tar.gz";
-            const url = try u.gpa.print("{s}/{s}/APKINDEX.tar.gz", .{
-                @import("package").hardened_repository, arch,
-            });
+            const index_path = work_dir ++ "/feed-index.tar.gz";
+            const url = try u.gpa.print("{s}/{s}/APKINDEX.tar.gz", .{ feed, arch });
             const got = try u.downloadLimit(url, index_path, 64 << 20);
             _ = linux.close(got.fd);
             const trust = [_]apk.Trusted{.{
                 .name = @import("package").repository_key,
                 .key = try apk.parseKey(u.gpa, @import("package").repository_pem),
             }};
-            if (try apk.hardenedFallback(
+            if (try apk.feedFallback(
                 u.gpa,
                 &trust,
                 try u.read(index_path),
                 try slot.readIn(u, work_dir ++ "/root", "lib/apk/db/installed"),
             )) |name| {
                 u.detail = try u.gpa.print(
-                    "{s}: resolved outside the signed hardened feed",
-                    .{name},
+                    "{s}: resolved outside the signed feed {s}",
+                    .{ name, feed },
                 );
-                return error.HardenedPackageRequired;
+                return error.FeedPackageRequired;
             }
         }
         u.step = "kernel";

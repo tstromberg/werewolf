@@ -1,9 +1,9 @@
 # vaultwarden: prod, with Vaultwarden, a server for the Bitwarden password
 # manager's apps, and its web vault, on :8080 behind caddy (whose TLS the
-# apps require). Wolfi does not ship it yet: melange builds it from a
-# pinned release in Wolfi's environment (../packages/vaultwarden/vaultwarden.yaml,
-# cmd/howl/melange.zig), and the libraries it links are named below, so the
-# updater keeps them current. Nobody
+# apps require). Wolfi does not ship it yet: werewolf's application feed
+# builds it from a pinned release in Wolfi's environment
+# (../packages/vaultwarden/vaultwarden.yaml), and the libraries it links
+# are named below, so the updater keeps them current. Nobody
 # signs up: the admin, whose Argon2 token the config brings, invites each
 # user. It sends nothing: no icons fetched, no push, no mail, no breach
 # lookups. The vault is in /data/svc/vaultwarden. leash starts it
@@ -11,10 +11,9 @@
 # forms/vaultwarden/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/vaultwarden/vaultwarden.yaml
-
 packages:
+  - vaultwarden
+  - vaultwarden-web
   # What ../packages/vaultwarden/vaultwarden.yaml's build links, from Wolfi; the build
   # fails if one is missing.
   - openssl-4.0-libssl

@@ -1,7 +1,7 @@
 base: node
 
-recipes:
-  - ../../../packages/n8n/n8n.yaml
+packages:
+  - n8n
 
 weaknesses:
   programs-no-interpreters: hardened Node.js runs n8n
@@ -25,7 +25,8 @@ services:
     render: env site
     pledge: stdio rpath wpath inet unix netlink listen proc connect
     listen: [tcp/5678 loopback, tcp/5679 loopback]
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     memory: 2048
     nofile: 8192
     env:

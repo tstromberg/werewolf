@@ -40,11 +40,12 @@ services:
     connect:
       # Discovery to connected subnets and mDNS's multicast group.
       - udp/5353 lan
-      - tcp/443 tcp/80 udp/53 tcp/53
+      - tcp/443 tcp/80
       # MQTT, MQTT over TLS, ESPHome, Matter, Z-Wave JS.
       - tcp/1883 tcp/8883 tcp/6053 tcp/5580 tcp/3000
       # Cast, Sonos, and the web ports of Kodi, UniFi, Jellyfin and Plex.
       - tcp/8008 tcp/8009 tcp/1400 tcp/8080 tcp/8443 tcp/8096 tcp/32400
+    lookup: "*"
     config:
       - owner-password /run/config/home-assistant/owner-password
       - settings /run/config/home-assistant/settings.json
@@ -75,7 +76,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8123]
+    connect: [tcp/443 tcp/8123]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname as DOMAIN

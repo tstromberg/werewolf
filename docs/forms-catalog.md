@@ -88,7 +88,6 @@ your own keys.
 | [keycloak](../forms/keycloak/README.md) | Single sign-on through OpenID Connect and SAML. |
 | [langflow](../forms/langflow/README.md) | The full Langflow editor/API with authenticated access, hosted providers and offline ONNX embeddings on hardened Python. |
 | [langflow-vuln-demo](../forms/langflow-vuln-demo/README.md) | Pinned vulnerable Langflow with public flow APIs on hardened Python. |
-| [libffi](../forms/libffi/README.md) | Static foreign-function callback trampolines for Python workloads under MDWE. |
 | [limesurvey](../forms/limesurvey/README.md) | Surveys and research data, stored in MariaDB. |
 | [loki](../forms/loki/README.md) | Log storage and queries over HTTPS, with authentication through Caddy. |
 | [mariadb-local](../forms/mariadb-local/README.md) | MariaDB for services in the same VM, accessed through a UNIX socket. |

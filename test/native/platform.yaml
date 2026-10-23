@@ -19,6 +19,7 @@ suites:
         - slot-commits
         - root-unlinked
         - root-verified
+        - age-cache-protected
         - cgrouped
         - sealed
         - power-separated
@@ -26,6 +27,7 @@ suites:
       verify:
         - data-usable
         - data-kept
+        - age-cache-protected
   - name: test-lifecycle
     source: platform.zig
     mode: platform

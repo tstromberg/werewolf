@@ -8,12 +8,10 @@
 # forms/bugsink/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/bugsink/bugsink.yaml
-
 with: [caddy]
 
 packages:
+  - bugsink
   # Revision 2 introduced the capability-group policy used by these forms.
   - python-3.15>=3.15.0_git20261010-r2000
   - tzdata
@@ -59,7 +57,8 @@ services:
     # lookup. watch: snappea waits on inotify for gunicorn's wake-ups.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
     listen: tcp/8000 loopback
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     secret:
       - SECRET_KEY /run/config/bugsink/secret-key
       - CREATE_SUPERUSER /run/config/bugsink/admin
@@ -91,7 +90,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    connect: [tcp/443 tcp/8000]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

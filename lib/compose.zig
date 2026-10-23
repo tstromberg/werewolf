@@ -38,8 +38,8 @@ pub const Build = struct {
 /// composes these anew and carries every other record forward, so none of
 /// these is ever a stale copy.
 pub const records = [_][]const u8{
-    "cmdline", "dev",    "etc",           "form",  "forms",      "net",
-    "oci",     "pledge", "posture-known", "prune", "weaknesses",
+    "age-enforce", "cmdline", "dev",           "etc",   "form",       "forms", "net",
+    "oci",         "pledge",  "posture-known", "prune", "weaknesses",
 };
 
 /// release_forms are the forms CI releases as disks, for both arches
@@ -227,6 +227,7 @@ pub fn compose(
     // init seeds /run/werewolf from these; the image's /etc/passwd, group
     // and shadow link there.
     try ro.createDirPath(io, "usr/share/werewolf/etc");
+    try put(io, ro, "usr/share/werewolf/age-enforce", "enforce\n");
     const normalized = try accounts(gpa, passwd, f);
     // A shell is a login form's policy, never the base filesystem's.
     const login_shell = if (b.dev and !b.dev_shell)
@@ -272,6 +273,7 @@ pub fn compose(
     // meta: the records.
     var rec = try meta.createDirPathOpen(io, "usr/share/werewolf", .{});
     defer rec.close(io);
+    try put(io, rec, "age-enforce", "enforce\n");
     // Stage the chain as forms/NAME (form.yaml, rootfs) and the known
     // posture failures; the updater composes the next slot from them.
     for (forms, 0..) |fm, i| {
@@ -410,8 +412,8 @@ pub fn apko(
     extra: []const []const u8,
     f: *Failure,
 ) !form.Node {
-    // werewolf's key, which signs minimal's hardened feed and, published,
-    // werewolf's own.
+    // werewolf's key, which signs minimal's hardened and application feeds
+    // and, published, werewolf's own.
     const key = try gpa.dupe(
         form.Node,
         &.{.{ .scalar = .{ .raw = package.keyring, .text = package.keyring } }},
@@ -584,7 +586,7 @@ pub const image_programs = [_][]const u8{
     "init",         "stage0",      "iface-up",     "fence",       "mount",      "mount-broker",
     "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",     "slot-keep",
     "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap", "syslogd",
-    "unwound",
+    "unwound",      "unwound-age",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -1159,6 +1161,17 @@ pub fn oci(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) 
     return out.items;
 }
 
+test "OCI service cannot alias the age cache directory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var failure: Failure = .{};
+    const yaml = "services:\n  unwound-age:\n    image: example.com/test:1\n" ++
+        "    exec: /app\n    user: root\n";
+    const fm = try testForm(gpa, "collision", yaml);
+    try testing.expectError(error.Form, oci(std.testing.io, gpa, Dir.cwd(), &.{fm}, &failure));
+}
+
 fn parseService(gpa: Allocator, s: form.Service, f: *Failure) !service.Service {
     var bad: service.Bad = .{};
     return service.parse(gpa, s.text, &bad) catch |err| switch (err) {
@@ -1637,7 +1650,7 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
     try testing.expect(mem.find(
         u8,
         looker,
-        "lookup 300 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered\n",
+        "lookup 300 * A AAAA CNAME MX TXT SRV NS PTR CAA TLSA unfiltered\n",
     ) != null);
     const direct_form = try testForm(gpa, "resolver", "services:\n  resolver:\n" ++
         "    user: web\n    exec: /resolver\n    listen: [tcp/53 udp/53 lan]\n" ++
@@ -2359,6 +2372,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     const cmdline_want = "proc_mem.force_override=never slab_nomerge " ++
         "page_alloc.shuffle=1 kvm-arm.mode=none loglevel=5\n";
     for ([_][2][]const u8{
+        .{ "age-enforce", "enforce\n" },
         .{ "form", "web\n" },
         .{ "net", "connect 80 tcp 443\nlisten tcp 80\n" },
         .{ "pledge", "stdio inet listen\n" },

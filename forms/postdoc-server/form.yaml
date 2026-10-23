@@ -4,19 +4,17 @@
 # alone, and the tunnel carries callers to it, so the machine opens no
 # port for them. Every route but /_/health wants the bearer token from
 # the config. Operators reach the machine by security key (the sshd
-# form). Wolfi does not ship postdoc: melange builds it
+# form). Wolfi does not ship postdoc: werewolf's application feed builds it
 # (../packages/postdoc-server/postdoc.yaml). Its rules and model are
 # downloaded at start into /data/svc/postdoc. See
 # forms/postdoc-server/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/postdoc-server/postdoc.yaml
-
 with: [cloudflared, sshd]
 
 packages:
-  # What the melange build links, from Wolfi. libc and libm come with the base.
+  - postdoc
+  # What it links, from Wolfi. libc and libm come with the base.
   - libgcc
   - libstdc++
 
@@ -47,7 +45,8 @@ services:
     user: cloudflared
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/2000 loopback]
-    connect: [udp/7844 tcp/7844 tcp/443 tcp/80 udp/53 tcp/53 tcp/49999]
+    connect: [udp/7844 tcp/7844 tcp/443 tcp/80 tcp/49999]
+    lookup: "*"
     secret: TUNNEL_TOKEN /run/config/cloudflared/token
     memory: 256
     nofile: 4096
@@ -72,7 +71,7 @@ services:
     listen: [tcp/49999 loopback]
     connect:
       - tcp/443 tcp/80 tcp/8081
-      - udp/53 tcp/53
+    lookup: "*"
     config:
       - api-token /run/config/postdoc/api-token
       - settings /run/config/postdoc/settings.json

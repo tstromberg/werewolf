@@ -1,9 +1,9 @@
 base: onnx
 
-recipes:
-  - ../../../packages/langflow/langflow.yaml
+packages:
+  - langflow
 
-with: [onnx-minilm, libffi]
+with: [onnx-minilm]
 
 weaknesses:
   programs-no-interpreters: hardened Python 3.15 runs Langflow and local ONNX inference
@@ -20,7 +20,8 @@ services:
     pledge: stdio rpath wpath inet unix netlink listen proc connect
     listen: tcp/7860 loopback
     # Hosted-model providers and model downloads use public HTTPS and resolver DNS.
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     secret: LANGFLOW_SUPERUSER_PASSWORD /run/config/langflow/password
     config: settings /run/config/langflow/settings.json
     setting: owner string required as LANGFLOW_SUPERUSER

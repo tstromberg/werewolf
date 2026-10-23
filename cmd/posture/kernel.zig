@@ -409,6 +409,7 @@ pub fn check(p: *Posture) !void {
     });
     try writeXorExecute(p);
     try aslr(p);
+    try kaslr(p);
     const min_addr = p.sysctl("vm/mmap_min_addr");
     try p.add(.{
         .id = "kernel-null-page",
@@ -596,24 +597,57 @@ pub fn check(p: *Posture) !void {
     try exploitEntries(p);
 }
 
+/// weakening_args turn off the randomization of where the kernel and
+/// programs are, or what hides the kernel's addresses from a program. No
+/// image asks for one, so a boot that has one was not booted as built.
+const weakening_args = [_][]const u8{
+    "nokaslr", "norandmaps", "nopti",           "pti=off",       "kpti=0",
+    "kpti=n",  "kpti=off",   "mitigations=off", "arm64.nopauth", "arm64.nobti",
+};
+
 fn imageCmdline(p: *Posture) !void {
     const own = p.read("/usr/share/werewolf/cmdline");
-    const missing = try missingArgs(p.gpa, own, p.read("/proc/cmdline"));
+    const have = p.read("/proc/cmdline");
+    const missing = try missingArgs(p.gpa, own, have);
+    const weakening = try presentArgs(p.gpa, &weakening_args, have);
     try p.add(.{
         .id = "kernel-cmdline",
         .area = "kernel",
         .name = "Booted as the image asks",
         .why = "The kernel was started with every hardening argument the image asks for, " ++
-            "which it cannot be given later.",
-        .how = "every argument in /usr/share/werewolf/cmdline is in /proc/cmdline",
-        .result = if (own.len == 0) .skip else if (missing.len == 0) .pass else .fail,
-        .detail = if (own.len == 0)
+            "which it cannot be given later, and none that turns address randomization off.",
+        .how = "every argument in /usr/share/werewolf/cmdline is in /proc/cmdline, and " ++
+            "none of " ++ comptime joined(&weakening_args) ++ " is",
+        .result = if (weakening.len > 0)
+            .fail
+        else if (own.len == 0)
+            .skip
+        else if (missing.len == 0)
+            .pass
+        else
+            .fail,
+        .detail = if (weakening.len > 0)
+            try p.gpa.print("weakened by: {s}", .{weakening})
+        else if (own.len == 0)
             "not werewolf: no /usr/share/werewolf/cmdline"
         else if (missing.len > 0)
             try p.gpa.print("missing: {s}", .{missing})
         else
             "",
     });
+}
+
+/// presentArgs lists those of names that are words of have.
+fn presentArgs(gpa: Allocator, names: []const []const u8, have: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (names) |name| {
+        var h = std.mem.tokenizeAny(u8, have, " \n");
+        while (h.next()) |x| if (std.mem.eql(u8, x, name)) {
+            try listAdd(gpa, &out, "{s}", .{name});
+            break;
+        };
+    }
+    return out.items;
 }
 
 /// cpuVulnerable lists the CPU flaws the kernel reports itself vulnerable
@@ -884,6 +918,84 @@ fn aslr(p: *Posture) !void {
                 .{ va, bits, full.? },
             ),
     });
+}
+
+/// kaslr checks the kernel was loaded at a random address, as the kernel
+/// itself records it. x86's EFI stub or decompressor sets KASLR_FLAG in
+/// boot_params when it chose a random base, and boot_params is readable by
+/// anyone. arm64 randomizes only with a seed (EFI_RNG_PROTOCOL, the device
+/// tree's kaslr-seed or RNDR), else runs at a fixed address and says only
+/// so in its log, which root alone can read.
+fn kaslr(p: *Posture) !void {
+    const Seen = struct { on: ?bool, observed: []const u8 };
+    const seen: Seen = switch (builtin.cpu.arch) {
+        .x86_64 => x86: {
+            const on = kaslrFlag(p.read("/sys/kernel/boot_params/data"));
+            break :x86 .{
+                .on = on,
+                .observed = if (on) |o|
+                    if (o) "boot_params KASLR_FLAG set" else "boot_params KASLR_FLAG clear"
+                else
+                    "/sys/kernel/boot_params/data unreadable",
+            };
+        },
+        .aarch64 => arm: {
+            const line = kaslrLine(p.kernelLog());
+            break :arm .{
+                .on = if (line) |l| std.mem.eql(u8, l, "KASLR enabled") else null,
+                .observed = line orelse "no KASLR line in the kernel log",
+            };
+        },
+        else => .{ .on = null, .observed = "no KASLR evidence on this architecture" },
+    };
+    try p.add(.{
+        .id = "kernel-kaslr",
+        .area = "kernel",
+        .name = "Kernel at a random address",
+        .why = "An exploit of a kernel bug cannot know where the kernel's code and data are.",
+        .how = "x86_64: KASLR_FLAG is set in /sys/kernel/boot_params/data; aarch64: the " ++
+            "kernel logged KASLR enabled",
+        .observed = seen.observed,
+        .result = if (seen.on) |on| if (on) .pass else .fail else .skip,
+        .detail = if (seen.on == null and builtin.cpu.arch == .aarch64 and !p.root)
+            "the kernel log is readable by root alone"
+        else if (seen.on == null)
+            seen.observed
+        else if (seen.on == false)
+            try p.gpa.print("the kernel runs at its fixed address: {s}", .{seen.observed})
+        else
+            "",
+    });
+}
+
+/// boot_params_loadflags is hdr.loadflags' offset in x86's boot_params
+/// (Documentation/arch/x86/boot.rst), and KASLR_FLAG its bit the boot code
+/// sets once it has randomized the kernel's base.
+const boot_params_loadflags = 0x211;
+const KASLR_FLAG = 1 << 1;
+
+/// kaslrFlag reads KASLR_FLAG from boot_params, or null if it is too short.
+fn kaslrFlag(boot_params: []const u8) ?bool {
+    if (boot_params.len <= boot_params_loadflags) return null;
+    return boot_params[boot_params_loadflags] & KASLR_FLAG != 0;
+}
+
+/// kaslrLine returns arm64's verdict from /dev/kmsg records: "KASLR
+/// enabled", or "KASLR disabled" and why. null if the log no longer holds it.
+fn kaslrLine(log: []const u8) ?[]const u8 {
+    var records = std.mem.tokenizeScalar(u8, log, '\n');
+    while (records.next()) |record| {
+        const comma = std.mem.findScalar(u8, record, ',') orelse continue;
+        const semi = std.mem.findScalar(u8, record, ';') orelse continue;
+        // The kernel's own facility is 0, so its priorities are 0 to 7;
+        // /dev/kmsg gives a userspace write another, even root's.
+        const priority = std.fmt.parseInt(u8, record[0..comma], 10) catch continue;
+        if (priority > 7) continue;
+        const text = record[semi + 1 ..];
+        if (std.mem.startsWith(u8, text, "KASLR enabled") or
+            std.mem.startsWith(u8, text, "KASLR disabled")) return text;
+    }
+    return null;
 }
 
 /// memory checks the kernel memory hardening that costs programs nothing.
@@ -1798,6 +1910,40 @@ test "vsyscall reports the mapping field, not a similarly named file" {
     try testing.expect(vsyscallMapping("1000-2000 r--p 0000 00:01 1 /tmp/[vsyscall]\n") == null);
 }
 
+test kaslrFlag {
+    var params: [4096]u8 = @splat(0);
+    try testing.expectEqual(false, kaslrFlag(&params));
+    params[0x211] = 0x83; // LOADED_HIGH, KASLR_FLAG, CAN_USE_HEAP
+    try testing.expectEqual(true, kaslrFlag(&params));
+    params[0x211] = 0x81;
+    try testing.expectEqual(false, kaslrFlag(&params));
+    try testing.expectEqual(null, kaslrFlag(params[0..0x211]));
+    try testing.expectEqual(null, kaslrFlag(""));
+}
+
+test kaslrLine {
+    try testing.expectEqualStrings(
+        "KASLR enabled",
+        kaslrLine("6,0,0,-;Booting Linux\n6,1,0,-;KASLR enabled\n").?,
+    );
+    try testing.expectEqualStrings(
+        "KASLR disabled due to lack of seed",
+        kaslrLine("4,1,0,-;KASLR disabled due to lack of seed\n").?,
+    );
+    try testing.expectEqualStrings(
+        "KASLR disabled on command line",
+        kaslrLine("6,1,0,-;KASLR disabled on command line\n SUBSYSTEM=x\n").?,
+    );
+    // A process writing to /dev/kmsg cannot pass for the kernel.
+    try testing.expectEqual(null, kaslrLine("13,2,0,-;KASLR enabled\n"));
+    try testing.expectEqualStrings(
+        "KASLR disabled due to lack of seed",
+        kaslrLine("12,1,0,-;KASLR enabled\n4,2,0,-;KASLR disabled due to lack of seed\n").?,
+    );
+    try testing.expectEqual(null, kaslrLine("6,2,0,-;audit: KASLR enabled\n"));
+    try testing.expectEqual(null, kaslrLine(""));
+}
+
 test heapInit {
     const line = "mem auto-init: stack:all(zero), heap alloc:on, heap free:off";
     try testing.expectEqual(true, heapInit(line, "heap alloc"));
@@ -1839,6 +1985,22 @@ test unsetArgs {
         "slab_nomerge",
         try unsetArgs(a, "slab_nomerge_x", &.{"slab_nomerge"}),
     );
+}
+
+test presentArgs {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings(
+        "",
+        try presentArgs(a, &weakening_args, "console=ttyS0 slab_nomerge kpti=1\n"),
+    );
+    try testing.expectEqualStrings(
+        "nokaslr, arm64.nopauth",
+        try presentArgs(a, &weakening_args, "nokaslr console=ttyAMA0 arm64.nopauth nokaslr\n"),
+    );
+    // Only whole words count: a longer name is a different switch.
+    try testing.expectEqualStrings("", try presentArgs(a, &weakening_args, "nokaslr_x pti=offx"));
 }
 
 test hardCoreLimit {

@@ -55,8 +55,8 @@ retain upstream semantics. Keep shell execution under the existing exec allowlis
 verified object identity rather than SONAME or self-declared metadata. Inventory
 IFUNC symbols and IRELATIVE relocations. Enforcement must precede resolver execution
 at startup, loading and dlsym/dlvsym on both architectures; constructors are too late.
-Reject forbidden resolvers; never substitute an implementation. Static executables
-need separate build checks because they can bypass ld.so. These gates are later work.
+Reject forbidden resolvers; never substitute an implementation. Static executable
+IFUNC admission remains separate work; runtime-loaded DSOs in static programs are gated.
 
 Remove foreign stdio vtable compatibility exceptions without an allowance. Preserve
 upstream supported stream behavior; do not rewrite logging or general stdio dispatch.

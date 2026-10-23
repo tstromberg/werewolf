@@ -40,6 +40,7 @@ pub const Type = enum(u16) {
     txt = 16,
     aaaa = 28,
     srv = 33,
+    tlsa = 52,
     caa = 257,
 
     /// from returns the supported type numbered n, or null.
@@ -221,6 +222,7 @@ const flag_qr: u16 = 0x8000;
 const flag_tc: u16 = 0x0200;
 const flag_rd: u16 = 0x0100;
 const flag_ra: u16 = 0x0080;
+const flag_ad: u16 = 0x0020;
 const type_soa = 6;
 const type_opt = 41;
 const class_in = 1;
@@ -257,9 +259,22 @@ pub fn parseQuery(msg: []const u8) Error!Query {
 /// writeQuery writes a recursive query for name and type, cased by mix.
 /// buf holds query_max bytes.
 pub fn writeQuery(buf: []u8, id: u16, name: *const Name, t: Type, mix: ?*const [32]u8) []u8 {
+    return writeQueryWithAd(buf, id, name, t, mix, false);
+}
+
+/// A trusted local validator receives AD in the request so it can return
+/// authenticated data without sending DNSSEC proof records to the client.
+pub fn writeQueryWithAd(
+    buf: []u8,
+    id: u16,
+    name: *const Name,
+    t: Type,
+    mix: ?*const [32]u8,
+    request_ad: bool,
+) []u8 {
     var w: Writer = .{ .buf = buf };
     w.int(u16, id);
-    w.int(u16, flag_rd);
+    w.int(u16, flag_rd | (if (request_ad) flag_ad else 0));
     w.int(u16, 1);
     w.int(u16, 0);
     w.int(u16, 0);
@@ -283,6 +298,9 @@ pub const Record = struct {
 pub const Answer = struct {
     rcode: Rcode = .noerror,
     truncated: bool = false,
+    /// The upstream asserted DNSSEC validation. The frontend trusts this
+    /// only when the resolver is the form's local validator.
+    authenticated: bool = false,
     /// negative is how long, in seconds, the answer's want of records may
     /// be kept: the least of its SOA's TTL and minimum, if it has one for
     /// the question's zone (RFC 2308).
@@ -319,6 +337,7 @@ pub fn parseResponse(msg: []const u8, query: []const u8, a: *Answer) Error!void 
             return;
         },
     };
+    a.authenticated = flags & flag_ad != 0;
     const qtype = Type.from(int(u16, query, query.len - 4)) orelse return error.Malformed;
     var qname: Name = .{};
     _ = try readName(query, header_len, &qname);
@@ -385,7 +404,7 @@ fn canonicalData(a: *Answer, msg: []const u8, pos: usize, end: usize, t: Type) E
         .cname, .ns, .ptr => 0,
         .mx => 2,
         .srv => 6,
-        .txt, .caa => data.len,
+        .txt, .caa, .tlsa => data.len,
     };
     if (data.len < fixed) return error.Malformed;
     switch (t) {
@@ -403,6 +422,7 @@ fn canonicalData(a: *Answer, msg: []const u8, pos: usize, end: usize, t: Type) E
                 c,
             )) return error.Malformed;
         },
+        .tlsa => if (data.len < 4) return error.Malformed,
         else => {},
     }
     var name: Name = .{};
@@ -461,7 +481,7 @@ pub fn target(r: *const Record) Name {
         .cname, .ns, .ptr => 0,
         .mx => 2,
         .srv => 6,
-        .a, .aaaa, .txt, .caa => unreachable,
+        .a, .aaaa, .txt, .caa, .tlsa => unreachable,
     };
     var n: Name = .{};
     // rdata is canonical, written by writeName: it always reads back.
@@ -485,6 +505,20 @@ pub fn writeResponse(
     records: []const Record,
     negative: ?u32,
     limit: usize,
+) []u8 {
+    return writeResponseWithAd(buf, id, rd, rcode, q, records, negative, limit, false);
+}
+
+pub fn writeResponseWithAd(
+    buf: []u8,
+    id: u16,
+    rd: bool,
+    rcode: Rcode,
+    q: ?Question,
+    records: []const Record,
+    negative: ?u32,
+    limit: usize,
+    authenticated: bool,
 ) []u8 {
     var w: Writer = .{ .buf = buf };
     w.int(u16, id);
@@ -528,6 +562,7 @@ pub fn writeResponse(
     };
     const n: u16 = if (fits) @intCast(records.len) else 0;
     mem.writeInt(u16, buf[2..4], flag_qr | flag_ra | (if (rd) flag_rd else 0) |
+        (if (authenticated and fits) flag_ad else 0) |
         (if (fits) 0 else flag_tc) | @as(u16, @backingInt(rcode)), .big);
     mem.writeInt(u16, buf[6..8], n, .big);
     return buf[0..w.len];
@@ -901,6 +936,55 @@ test "names in data are uncompressed and every type keeps its shape" {
     var bad_caa: Responder = .init(caa_q);
     bad_caa.record("example.com", .caa, 60, "\x00\x05is ueletsencrypt.org");
     try testing.expectError(error.Malformed, parseResponse(bad_caa.bytes(), caa_q, &a));
+
+    const tlsa_q = writeQuery(&buf, 3, &nm("_25._tcp.example.com"), .tlsa, null);
+    var tlsa: Responder = .init(tlsa_q);
+    const association = "\x03\x01\x01" ++ rep(0x5a, 32);
+    tlsa.record("_25._tcp.example.com", .tlsa, 60, association);
+    try parseResponse(tlsa.bytes(), tlsa_q, &a);
+    try testing.expectEqualStrings(association, a.records[0].rdata);
+    var short_tlsa: Responder = .init(tlsa_q);
+    short_tlsa.record("_25._tcp.example.com", .tlsa, 60, "\x03\x01\x01");
+    try testing.expectError(error.Malformed, parseResponse(short_tlsa.bytes(), tlsa_q, &a));
+}
+
+test "authenticated answers require a requested and trusted AD bit" {
+    var buf: [query_max]u8 = undefined;
+    const name = nm("_25._tcp.mail.example");
+    const q = writeQueryWithAd(&buf, 7, &name, .tlsa, null, true);
+    try testing.expectEqual(flag_rd | flag_ad, int(u16, q, 2));
+    var r: Responder = .init(q);
+    r.record(name.text(), .tlsa, 60, "\x03\x01\x01" ++ rep(0x41, 32));
+    var reply: [response_max]u8 = undefined;
+    @memcpy(reply[0..r.bytes().len], r.bytes());
+    mem.writeInt(u16, reply[2..4], int(u16, reply[0..], 2) | flag_ad, .big);
+    var a: Answer = .{};
+    try parseResponse(reply[0..r.bytes().len], q, &a);
+    try testing.expect(a.authenticated);
+    const question: Question = .{ .name = &name, .type = @backingInt(Type.tlsa) };
+    const rebuilt = writeResponseWithAd(
+        &reply,
+        7,
+        true,
+        a.rcode,
+        question,
+        a.slice(),
+        null,
+        response_max,
+        a.authenticated,
+    );
+    try testing.expect(int(u16, rebuilt, 2) & flag_ad != 0);
+    const ordinary = writeResponse(
+        &reply,
+        7,
+        true,
+        a.rcode,
+        question,
+        a.slice(),
+        null,
+        response_max,
+    );
+    try testing.expect(int(u16, ordinary, 2) & flag_ad == 0);
 }
 
 test "replies past the limit are truncated, and errors repeat the question" {
@@ -932,6 +1016,7 @@ test "types parse by their policy names" {
     try testing.expectEqual(null, Type.parse("aaaa"));
     try testing.expectEqual(null, Type.parse("ANY"));
     try testing.expectEqual(Type.caa, Type.from(257).?);
+    try testing.expectEqual(Type.tlsa, Type.parse("TLSA").?);
     try testing.expectEqual(null, Type.from(255));
     try testing.expectEqual(null, Type.from(252)); // AXFR
 }

@@ -120,6 +120,9 @@ def server(work):
             servers = (work / 'lease-dns').read_text().split()
             if servers:
                 fields[6] = b''.join(socket.inet_aton(address) for address in servers)
+            assigned_domain = (work / 'lease-domain').read_text().strip()
+            if assigned_domain:
+                fields[15] = assigned_domain.encode('ascii')
             for code, value in fields.items():
                 reply += bytes([code, len(value)]) + value
             reply += b'\xff'
@@ -218,6 +221,7 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
             (binaries / 'werewolf-posture-egress').chmod(0o755)
             run(['mount', '--bind', str(binaries), '/usr/local/bin'])
         (work / 'lease-dns').write_text(FIRST + '\n')
+        (work / 'lease-domain').write_text('corp.example.test\n')
         for directory in ['/run', '/etc', '/usr/share', '/var']:
             run(['mount', '-t', 'tmpfs', 'tmpfs', directory])
         Path('/var/empty').mkdir(mode=0o755)
@@ -282,6 +286,8 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
             watched(old)
             if dhcp:
                 run([dhcp, 'up', 'client'], timeout=35)
+                domain_file = resolv.parent / 'dhcp-domain'
+                assert domain_file.read_text() == 'corp.example.test'
                 keeper_log = (work / 'dhcp.log').open('w')
                 keeper = subprocess.Popen([dhcp, 'keep'], stdout=keeper_log, stderr=subprocess.STDOUT)
             client = subprocess.Popen([fence, '/usr/bin/python3', '-u', str(probe), str(work / 'tls.crt')],
@@ -316,11 +322,14 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
                 new = ''.join('nameserver ' + address + '\n' for address in addresses)
                 if keeper and keeper.poll() is None and addresses == [SECOND]:
                     (work / 'lease-dns').write_text(SECOND + '\n')
+                    (work / 'lease-domain').write_text('renewed.example.test\n')
                     deadline = time.monotonic() + 45
-                    while resolv.read_text() != new and time.monotonic() < deadline:
+                    while (resolv.read_text() != new or
+                           domain_file.read_text() != 'renewed.example.test') and time.monotonic() < deadline:
                         assert keeper.poll() is None, (work / 'dhcp.log').read_text()
                         time.sleep(.1)
                     assert resolv.read_text() == new, (work / 'dhcp.log').read_text()
+                    assert domain_file.read_text() == 'renewed.example.test'
                     assert '"event":"renewed"' in (work / 'dhcp.log').read_text()
                     keeper.terminate()
                     keeper.wait(timeout=5)

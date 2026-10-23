@@ -4,12 +4,13 @@
 # are the config's, as bcrypt htpasswd lines, and none is built in. Each
 # user pulls; only those the settings name push or delete. zot keeps the
 # images in /data/svc/zot, deduplicated, and collects what no tag holds.
-# Wolfi does not ship zot: melange builds the registry alone, with no
-# extensions (../packages/zot/zot.yaml). See forms/zot/README.md.
+# Wolfi's zot has every extension; werewolf's application feed builds the
+# registry alone, with none (../packages/zot/zot.yaml). See
+# forms/zot/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/zot/zot.yaml
+packages:
+  - zot
 
 with: [caddy]
 
@@ -48,7 +49,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/5000]
+    connect: [tcp/443 tcp/5000]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

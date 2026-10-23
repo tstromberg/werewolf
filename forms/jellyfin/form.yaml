@@ -10,7 +10,7 @@ base: prod-ssh
 packages:
   - jellyfin
   - jellyfin-web
-  - caddy
+  - caddy-werewolf
 
 # Taken back of werewolf's defaults (lib/allow.zig): .NET compiles
 # Jellyfin to machine code as it runs.
@@ -79,7 +79,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8096]
+    connect: [tcp/443 tcp/8096]
+    lookup: "*"
     read: /etc/caddy
     config:
       - jellyfin-password /run/config/caddy/jellyfin-password

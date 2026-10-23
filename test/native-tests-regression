@@ -527,8 +527,10 @@ class PlatformPlan(unittest.TestCase):
         application = native.read_plan('gatus')
         clean = native.boot_plan('gatus')
         self.assertEqual(clean['drivers'][0]['name'], 'test-platform')
-        self.assertEqual(len(clean['drivers'][0]['cases']['seed']), 15)
-        self.assertEqual(clean['drivers'][0]['cases']['verify'], ['data-usable', 'data-kept'])
+        self.assertEqual(len(clean['drivers'][0]['cases']['seed']), 16)
+        self.assertIn('age-cache-protected', clean['drivers'][0]['cases']['seed'])
+        self.assertEqual(clean['drivers'][0]['cases']['verify'],
+                         ['data-usable', 'data-kept', 'age-cache-protected'])
         self.assertEqual(clean['drivers'][1]['name'], 'test-lifecycle')
         self.assertEqual(clean['drivers'][1]['cases'], {'seed': ['reaped'], 'verify': []})
         self.assertNotIn('test-platform', [d['name'] for d in application['drivers']])

@@ -50,6 +50,9 @@ def config(address, port):
 
 
 def checks(client_process, work):
+    # BIND's nslookup in the lab VM rejects the base fixture's /etc tmpfs symlink.
+    Path('/etc/resolv.conf').unlink()
+    Path('/etc/resolv.conf').write_text('nameserver 127.0.0.53\n')
     servers = []
     magic = f'unwound-test-{os.getpid()}'
     shellack_file = Path('/tmp') / f'{magic}.aiff'

@@ -1,7 +1,7 @@
 base: node
 
-recipes:
-  - ../../../packages/n8n-vuln-demo/n8n.yaml
+packages:
+  - n8n-vuln-demo
 
 updates: off
 

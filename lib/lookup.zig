@@ -10,7 +10,18 @@ const Allocator = mem.Allocator;
 
 /// types are the query types unwound forwards, as cmd/unwound/wire.zig's
 /// Type names them; unwound checks every line again when it starts.
-pub const types = [_][]const u8{ "A", "AAAA", "CNAME", "MX", "TXT", "SRV", "NS", "PTR", "CAA" };
+pub const types = [_][]const u8{
+    "A",
+    "AAAA",
+    "CNAME",
+    "MX",
+    "TXT",
+    "SRV",
+    "NS",
+    "PTR",
+    "CAA",
+    "TLSA",
+};
 const default_types = [_][]const u8{ "A", "AAAA" };
 
 /// compile returns the policy line for user's allowance spec, or
@@ -137,7 +148,7 @@ test "allowances compile to canonical lines with their types" {
         .{ "a.example txt mx TXT", "lookup web a.example TXT MX" },
         .{ "xn--bcher-kva.example", "lookup web xn--bcher-kva.example A AAAA" },
         .{ "*", "lookup web * A AAAA" },
-        .{ "* all unfiltered", "lookup web * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered" },
+        .{ "* all unfiltered", "lookup web * A AAAA CNAME MX TXT SRV NS PTR CAA TLSA unfiltered" },
         .{ "*\tA\tunfiltered", "lookup web * A unfiltered" },
         // The longest name: 253 characters.
         .{

@@ -3,7 +3,7 @@
 # over HTTPS at the machine's base URL, with a certificate from Let's
 # Encrypt, and hands its PHP to php-fpm; background jobs run every five
 # minutes. Wolfi's Nextcloud is a container's, a major release behind:
-# melange lays the release in /usr/share/nextcloud
+# werewolf's application feed lays the release in /usr/share/nextcloud
 # (../packages/nextcloud/nextcloud.yaml), which no one on the machine can
 # change. Its config, apps from the app store and everyone's files are in
 # /data/svc/nextcloud. It is installed, with its administrator from the
@@ -11,12 +11,10 @@
 # forms/nextcloud/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/nextcloud/nextcloud.yaml
-
 with: [postgresql, valkey, caddy, cron, sh-shim]
 
 packages:
+  - nextcloud
   - php-8.5
   - php-8.5-fpm
   - php-8.5-apcu          # the local cache
@@ -69,7 +67,8 @@ services:
     group: nextcloud
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53, /run/svc/nextcloud/php.sock]
+    connect: [tcp/443, /run/svc/nextcloud/php.sock]
+    lookup: "*"
     read: /etc/caddy /data/svc/nextcloud/apps
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
@@ -109,9 +108,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     connect:
       - tcp/443 tcp/80 tcp/465 tcp/587 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     read: /etc/php
     # The administrator's password, and the site's settings, from the
     # machine's config: without the password the service parks, since an
@@ -150,9 +149,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect proc exec
     connect:
       - tcp/443 tcp/80 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     run: /usr/bin/php
     read: /etc/cron /etc/php
     write: /data/svc/nextcloud

@@ -9,13 +9,10 @@
 # See forms/greenbone/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/greenbone/pg-gvm.yaml
-
 with: [postgresql, caddy, valkey]
 
 # The extension is built by ../packages/greenbone/pg-gvm.yaml against this PostgreSQL.
-packages: [postgresql-17-contrib, glib, libical~3.0]
+packages: [pg-gvm, postgresql-17-contrib, glib, libical~3.0]
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).
@@ -45,7 +42,8 @@ services:
     image: registry.community.greenbone.net/community/greenbone-feed-sync:stable
     exec: /bin/bash /usr/lib/werewolf/feed-run
     pledge: stdio rpath wpath inet unix netlink connect proc exec
-    connect: [tcp/873 public, udp/53, tcp/53]
+    connect: [tcp/873 public]
+    lookup: "*"
     run: /usr/
     # The feed places lock files beside its data directories. These parents
     # are private writable storage; the declared cache shares stay separate.
@@ -149,7 +147,8 @@ services:
     exec: /bin/bash /usr/lib/werewolf/openvas-run
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec packet
     caps: net_raw net_admin
-    connect: [tcp/6379, udp/53, any]
+    connect: [tcp/6379, any]
+    lookup: "*"
     group: _oci-feed
     write: [/var/log/gvm, /etc/openvas]
     run: /usr/
@@ -201,7 +200,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/9392]
+    connect: [tcp/443 tcp/9392]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

@@ -52,6 +52,7 @@ const pref = struct {
     const label_pick: u32 = 3;
     const label_refuse: u32 = 4;
     const public_refuse: u32 = 5;
+    const local_validator_refuse: u32 = 7;
     /// loopback_allow is one user's explicit port on 127.0.0.1, before
     /// loopback_refuse takes the rest of 127.0.0.0/8 from that user.
     /// Both are before local_out, which would otherwise deliver loopback
@@ -187,7 +188,14 @@ fn apply(lan: *Lan) !Policy {
     var resolv: [1024]u8 = undefined;
     var socket = try dns.Socket.open();
     defer socket.close();
-    const servers = try dns.resolvers(try readOptional(dns.upstream_path, &resolv));
+    var local: [64]u8 = undefined;
+    const validated = try readOptional(dns.local_validator_path, &local);
+    const upstream_text = try readOptional(dns.upstream_path, &resolv);
+    const servers = if (validated.len > 0) blk: {
+        if (!std.mem.eql(u8, validated, dns.local_validator_text)) return error.BadResolver;
+        break :blk try dns.validatedLocal(upstream_text);
+    } else try dns.resolvers(upstream_text);
+    p.local_validator = validated.len > 0;
     try dns.replace(&socket, p.dns, .{}, servers);
     step = "routes";
     try routeRules(p);
@@ -324,6 +332,7 @@ const Policy = struct {
     nmetadata: usize = 0,
     dns: dns.Users = .{},
     dns_direct: dns.Users = .{},
+    local_validator: bool = false,
     /// lookups are unwound's clients, in label order.
     lookups: dns.Users = .{},
     lan: []const Prefix = &.{},
@@ -484,7 +493,7 @@ const Rule = net_rule.Rule;
 /// policy_max bounds the compiled policy, lookup grants included.
 const policy_max = 64 << 10;
 
-const max_rules = 22 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
+const max_rules = 24 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
     (36 + 8 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
@@ -606,6 +615,16 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dport = c.port,
         .uid = c.uid,
     });
+    if (family == linux.AF.INET and p.local_validator) {
+        for ([_]Proto{ .udp, .tcp }) |proto| rules.add(.{
+            .priority = pref.local_validator_refuse,
+            .action = FR_ACT_PROHIBIT,
+            .from_here = true,
+            .dst = &loopback_ip,
+            .proto = proto,
+            .dport = 53,
+        });
+    }
     // A user who may open every TCP port must not reach this machine's
     // own services. An explicit port of that user's (Redis) is allowed
     // on 127.0.0.1 and ::1; the rest of loopback is prohibited. Other
@@ -1860,6 +1879,22 @@ test "a DNS service reaches only its declared direct upstream ports" {
     }
     try std.testing.expectError(error.BadPolicy, parsePolicy("dns-direct\n"));
     try std.testing.expectError(error.BadPolicy, parsePolicy("dns-direct 207 extra\n"));
+}
+
+test "a local validator refuses loopback DNS except unwound upstream" {
+    var p = try parsePolicy("dns 54\nlookup 2001 * A AAAA\nlisten tcp 53 loopback\n");
+    p.local_validator = true;
+    var rules: [max_rules]Rule = undefined;
+    const planned = plan(p, linux.AF.INET, &rules);
+    for ([_]Proto{ .udp, .tcp }) |proto| {
+        var found = false;
+        for (planned) |r| if (r.priority == pref.local_validator_refuse and r.proto == proto and
+            r.dport == 53 and r.action == FR_ACT_PROHIBIT)
+        {
+            found = true;
+        };
+        try std.testing.expect(found);
+    }
 }
 
 test "a direct LAN DNS grant stays on connected subnets" {

@@ -7,12 +7,10 @@
 # this form's package, on Java 11. See forms/bloodhound/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/bloodhound/neo4j.yaml
-
 with: [postgresql, caddy]
 
 packages:
+  - neo4j-4.4
   # pg_trgm, which BloodHound's first migration creates. The postgresql
   # form ships the server alone.
   - postgresql-17-contrib
@@ -101,7 +99,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    connect: [tcp/443 tcp/8080]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

@@ -37,7 +37,8 @@ services:
     user: haproxy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/80 tcp/443 tcp/8080 udp/53 tcp/53]
+    connect: [tcp/80 tcp/443 tcp/8080]
+    lookup: "*"
     config:
       - tls-cert /run/config/haproxy/tls-cert optional
       - tls-key /run/config/haproxy/tls-key optional

@@ -20,14 +20,14 @@ build/host/howl create web --with python-app --app ./myapp     # ./myapp/main.py
 build/host/howl build --with python-app --app ./myapp          # the release files, for elsewhere
 ```
 
-DIR is what the application's own toolchain made: regular files and
-directories, no links, no setuid files. werewolf prints DIR's sha256 over
-every path, mode and byte, so the same DIR makes the same image; a new
-application means a new machine, `howl delete` then `create`.
-[apps-by-hand.md](apps-by-hand.md) does the same with `make disk` and `tar`.
-What the application needs from each machine, such as a database's address,
-is a setting its form declares ([forms.md](forms.md#settings)):
-`python-example` takes `--greeting TEXT` and hands it over as `GREETING`.
+DIR is what the application's own toolchain made: regular files and directories, no
+links, no setuid files, programs position independent (`go build -buildmode=pie`,
+`-fPIE -pie`). werewolf prints DIR's sha256 over every path, mode and byte, so the same
+DIR makes the same image; a new application means a new machine, `howl delete` then
+`create`. [apps-by-hand.md](apps-by-hand.md) does the same with `make disk` and `tar`.
+What the application needs from each machine, such as a database's address, is a setting
+its form declares ([forms.md](forms.md#settings)): `python-example` takes
+`--greeting TEXT` and hands it over as `GREETING`.
 
 ## A Python web server
 

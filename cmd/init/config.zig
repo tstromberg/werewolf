@@ -5,6 +5,7 @@ const std = @import("std");
 const seal_lib = @import("seal");
 const sandbox = @import("sandbox");
 const settings = @import("settings");
+const dns = @import("dns");
 const people = @import("people");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -99,6 +100,13 @@ pub fn metadata(m: *Machine) void {
         break :blk "werewolf";
     };
     m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
+    const configured_domain = if (std.mem.findScalar(u8, host, '.')) |dot|
+        host[dot + 1 ..]
+    else
+        "";
+    var canonical_domain: [253]u8 = undefined;
+    const system_domain = dns.normalizeSystemDomain(configured_domain, &canonical_domain) orelse "";
+    m.write(dns.config_domain_path, system_domain, 0o644);
     // The hostname resolves locally: programs such as Java's getLocalHost
     // need it, and a DNS lookup would leak the name to the network.
     m.write("/run/werewolf/hosts", m.fmt(

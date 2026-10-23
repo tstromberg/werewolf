@@ -7,14 +7,17 @@
 # and has no shell: forms that log people in add busybox-full, as does any
 # form built with DEV=1. Every other form includes this one.
 #
-# Hardened Wolfi replacements share one signed feed (glibc and the runtimes).
-# howl and the updater verify that every installed package whose name the feed
-# covers matches its signed index; an unavailable feed or Wolfi fallback fails.
-# Explicit older runtime streams and OCI-contained runtimes remain separate.
-# Wolfi stays first: the updater reads its CVE feed there.
+# Hardened Wolfi replacements share one signed feed (glibc and the runtimes);
+# applications Wolfi does not ship, or ships unfit for a form, another
+# (../packages). howl and the updater verify that every installed package whose
+# name either feed covers matches its signed index; an unavailable feed or a
+# Wolfi fallback fails. Explicit older runtime streams and OCI-contained
+# runtimes remain separate. Wolfi stays first: the updater reads its CVE feed
+# there.
 repositories:
   - https://packages.wolfi.dev/os
   - https://dist.werewolf-linux.org/apk/hardened
+  - https://dist.werewolf-linux.org/apk/packages
   - https://dist.werewolf-linux.org/apk
 keyring:
   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
@@ -36,7 +39,8 @@ archs:
 # shares, so none may signal it (cmd/seal-watch). _update is the updater's
 # network half, which fetches the packages and CVE sources it reads.
 # _unwound answers every program's DNS at 127.0.0.53, and _unwoundnet asks
-# the resolvers for it: the one user that may (cmd/unwound).
+# the resolvers for it: the one user that may (cmd/unwound). _unwoundage is
+# the age authority, which owns the protected cache and fetches evidence.
 accounts:
   groups:
     - groupname: tty
@@ -59,6 +63,8 @@ accounts:
       gid: 53
     - groupname: _unwoundnet
       gid: 54
+    - groupname: _unwoundage
+      gid: 55
   users:
     - username: _updater
       uid: 77
@@ -105,6 +111,11 @@ accounts:
       gid: 54
       homedir: /var/empty
       shell: /sbin/nologin
+    - username: _unwoundage
+      uid: 55
+      gid: 55
+      homedir: /var/empty
+      shell: /sbin/nologin
 
 # werewolf's programs from cmd/ every form's machines run beyond the ones
 # every image has (docs/programs.md): the updater.
@@ -119,6 +130,8 @@ net:
   - lookup _update packages.wolfi.dev
   - lookup _update dist.werewolf-linux.org
   - lookup _update git.kernel.org
+  - connect _unwoundage tcp/443 public
+  - lookup _unwoundage * A AAAA unfiltered
 
 # make check's, for this form alone (forms/README.md): its checks boot the
 # slot offline, so the updater finds nothing.

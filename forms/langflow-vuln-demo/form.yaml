@@ -1,9 +1,9 @@
 base: onnx
 
-recipes:
-  - ../../../packages/langflow-vuln-demo/langflow.yaml
+packages:
+  - langflow-vuln-demo
 
-with: [onnx-minilm, libffi]
+with: [onnx-minilm]
 
 updates: off
 

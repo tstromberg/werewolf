@@ -9,10 +9,14 @@ cue, and records every question that reaches it.
 """
 import json
 import os
+import datetime
+import contextlib
 from pathlib import Path
 import select
 import shutil
 import socket
+import ssl
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -21,6 +25,7 @@ import threading
 import time
 
 UPSTREAM = '10.53.0.2'
+AGE_HTTPS = '8.8.8.8'
 POLICY = '''listen tcp 53 loopback
 dns 54
 lookup 2001 api.example.test A AAAA
@@ -31,7 +36,7 @@ lookup 2001 alias-bad.example.test A
 lookup 2001 slow.example.test A
 lookup 2001 spoof.example.test A
 lookup 2002 * A AAAA
-lookup 2003 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered
+lookup 2003 * A AAAA CNAME MX TXT SRV NS PTR CAA TLSA unfiltered
 lookup 2001 cached.example.test A
 lookup 2001 short.example.test A
 lookup 2001 zero.example.test A
@@ -85,11 +90,13 @@ def answer(query, tcp):
     question = query[12:end + 4]
     name = qname.lower()
 
-    def reply(records, rcode=0, flags=0x8180, ident=query[:2], q=question, authority=()):
+    def reply(records, rcode=0, flags=0x81a0, ident=query[:2], q=question, authority=()):
         return (ident + struct.pack('!HHHHH', flags | rcode, 1, len(records), len(authority), 0) + q +
                 b''.join(records) + b''.join(authority))
 
     a = lambda ip: socket.inet_aton(ip)
+    if name in ('rdap.verisign.com', 'rdap.publicinterestregistry.org', 'crt.sh') and qtype == 1:
+        return [reply([record(qname, 1, a(AGE_HTTPS))])]
     if name == 'slow.example.test':
         return []
     if name == 'spoof.example.test':
@@ -177,6 +184,53 @@ def server(log_path):
             threading.Timer(0.5, later, (query, addr)).start()
         else:
             later(query, addr)
+
+
+def age_https(cert, key, log_path):
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(cert, key)
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((AGE_HTTPS, 443))
+    sock.listen(16)
+    log = open(log_path, 'a', buffering=1)
+    print('ready', flush=True)
+    while True:
+        raw, _ = sock.accept()
+        try:
+            with tls.wrap_socket(raw, server_side=True) as client:
+                client.settimeout(20)
+                header = client.recv(4096).decode('ascii', 'replace')
+                line = header.split('\r\n', 1)[0]
+                host = next((x[6:].strip() for x in header.split('\r\n')
+                             if x.lower().startswith('host: ')), '')
+                path = line.split(' ')[1]
+                log.write(json.dumps({'host': host, 'path': path}) + '\n')
+                if host == 'crt.sh':
+                    assert 'q=outage.com' in path, path
+                    body = json.dumps([{'name_value': 'outage.com',
+                                        'min_entry_timestamp': '2020-01-01T00:00:00'}]).encode()
+                    status = '200 OK'
+                else:
+                    domain = path.rsplit('/', 1)[-1]
+                    if domain == 'timeout.com':
+                        time.sleep(16)
+                        continue
+                    status = ('503 Service Unavailable' if domain == 'outage.com' else
+                              '302 Found' if domain == 'redirect.com' else '200 OK')
+                    when = (datetime.datetime.now(datetime.timezone.utc) -
+                            datetime.timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%SZ') if domain == 'young.com' else '2020-01-01T00:00:00Z'
+                    name = 'wrong.com' if domain == 'invalid.com' else domain
+                    body = json.dumps({'objectClassName': 'domain', 'ldhName': name,
+                                       'events': [{'eventAction': 'registration',
+                                                   'eventDate': when}]}).encode()
+                redirect = 'Location: https://crt.sh/?q=redirect.com&output=json\r\n' if status == '302 Found' else ''
+                client.sendall((f'HTTP/1.1 {status}\r\n{redirect}Content-Type: application/json\r\n'
+                                f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode() + body)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            raw.close()
 
 
 # --- the driver, under fence -------------------------------------------------
@@ -269,7 +323,7 @@ def parse(msg):
     at = 12
     for _ in range(qd):
         at = read_name(msg, at)[1] + 4
-    answers, ttls = [], []
+    answers, ttls, rdata = [], [], []
     for _ in range(an):
         name, at = read_name(msg, at)
         kind, _, ttl, size = struct.unpack('!HHIH', msg[at:at + 10])
@@ -277,8 +331,9 @@ def parse(msg):
         at += 10 + size
         answers.append(socket.inet_ntoa(data) if kind == 1 else kind)
         ttls.append(ttl)
+        rdata.append(data.hex())
     return {'id': msg[0] << 8 | msg[1], 'rcode': flags & 0xf, 'tc': bool(flags & 0x200), 'answers': answers,
-            'ttls': ttls}
+            'ttls': ttls, 'rdata': rdata, 'ad': bool(flags & 0x20)}
 
 def probe(r):
     reader, writer = os.pipe()
@@ -319,6 +374,17 @@ for line in sys.stdin:
         os.rename('/run/werewolf/network/upstream.new', '/run/werewolf/network/upstream')
         time.sleep(1.1)
         print('{}', flush=True)
+    elif r.get('system_domain') is not None:
+        source = r.get('domain_source', 'dhcp')
+        assert source in ('dhcp', 'config')
+        base = '/run/werewolf/network/' + source + '-domain'
+        with open(base + '.new', 'w') as f:
+            f.write(r['system_domain'])
+        os.chown(base + '.new', 73 if source == 'dhcp' else 0,
+                 73 if source == 'dhcp' else 0)
+        os.rename(base + '.new', base)
+        time.sleep(1.1)
+        print('{}', flush=True)
     elif r.get('kill_upstream'):
         children = open(f'/proc/{daemon.pid}/task/{daemon.pid}/children').read().split()
         os.kill(int(children[0]), 9)
@@ -326,13 +392,28 @@ for line in sys.stdin:
             print(json.dumps({'exit': daemon.wait(timeout=3)}), flush=True)
         except subprocess.TimeoutExpired:
             print(json.dumps({'exit': None}), flush=True)
+    elif r.get('restart_unwound'):
+        try:
+            previous = daemon.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            previous = None
+            daemon.kill()
+            daemon.wait()
+        daemon = subprocess.Popen([sys.argv[1]], stderr=open(sys.argv[3], 'w'))
+        for _ in range(100):
+            if ':0035 ' in open('/proc/net/udp').read():
+                break
+            time.sleep(0.05)
+        print(json.dumps({'exit': previous}), flush=True)
     else:
         print(json.dumps(probe(r)), flush=True)
 '''
 
 
-def inside(fence, unwound, parent_net):
+def inside(fence, unwound, parent_net, age_binary=None):
     assert os.readlink('/proc/self/ns/net') != parent_net
+    age_live = os.environ.get('AGE_LIVE_TEST') == '1'
+    openssl_config = Path('/etc/ssl/openssl.cnf').read_bytes() if age_live else None
     run(['mount', '--make-rprivate', '/'])
     with tempfile.TemporaryDirectory(prefix='werewolf-unwound-') as name:
         work = Path(name)
@@ -349,15 +430,86 @@ def inside(fence, unwound, parent_net):
         run(['mount', '--bind', str(binaries), '/usr/local/bin'])
         for directory in ['/run', '/etc', '/usr/share', '/var']:
             run(['mount', '-t', 'tmpfs', 'tmpfs', directory])
+        if age_live:
+            Path('/etc/ssl').mkdir()
+            Path('/etc/ssl/openssl.cnf').write_bytes(openssl_config)
         Path('/var/empty').mkdir(mode=0o755)
         policy = Path('/usr/share/werewolf/net')
         policy.parent.mkdir()
-        policy.write_text(POLICY)
+        age_test = os.environ.get('AGE_TEST') == '1' or age_live
+        policy.write_text(POLICY + ('''lookup 55 * A AAAA unfiltered
+connect 55 tcp 443 public
+''' if age_live else ''))
+        if age_test:
+            (policy.parent / 'age-enforce').write_text('enforce\n')
+            Path('/data').mkdir(exist_ok=True)
+            run(['mount', '-t', 'tmpfs', 'tmpfs', '/data'])
+            age_dir = Path('/data/svc/unwound-age')
+            age_dir.mkdir(parents=True)
+            age_db = sqlite3.connect(age_dir / 'age.db')
+            age_db.executescript((Path(__file__).resolve().parents[1] /
+                                   'cmd/unwound/age.sql').read_text())
+            age_db.execute('PRAGMA journal_mode=WAL')
+            now = int(time.time())
+            for domain, status, effective in (() if age_live else (
+                ('example.com', 'valid', 946684800),
+                ('young.com', 'valid', now - 86400),
+                ('example.net', 'unknown', None),
+            )):
+                age_db.execute('''INSERT INTO domain_age
+                    (domain,source,status,registered_at,effective_at,fetched_at,
+                     retry_after,last_used_at,psl_generation,bootstrap_generation)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                    (domain, 'rdap', status, effective, effective, now,
+                     now + 86400, now, 'fixture', 'fixture'))
+            age_db.commit()
+            age_db.close()
+            os.chown(age_dir, 55, 55)
+            os.chmod(age_dir, 0o700)
+            for entry in age_dir.iterdir():
+                os.chown(entry, 55, 55)
+            Path('/run/werewolf-age').mkdir()
         network = Path('/run/werewolf/network')
         network.mkdir(parents=True)
         (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
         (network / 'upstream').write_text('nameserver ' + UPSTREAM + '\n')
         Path('/etc/resolv.conf').symlink_to('/run/werewolf/network/resolv.conf')
+        if age_live:
+            ca_key, ca_cert = work / 'ca.key', work / 'ca.crt'
+            server_key, server_csr, server_cert = work / 'server.key', work / 'server.csr', work / 'server.crt'
+            run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                 '-keyout', str(ca_key), '-out', str(ca_cert), '-subj', '/CN=unwound-age-test-ca',
+                 '-addext', 'basicConstraints=critical,CA:TRUE'], stderr=subprocess.DEVNULL)
+            run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(server_key),
+                 '-out', str(server_csr), '-subj', '/CN=rdap.verisign.com'], stderr=subprocess.DEVNULL)
+            ext = work / 'server.ext'
+            ext.write_text('subjectAltName=DNS:rdap.verisign.com,DNS:crt.sh\n'
+                           'basicConstraints=CA:FALSE\n'
+                           'extendedKeyUsage=serverAuth\n')
+            run(['openssl', 'x509', '-req', '-in', str(server_csr), '-CA', str(ca_cert),
+                 '-CAkey', str(ca_key), '-CAcreateserial', '-out', str(server_cert),
+                 '-days', '1', '-extfile', str(ext)], stderr=subprocess.DEVNULL)
+            cert_dir = Path('/etc/ssl/certs')
+            cert_dir.mkdir(parents=True)
+            shutil.copyfile(ca_cert, cert_dir / 'ca-certificates.crt')
+        age_worker = None
+        age_control = None
+        age_mounts = []
+        if age_test:
+            parent, child = socket.socketpair()
+            def control_fd():
+                os.dup2(child.fileno(), 3)
+            age_worker = subprocess.Popen([age_binary], pass_fds=(3, child.fileno()),
+                                          preexec_fn=control_fd, stderr=subprocess.PIPE)
+            child.close()
+            age_control = parent
+            parent.settimeout(10)
+            assert parent.recv(1) == b'R', age_worker.stderr.read().decode()
+            for path in (str(age_dir), '/run/werewolf-age'):
+                run(['mount', '--bind', path, path])
+                run(['mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec,nosymfollow', path])
+                age_mounts.append(path)
+            parent.sendall(b'G')
         run(['ip', 'link', 'set', 'lo', 'up'])
         run(['ip', 'netns', 'add', 'unwound-peer'])
         run(['ip', 'link', 'add', 'client', 'type', 'veth', 'peer', 'name', 'peer'])
@@ -370,14 +522,24 @@ def inside(fence, unwound, parent_net):
         for scope in ['all', 'default', 'client']:
             Path('/proc/sys/net/ipv4/conf/' + scope + '/rp_filter').write_text(os.environ.get('RP_FILTER', '0') + '\n')
         run(['ip', '-n', 'unwound-peer', 'addr', 'add', UPSTREAM + '/24', 'dev', 'peer'])
+        if age_live:
+            run(['ip', '-n', 'unwound-peer', 'addr', 'add', AGE_HTTPS + '/32', 'dev', 'peer'])
+            run(['ip', 'route', 'add', AGE_HTTPS + '/32', 'via', UPSTREAM, 'dev', 'client'])
         run(['ip', '-n', 'unwound-peer', 'link', 'set', 'peer', 'up'])
         run(['ip', '-n', 'unwound-peer', 'link', 'set', 'lo', 'up'])
         peer = subprocess.Popen(['ip', 'netns', 'exec', 'unwound-peer', sys.executable,
                                  str(Path(__file__).resolve()), '--server', str(work / 'upstream.log')],
                                 stdout=subprocess.PIPE, text=True)
         client = None
+        https = None
         try:
             assert select.select([peer.stdout], [], [], 10)[0] and peer.stdout.readline().strip() == 'ready'
+            if age_live:
+                https = subprocess.Popen(['ip', 'netns', 'exec', 'unwound-peer', sys.executable,
+                                          str(Path(__file__).resolve()), '--age-https',
+                                          str(server_cert), str(server_key), str(work / 'age-https.log')],
+                                         stdout=subprocess.PIPE, text=True)
+                assert select.select([https.stdout], [], [], 10)[0] and https.stdout.readline().strip() == 'ready'
             client = subprocess.Popen([fence, '/usr/bin/python3', '-u', str(driver), '/usr/local/bin/unwound',
                                        str(work / 'audit'), str(work / 'stderr')],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -386,8 +548,15 @@ def inside(fence, unwound, parent_net):
             assert '"event":"fence"' in announcement, announcement
             assert select.select([client.stdout], [], [], 10)[0], 'unwound timeout'
             assert client.stdout.readline().strip() == 'ready', (work / 'stderr').read_text()
-            checks(client, work)
-            print('check-unwound: passed')
+            if age_live:
+                age_live_checks(client, work, age_dir)
+                print('check-unwound-age-live: passed')
+            elif age_test:
+                age_checks(client, work)
+                print('check-unwound-age: passed')
+            else:
+                checks(client, work)
+                print('check-unwound: passed')
         except BaseException:
             for f in ['stderr', 'audit', 'upstream.log']:
                 print('--- ' + f + '\n' + (work / f).read_text(), file=sys.stderr)
@@ -401,7 +570,92 @@ def inside(fence, unwound, parent_net):
                 client.wait()
             peer.terminate()
             peer.wait(timeout=5)
+            if https is not None:
+                https.terminate()
+                https.wait(timeout=5)
             run(['ip', 'netns', 'delete', 'unwound-peer'])
+            if age_worker is not None:
+                age_worker.kill()
+                age_worker.wait(timeout=5)
+                age_control.close()
+                for path in reversed(age_mounts):
+                    run(['umount', path])
+
+
+def age_checks(client, work):
+    def send(request):
+        client.stdin.write(json.dumps(request) + '\n')
+        client.stdin.flush()
+        assert select.select([client.stdout], [], [], 15)[0], ('timeout', request)
+        return json.loads(client.stdout.readline())
+
+    def ask(uid, name):
+        return send(dict(uid=uid, name=name, type=1))
+
+    assert ask(2001, 'api.example.test')['rcode'] == 0
+    assert ask(2002, 'open.example.com')['rcode'] == 3
+    assert ask(2002, 'young.com')['rcode'] == 5
+    assert ask(2002, 'unknown.example.net')['rcode'] == 5
+    assert 'young.com' not in [json.loads(x)['name']
+        for x in (work / 'upstream.log').read_text().splitlines()]
+    audit = [json.loads(x.removeprefix('unwound: '))
+        for x in (work / 'audit').read_text().splitlines() if x.startswith('unwound: ')]
+    assert any(a.get('event') == 'query' and a.get('name') == 'unknown.example.net'
+        and a.get('why') == 'age' and a.get('detail') == 'unknown' for a in audit)
+    assert send(dict(system_domain='assigned.test')) == {}
+    assert ask(2001, 'host.assigned.test')['rcode'] == 3
+    assert ask(2002, 'host.assigned.test')['rcode'] == 3
+
+
+def age_live_checks(client, work, age_dir):
+    def ask(name, timeout=15):
+        client.stdin.write(json.dumps({'uid': 2002, 'name': name, 'type': 1,
+                                       'timeout': timeout}) + '\n')
+        client.stdin.flush()
+        assert select.select([client.stdout], [], [], timeout + 3)[0], name
+        return json.loads(client.stdout.readline())
+
+    assert ask('a.mature.com')['rcode'] == 3
+    assert ask('b.mature.com')['rcode'] == 3
+    assert ask('young.com')['rcode'] == 5
+    assert ask('outage.com')['rcode'] == 3
+    assert ask('invalid.com')['rcode'] == 5
+    assert ask('redirect.com')['rcode'] == 5
+    assert ask('invalidtls.org')['rcode'] == 5
+    with contextlib.closing(sqlite3.connect(f'file:{age_dir}/age.db?mode=ro', uri=True)) as db:
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('mature.com',)).fetchone() == ('rdap', 'valid')
+        trigger = db.execute('SELECT qname,qtype,transport,service_uid,policy_namespace '
+                             'FROM age_check WHERE domain=?', ('mature.com',)).fetchone()
+        assert trigger == ('a.mature.com', 1, 'udp', 2002, 'uid:2002'), trigger
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('young.com',)).fetchone() == ('rdap', 'valid')
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('outage.com',)).fetchone() == ('crtsh', 'history')
+        assert db.execute('SELECT rdap_result,crtsh_result FROM age_check WHERE domain=?',
+                          ('outage.com',)).fetchone() == ('error', 'history')
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('invalid.com',)).fetchone() == ('rdap', 'unknown')
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('invalidtls.org',)).fetchone() == ('rdap', 'unknown')
+    https = [json.loads(line) for line in (work / 'age-https.log').read_text().splitlines()]
+    assert sum(x['host'] == 'rdap.verisign.com' and x['path'].endswith('/mature.com')
+               for x in https) == 1, https
+    assert sum(x['host'] == 'crt.sh' for x in https) == 1, https
+    assert 'young.com' not in [json.loads(x)['name'] for x in
+                               (work / 'upstream.log').read_text().splitlines()], 'young reached upstream'
+    timed = ask('timeout.com', timeout=13)
+    assert 'error' in timed, timed
+    client.stdin.write(json.dumps({'restart_unwound': True}) + '\n')
+    client.stdin.flush()
+    assert select.select([client.stdout], [], [], 6)[0], 'restart timeout'
+    assert json.loads(client.stdout.readline())['exit'] == 1
+    assert ask('c.mature.com')['rcode'] == 3
+    with contextlib.closing(sqlite3.connect(f'file:{age_dir}/age.db?mode=ro', uri=True)) as db:
+        assert db.execute('SELECT finished_at FROM age_check WHERE domain=?',
+                          ('timeout.com',)).fetchone() == (None,)
+        assert db.execute('SELECT count(*) FROM domain_age WHERE domain=?',
+                          ('timeout.com',)).fetchone() == (0,)
 
 
 def checks(client, work):
@@ -425,6 +679,7 @@ def checks(client, work):
     expect(ask(54, 'api.example.test', server=UPSTREAM), 0, ['192.0.2.10'], 'the upstream user')
     # Exact grants, by type, over UDP and TCP.
     expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'granted A')
+    assert not ask(2001, 'api.example.test')['ad'], 'AD from an untrusted upstream escaped'
     expect(ask(2001, 'API.Example.Test', tcp=True), 0, ['192.0.2.10'], 'granted A over TCP, any case')
     piped = ask(2001, 'api.example.test', pipeline=True, second='x.cdn.example.test')['results']
     assert [r['id'] for r in piped] == [0x4242, 0x4243], piped
@@ -432,6 +687,20 @@ def checks(client, work):
     expect(ask(2001, 'api.example.test', 28), 0, [28], 'granted AAAA')
     expect(ask(2001, 'api.example.test', 16), 5, [], 'TXT not granted')
     expect(ask(2001, 'denied.example.test'), 5, [], 'name not granted')
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'system domain absent')
+    assert send(dict(system_domain='corp.lan.test')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 3, [], 'DHCP domain shared with DNS-enabled service')
+    expect(ask(2001, 'corp.lan.test'), 3, [], 'system domain apex')
+    expect(ask(2001, 'host.corp.lan.test', 16), 3, [], 'system domain supports DNS types')
+    expect(ask(2001, 'host.corp.lan.test.evil'), 5, [], 'system domain label boundary')
+    expect(ask(2001, 'a' * 41 + '.corp.lan.test'), 5, [], 'system domain still screened')
+    assert send(dict(system_domain='config.lan.test', domain_source='config')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'config domain overrides DHCP')
+    expect(ask(2001, 'host.config.lan.test'), 3, [], 'config FQDN domain')
+    assert send(dict(system_domain='', domain_source='config')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 3, [], 'DHCP domain restored')
+    assert send(dict(system_domain='')) == {}
+    expect(ask(2001, 'host.corp.lan.test'), 5, [], 'domain revoked')
     # *.NAME: below it, never NAME.
     expect(ask(2001, 'x.cdn.example.test'), 0, ['192.0.2.11'], 'subtree grant')
     expect(ask(2001, 'cdn.example.test'), 5, [], 'subtree grant excludes its apex')
@@ -559,12 +828,26 @@ def checks(client, work):
     assert {'udp', 'tcp'} <= {s['proto'] for s in seen}
 
     # Every decision is audited: who, what, why and the rule.
-    audit = [json.loads(l.split(': ', 1)[1]) for l in (work / 'audit').read_text().splitlines()]
+    for _ in range(50):
+        audit = [json.loads(l.split(': ', 1)[1]) for l in (work / 'audit').read_text().splitlines()]
+        if any(a.get('event') == 'age_observe' and a.get('qname') == 'poll.example.test'
+               for a in audit):
+            break
+        time.sleep(.02)
+    observations = [a for a in audit if a.get('event') == 'age_observe']
+    assert any(a.get('uid') == 2002 and a.get('qname') == 'poll.example.test'
+               and a.get('boundary') == 'unknown' and a.get('domain') is None
+               and a.get('dns_id') == 0x4242 and a.get('qtype') == 1
+               and a.get('transport') == 'udp' and a.get('source') == '127.53.0.2'
+               and a.get('rule') == 10 for a in observations), observations
+    assert not any(a.get('qname') == 'host.corp.lan.test' for a in observations), observations
+    assert not any(a.get('qname') == 'open.example.test' for a in observations), observations
     queries = [a for a in audit if a.get('event') == 'query']
     def find(**want):
         return [a for a in queries if all(a.get(k) == v for k, v in want.items())]
     assert find(uid=2001, name='denied.example.test', decision='deny', why='no_grant'), queries
     assert find(uid=2001, name='api.example.test', type='A', decision='allow', rcode='noerror', rule=3)
+    assert find(uid=2001, name='host.corp.lan.test', decision='allow', why='system_domain')
     assert find(uid=2001, name='alias-bad.example.test', decision='deny', why='alias', alias='evil.example.net')
     assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', rule=10)
     assert find(uid=2002, name='poll.example.test', decision='allow', why='screened', cached=True, rule=10)
@@ -593,15 +876,22 @@ def checks(client, work):
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--server':
         server(sys.argv[2])
+    elif len(sys.argv) == 5 and sys.argv[1] == '--age-https':
+        age_https(sys.argv[2], sys.argv[3], sys.argv[4])
     elif len(sys.argv) == 5 and sys.argv[1] == '--inside':
         inside(sys.argv[2], sys.argv[3], sys.argv[4])
-    elif len(sys.argv) == 3:
+    elif len(sys.argv) == 6 and sys.argv[1] == '--inside':
+        inside(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+    elif len(sys.argv) in (3, 4):
         if sys.platform != 'linux':
             sys.exit('check-unwound requires Linux to create private namespaces')
         if os.geteuid() != 0:
             sys.exit('check-unwound needs root: fence sets routing rules and unwound drops to its users')
-        run(['unshare', '--net', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
-             '--inside', str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
-             os.readlink('/proc/self/ns/net')])
+        command = ['unshare', '--net', '--mount', '--fork', sys.executable,
+                   str(Path(__file__).resolve()), '--inside', str(Path(sys.argv[1]).resolve()),
+                   str(Path(sys.argv[2]).resolve()), os.readlink('/proc/self/ns/net')]
+        if len(sys.argv) == 4:
+            command.append(str(Path(sys.argv[3]).resolve()))
+        run(command)
     else:
         sys.exit(__doc__)

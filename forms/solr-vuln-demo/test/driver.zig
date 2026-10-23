@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         "/usr/lib/apk/db/installed",
         gpa,
-        .limited(4 << 20),
+        .limited(64 << 20), // apk lists every file each package installs
     );
     const prefix = "P:openjdk-27-jre\nV:";
     const at = std.mem.indexOf(u8, packages, prefix) orelse return error.MissingJava;

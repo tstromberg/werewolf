@@ -21,7 +21,8 @@ services:
     user: gatus
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/8080]
-    connect: [tcp/443 tcp/80 udp/53 tcp/53 icmp]
+    connect: [tcp/443 tcp/80 icmp]
+    lookup: "*"
     read: /etc/gatus
     config: settings /run/config/gatus/settings.json
     setting: target url required as TARGET

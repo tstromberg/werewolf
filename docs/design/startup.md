@@ -18,9 +18,10 @@ is neither: a few engineers and many machines, each run by whoever
 deployed it last. A forgotten admin page or an open registry is how
 they are broken into; per-seat pricing is why they self-host at all.
 
-A form need not wait for Wolfi. melange builds a package from a pinned
-source (forms/miniflux), and `image:` runs a project's own OCI image,
-pinned by digest, in a tree of its own ([oci.md](oci.md); forms/grafana).
+A form need not wait for Wolfi. werewolf's application feed builds a
+package from a pinned source (forms/miniflux), and `image:` runs a
+project's own OCI image, pinned by digest, in a tree of its own
+([oci.md](oci.md); forms/grafana).
 
 ## Goals
 

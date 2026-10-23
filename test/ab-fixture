@@ -36,7 +36,7 @@ run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
      '-keyout', str(root / 'tls.key'), '-out', str(root / 'tls.crt')], 'tls')
 run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(root / 'ssh.key')], 'ssh-key')
 probe = root / 'ab-status'
-run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
+run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fPIE', '-target', arch + '-linux-musl',
      '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'verity', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
      '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
      '-Mipe=lib/ipe.zig', '-Mverity=lib/verity.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig',

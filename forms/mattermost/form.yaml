@@ -4,13 +4,14 @@
 # made the system admin from the config, so no visitor claims it. Nobody
 # signs up without an invitation, and plugins, which are code, are off.
 # Mattermost keeps its tables and its configuration in a schema of its
-# own, and its files in /data/svc/mattermost. melange packages upstream's
-# release (../packages/mattermost/mattermost-team.yaml). See
+# own, and its files in /data/svc/mattermost. werewolf's application feed
+# packages upstream's release
+# (../packages/mattermost/mattermost-team.yaml). See
 # forms/mattermost/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/mattermost/mattermost-team.yaml
+packages:
+  - mattermost-team
 
 with: [postgresql, caddy]
 
@@ -43,8 +44,8 @@ services:
     listen: [tcp/8065 loopback]
     connect:
       - tcp/443 tcp/80 tcp/587 tcp/465 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
+    lookup: "*"
     read: /etc/mattermost
     config: settings /run/config/mattermost/settings.json
     setting: base-url url required as MM_SERVICESETTINGS_SITEURL
@@ -104,7 +105,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8065]
+    connect: [tcp/443 tcp/8065]
+    lookup: "*"
     read: /etc/caddy
     config:
       - admin-password /run/config/caddy/admin-password

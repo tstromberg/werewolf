@@ -44,11 +44,16 @@ Bare `*` screens names; `unfiltered` removes only that line's screening. Require
 with it. Type limits, quotas, parsing, audit and local resolution through unwound
 still apply.
 Explicit name/type grants work during screening outages and fix false positives.
+The assigned system domain and its descendants are granted to every service
+with DNS enabled, including supported types beyond A and AAAA. The automatic
+grant retains tunnel screening and bypasses the 90-day age gate.
+The FQDN from boot metadata takes precedence over DHCP option 15.
 Canonicalize all names to lowercase ASCII/A-labels without one terminal dot; accept
 only exact names, leading `*.` or bare `*`. No regex or substring matching.
 Screening uses bounded name shape, entropy, per-service name and site budgets,
-answer holding and answer trimming. See the [implementation plan](unwound-plan.md)
-for the actual limits. Age and endpoint lists remain deferred.
+answer holding and answer trimming. Screened wildcards also require domain-age
+evidence. See the [implementation plan](unwound-plan.md) for the actual limits.
+Endpoint lists remain deferred.
 Apply grants to aliases before follow-up/return; upstreams may already follow them.
 
 Builder adds `lookup` alongside `connect`, derives UID/service identity, and emits
@@ -69,31 +74,25 @@ The builder derives the user ID; the compiled policy's `dns-direct UID` line
 is an internal fence instruction, not form syntax. A top-level `net:` exception
 and a shared service user are refused.
 
-## Deferred: age and endpoint evidence
+## Age and endpoint evidence
 
-The following is research for a later updater; none of it authorizes current
-queries. A reviewed endpoint list may identify known out-of-band DNS endpoints,
+The [age design](unwound-age.md) describes the enforced gate. A reviewed
+endpoint list may identify
+known out-of-band DNS endpoints,
 but an entry would express risk policy rather than prove maliciousness.
 
-Age defaults to 30 days from the current registry [RDAP] registration event. Match the
-domain object; absent/conflicting/future dates mean unknown. Renewal is not creation.
-CT's earliest log-entry time supports history, not ownership/registration age; neither
-certificate notBefore nor old CT overrides young/unknown RDAP. Use the [PSL] ICANN
-boundary for registry queries; PRIVATE tenants cannot borrow provider age. Unknown
-age, internal names and PRIVATE tenants need explicit grants; no CT-only fallback.
-An isolated updater queries [RDAP bootstrap] HTTPS endpoints, with a fixed bootstrap
-DNS policy. Send only registrable domains after local endpoint/entropy checks, never
-full QNAMEs. Bound/coalesce misses per service/provider; restrict redirects/referrals,
-reject private destinations and cap HTTP/JSON sizes, depth and time. DNS workers read
-snapshots only. Persist domain/source/event/fetch/expiry/provenance, shared by services.
-Refresh daily with jitter; mature records may remain usable for seven days from fetch
-during outages, logged as stale. Cache unknown/errors one hour; honor Retry-After.
-Require fresh evidence at the age threshold. Cap records at 100,000/64 MiB; eviction
-means unknown. Atomically validate snapshots; signed lists/PSL have expiry and rollback
-protection. Expired data or uncertain time cannot authorize screened names.
-An updater would add age/source/fetch time and data generations to audit records.
-The current local screen uses a 3.5-bit entropy threshold for labels of at least
-24 characters and enforces bounded distinct-name rates.
+Age defaults to 90 days from the current registry [RDAP] registration event.
+An RDAP answer can authorize from cache for seven days; the row can remain
+stored after that but needs a new check to authorize again.
+The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants
+need their own grant. On RDAP availability failure, crt.sh may provide a
+marked, 24-hour provisional decision from old CT history. It cannot override
+a young or ambiguous RDAP answer. One isolated age authority uses [RDAP bootstrap]
+over HTTPS and SQLite to retain the last 20,000 domains and the
+requests that caused external checks. DNS workers receive bounded verdicts
+over IPC. UID and service namespace come from the source label; exact process
+identity needs a kernel-backed attribution path. The current local screen
+keeps its 3.5-bit entropy threshold and distinct-name budgets.
 
 ## Drawbacks
 

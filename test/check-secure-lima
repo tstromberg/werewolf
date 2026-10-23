@@ -168,7 +168,7 @@ try:
     run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', private_ssh], 'ssh-key')
     probe = overlay / 'usr/bin/ab-status'
     probe.parent.mkdir(parents=True)
-    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
+    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-fPIE', '-target', arch + '-linux-musl',
          '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
          '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
          '-Mipe=lib/ipe.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig', '--dep', 'package',

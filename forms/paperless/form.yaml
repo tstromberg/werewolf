@@ -8,12 +8,10 @@
 # forms/paperless/README.md.
 base: prod
 
-recipes:
-  - ../../../packages/paperless/paperless.yaml
-
 with: [postgresql, valkey, caddy]
 
 packages:
+  - paperless
   # The interpreter, and what the wheels link. howl build-apk names the rest.
   - python-3.15
   - libstdc++
@@ -255,7 +253,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    connect: [tcp/443 tcp/8000]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

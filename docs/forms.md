@@ -86,14 +86,13 @@ path. Two users or groups with the same name or id fail the build.
 
 ## Packages Wolfi does not ship
 
-Third-party Melange contexts live in `../packages/NAME`; explicit hardening ports
-live in `../hardened-packages`. A form declares recipe paths relative to itself:
-`recipes: [../../../packages/vaultwarden/vaultwarden.yaml]`
-
-Distro-specific recipes stay beside their source, as in `forms/vuln-demo/melange`
-and `boot/tpm-stub.melange.yaml`. Without `recipes`, a form discovers `melange/*.yaml`.
-Melange builds in QEMU on macOS or bubblewrap on Linux, overlays the packages and
-checks shared-library dependencies. Missing declared recipes fail the build.
+Third-party software comes from a signed feed by package name: `../packages` builds
+what Wolfi lacks or ships unfit, rarely what it ships (named `-werewolf`), and
+`../hardened-packages` the runtimes werewolf patches. `minimal` lists both feeds; a
+name either covers comes from it or the build fails. A recipe is for werewolf's own
+software or a package in development: `recipes: [../../../packages/zot/zot.yaml]`,
+or `melange/*.yaml` beside its source, as in `forms/vuln-demo`. Melange builds in
+QEMU or bubblewrap, overlays the packages and checks shared-library dependencies.
 See [package source setup](../CONTRIBUTING.md#package-sources) for checkout and CI pins.
 
 ## Private configuration files

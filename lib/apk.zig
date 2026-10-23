@@ -77,11 +77,12 @@ pub fn records(gpa: Allocator, keys: []const Trusted, data: []const u8) ![]const
     return parseRecords(gpa, (try verified(gpa, keys, data)).list);
 }
 
-/// hardenedFallback returns an installed package whose name the hardened feed
-/// covers but whose version or signed control checksum is absent from it.
+/// feedFallback returns an installed package whose name a pinned feed (the
+/// hardened runtimes, werewolf's applications) covers but whose version or
+/// signed control checksum is absent from it.
 /// Checking checksums also rejects an identically versioned package from another
 /// repository. Uncovered explicit runtime streams remain their own choice.
-pub fn hardenedFallback(
+pub fn feedFallback(
     gpa: Allocator,
     keys: []const Trusted,
     index: []const u8,
@@ -502,17 +503,17 @@ test "hardened packages cannot fall back to another version or control checksum"
     var encoded: [28]u8 = undefined;
     const checksum = std.base64.standard.Encoder.encode(&encoded, &r.sha1);
     const installed = try a.print("P:{s}\nV:{s}\nC:Q1{s}\n\n", .{ r.name, r.version, checksum });
-    try testing.expectEqual(null, try hardenedFallback(a, keys, index, installed));
+    try testing.expectEqual(null, try feedFallback(a, keys, index, installed));
     const fallback = try a.print("P:{s}\nV:999-r0\nC:Q1{s}\n\n", .{ r.name, checksum });
-    try testing.expectEqualStrings(r.name, (try hardenedFallback(a, keys, index, fallback)).?);
+    try testing.expectEqualStrings(r.name, (try feedFallback(a, keys, index, fallback)).?);
     const impostor = try a.print(
         "P:{s}\nV:{s}\nC:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n",
         .{ r.name, r.version },
     );
-    try testing.expectEqualStrings(r.name, (try hardenedFallback(a, keys, index, impostor)).?);
+    try testing.expectEqualStrings(r.name, (try feedFallback(a, keys, index, impostor)).?);
     const older_stream = try a.print("P:python-3.12\nV:3.12.0-r0\nC:Q1{s}\n\n", .{checksum});
-    try testing.expectEqual(null, try hardenedFallback(a, keys, index, older_stream));
-    try testing.expectError(error.BadApkIndex, hardenedFallback(a, keys, index, "P:hello\nV:1\n"));
+    try testing.expectEqual(null, try feedFallback(a, keys, index, older_stream));
+    try testing.expectError(error.BadApkIndex, feedFallback(a, keys, index, "P:hello\nV:1\n"));
 }
 
 test readIndex {

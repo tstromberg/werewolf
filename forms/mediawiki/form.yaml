@@ -1,6 +1,6 @@
 # mediawiki: php, with MediaWiki 1.43, the long-term release, on SQLite:
 # a wiki for a lab's or a department's notes, on one machine. Wolfi does
-# not ship MediaWiki: melange lays the release's code in
+# not ship MediaWiki: werewolf's application feed lays the release's code in
 # /usr/share/mediawiki (../packages/mediawiki/mediawiki.yaml), which is
 # nginx's root; the form brings LocalSettings.php and the extensions it
 # loads, in /etc/mediawiki, and the setup that installs the wiki from the
@@ -12,10 +12,8 @@
 # forms/mediawiki/README.md.
 base: php
 
-recipes:
-  - ../../../packages/mediawiki/mediawiki.yaml
-
 packages:
+  - mediawiki
   - php-8.5               # the php command, for the setup and updates
   - php-8.5-pdo
   - php-8.5-pdo_sqlite    # the database

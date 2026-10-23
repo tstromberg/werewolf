@@ -21,7 +21,8 @@ services:
     user: oauth2-proxy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/4180]
-    connect: [tcp/443 tcp/80 udp/53 tcp/53]
+    connect: [tcp/443 tcp/80]
+    lookup: "*"
     read: /etc/oauth2-proxy
     secret:
       - OAUTH2_PROXY_CLIENT_SECRET /run/config/oauth2-proxy/client_secret

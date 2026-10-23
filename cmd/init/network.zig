@@ -20,13 +20,16 @@ const writeFile = init.writeFile;
 /// providers without DHCP. Otherwise, if
 /// the form has it, dhcp-client gets a lease; init starts its renewal later.
 pub fn network(m: *Machine) void {
+    const local_validator = exists(dns.local_validator_path);
     // Keep the directory present even when DHCP has not acquired a lease.
     // Every program asks unwound; only it, fence and DHCP read upstream,
     // which DHCP atomically replaces (docs/design/unwound.md).
     mkdir("/run/werewolf/network", 0o755);
     m.write(dns.resolv_path, dns.resolv_text, 0o644);
     m.write(dns.service_address_path, "", 0o644);
-    m.write(dns.upstream_path, "", 0o644);
+    m.write(dns.dhcp_domain_path, "", 0o644);
+    m.write(dns.config_domain_path, "", 0o644);
+    m.write(dns.upstream_path, if (local_validator) dns.local_validator_text else "", 0o644);
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);
     m.write("/run/werewolf/network/nic", nic, 0o644);
@@ -56,9 +59,9 @@ pub fn network(m: *Machine) void {
         // resolver here because nothing checked the command line's
         // (lib/network.zig checked the config tar's).
         const dns_ok = if (network_file.ip4(c.dns)) |d| network_file.usable(d) else |_| false;
-        if (c.dns.len > 0 and !dns_ok) {
+        if (!local_validator and c.dns.len > 0 and !dns_ok) {
             say("network: dns {s} refused: not a usable IPv4 address", .{c.dns});
-        } else if (c.dns.len > 0) {
+        } else if (!local_validator and c.dns.len > 0) {
             mkdir("/run/werewolf/network", 0o755);
             m.write(dns.upstream_path, m.fmt("nameserver {s}\n", .{c.dns}), 0o644);
         }

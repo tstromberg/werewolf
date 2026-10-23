@@ -1,0 +1,16 @@
+{
+  "psl": {
+    "source": "https://publicsuffix.org/list/public_suffix_list.dat",
+    "sha256": "0232f4df0831911356e8ee1f4d5c3b6b12c0ed3f6bd66b0f81c8ab5d3d49e9ca",
+    "version": "2026-10-22_08-36-41_UTC",
+    "commit": "8437e5262f13305f94087abe699b4fe2be1d1de8",
+    "rules": 10397
+  },
+  "rdap": {
+    "source": "https://data.iana.org/rdap/dns.json",
+    "sha256": "1d731769a3bd29054e2a5a7828cec1b27831c46103b4c70a000d5ffcb6c285e1",
+    "publication": "2026-10-22T23:00:04Z",
+    "services": 592
+  },
+  "normalizer": "idna 3.20, UTS #46, STD3"
+}

@@ -24,7 +24,8 @@ services:
     user: step
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/443]
-    connect: [tcp/80 tcp/53 udp/53]
+    connect: [tcp/80]
+    lookup: "*"
     read: /etc/step-ca
     # The root's certificate, the intermediate's certificate and key, and the
     # key's password, from the machine's config: missing, the service parks

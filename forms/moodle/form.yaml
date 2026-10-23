@@ -2,21 +2,19 @@
 # university, with PostgreSQL, Caddy and cron beside it (with): Caddy
 # serves it over HTTPS at the machine's base URL, with a certificate from
 # Let's Encrypt, and hands its PHP to php-fpm; Moodle's cron runs every
-# minute. Wolfi does not ship Moodle: melange lays the release in
-# /usr/share/moodle (../packages/moodle/moodle.yaml), which no one on
-# the machine can change, with the form's config.php beside it. Course
-# files, sessions and caches are in /data/svc/moodle, its tables in the
-# schema moodle. It is installed, with its administrator from the config,
-# before it serves, and upgraded by the image, never the web. See
-# forms/moodle/README.md.
+# minute. Wolfi does not ship Moodle: werewolf's application feed lays
+# the release in /usr/share/moodle (../packages/moodle/moodle.yaml),
+# which no one on the machine can change, with the form's config.php
+# beside it. Course files, sessions and caches are in /data/svc/moodle,
+# its tables in the schema moodle. It is installed, with its
+# administrator from the config, before it serves, and upgraded by the
+# image, never the web. See forms/moodle/README.md.
 base: prod
-
-recipes:
-  - ../../../packages/moodle/moodle.yaml
 
 with: [postgresql, caddy, cron, sh-shim]
 
 packages:
+  - moodle
   - php-8.5
   - php-8.5-fpm
   - php-8.5-ctype
@@ -61,7 +59,8 @@ services:
     group: moodle
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53, /run/svc/moodle/php.sock]
+    connect: [tcp/443, /run/svc/moodle/php.sock]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
@@ -97,8 +96,8 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     connect:
       - tcp/443 tcp/80 tcp/465 tcp/587 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
+    lookup: "*"
     read: /etc/php
     # The administrator's password, the mail relay's, and the site's
     # settings, from the machine's config: without the administrator's
@@ -136,8 +135,8 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect proc exec
     connect:
       - tcp/443 tcp/80 tcp/465 tcp/587 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
+    lookup: "*"
     run: /usr/bin/php
     read: /etc/cron /etc/php
     write: /data/svc/moodle

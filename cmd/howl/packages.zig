@@ -75,29 +75,33 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             .value = .{ .map = &.{.{ .key = "packages", .value = .{ .list = serials.items } }} },
         }},
     });
-    // A Wolfi upstream version can outrank any hardened revision. Constrain
-    // covered, explicitly requested packages to the signed feed before
-    // solving; their exact subpackage dependencies constrain the runtime too.
+    // A Wolfi upstream version can outrank any hardened revision or werewolf
+    // build. Constrain covered, explicitly requested packages to their signed
+    // feed before solving; their exact subpackage dependencies constrain the
+    // runtime too.
     const contents = node.get("contents").?;
     const repos = contents.get("repositories") orelse forms.Node{ .list = &.{} };
-    for (repos.list) |repo| {
-        if (!mem.eql(u8, repo.scalar.text, package.hardened_repository)) continue;
+    for (package.pinned_repositories) |feed| {
+        for (repos.list) |repo| {
+            if (mem.eql(u8, repo.scalar.text, feed)) break;
+        } else continue;
         var why: @import("howl.zig").Why = .{};
-        const index = @import("published.zig").hardenedIndex(
+        const index = @import("published.zig").feedIndex(
             b.io,
             b.gpa,
+            feed,
             b.spec.arch,
             &why,
         ) catch |err|
             return b.fail(
-                "hardened feed: {s}",
-                .{if (why.text.len > 0) why.text else @errorName(err)},
+                "{s}: {s}",
+                .{ feed, if (why.text.len > 0) why.text else @errorName(err) },
             );
         const trust = [_]trusted_apk.Trusted{.{
             .name = package.repository_key,
             .key = try trusted_apk.parseKey(b.gpa, package.repository_pem),
         }};
-        const pins_from_feed = try hardenedPins(
+        const pins_from_feed = try feedPins(
             b.gpa,
             (contents.get("packages") orelse forms.Node{ .list = &.{} }).list,
             try trusted_apk.records(b.gpa, &trust, index),
@@ -107,7 +111,6 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             .key = "contents",
             .value = .{ .map = &.{.{ .key = "packages", .value = .{ .list = pins_from_feed } }} },
         }} });
-        break;
     }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);
@@ -119,7 +122,7 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
     try b.steps.note("{s} written", .{target});
 }
 
-fn hardenedPins(
+fn feedPins(
     gpa: Allocator,
     requested: []const forms.Node,
     offered: []const trusted_apk.Record,
@@ -196,14 +199,14 @@ test "hardened runtime pins survive newer upstream versions and keep fixture pin
         \\  - python-3.13
         \\  - libstdc++
     , &diag);
-    const chosen = try hardenedPins(a, request.get("packages").?.list, &offered, &.{});
+    const chosen = try feedPins(a, request.get("packages").?.list, &offered, &.{});
     try std.testing.expectEqual(@as(usize, 2), chosen.len);
     try std.testing.expectEqualStrings(
         "python-3.15=3.15.0_git20261010-r2000",
         chosen[0].scalar.text,
     );
     try std.testing.expectEqualStrings("openjdk-27-jre=27-r10000", chosen[1].scalar.text);
-    const reused = try hardenedPins(a, request.get("packages").?.list, &offered, &.{
+    const reused = try feedPins(a, request.get("packages").?.list, &offered, &.{
         "python-3.15=3.15.0_git20261017-r0", // A stock fallback is never reused.
         "openjdk-27-jre=27-r9000", // A signed older release stays reproducible.
     });
@@ -220,7 +223,7 @@ test "hardened runtime pins survive newer upstream versions and keep fixture pin
     , &diag));
     try std.testing.expectEqual(
         @as(usize, 0),
-        (try hardenedPins(a, pinned.get("packages").?.list, &offered, &.{})).len,
+        (try feedPins(a, pinned.get("packages").?.list, &offered, &.{})).len,
     );
 }
 
@@ -314,25 +317,28 @@ pub fn apkoBuild(
     try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
     const t = try b.tmp(target);
     try apko(b, config, args.items, &.{try b.absolute(t)});
-    if (mem.find(u8, try b.read(config, 1 << 20), package.hardened_repository) != null) {
+    const cfg = try b.read(config, 1 << 20);
+    for (package.pinned_repositories) |feed| {
+        if (mem.find(u8, cfg, feed) == null) continue;
         var why: @import("howl.zig").Why = .{};
-        const index = @import("published.zig").hardenedIndex(
+        const index = @import("published.zig").feedIndex(
             b.io,
             b.gpa,
+            feed,
             b.spec.arch,
             &why,
         ) catch |err|
             return b.fail(
-                "hardened feed: {s}",
-                .{if (why.text.len > 0) why.text else @errorName(err)},
+                "{s}: {s}",
+                .{ feed, if (why.text.len > 0) why.text else @errorName(err) },
             );
         const trust = [_]trusted_apk.Trusted{.{
             .name = package.repository_key,
             .key = try trusted_apk.parseKey(b.gpa, package.repository_pem),
         }};
         const installed = try b.capture(t, &.{ "bsdtar", "-xOf", t, "usr/lib/apk/db/installed" });
-        if (try trusted_apk.hardenedFallback(b.gpa, &trust, index, installed)) |name|
-            return b.fail("{s}: resolved outside the signed hardened feed", .{name});
+        if (try trusted_apk.feedFallback(b.gpa, &trust, index, installed)) |name|
+            return b.fail("{s}: resolved outside the signed feed {s}", .{ name, feed });
     }
     try b.rename(t, target);
     try b.done(target, began);

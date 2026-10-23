@@ -38,7 +38,7 @@ services:
     connect:
       - tcp/22000 udp/22000
       - tcp/443 tcp/22067 udp/3478 public
-      - udp/53 tcp/53
+    lookup: "*"
     write: /var/syncthing
     config: settings /run/config/syncthing/settings.json
     setting:
@@ -71,7 +71,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8384]
+    connect: [tcp/443 tcp/8384]
+    lookup: "*"
     read: /etc/caddy
     config:
       - gui-password /run/config/caddy/gui-password

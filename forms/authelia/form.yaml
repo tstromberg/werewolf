@@ -4,16 +4,14 @@
 # other site under DOMAIN, with certificates from Let's Encrypt. Users and
 # secrets come from the config before it serves; nobody signs up, and
 # nothing is reachable without a rule. Wolfi does not ship Authelia:
-# melange builds it from a pinned release
+# werewolf's application feed builds it from a pinned release
 # (../packages/authelia/authelia.yaml). See forms/authelia/README.md.
 base: prod
-
-recipes:
-  - ../../../packages/authelia/authelia.yaml
 
 with: [caddy]
 
 packages:
+  - authelia
   # What ../packages/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 
@@ -35,7 +33,8 @@ services:
     # netlink: Go's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/9091 loopback]
-    connect: [tcp/587 tcp/465 tcp/53 udp/53]
+    connect: [tcp/587 tcp/465]
+    lookup: "*"
     read: /etc/authelia
     config:
       - sso-users /run/config/authelia/users.yml
@@ -69,7 +68,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/9091]
+    connect: [tcp/443 tcp/9091]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

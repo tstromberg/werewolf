@@ -1788,12 +1788,33 @@ pub fn services(
         }
     }
     const out = found.values();
+    for (out) |s| if (mem.eql(u8, s.name, "unwound-age")) {
+        return f.fail(gpa, "{s}: unwound-age is reserved", .{s.path});
+    };
     std.mem.sortUnstable(Service, out, {}, struct {
         fn lt(_: void, a: Service, b: Service) bool {
             return mem.lessThan(u8, a.name, b.name);
         }
     }.lt);
     return out;
+}
+
+test "a native service cannot claim the age cache directory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    const path = "forms/site/rootfs/etc/sv/unwound-age";
+    try tmp.dir.createDirPath(io, path);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = path ++ "/service",
+        .data = "exec /bin/true\n",
+    });
+    const fm = Form{ .name = "site", .dir = "forms/site", .spec = .{ .map = &.{} } };
+    var f: Failure = .{};
+    try testing.expectError(error.Form, services(io, gpa, tmp.dir, &.{fm}, &f));
 }
 
 /// apko merges what the chain's forms give apko into the one config apko
@@ -2057,12 +2078,12 @@ test "recipes resolve sibling contexts and retain distro source discovery" {
     fm.spec = try testParse(gpa,
         \\recipes:
         \\  - ../../../packages/solr/solr.yaml
-        \\  - ../../../hardened-packages/ports/libffi/libffi.yaml
+        \\  - ../../../packages/zot/zot.yaml
     );
     const declared = try fm.recipes(io, gpa, tmp.dir);
     try testing.expectEqual(2, declared.len);
     try testing.expectEqualStrings("../packages/solr/solr.yaml", declared[0]);
-    try testing.expectEqualStrings("../hardened-packages/ports/libffi/libffi.yaml", declared[1]);
+    try testing.expectEqualStrings("../packages/zot/zot.yaml", declared[1]);
     fm.spec = try testParse(gpa, "recipes: []");
     try testing.expectEqual(0, (try fm.recipes(io, gpa, tmp.dir)).len);
 }

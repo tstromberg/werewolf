@@ -1,7 +1,7 @@
 # mastodon: Mastodon, on ruby, with PostgreSQL, Valkey, Caddy, supercronic
 # and sh-shim beside it (form.yaml's with). Wolfi does not ship Mastodon:
-# melange builds it from a pinned release in Wolfi's environment
-# (../packages/mastodon/mastodon.yaml, cmd/howl/melange.zig) into
+# werewolf's application feed builds it from a pinned release in Wolfi's
+# environment (../packages/mastodon/mastodon.yaml) into
 # /usr/lib/mastodon, its assets compiled and its gems vendored. The
 # libraries they link are named below, so the updater keeps them current.
 # Three services run it: the web (etc/sv/mastodon), the streaming server
@@ -9,10 +9,8 @@
 # its own leash. See forms/mastodon/README.md.
 base: ruby
 
-recipes:
-  - ../../../packages/mastodon/mastodon.yaml
-
 packages:
+  - mastodon
   - nodejs-24
   - jemalloc
   # Media: libvips in the web and jobs, by FFI; ffmpeg, ffprobe and file
@@ -59,7 +57,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80, tcp/443]
-    connect: [tcp/443 tcp/53 tcp/3000 tcp/4000]
+    connect: [tcp/443 tcp/3000 tcp/4000]
+    lookup: "*"
     read: /etc/caddy /data/svc/mastodon/system
     config: settings /run/config/caddy/settings.json
     setting: domain hostname as DOMAIN
@@ -126,9 +125,9 @@ services:
     listen: [tcp/3000 loopback]
     connect:
       - tcp/443 tcp/80 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     # What Paperclip runs on an upload, through /bin/sh: each by its narrow
     # link, with no network, its own pledge, and the upload's directory alone.
     run: /usr/bin/file /usr/bin/ffprobe /usr/bin/ffmpeg
@@ -192,9 +191,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect proc exec landlock seccomp
     connect:
       - tcp/443 tcp/80 tcp/587 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     # Its secrets, which the web's secrets.rb made (/usr/lib/mastodon/.env.production).
     read: /data/svc/mastodon/env
     write: /data/svc/mastodon/system

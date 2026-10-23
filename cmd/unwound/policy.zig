@@ -39,10 +39,19 @@ pub const Why = enum {
     granted,
     /// screened matched only a screened `*`: screen.zig decides the rest.
     screened,
+    /// system_domain is an assigned suffix shared by DNS-enabled services.
+    /// It still passes tunnel screening, but will skip the age gate.
+    system_domain,
     /// unsupported is a type no grant can name: ANY, AXFR, UPDATE's.
     unsupported,
     no_grant,
 };
+
+/// Only an arbitrary screened wildcard needs domain-age evidence. Explicit
+/// grants and the assigned system domain bypass age, not tunnel screening.
+pub fn needsAge(why: Why) bool {
+    return why == .screened;
+}
 
 pub const Decision = struct {
     allow: bool,
@@ -53,6 +62,7 @@ pub const Decision = struct {
 
 pub const Policy = struct {
     users: dns.Users = .{},
+    system_domain: ?wire.Name = null,
     grants: [max_grants]Grant = undefined,
     n: usize = 0,
     /// generation identifies the policy text in audit records.
@@ -117,6 +127,25 @@ pub const Policy = struct {
         return p.users.ids[s];
     }
 
+    /// setSystemDomain accepts a DHCP or boot-config domain, not a field from
+    /// a DNS client. An empty value clears a prior assignment on renewal.
+    pub fn setSystemDomain(p: *Policy, raw: []const u8) bool {
+        p.system_domain = null;
+        if (raw.len == 0) return true;
+        var canonical: [253]u8 = undefined;
+        const normalized = dns.normalizeSystemDomain(raw, &canonical) orelse return false;
+        p.system_domain = wire.Name.fromText(normalized) catch return false;
+        return true;
+    }
+
+    fn inSystemDomain(p: *const Policy, n: *const wire.Name) bool {
+        const base = if (p.system_domain) |*d| d.text() else return false;
+        const query = n.text();
+        return mem.eql(u8, query, base) or
+            (query.len > base.len and mem.endsWith(u8, query, base) and
+                query[query.len - base.len - 1] == '.');
+    }
+
     /// decide answers whether service s may ask for name and type t. A
     /// grant that is not screened wins over one that is, whatever the order.
     pub fn decide(p: *const Policy, s: u8, n: *const wire.Name, t: u16) Decision {
@@ -130,6 +159,7 @@ pub const Policy = struct {
             }
             return .{ .allow = true, .why = .granted, .line = g.line };
         }
+        if (p.inSystemDomain(n)) return .{ .allow = true, .why = .system_domain };
         if (screened != 0) return .{ .allow = true, .why = .screened, .line = screened };
         return .{ .allow = false, .why = .no_grant };
     }
@@ -231,6 +261,40 @@ test "grants: exact names, subtrees, wildcards and their types" {
     for (cases) |c| try testing.expectEqual(c.d, p.decide(c.s, &name(c.n), c.t));
     try testing.expectEqual(null, p.service(.{ 127, 53, 0, 4 }));
     try testing.expectEqual(null, p.service(.{ 127, 0, 0, 1 }));
+}
+
+test "assigned system domain is screened and shared only by DNS-enabled services" {
+    var p: Policy = .{};
+    try p.parse(example);
+    try testing.expect(p.setSystemDomain("Corp.Example.COM."));
+    try testing.expectEqualStrings("corp.example.com", p.system_domain.?.text());
+    const cases = [_]struct { s: u8, n: []const u8, t: u16, allow: bool, why: Why }{
+        .{ .s = 0, .n = "corp.example.com", .t = 1, .allow = true, .why = .system_domain },
+        .{ .s = 0, .n = "host.corp.example.com", .t = 16, .allow = true, .why = .system_domain },
+        .{ .s = 1, .n = "host.corp.example.com", .t = 1, .allow = true, .why = .system_domain },
+        .{ .s = 0, .n = "evilcorp.example.com", .t = 1, .allow = false, .why = .no_grant },
+        .{ .s = 0, .n = "corp.example.com.evil", .t = 1, .allow = false, .why = .no_grant },
+        .{ .s = 0, .n = "corp.example.com", .t = 255, .allow = false, .why = .unsupported },
+    };
+    for (cases) |c| {
+        const got = p.decide(c.s, &name(c.n), c.t);
+        try testing.expectEqual(c.allow, got.allow);
+        try testing.expectEqual(c.why, got.why);
+    }
+    for ([_][]const u8{
+        "a",
+        ".example.com",
+        "example..com",
+        "example.com..",
+        "*.example.com",
+        "a_b.example.com",
+    }) |bad|
+        try testing.expect(!p.setSystemDomain(bad));
+    try testing.expect(p.system_domain == null);
+    try testing.expect(p.setSystemDomain(""));
+    try testing.expect(needsAge(.screened));
+    try testing.expect(!needsAge(.system_domain));
+    try testing.expect(!needsAge(.granted));
 }
 
 test "malformed lookup lines fail the whole policy" {

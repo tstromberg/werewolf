@@ -45,7 +45,8 @@ services:
     run: /usr/bin/grype
     user: grype
     pledge: stdio rpath wpath proc exec inet unix connect
-    connect: [tcp/443 udp/53 tcp/53 /run/svc/postgres/.s.PGSQL.5432]
+    connect: [tcp/443 /run/svc/postgres/.s.PGSQL.5432]
+    lookup: "*"
     read: /
     # status reads its findings.
     share: shared

@@ -28,7 +28,8 @@ services:
     # netlink: Go's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/8080 loopback]
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     config: settings /run/config/headscale/settings.json
     setting: base-url url required as HEADSCALE_SERVER_URL
     render: env site
@@ -77,7 +78,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    connect: [tcp/443 tcp/8080]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL

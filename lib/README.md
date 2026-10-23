@@ -89,9 +89,11 @@ The steps of making a slot that howl's build (`cmd/howl/build.zig`) and,
 in time, slot-update share, as functions of bytes rather than paths:
 gunzip and unzstd; the arm64 zboot unwrap and x86_64's `vmlinux`; the
 kernel config's rules, which the build checks the `linux-werewolf`
-package's `boot/config-*` against (`configMisses`); and
-mkfs.erofs's options and the version check that refuses one before 1.9,
-which writes empty files from a tar. See
+package's `boot/config-*` against (`configMisses`); the program check,
+which refuses a root holding an executable stack or a program at a fixed
+address, where ASLR cannot move its code (`judgeElf`), but for those
+`elf_exceptions` names with a reason; and mkfs.erofs's options and the
+version check that refuses one before 1.9, which writes empty files from a tar. See
 [docs/design/howl-build.md](../docs/design/howl-build.md).
 
 ## cmdline

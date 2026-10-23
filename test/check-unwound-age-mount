@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Check SQLite WAL writes in a private mount namespace behind a read-only view.
+
+This verifies one mount boundary, not every way a privileged root process
+could attack a worker. The worker must also drop capabilities and deny tracing.
+"""
+
+import errno
+import ctypes
+import os
+from pathlib import Path
+import sqlite3
+import socket
+import subprocess
+import sys
+import tempfile
+
+
+def run(*args):
+    subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
+
+
+def denied(path):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as error:
+        assert error.errno == errno.EROFS, (path, error)
+    else:
+        os.close(fd)
+        raise AssertionError(f"read-only view accepted a write: {path}")
+
+
+def denied_without_ptrace(path):
+    probe = '''import os, sys
+try:
+    fd = os.open(sys.argv[1], os.O_WRONLY)
+except PermissionError:
+    pass
+else:
+    os.close(fd)
+    raise AssertionError('private writer path was writable')
+'''
+    subprocess.run(
+        ['setpriv', '--bounding-set=-sys_ptrace', sys.executable, '-c', probe, str(path)],
+        check=True,
+    )
+
+
+def writer(directory):
+    run('mount', '--make-rprivate', '/')
+    os.setgroups([])
+    os.setgid(74)
+    os.setuid(74)
+    assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(directory / 'age.sock'))
+    listener.listen(1)
+    print(f'ready {os.getpid()}', flush=True)
+    assert sys.stdin.readline() == 'write\n'
+    db = sqlite3.connect(str(directory / 'age.db'))
+    assert db.execute('PRAGMA journal_mode=WAL').fetchone() == ('wal',)
+    db.execute('CREATE TABLE evidence (domain TEXT PRIMARY KEY)')
+    db.execute("INSERT INTO evidence VALUES ('example.com')")
+    db.commit()
+    print('written', flush=True)
+    assert sys.stdin.readline() == 'connect\n'
+    with listener.accept()[0] as peer:
+        peer.sendall(b'age')
+    assert sys.stdin.readline() == 'close\n'
+    db.close()
+    listener.close()
+
+
+def inside():
+    run('mount', '--make-rprivate', '/')
+    with tempfile.TemporaryDirectory(prefix='unwound-age-mount-') as name:
+        directory = Path(name)
+        os.chown(directory, 74, 74)
+        worker = subprocess.Popen(
+            ['unshare', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
+             '--writer', name],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        mounted = False
+        try:
+            ready = worker.stdout.readline().split()
+            assert ready[0] == 'ready', ready
+            writer_pid = int(ready[1])
+            run('mount', '--bind', name, name)
+            run('mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec,nosymfollow', name)
+            mounted = True
+            alias = Path(tempfile.mkdtemp(prefix='oci-age-alias-'))
+            run('mount', '--bind', name, str(alias))
+            for suffix in ('age.db', 'age.db-wal', 'age.db-shm'):
+                denied(alias / suffix)
+            run('umount', str(alias))
+            alias.rmdir()
+            remount = subprocess.run(
+                ['setpriv', '--bounding-set=-sys_admin', 'mount',
+                 '-o', 'remount,bind,rw', name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            assert remount.returncode != 0, 'root without CAP_SYS_ADMIN remounted age data'
+            for suffix in ('age.db', 'age.db-wal', 'age.db-shm'):
+                denied(directory / suffix)
+            try:
+                os.unlink(directory / 'age.sock')
+            except OSError as error:
+                assert error.errno == errno.EROFS, error
+            else:
+                raise AssertionError('root replaced the protected age socket')
+            worker.stdin.write('write\n')
+            worker.stdin.flush()
+            assert worker.stdout.readline() == 'written\n'
+            for suffix in ('age.db', 'age.db-wal', 'age.db-shm'):
+                assert (directory / suffix).exists(), suffix
+                denied(directory / suffix)
+                denied_without_ptrace(
+                    Path(f'/proc/{writer_pid}/root') / directory.relative_to('/') / suffix
+                )
+            held = [entry for entry in Path(f'/proc/{writer_pid}/fd').iterdir()
+                    if 'age.db' in os.readlink(entry)]
+            assert held, 'SQLite did not keep a database descriptor'
+            for entry in held:
+                denied_without_ptrace(entry)
+            worker.stdin.write('connect\n')
+            worker.stdin.flush()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                peer.connect(str(directory / 'age.sock'))
+                assert peer.recv(3) == b'age'
+            worker.stdin.write('close\n')
+            worker.stdin.flush()
+            assert worker.wait(timeout=5) == 0
+            print('age mount: private SQLite WAL and immutable socket pass')
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait()
+            if mounted:
+                run('umount', name)
+
+
+if __name__ == '__main__':
+    if sys.platform != 'linux' or os.geteuid() != 0:
+        sys.exit('check-unwound-age-mount requires root on Linux')
+    if len(sys.argv) == 3 and sys.argv[1] == '--writer':
+        writer(Path(sys.argv[2]))
+    elif len(sys.argv) == 2 and sys.argv[1] == '--inside':
+        inside()
+    elif len(sys.argv) == 1:
+        subprocess.run(
+            ['unshare', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()), '--inside'],
+            check=True,
+        )
+    else:
+        sys.exit(__doc__)

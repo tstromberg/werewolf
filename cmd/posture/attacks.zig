@@ -454,12 +454,14 @@ fn policyPort(p: *Posture) ?u16 {
         p.gpa,
         .limited(64 << 10),
     ) catch return null;
-    return firstTcpPort(net);
+    // A local DNSSEC validator's port 53 is deliberately reserved for
+    // _unwoundnet, even when a service listens there.
+    return firstTcpPort(net, exists(p.io, "/usr/share/werewolf/dnssec-local"));
 }
 
 /// firstTcpPort returns the first port of a `listen tcp PORT` or
 /// `connect UID tcp PORT` line in a compiled fence policy.
-fn firstTcpPort(net: []const u8) ?u16 {
+fn firstTcpPort(net: []const u8, skip_local_dns: bool) ?u16 {
     var lines = std.mem.tokenizeScalar(u8, net, '\n');
     while (lines.next()) |line| {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
@@ -467,7 +469,9 @@ fn firstTcpPort(net: []const u8) ?u16 {
         if (std.mem.eql(u8, key, "connect")) _ = words.next(); // skip the user
         if (!std.mem.eql(u8, key, "listen") and !std.mem.eql(u8, key, "connect")) continue;
         if (!std.mem.eql(u8, words.next() orelse continue, "tcp")) continue;
-        return std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
+        const port = std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
+        if (skip_local_dns and port == 53) continue;
+        return port;
     }
     return null;
 }
@@ -574,17 +578,22 @@ fn runs(path: [:0]const u8) bool {
 
 test firstTcpPort {
     const t = std.testing;
-    try t.expectEqual(@as(?u16, 80), firstTcpPort("listen tcp 80\n"));
-    try t.expectEqual(@as(?u16, 443), firstTcpPort("connect 69 tcp 443\n"));
+    try t.expectEqual(@as(?u16, 80), firstTcpPort("listen tcp 80\n", false));
+    try t.expectEqual(@as(?u16, 443), firstTcpPort("connect 69 tcp 443\n", false));
     try t.expectEqual(
         @as(?u16, 5432),
-        firstTcpPort("connect all icmp\nlisten tcp 5432 loopback\n"),
+        firstTcpPort("connect all icmp\nlisten tcp 5432 loopback\n", false),
     );
-    try t.expectEqual(@as(?u16, 22), firstTcpPort("connect 69 udp 53\nlisten tcp 22\n"));
+    try t.expectEqual(@as(?u16, 22), firstTcpPort("connect 69 udp 53\nlisten tcp 22\n", false));
     try t.expectEqual(
         @as(?u16, 8080),
-        firstTcpPort("listen tcp x\nmetadata 300\nlisten tcp 8080\n"),
+        firstTcpPort("listen tcp x\nmetadata 300\nlisten tcp 8080\n", false),
     );
-    try t.expectEqual(@as(?u16, null), firstTcpPort("connect all icmp\nmetadata 300\n"));
-    try t.expectEqual(@as(?u16, null), firstTcpPort(""));
+    try t.expectEqual(@as(?u16, null), firstTcpPort("connect all icmp\nmetadata 300\n", false));
+    try t.expectEqual(@as(?u16, null), firstTcpPort("", false));
+    try t.expectEqual(@as(?u16, 25), firstTcpPort("listen tcp 53 loopback\nlisten tcp 25\n", true));
+    try t.expectEqual(
+        @as(?u16, 53),
+        firstTcpPort("listen tcp 53 loopback\nlisten tcp 25\n", false),
+    );
 }

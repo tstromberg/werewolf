@@ -6,8 +6,8 @@
 # RCON or query port. The world is in /data. See forms/minecraft/README.md.
 base: jre
 
-recipes:
-  - ../../../packages/minecraft/minecraft.yaml
+packages:
+  - minecraft
 
 # make check's (forms/README.md). The game port speaks Minecraft's
 # protocol, not HTTP. The heap and the world sit beside the machine's.
@@ -38,7 +38,8 @@ services:
     # netlink: the JVM lists the host's addresses.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/25565]
-    connect: [tcp/443 tcp/53 udp/53]
+    connect: [tcp/443]
+    lookup: "*"
     config: settings /run/config/minecraft/settings.json
     setting: players string... required
     render: json minecraft.json
