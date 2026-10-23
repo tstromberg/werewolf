@@ -406,6 +406,19 @@ test "PSL boundaries keep private tenants separate from registered owners" {
     try t.expect(boundary("co.uk", fixture_psl) == .unknown);
 }
 
+test "pinned PSL handles ICANN, PRIVATE, wildcard and Unicode A-label rules" {
+    const t = std.testing;
+    const psl = @embedFile("data/public_suffix_list.ascii.dat");
+    try t.expectEqualStrings("example.co.uk", boundary("a.example.co.uk", psl).registered);
+    try t.expectEqualStrings("github.io", boundary("github.io", psl).registered);
+    try t.expect(boundary("alice.github.io", psl) == .tenant);
+    try t.expectEqualStrings("www.ck", boundary("a.www.ck", psl).registered);
+    try t.expectEqualStrings(
+        "x.xn--aroport-bya.ci",
+        boundary("x.xn--aroport-bya.ci", psl).registered,
+    );
+}
+
 test "RDAP age takes registration resets and refuses ambiguous evidence" {
     const t = std.testing;
     const base =

@@ -28,7 +28,7 @@ pub fn rdapUrl(gpa: mem.Allocator, domain: []const u8, body: []const u8, out: []
     var best_labels: usize = 0;
     var best_url: ?[]const u8 = null;
     for (data.services) |service| {
-        if (service[0].len > 256 or service[1].len > 16) return null;
+        if (service[0].len > 512 or service[1].len > 16) return null;
         for (service[0]) |suffix| {
             if (!validName(suffix) or !labelSuffix(domain, suffix)) continue;
             const count = labels(suffix);
@@ -130,4 +130,19 @@ test "RDAP bootstrap rejects unsafe URL authorities and malformed files" {
     }
     try t.expect(rdapUrl(t.allocator, "example.com", "{}", &out) == null);
     try t.expect(rdapUrl(t.allocator, "example.com", "[]", &out) == null);
+}
+
+test "pinned IANA bootstrap selects actual registries and refuses HTTP-only ones" {
+    const t = std.testing;
+    const body = @embedFile("data/rdap-dns.json");
+    var out: [512]u8 = undefined;
+    try t.expectEqualStrings(
+        "https://rdap.verisign.com/com/v1/domain/example.com",
+        rdapUrl(t.allocator, "example.com", body, &out).?,
+    );
+    try t.expectEqualStrings(
+        "https://rdap.nominet.uk/uk/domain/example.co.uk",
+        rdapUrl(t.allocator, "example.co.uk", body, &out).?,
+    );
+    try t.expect(rdapUrl(t.allocator, "example.kg", body, &out) == null);
 }

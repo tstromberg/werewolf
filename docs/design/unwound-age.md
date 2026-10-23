@@ -1,7 +1,7 @@
 # Domain age for screened DNS
 
-Status: offline classifier and SQLite schema, 2026-10-23. No age decision is
-active in unwound. This builds on the [allowance policy](unwound-policy.md).
+Status: offline classifier, pinned data and SQLite schema, 2026-10-23. No age
+decision is active in unwound. This builds on the [allowance policy](unwound-policy.md).
 
 ## Decision
 
@@ -94,9 +94,16 @@ exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, expiry and clock boundaries with the
 90-day default. Cached evidence is reclassified by its fetch date and domain.
 PSL and IANA versions are retained for audit, not cache invalidation. It
-accepts only normalized ASCII PSL input. The updater must convert Unicode
-PSL rules to A-labels before using it. `cmd/unwound/bootstrap.zig` selects a
-pinned IANA entry by label-wise longest match and requires HTTPS. Run fetchers
+accepts only normalized ASCII PSL input. `tools/update-unwound-age-data`
+converts the official PSL to A-labels with `idna==3.20` and pins it alongside
+the IANA RDAP DNS bootstrap in the source tree's `cmd/unwound/data`. The future
+worker will include these reviewed files in the image. `sources.json` records
+source URLs, SHA-256 hashes, versions and generation details. Refresh by
+downloading the two official URLs into local files and passing both paths to
+the updater; review the data diff before building an image. The updater makes
+no network requests; the planned worker will use the pinned image files.
+`cmd/unwound/bootstrap.zig` selects a pinned IANA entry by label-wise longest
+match and requires HTTPS. Run fetchers
 against fixture HTTPS servers and inspect audit records in observe mode.
 Enable the gate after native tests cover initial boot, renewal, restart,
 outage, rollback, CT fallback, LRU eviction, provenance, file authority and
