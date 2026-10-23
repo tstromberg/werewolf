@@ -680,6 +680,9 @@ const Frontend = struct {
             if (caches[s].find(q.name.text(), t, now())) |e| {
                 f.stats.cached += 1;
                 const records = e.records(&q.name, now(), &f.records);
+                const cached: Slot = .{ .service = s, .name = q.name, .type = t };
+                if (f.forbiddenAlias(&cached, records)) |to|
+                    return f.refuse(client, s, &q, "alias", d.line, .{ .alias = &to });
                 f.audit(s, &q.name, q.type, true, @tagName(d.why), d.line, .{
                     .rcode = e.rcode,
                     .answers = records.len,
@@ -823,7 +826,7 @@ const Frontend = struct {
                     if (caches[slot.service].find(slot.name.text(), slot.type, now())) |e| {
                         f.stats.cached += 1;
                         const records = e.records(&slot.name, now(), &f.records);
-                        if (forbiddenAlias(slot, records)) |to| {
+                        if (f.forbiddenAlias(slot, records)) |to| {
                             f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
                             continue;
                         }
@@ -911,18 +914,22 @@ const Frontend = struct {
         return @as(u16, gen) << 8 | @as(u16, @intCast(i));
     }
 
-    fn forbiddenAlias(slot: *const Slot, records: []const wire.Record) ?wire.Name {
+    /// A checked origin's aliases stay in its registered domain. An exempt
+    /// origin does not confer its exemption on a screened target.
+    fn forbiddenAlias(f: *Frontend, slot: *const Slot, records: []const wire.Record) ?wire.Name {
         if (slot.type == .cname) return null;
         for (records) |*record| {
             if (record.type != .cname) continue;
             const to = wire.target(record);
-            if (!policy.decide(slot.service, &to, @backingInt(slot.type)).allow or
-                (slot.age_required and
-                    !age_gate.sameRegistered(
-                        slot.name.text(),
-                        to.text(),
-                        @embedFile("data/public_suffix_list.ascii.dat"),
-                    ))) return to;
+            const target = policy.decide(slot.service, &to, @backingInt(slot.type));
+            if (!target.allow) return to;
+            if (slot.age_required) {
+                if (!age_gate.sameRegistered(
+                    slot.name.text(),
+                    to.text(),
+                    @embedFile("data/public_suffix_list.ascii.dat"),
+                )) return to;
+            } else if (f.enforce_age and @import("policy.zig").needsAge(target.why)) return to;
         }
         return null;
     }
@@ -957,7 +964,7 @@ const Frontend = struct {
             var a: wire.Answer = undefined;
             wire.parseResponse(msg, asked, &a) catch f.fail("upstream sent garbage");
             a.authenticated = a.authenticated and f.trust_ad;
-            if (forbiddenAlias(slot, a.slice())) |to| {
+            if (f.forbiddenAlias(slot, a.slice())) |to| {
                 f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
                 continue;
             }

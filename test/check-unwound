@@ -42,6 +42,9 @@ lookup 2001 short.example.test A
 lookup 2001 zero.example.test A
 lookup 2001 gone.example.test A
 lookup 2001 delayed.example.test A
+lookup 2001 revoked-alias.example.test A
+lookup 2002 explicit-alias.example.test A
+lookup 2002 revoked-alias.example.test A
 lookup 2005 * A AAAA
 dns-direct 2005
 connect 2005 udp 53
@@ -121,6 +124,17 @@ def answer(query, tcp):
             return [reply([], flags=0x8380)]
         txt = bytes([255]) + b'x' * 255
         return [reply([record(qname, 16, txt)] * 3)]
+    aliases = {
+        'assigned-alias.assigned.test': 'young.com',
+        'explicit-alias.example.test': 'young.com',
+        'revoked-alias.example.test': 'edge.assigned.test',
+        'local-alias.example.com': 'edge.example.com',
+        'cross-alias.example.com': 'young.com',
+    }
+    if name in aliases and qtype == 1:
+        target = aliases[name]
+        return [reply([record(qname, 5, encode(target)),
+                       record(target, 1, a('192.0.2.50'))])]
     table = {
         ('api.example.test', 1): [record(qname, 1, a('192.0.2.10'))],
         ('api.example.test', 28): [record(qname, 28, socket.inet_pton(socket.AF_INET6, '2001:db8::10'))],
@@ -589,12 +603,19 @@ def age_checks(client, work):
         assert select.select([client.stdout], [], [], 15)[0], ('timeout', request)
         return json.loads(client.stdout.readline())
 
-    def ask(uid, name):
-        return send(dict(uid=uid, name=name, type=1))
+    def ask(uid, name, **extra):
+        return send(dict(uid=uid, name=name, type=1, **extra))
 
     assert ask(2001, 'api.example.test')['rcode'] == 0
+    assert ask(2001, 'alias-ok.example.test')['rcode'] == 0
     assert ask(2002, 'open.example.com')['rcode'] == 3
     assert ask(2002, 'young.com')['rcode'] == 5
+    assert ask(2002, 'local-alias.example.com')['rcode'] == 0
+    assert ask(2002, 'cross-alias.example.com')['rcode'] == 5
+    aliases = {
+        'explicit_udp': ask(2002, 'explicit-alias.example.test')['rcode'],
+        'explicit_tcp': ask(2002, 'explicit-alias.example.test', tcp=True)['rcode'],
+    }
     assert ask(2002, 'unknown.example.net')['rcode'] == 5
     assert 'young.com' not in [json.loads(x)['name']
         for x in (work / 'upstream.log').read_text().splitlines()]
@@ -605,6 +626,16 @@ def age_checks(client, work):
     assert send(dict(system_domain='assigned.test')) == {}
     assert ask(2001, 'host.assigned.test')['rcode'] == 3
     assert ask(2002, 'host.assigned.test')['rcode'] == 3
+    aliases['assigned'] = ask(2002, 'assigned-alias.assigned.test', tcp=True)['rcode']
+    assert ask(2001, 'revoked-alias.example.test')['rcode'] == 0
+    assert ask(2002, 'revoked-alias.example.test')['rcode'] == 0
+    assert send(dict(system_domain='')) == {}
+    aliases['revoked'] = ask(2001, 'revoked-alias.example.test', tcp=True)['rcode']
+    aliases['revoked_wildcard'] = ask(2002, 'revoked-alias.example.test', tcp=True)['rcode']
+    assert all(rcode == 5 for rcode in aliases.values()), aliases
+    upstream = [json.loads(x)['name'].lower()
+                for x in (work / 'upstream.log').read_text().splitlines()]
+    assert upstream.count('revoked-alias.example.test') == 2, upstream
 
 
 def age_live_checks(client, work, age_dir):

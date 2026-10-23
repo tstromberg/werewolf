@@ -15,6 +15,11 @@ DHCP option 15; a domain assignment can change during DHCP renewal.
 Unknown evidence is refused. Without the marker, the observer records PSL
 boundaries without changing answers.
 
+Aliases from an age-checked name must stay in its checked registered domain.
+An exempt name may only alias to another exempt name; other chains are
+refused. Cached aliases are checked against the current grants again,
+including changes to the assigned system domain.
+
 The age belongs to the registered domain, never the whole QNAME. Use the
 ICANN section of the Public Suffix List (PSL) to find that boundary. A name
 below a PRIVATE rule is a tenant: its provider's old registration does not
