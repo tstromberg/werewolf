@@ -90,9 +90,10 @@ marked, 24-hour provisional decision from old CT history. It cannot override
 a young or ambiguous RDAP answer. One isolated age authority uses [RDAP bootstrap]
 over HTTPS and SQLite to retain the last 20,000 domains and the
 requests that caused external checks. DNS workers receive bounded verdicts
-over IPC. UID and service namespace come from the source label; exact process
-identity needs a kernel-backed attribution path. The current local screen
-keeps its 3.5-bit entropy threshold and distinct-name budgets.
+over IPC. UID and service namespace come from the source label. A passed
+socket retains its service identity; individual process identity is not
+claimed. The local screen keeps its 3.5-bit entropy threshold and
+distinct-name budgets.
 
 ## Drawbacks
 

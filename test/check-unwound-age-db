@@ -48,13 +48,21 @@ def rejected(sql, params):
     raise AssertionError("invalid age evidence or invented process identity accepted")
 
 
+for column, value in (('process_pid', 123), ('process_start_ticks', 456),
+                      ('process_exe', '/usr/bin/invented'), ('netns_inode', 789)):
+    rejected(
+        f"""INSERT INTO age_check
+           (domain, started_at, cause, request_id, dns_id, qname, qtype,
+            transport, source_label, service_uid, policy_namespace,
+            policy_generation, provenance, {column})
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (*request, value),
+    )
 rejected(
-    """INSERT INTO age_check
-       (domain, started_at, cause, request_id, dns_id, qname, qtype,
-        transport, source_label, service_uid, policy_namespace,
-        policy_generation, provenance, process_pid)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-    (*request, 123),
+    """UPDATE age_check SET provenance='kernel_verified', process_pid=123,
+       process_start_ticks=456, process_exe='/usr/bin/invented', netns_inode=789
+       WHERE id=?""",
+    (check_id,),
 )
 rejected(
     """INSERT INTO domain_age

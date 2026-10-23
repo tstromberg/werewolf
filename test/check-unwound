@@ -278,12 +278,12 @@ def read_name(msg, at):
         at += 1 + msg[at]
     return '.'.join(labels), at + 1
 
-def ask(r):
+def ask(r, passed=None):
     query = r.get('raw')
     query = bytes.fromhex(query) if query else (struct.pack('!HHHHHH', 0x4242, 0x0100, 1, 0, 0, 0) +
                                                 encode(r['name']) + struct.pack('!HH', r['type'], 1))
     kind = socket.SOCK_STREAM if r.get('tcp') else socket.SOCK_DGRAM
-    s = socket.socket(socket.AF_INET, kind)
+    s = passed if passed is not None else socket.socket(socket.AF_INET, kind)
     s.settimeout(r.get('timeout', 8))
     server = r.get('server', '127.0.0.53')
     try:
@@ -355,7 +355,31 @@ def parse(msg):
     return {'id': msg[0] << 8 | msg[1], 'rcode': flags & 0xf, 'tc': bool(flags & 0x200), 'answers': answers,
             'ttls': ttls, 'rdata': rdata, 'ad': bool(flags & 0x20)}
 
+def passed_socket(r):
+    """The creator exits before another UID uses its socket."""
+    parent, child = socket.socketpair()
+    pid = os.fork()
+    if pid == 0:
+        parent.close()
+        os.setgroups([])
+        os.setgid(r['socket_uid'])
+        os.setuid(r['socket_uid'])
+        kind = socket.SOCK_STREAM if r.get('tcp') else socket.SOCK_DGRAM
+        sock = socket.socket(socket.AF_INET, kind)
+        child.sendmsg([b'F'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                               struct.pack('i', sock.fileno()))])
+        os._exit(0)
+    child.close()
+    data, rights, flags, _ = parent.recvmsg(1, socket.CMSG_SPACE(struct.calcsize('i')))
+    parent.close()
+    assert os.waitpid(pid, 0)[1] == 0
+    assert data == b'F' and flags == 0 and len(rights) == 1
+    level, kind, descriptor = rights[0]
+    assert (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+    return socket.socket(fileno=struct.unpack('i', descriptor)[0])
+
 def probe(r):
+    passed = passed_socket(r) if 'socket_uid' in r else None
     reader, writer = os.pipe()
     pid = os.fork()
     if pid == 0:
@@ -367,13 +391,17 @@ def probe(r):
                 os.setuid(r['uid'])
             start = time.monotonic()
             result = (pipeline(r) if r.get('pipeline') else
-                      many(r) if r.get('parallel') else ask(r))
+                      many(r) if r.get('parallel') else ask(r, passed))
             result['ms'] = int((time.monotonic() - start) * 1000)
+            if passed is not None:
+                result['sender_uid'] = os.getuid()
         except Exception as e:
             result = {'error': repr(e)}
         os.write(writer, json.dumps(result).encode())
         os._exit(0)
     os.close(writer)
+    if passed is not None:
+        passed.close()
     out = b''
     while chunk := os.read(reader, 65536):
         out += chunk
@@ -670,6 +698,10 @@ def age_live_checks(client, work, age_dir):
     for domain in ('expires.com', 'ctexpires.com'):
         assert ask(domain)['answers'] == ['192.0.2.60']
         assert ask(domain, tcp=True)['answers'] == ['192.0.2.60']
+    for domain, tcp in (('handoff.com', False), ('handofftcp.com', True)):
+        assert ask(domain, uid=2001, tcp=tcp)['rcode'] == 5
+        result = ask(domain, uid=2001, socket_uid=2002, tcp=tcp)
+        assert result['rcode'] == 3 and result['sender_uid'] == 2001, result
     assert ask('a.mature.com')['rcode'] == 3
     assert ask('b.mature.com')['rcode'] == 3
     assert ask('young.com')['rcode'] == 5
@@ -683,6 +715,13 @@ def age_live_checks(client, work, age_dir):
         trigger = db.execute('SELECT qname,qtype,transport,service_uid,policy_namespace '
                              'FROM age_check WHERE domain=?', ('mature.com',)).fetchone()
         assert trigger == ('a.mature.com', 1, 'udp', 2002, 'uid:2002'), trigger
+        for domain, transport in (('handoff.com', 'udp'), ('handofftcp.com', 'tcp')):
+            trigger = db.execute('SELECT qname,transport,source_label,service_uid,'
+                                 'policy_namespace,provenance,process_pid,process_start_ticks,'
+                                 'process_exe,netns_inode FROM age_check WHERE domain=?',
+                                 (domain,)).fetchone()
+            assert trigger == (domain, transport, '127.53.0.2', 2002, 'uid:2002',
+                               'uid_only', None, None, None, None), trigger
         assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
                           ('young.com',)).fetchone() == ('rdap', 'valid')
         assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
@@ -726,6 +765,10 @@ def age_live_checks(client, work, age_dir):
                           ('timeout.com',)).fetchone() == (None,)
         assert db.execute('SELECT count(*) FROM domain_age WHERE domain=?',
                           ('timeout.com',)).fetchone() == (0,)
+        assert db.execute('''SELECT count(*) FROM age_check
+            WHERE provenance != 'uid_only' OR process_pid IS NOT NULL
+               OR process_start_ticks IS NOT NULL OR process_exe IS NOT NULL
+               OR netns_inode IS NOT NULL''').fetchone() == (0,)
 
 
 def checks(client, work):

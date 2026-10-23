@@ -81,6 +81,8 @@ still apply.
 
 The [age evidence authority](unwound-age-authority.md) specifies which
 request fields can be trusted and how the SQLite files must be protected.
+Request attribution deliberately stops at the kernel-bound socket UID and
+policy namespace; individual process identity is not claimed.
 
 ## Rollout and checks
 

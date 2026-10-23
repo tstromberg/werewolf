@@ -1,8 +1,7 @@
 # Authority for domain-age evidence
 
-Status: implemented with a protected mount view and a native fixture. Full
-image boot validation remains a release check; see the
-[domain-age design](unwound-age.md).
+Status: implemented with a protected mount view and checked in native
+fixtures and booted images. See the [domain-age design](unwound-age.md).
 
 ## Request provenance
 
@@ -16,13 +15,19 @@ The request fields in `age_check` are immutable after insertion. A cached
 domain may pin only a check for that same registered domain; completion and
 provider-result fields may be updated when the external check finishes.
 
-The schema has nullable PID, process start time, executable and network
-namespace inode fields. `provenance=uid_only` requires them to be NULL. A
-DNS socket does not identify the individual process that sent a datagram,
-and this image has no BPF syscall or tracing support. Do not infer a PID by
-racing `/proc` or trusting a self-reported name. Exact process attribution
-requires a separate kernel-backed provenance path, tested with fork/exec and
-socket handoff, before those fields may be filled.
+Decided 2026-10-23: attribution stops at the kernel-bound socket UID and
+policy namespace. A socket can be inherited or passed to another process;
+its service identity does not identify the current sender. Do not infer a
+PID by racing `/proc` or trusting a self-reported name. The image keeps BPF
+and tracing disabled and adds no kernel extension for process attribution.
+
+The schema retains nullable PID, process start time, executable and network
+namespace inode fields for compatibility. The writer always records
+`provenance=uid_only` and leaves all four fields NULL. Integration tests pass
+UDP and TCP sockets to another UID after their creator exits, then check
+the exact DNS request, original socket UID, source label and policy namespace
+in SQL. Storage tests refuse invented process fields and later changes to
+the recorded identity.
 
 ## SQLite authority
 

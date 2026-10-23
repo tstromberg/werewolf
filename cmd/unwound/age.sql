@@ -60,7 +60,8 @@ END;
 -- One row for each external age check, including attempts that fail. This is
 -- intentionally independent of domain_age so LRU eviction does not erase the
 -- first request that caused an RDAP/crt.sh lookup. A scheduled refresh has no DNS
--- request. pid/exe/netns are NULL until independently verified by the kernel.
+-- request. Attribution stops at the kernel-bound socket UID. The process
+-- columns remain NULL and are retained for schema compatibility.
 CREATE TABLE IF NOT EXISTS age_check (
     id INTEGER PRIMARY KEY,
     domain TEXT NOT NULL COLLATE BINARY,
