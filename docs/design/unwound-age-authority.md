@@ -47,14 +47,20 @@ external checks are not connected.
 The bounded fetcher stream and writer-side evidence conversion now have host
 tests; `make check-unwound-age-transport` checks its framing in Linux. The
 frontend's reply validator independently derives the PSL boundary and refuses
-a mature reply naming another registered domain. These pieces do not yet
-change DNS answers.
+a mature reply naming another registered domain. An immutable image marker,
+`/usr/share/werewolf/age-enforce`, can select the staged DNS wait path; the
+native `check-unwound-age` fixture uses it to verify unknown-age refusal and
+the assigned-domain bypass. No production image installs the marker. The
+current worker can return only unknown, and no live evidence can authorize a
+name yet.
 
 `test/check-unwound-age-mount` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers
 its directory in the main namespace. SQLite can create its database, WAL and
 shared-memory files through the writer's normal path, while root in the main
-namespace gets `EROFS` for those paths. With `CAP_SYS_PTRACE` removed from
+namespace gets `EROFS` for those paths and cannot replace the listener socket.
+It also checks that root without `CAP_SYS_ADMIN` cannot remount that view.
+With `CAP_SYS_PTRACE` removed from
 root's bounding set, the fixture also denies paths through the writer's
 `/proc/PID/root` and `/proc/PID/fd`; init already drops that capability.
 With it retained, root reached the writable namespace through `/proc/PID/root`.

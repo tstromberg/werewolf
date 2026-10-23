@@ -365,6 +365,9 @@ def inside(fence, unwound, parent_net):
         policy = Path('/usr/share/werewolf/net')
         policy.parent.mkdir()
         policy.write_text(POLICY)
+        age_test = os.environ.get('AGE_TEST') == '1'
+        if age_test:
+            (policy.parent / 'age-enforce').write_text('enforce\n')
         network = Path('/run/werewolf/network')
         network.mkdir(parents=True)
         (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
@@ -398,8 +401,12 @@ def inside(fence, unwound, parent_net):
             assert '"event":"fence"' in announcement, announcement
             assert select.select([client.stdout], [], [], 10)[0], 'unwound timeout'
             assert client.stdout.readline().strip() == 'ready', (work / 'stderr').read_text()
-            checks(client, work)
-            print('check-unwound: passed')
+            if age_test:
+                age_checks(client, work)
+                print('check-unwound-age: passed')
+            else:
+                checks(client, work)
+                print('check-unwound: passed')
         except BaseException:
             for f in ['stderr', 'audit', 'upstream.log']:
                 print('--- ' + f + '\n' + (work / f).read_text(), file=sys.stderr)
@@ -414,6 +421,29 @@ def inside(fence, unwound, parent_net):
             peer.terminate()
             peer.wait(timeout=5)
             run(['ip', 'netns', 'delete', 'unwound-peer'])
+
+
+def age_checks(client, work):
+    def send(request):
+        client.stdin.write(json.dumps(request) + '\n')
+        client.stdin.flush()
+        assert select.select([client.stdout], [], [], 15)[0], ('timeout', request)
+        return json.loads(client.stdout.readline())
+
+    def ask(uid, name):
+        return send(dict(uid=uid, name=name, type=1))
+
+    assert ask(2001, 'api.example.test')['rcode'] == 0
+    assert ask(2002, 'open.example.com')['rcode'] == 5
+    assert 'open.example.com' not in [json.loads(x)['name']
+        for x in (work / 'upstream.log').read_text().splitlines()]
+    audit = [json.loads(x.removeprefix('unwound: '))
+        for x in (work / 'audit').read_text().splitlines() if x.startswith('unwound: ')]
+    assert any(a.get('event') == 'query' and a.get('name') == 'open.example.com'
+        and a.get('why') == 'age' and a.get('detail') == 'unknown' for a in audit)
+    assert send(dict(system_domain='assigned.test')) == {}
+    assert ask(2001, 'host.assigned.test')['rcode'] == 3
+    assert ask(2002, 'host.assigned.test')['rcode'] == 3
 
 
 def checks(client, work):

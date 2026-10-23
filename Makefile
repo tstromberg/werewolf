@@ -776,7 +776,7 @@ check-lan: $(call program_bin,fence)
 
 # check-unwound runs the real fence and unwound against a fixture resolver
 # in private namespaces, as root, on Linux (cmd/unwound/README.md).
-.PHONY: check-unwound check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels fuzz-unwound
+.PHONY: check-unwound check-unwound-age check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels fuzz-unwound
 
 # The age writer is statically linked with a hash-pinned SQLite amalgamation.
 # This host test exercises the real schema before the writer joins unwound.
@@ -804,8 +804,15 @@ build/$(ARCH)/check-unwound-age-transport: cmd/unwound/age_fetch_transport.zig c
 check-unwound-age-transport: build/$(ARCH)/check-unwound-age-transport
 	$(DNS_TEST_RUNNER) ./build/$(ARCH)/check-unwound-age-transport
 
+.PHONY: check-unwound-age-mount
+check-unwound-age-mount:
+	$(DNS_TEST_RUNNER) python3 test/check-unwound-age-mount
+
 check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
 	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
+
+check-unwound-age: $(call program_bin,fence) $(call program_bin,unwound)
+	$(DNS_TEST_RUNNER) env AGE_TEST=1 python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
 # Lab check with a freshly signed local TLSA zone and a deliberately invalid
 # signature. Requires named, unbound and BIND's dnssec tools in unwound-lab.
 check-unwound-dnssec: $(call program_bin,fence) $(call program_bin,unwound)

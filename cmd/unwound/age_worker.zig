@@ -6,13 +6,14 @@ const sandbox = @import("sandbox");
 const dns = @import("dns");
 const age = @import("age.zig");
 const ipc = @import("age_ipc.zig");
+const wire = @import("wire.zig");
 const Policy = @import("policy.zig").Policy;
 const unwound = @import("unwound.zig");
 
-pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
+pub fn run(channel: i32, log: i32, policy: *const Policy, enforce: bool) noreturn {
     unwound.log_fd = log;
     unwound.side = "age";
-    setup(channel, log) catch @panic("age worker setup");
+    setup(channel, log, enforce) catch @panic("age worker setup");
     const psl = @embedFile("data/public_suffix_list.ascii.dat");
     var packet: [ipc.max_len + 1]u8 = undefined;
     while (true) {
@@ -65,16 +66,30 @@ pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
             },
         ) catch continue;
         _ = linux.write(log, record.ptr, record.len);
+        if (enforce) {
+            var out: [ipc.response_max]u8 = undefined;
+            const reply: ipc.Response = .{
+                .request_id = request.request_id,
+                .verdict = .unknown,
+                .source = .none,
+                .domain = if (domain) |value| wire.Name.fromText(value) catch null else null,
+            };
+            const msg = ipc.encodeResponse(&out, &reply);
+            const sent = linux.sendto(channel, msg.ptr, msg.len, linux.MSG.NOSIGNAL, null, 0);
+            if (linux.errno(sent) != .SUCCESS or sent != msg.len)
+                @panic("age worker reply");
+        }
     }
 }
 
-fn setup(channel: i32, log: i32) !void {
+fn setup(channel: i32, log: i32, enforce: bool) !void {
     try sandbox.limit(.NOFILE, 16);
     try sandbox.dropTo(55, "/var/empty");
     _ = try sandbox.sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
     var filter: sandbox.Filter = .{};
     filter.allowArg("recvfrom", 0, @intCast(channel));
+    if (enforce) filter.allowArg("sendto", 0, @intCast(channel));
     filter.allowArg("write", 0, @intCast(log));
     inline for (.{
         "poll",

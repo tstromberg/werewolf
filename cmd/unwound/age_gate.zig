@@ -7,6 +7,20 @@ const ipc = @import("age_ipc.zig");
 
 pub const Outcome = enum { ignore, refuse_young, refuse_unknown, allow };
 
+/// An alias in the answer may stay inside the age-checked registered domain.
+/// An alias elsewhere must be looked up separately and pass its own age gate.
+pub fn sameRegistered(a: []const u8, b: []const u8, psl: []const u8) bool {
+    const left = switch (age.boundary(a, psl)) {
+        .registered => |domain| domain,
+        else => return false,
+    };
+    const right = switch (age.boundary(b, psl)) {
+        .registered => |domain| domain,
+        else => return false,
+    };
+    return std.mem.eql(u8, left, right);
+}
+
 pub fn decide(request: *const ipc.Request, reply: *const ipc.Response, psl: []const u8) Outcome {
     if (reply.request_id != request.request_id) return .ignore;
     const domain = switch (age.boundary(request.name.text(), psl)) {
@@ -60,4 +74,7 @@ test "only mature evidence for the request's registered domain releases DNS" {
     reply.verdict = .mature;
     reply.domain = try wire.Name.fromText("github.io");
     try t.expectEqual(Outcome.refuse_unknown, decide(&tenant, &reply, psl));
+    try t.expect(sameRegistered("a.example.com", "edge.example.com", psl));
+    try t.expect(!sameRegistered("a.example.com", "edge.other.com", psl));
+    try t.expect(!sameRegistered("a.example.com", "alice.github.io", psl));
 }
