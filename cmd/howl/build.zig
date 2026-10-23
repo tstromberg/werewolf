@@ -1081,7 +1081,7 @@ pub const every_program = [_][]const u8{
     "stage0",     "iface-up",     "fence",       "mount",        "mount-broker",
     "posture",    "seal-watch",   "seal",        "runit-stage",  "reboot",
     "slot-keep",  "power-button", "debug-shell", "ssh-host-key", "leash",
-    "leash-reap", "syslogd",      "unwound",
+    "leash-reap", "syslogd",      "unwound",     "unwound-age",
 };
 
 /// plan reads the form's chain and works out everything the steps need.

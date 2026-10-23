@@ -212,7 +212,7 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe $(PROGRAM_FLAGS) -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(CMDS),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(filter-out unwound-age,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
 
 # howl makes programs before it builds an image.
@@ -281,7 +281,7 @@ $(TEST_SK): tools/test-sk.zig
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
-	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_fetch_ipc.zig cmd/unwound/age_http.zig cmd/unwound/age_fetcher.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
+	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
@@ -783,6 +783,13 @@ check-lan: $(call program_bin,fence)
 UNWOUND_SQLITE = out/third-party/sqlite-3540100
 $(UNWOUND_SQLITE)/sqlite3.c: tools/checkout-unwound-sqlite
 	python3 tools/checkout-unwound-sqlite
+build/$(ARCH)/unwound-age-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
+	@mkdir -p $(dir $@)
+	zig cc -target $(ARCH)-linux-musl -O2 -fPIC -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=0 -c $< -o $@
+$(call program_bin,unwound-age): cmd/unwound/age_authority.zig $(wildcard cmd/unwound/*.zig) $(wildcard lib/*.zig) build/$(ARCH)/unwound-age-sqlite.o $(PROGRAM_FLAGS_STAMP)
+	$(zig_check)
+	@mkdir -p $(dir $@)
+	zig build-exe $(PROGRAM_FLAGS) -target $(ARCH)-linux-musl -lc $(call ZIG_MODULES,cmd/unwound/age_authority.zig) build/$(ARCH)/unwound-age-sqlite.o -femit-bin=$@
 build/host/unwound-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
 	@mkdir -p $(dir $@)
 	zig cc -O2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=0 -c $< -o $@
@@ -795,24 +802,22 @@ check-unwound-age-store: build/host/unwound-sqlite.o
 _test/cmd/unwound/age_evidence.zig: build/host/unwound-sqlite.o
 	zig test -lc cmd/unwound/age_evidence.zig $<
 
-# Run the framed age-fetch IPC test in a native Linux runner, like
-# check-unwound; it deliberately splits a response into single-byte writes.
-build/$(ARCH)/check-unwound-age-transport: cmd/unwound/age_fetch_transport.zig cmd/unwound/age_fetch_ipc.zig
-	@mkdir -p $(dir $@)
-	zig test -target $(ARCH)-linux-musl --test-no-exec $< -femit-bin=$@
-.PHONY: check-unwound-age-transport
-check-unwound-age-transport: build/$(ARCH)/check-unwound-age-transport
-	$(DNS_TEST_RUNNER) ./build/$(ARCH)/check-unwound-age-transport
+_test/cmd/unwound-age/unwound-age.zig: build/host/unwound-sqlite.o
+	zig test -lc $(call ZIG_MODULES,cmd/unwound/age_authority.zig) $<
 
 .PHONY: check-unwound-age-mount
 check-unwound-age-mount:
 	$(DNS_TEST_RUNNER) python3 test/check-unwound-age-mount
 
+.PHONY: check-unwound-age-authority
+check-unwound-age-authority: $(call program_bin,unwound-age)
+	$(DNS_TEST_RUNNER) python3 test/check-unwound-age-authority $(call program_bin,unwound-age)
+
 check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
 	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
 
-check-unwound-age: $(call program_bin,fence) $(call program_bin,unwound)
-	$(DNS_TEST_RUNNER) env AGE_TEST=1 python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
+check-unwound-age: $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
+	$(DNS_TEST_RUNNER) env AGE_TEST=1 python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
 # Lab check with a freshly signed local TLSA zone and a deliberately invalid
 # signature. Requires named, unbound and BIND's dnssec tools in unwound-lab.
 check-unwound-dnssec: $(call program_bin,fence) $(call program_bin,unwound)

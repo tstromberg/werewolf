@@ -121,8 +121,10 @@ fn run() !void {
         0,
         &domain_pair,
     ), "system domain channel");
-    var age_pair: [2]i32 = undefined;
-    _ = try sys(linux.socketpair(
+    var age_pair: [2]i32 = .{ -1, -1 };
+    if (enforce_age) {
+        age_pair[0] = try connectAge();
+    } else _ = try sys(linux.socketpair(
         linux.AF.UNIX,
         linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
         0,
@@ -137,12 +139,14 @@ fn run() !void {
     _ = linux.close(pair[1]);
     _ = linux.close(domain_pair[1]);
     _ = linux.close(network);
-    if (try sys(linux.fork(), "fork age observer") == 0) {
-        sandbox.tieTo(parent);
-        try sandbox.closeAllBut(&.{ age_pair[1], log });
-        age_worker.run(age_pair[1], log, &policy, enforce_age);
+    if (!enforce_age) {
+        if (try sys(linux.fork(), "fork age observer") == 0) {
+            sandbox.tieTo(parent);
+            try sandbox.closeAllBut(&.{ age_pair[1], log });
+            age_worker.run(age_pair[1], log, &policy);
+        }
+        _ = linux.close(age_pair[1]);
     }
-    _ = linux.close(age_pair[1]);
     try sandbox.closeAllBut(&.{ udp, tcp, pair[0], domain_pair[0], age_pair[0], log });
     log_fd = log;
     side = "frontend";
@@ -212,6 +216,25 @@ fn readAgeMarker() !bool {
     const n = try sys(linux.read(@intCast(fd), &buf, buf.len), "read age marker");
     if (n != buf.len or !std.mem.eql(u8, &buf, age_marker_text)) return error.AgeMarker;
     return true;
+}
+
+fn connectAge() !i32 {
+    const fd: i32 = @intCast(try sys(
+        linux.socket(
+            linux.AF.UNIX,
+            linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+            0,
+        ),
+        "age authority socket",
+    ));
+    errdefer _ = linux.close(fd);
+    var address: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(address.path[0..dns.age_socket_path.len], dns.age_socket_path);
+    _ = try sys(
+        linux.connect(fd, @ptrCast(&address), @intCast(2 + dns.age_socket_path.len + 1)),
+        "connect age authority",
+    );
+    return fd;
 }
 
 /// readPolicy reads the image's compiled network policy, which must be

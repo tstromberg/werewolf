@@ -1,7 +1,7 @@
 # Authority for domain-age evidence
 
-Status: planned. Root-resistant cache storage is required before the age gate
-can affect DNS answers; see the
+Status: implemented with a protected mount view and a native fixture. Full
+image boot validation remains a release check; see the
 [domain-age design](unwound-age.md).
 
 ## Request provenance
@@ -27,32 +27,30 @@ socket handoff, before those fields may be filled.
 ## SQLite authority
 
 The writer runs as a dedicated non-root account, owns a 0700 directory and
-uses Landlock to limit its writes to that directory. The frontend and fetcher
-have no database descriptor. This isolates a compromised DNS or RDAP process.
+uses Landlock to limit its writes to that directory. The DNS frontend has no
+database descriptor. The authority also performs the HTTPS check, so it is
+the one process trusted to handle both network evidence and SQLite.
 SQLite's WAL, shared-memory and main files all need the same protection.
 
 `tools/checkout-unwound-sqlite` verifies the official SQLite 3.54.1 source
 archive by SHA3-256 before extracting its amalgamation into `out/`. The age
-writer will link it statically. `cmd/unwound/age_db.zig` opens the schema with
+writer links it statically. `cmd/unwound/age_db.zig` opens the schema with
 foreign keys, trusted schema disabled and WAL requested. It records a check's
 first request, then atomically stores the provider result and cache row. A
 late response cannot replace newer evidence. Reads recompute the age verdict
 from dated evidence. Its host test uses the pinned SQLite code; run
-`make check-unwound-age-store`. An observe-only child and bounded request
-channel are present. It logs `age_observe` with DNS ID, QNAME, qtype, transport,
-source label, UID and policy generation. A full channel increments `age_lost`;
-assigned system domains and explicit grants bypass it. Database access and
-external checks are not connected.
+`make check-unwound-age-store`. The observe-only child logs `age_observe` with
+DNS ID, QNAME, qtype, transport, source label, UID and policy generation.
+A full channel increments `age_lost`; assigned system domains and explicit
+grants bypass it. The separate authority handles the SQLite cache and bounded
+HTTPS checks in one writer process.
 
-The bounded fetcher stream and writer-side evidence conversion now have host
-tests; `make check-unwound-age-transport` checks its framing in Linux. The
-frontend's reply validator independently derives the PSL boundary and refuses
-a mature reply naming another registered domain. An immutable image marker,
-`/usr/share/werewolf/age-enforce`, can select the staged DNS wait path; the
-native `check-unwound-age` fixture uses it to verify unknown-age refusal and
-the assigned-domain bypass. No production image installs the marker. The
-current worker can return only unknown, and no live evidence can authorize a
-name yet.
+The frontend independently derives the PSL boundary and refuses a mature
+reply naming another registered domain. An immutable image marker,
+`/usr/share/werewolf/age-enforce`, selects the DNS wait path. The native
+`check-unwound-age` fixture exercises cached maturity, young and unknown
+refusal, and the assigned-domain bypass. The authority fixture also checks a
+live RDAP lookup, its audit row and read-only root view.
 
 `test/check-unwound-age-mount` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers
@@ -70,17 +68,15 @@ and WAL behavior in the Linux lab.
 Landlock restricts a task and its descendants; it cannot impose a new rule
 on another root task. Fence currently permits writes under `/data`, and a
 sufficiently privileged root process can bypass ordinary file ownership.
-The protected writer must start after init's seal but before `fence` drops
-`CAP_SYS_ADMIN`. Init must give it a private writable mount view, then bind
+Init starts the protected writer before the seal, because the seal refuses
+new mount namespaces. It gets a private writable mount view; init then binds
 the age directory read-only in the main view before runit starts services.
-Its listening socket must also be on an immutable path in the main view so
+Its listening socket is also on an immutable path in the main view so
 root cannot replace the age authority on an unwound restart. The writer and
 its supervisor must be non-dumpable and have no surviving mount capability.
 
-This design does **not yet** claim a root-proof SQLite cache. Before enforcement,
-native boot tests must demonstrate that root login and every service cannot
-replace the database or its WAL files, or the worker needs a separate
-trusted storage. The namespace boundary needs native boot checks for the
-capability drop, mount broker calls, OCI bind aliases, and
-forms that retain `CAP_SYS_ADMIN`. An integrity or
-generation failure makes age unknown, never mature.
+The native mount fixture proves that root without `CAP_SYS_ADMIN` cannot
+replace the database, WAL or socket through its normal filesystem view. A
+full image boot must also check capability drops, mount broker calls and OCI
+bind aliases. The cache is not protected against tampering before this boot;
+unknown or expired evidence never gives a mature verdict.

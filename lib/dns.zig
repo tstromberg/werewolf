@@ -31,6 +31,10 @@ pub const config_domain_path = network_dir ++ "/" ++ config_domain_name;
 /// on 127.0.0.1. DHCP cannot substitute a remote server for it.
 pub const local_validator_path = "/usr/share/werewolf/dnssec-local";
 pub const local_validator_text = "nameserver 127.0.0.1\n";
+/// The age authority binds this before init makes its directory read-only
+/// to root's main mount namespace.
+pub const age_socket_dir = "/run/werewolf-age";
+pub const age_socket_path = age_socket_dir ++ "/age.sock";
 
 /// normalizeSystemDomain accepts one assigned DNS suffix for the automatic
 /// age exemption. A single label or a malformed value cannot widen policy.

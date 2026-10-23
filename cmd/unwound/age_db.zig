@@ -142,7 +142,7 @@ pub const Db = struct {
         var db: Db = .{ .handle = handle.? };
         errdefer db.close();
         try db.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;" ++
-            " PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL;");
+            " PRAGMA temp_store=MEMORY; PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL;");
         if (require_wal) {
             var s = try db.prepare("PRAGMA journal_mode");
             defer s.close();

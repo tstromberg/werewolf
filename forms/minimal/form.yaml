@@ -40,7 +40,7 @@ archs:
 # network half, which fetches the packages and CVE sources it reads.
 # _unwound answers every program's DNS at 127.0.0.53, and _unwoundnet asks
 # the resolvers for it: the one user that may (cmd/unwound). _unwoundage is
-# the separate observe-only age child; it has no database or network yet.
+# the age authority, which owns the protected cache and fetches evidence.
 accounts:
   groups:
     - groupname: tty
@@ -130,6 +130,8 @@ net:
   - lookup _update packages.wolfi.dev
   - lookup _update dist.werewolf-linux.org
   - lookup _update git.kernel.org
+  - connect _unwoundage tcp/443 public
+  - lookup _unwoundage * A AAAA unfiltered
 
 # make check's, for this form alone (forms/README.md): its checks boot the
 # slot offline, so the updater finds nothing.

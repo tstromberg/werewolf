@@ -13,6 +13,7 @@ from pathlib import Path
 import select
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -343,7 +344,7 @@ for line in sys.stdin:
 '''
 
 
-def inside(fence, unwound, parent_net):
+def inside(fence, unwound, parent_net, age_binary=None):
     assert os.readlink('/proc/self/ns/net') != parent_net
     run(['mount', '--make-rprivate', '/'])
     with tempfile.TemporaryDirectory(prefix='werewolf-unwound-') as name:
@@ -368,11 +369,56 @@ def inside(fence, unwound, parent_net):
         age_test = os.environ.get('AGE_TEST') == '1'
         if age_test:
             (policy.parent / 'age-enforce').write_text('enforce\n')
+            Path('/data').mkdir(exist_ok=True)
+            run(['mount', '-t', 'tmpfs', 'tmpfs', '/data'])
+            age_dir = Path('/data/svc/unwound-age')
+            age_dir.mkdir(parents=True)
+            age_db = sqlite3.connect(age_dir / 'age.db')
+            age_db.executescript((Path(__file__).resolve().parents[1] /
+                                   'cmd/unwound/age.sql').read_text())
+            age_db.execute('PRAGMA journal_mode=WAL')
+            now = int(time.time())
+            for domain, status, effective in (
+                ('example.com', 'valid', 946684800),
+                ('young.com', 'valid', now - 86400),
+                ('example.net', 'unknown', None),
+            ):
+                age_db.execute('''INSERT INTO domain_age
+                    (domain,source,status,registered_at,effective_at,fetched_at,
+                     retry_after,last_used_at,psl_generation,bootstrap_generation)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                    (domain, 'rdap', status, effective, effective, now,
+                     now + 86400, now, 'fixture', 'fixture'))
+            age_db.commit()
+            age_db.close()
+            os.chown(age_dir, 55, 55)
+            os.chmod(age_dir, 0o700)
+            for entry in age_dir.iterdir():
+                os.chown(entry, 55, 55)
+            Path('/run/werewolf-age').mkdir()
         network = Path('/run/werewolf/network')
         network.mkdir(parents=True)
         (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
         (network / 'upstream').write_text('nameserver ' + UPSTREAM + '\n')
         Path('/etc/resolv.conf').symlink_to('/run/werewolf/network/resolv.conf')
+        age_worker = None
+        age_control = None
+        age_mounts = []
+        if age_test:
+            parent, child = socket.socketpair()
+            def control_fd():
+                os.dup2(child.fileno(), 3)
+            age_worker = subprocess.Popen([age_binary], pass_fds=(3, child.fileno()),
+                                          preexec_fn=control_fd, stderr=subprocess.PIPE)
+            child.close()
+            age_control = parent
+            parent.settimeout(10)
+            assert parent.recv(1) == b'R', age_worker.stderr.read().decode()
+            for path in (str(age_dir), '/run/werewolf-age'):
+                run(['mount', '--bind', path, path])
+                run(['mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec,nosymfollow', path])
+                age_mounts.append(path)
+            parent.sendall(b'G')
         run(['ip', 'link', 'set', 'lo', 'up'])
         run(['ip', 'netns', 'add', 'unwound-peer'])
         run(['ip', 'link', 'add', 'client', 'type', 'veth', 'peer', 'name', 'peer'])
@@ -421,6 +467,12 @@ def inside(fence, unwound, parent_net):
             peer.terminate()
             peer.wait(timeout=5)
             run(['ip', 'netns', 'delete', 'unwound-peer'])
+            if age_worker is not None:
+                age_worker.kill()
+                age_worker.wait(timeout=5)
+                age_control.close()
+                for path in reversed(age_mounts):
+                    run(['umount', path])
 
 
 def age_checks(client, work):
@@ -434,12 +486,14 @@ def age_checks(client, work):
         return send(dict(uid=uid, name=name, type=1))
 
     assert ask(2001, 'api.example.test')['rcode'] == 0
-    assert ask(2002, 'open.example.com')['rcode'] == 5
-    assert 'open.example.com' not in [json.loads(x)['name']
+    assert ask(2002, 'open.example.com')['rcode'] == 3
+    assert ask(2002, 'young.com')['rcode'] == 5
+    assert ask(2002, 'unknown.example.net')['rcode'] == 5
+    assert 'young.com' not in [json.loads(x)['name']
         for x in (work / 'upstream.log').read_text().splitlines()]
     audit = [json.loads(x.removeprefix('unwound: '))
         for x in (work / 'audit').read_text().splitlines() if x.startswith('unwound: ')]
-    assert any(a.get('event') == 'query' and a.get('name') == 'open.example.com'
+    assert any(a.get('event') == 'query' and a.get('name') == 'unknown.example.net'
         and a.get('why') == 'age' and a.get('detail') == 'unknown' for a in audit)
     assert send(dict(system_domain='assigned.test')) == {}
     assert ask(2001, 'host.assigned.test')['rcode'] == 3
@@ -666,13 +720,18 @@ if __name__ == '__main__':
         server(sys.argv[2])
     elif len(sys.argv) == 5 and sys.argv[1] == '--inside':
         inside(sys.argv[2], sys.argv[3], sys.argv[4])
-    elif len(sys.argv) == 3:
+    elif len(sys.argv) == 6 and sys.argv[1] == '--inside':
+        inside(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+    elif len(sys.argv) in (3, 4):
         if sys.platform != 'linux':
             sys.exit('check-unwound requires Linux to create private namespaces')
         if os.geteuid() != 0:
             sys.exit('check-unwound needs root: fence sets routing rules and unwound drops to its users')
-        run(['unshare', '--net', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
-             '--inside', str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
-             os.readlink('/proc/self/ns/net')])
+        command = ['unshare', '--net', '--mount', '--fork', sys.executable,
+                   str(Path(__file__).resolve()), '--inside', str(Path(sys.argv[1]).resolve()),
+                   str(Path(sys.argv[2]).resolve()), os.readlink('/proc/self/ns/net')]
+        if len(sys.argv) == 4:
+            command.append(str(Path(sys.argv[3]).resolve()))
+        run(command)
     else:
         sys.exit(__doc__)

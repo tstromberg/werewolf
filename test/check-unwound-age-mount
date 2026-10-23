@@ -87,7 +87,7 @@ def inside():
             assert ready[0] == 'ready', ready
             writer_pid = int(ready[1])
             run('mount', '--bind', name, name)
-            run('mount', '-o', 'remount,bind,ro', name)
+            run('mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec,nosymfollow', name)
             mounted = True
             remount = subprocess.run(
                 ['setpriv', '--bounding-set=-sys_admin', 'mount',

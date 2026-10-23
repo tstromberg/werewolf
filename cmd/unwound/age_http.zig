@@ -1,4 +1,4 @@
-//! Bounded HTTPS reads for the future `_rdap` fetcher. The caller runs this
+//! Bounded HTTPS reads for the age authority. The caller runs this
 //! under a public-address TCP/443 fence rule and supplies a validated CA set.
 //! No full QNAME reaches this module: only a registered domain from the PSL.
 const std = @import("std");

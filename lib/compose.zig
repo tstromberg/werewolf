@@ -38,8 +38,8 @@ pub const Build = struct {
 /// composes these anew and carries every other record forward, so none of
 /// these is ever a stale copy.
 pub const records = [_][]const u8{
-    "cmdline", "dev",    "etc",           "form",  "forms",      "net",
-    "oci",     "pledge", "posture-known", "prune", "weaknesses",
+    "age-enforce", "cmdline", "dev",           "etc",   "form",       "forms", "net",
+    "oci",         "pledge",  "posture-known", "prune", "weaknesses",
 };
 
 /// release_forms are the forms CI releases as disks, for both arches
@@ -227,6 +227,7 @@ pub fn compose(
     // init seeds /run/werewolf from these; the image's /etc/passwd, group
     // and shadow link there.
     try ro.createDirPath(io, "usr/share/werewolf/etc");
+    try put(io, ro, "usr/share/werewolf/age-enforce", "enforce\n");
     const normalized = try accounts(gpa, passwd, f);
     // A shell is a login form's policy, never the base filesystem's.
     const login_shell = if (b.dev and !b.dev_shell)
@@ -272,6 +273,7 @@ pub fn compose(
     // meta: the records.
     var rec = try meta.createDirPathOpen(io, "usr/share/werewolf", .{});
     defer rec.close(io);
+    try put(io, rec, "age-enforce", "enforce\n");
     // Stage the chain as forms/NAME (form.yaml, rootfs) and the known
     // posture failures; the updater composes the next slot from them.
     for (forms, 0..) |fm, i| {
@@ -584,7 +586,7 @@ pub const image_programs = [_][]const u8{
     "init",         "stage0",      "iface-up",     "fence",       "mount",      "mount-broker",
     "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",     "slot-keep",
     "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap", "syslogd",
-    "unwound",
+    "unwound",      "unwound-age",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -2359,6 +2361,7 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     const cmdline_want = "proc_mem.force_override=never slab_nomerge " ++
         "page_alloc.shuffle=1 kvm-arm.mode=none loglevel=5\n";
     for ([_][2][]const u8{
+        .{ "age-enforce", "enforce\n" },
         .{ "form", "web\n" },
         .{ "net", "connect 80 tcp 443\nlisten tcp 80\n" },
         .{ "pledge", "stdio inet listen\n" },

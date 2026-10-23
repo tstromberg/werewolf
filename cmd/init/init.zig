@@ -13,6 +13,7 @@ const phase_config = @import("config.zig");
 const phase_data = @import("data.zig");
 const phase_oci = @import("oci.zig");
 const phase_seal = @import("seal.zig");
+const phase_age = @import("age.zig");
 const broker = @import("broker");
 const cmdline = @import("cmdline");
 
@@ -83,6 +84,10 @@ pub fn main(init: std.process.Init) !void {
     m.data();
     phases.add("data", bootMs());
     if (m.oci()) phases.add("oci", bootMs());
+    phase_age.start() catch |err| {
+        say("age authority unavailable: {s}; not handing over", .{@errorName(err)});
+        std.process.exit(1);
+    };
 
     // No process may dump core, so a crash leaves no copy of its memory and
     // secrets behind. The hard limit is 0, so no process can raise it.
@@ -615,4 +620,5 @@ test {
     _ = phase_data;
     _ = phase_oci;
     _ = phase_seal;
+    _ = phase_age;
 }
