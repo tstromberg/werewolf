@@ -11,6 +11,9 @@ generation, local request ID, timestamps, cause and provider outcomes. The
 policy namespace comes from the kernel-constrained source label and compiled
 UID map, not a process-supplied field. A scheduled refresh has no triggering
 DNS request. Coalesced requests retain their normal DNS audit records.
+The request fields in `age_check` are immutable after insertion. A cached
+domain may pin only a check for that same registered domain; completion and
+provider-result fields may be updated when the external check finishes.
 
 The schema has nullable PID, process start time, executable and network
 namespace inode fields. `provenance=uid_only` requires them to be NULL. A

@@ -77,7 +77,8 @@ row limits.
 
 RDAP evidence fetched after the 90-day boundary is fresh for one day. Mature
 RDAP evidence may remain usable for at most seven days from fetch during a
-registry outage, logged as stale. At the boundary evidence must be fresh.
+registry outage, logged as stale. Stale RDAP and provisional CT require an
+RDAP failure recorded in the last hour. At the boundary evidence must be fresh.
 crt.sh provisional evidence is fresh for at most 24 hours and never gets the
 seven-day stale allowance. A clock behind fetch or bootstrap publication
 makes evidence unknown. The current name/site budgets still apply.
@@ -92,12 +93,13 @@ request fields can be trusted and how the SQLite files must be protected.
 The offline classifier in `cmd/unwound/age.zig` covers PSL exact, wildcard,
 exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, staleness and clock boundaries with the
-90-day default. It accepts only
-normalized ASCII PSL input. The updater must convert Unicode PSL rules to
+90-day default. Cached evidence is reclassified against pinned data
+generations and recent RDAP failures. It accepts only normalized ASCII PSL
+input. The updater must convert Unicode PSL rules to
 A-labels before using it. `cmd/unwound/bootstrap.zig` selects a pinned IANA
 entry by label-wise longest match and requires HTTPS. Run fetchers against
-fixture HTTPS servers and
-inspect audit records in observe mode. Enable the gate after native tests
+fixture HTTPS servers and inspect audit records in observe mode. Enable the
+gate after native tests
 cover initial boot, renewal, restart, outage, rollback, CT fallback, LRU
 eviction, provenance, file authority and bounded miss floods. Audit records
 name the derived domain, evidence generation and decision, never the RDAP

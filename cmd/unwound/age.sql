@@ -10,12 +10,13 @@ CREATE TABLE IF NOT EXISTS domain_age (
     effective_at INTEGER,
     ct_first_seen_at INTEGER,
     fetched_at INTEGER NOT NULL,
+    last_rdap_failure_at INTEGER CHECK (last_rdap_failure_at >= 0),
     retry_after INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL,
     evidence_uri TEXT,
     psl_generation TEXT NOT NULL,
     bootstrap_generation TEXT NOT NULL,
-    last_check_id INTEGER,
+    last_check_id INTEGER REFERENCES age_check(id),
     CHECK (length(domain) BETWEEN 1 AND 253 AND domain = lower(domain)),
     CHECK (registered_at IS NULL OR registered_at <= effective_at),
     CHECK (effective_at IS NULL OR effective_at <= fetched_at),
@@ -28,6 +29,25 @@ CREATE TABLE IF NOT EXISTS domain_age (
 
 CREATE INDEX IF NOT EXISTS domain_age_lru ON domain_age(last_used_at, domain);
 CREATE INDEX IF NOT EXISTS domain_age_retry ON domain_age(retry_after);
+
+-- A cached row may pin only a check of that exact registered domain. Keep
+-- this invariant even if a connection forgets to enable foreign_keys.
+CREATE TRIGGER IF NOT EXISTS domain_age_check_insert BEFORE INSERT ON domain_age
+WHEN NEW.last_check_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM age_check WHERE id = NEW.last_check_id AND domain = NEW.domain
+)
+BEGIN
+    SELECT RAISE(ABORT, 'last_check_id belongs to another domain');
+END;
+
+CREATE TRIGGER IF NOT EXISTS domain_age_check_update
+BEFORE UPDATE OF last_check_id, domain ON domain_age
+WHEN NEW.last_check_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM age_check WHERE id = NEW.last_check_id AND domain = NEW.domain
+)
+BEGIN
+    SELECT RAISE(ABORT, 'last_check_id belongs to another domain');
+END;
 
 CREATE TRIGGER IF NOT EXISTS domain_age_limit AFTER INSERT ON domain_age
 WHEN (SELECT count(*) FROM domain_age) > 20000
@@ -81,6 +101,17 @@ CREATE TABLE IF NOT EXISTS age_check (
 
 CREATE INDEX IF NOT EXISTS age_check_domain_time ON age_check(domain, started_at DESC);
 CREATE INDEX IF NOT EXISTS age_check_time ON age_check(started_at);
+
+-- The writer may finish a check by setting its result fields, but the
+-- triggering request and process attribution are immutable once recorded.
+CREATE TRIGGER IF NOT EXISTS age_check_provenance_immutable
+BEFORE UPDATE OF domain, started_at, cause, request_id, dns_id, qname, qtype,
+    transport, source_label, service_uid, policy_namespace, policy_generation,
+    provenance, process_pid, process_start_ticks, process_exe, netns_inode
+ON age_check
+BEGIN
+    SELECT RAISE(ABORT, 'age check provenance is immutable');
+END;
 
 -- Check history is bounded independently of the indefinitely retained LRU
 -- evidence rows. Prune a batch only when the table grows past 120,000 checks;

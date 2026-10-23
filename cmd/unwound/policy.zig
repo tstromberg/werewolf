@@ -47,6 +47,12 @@ pub const Why = enum {
     no_grant,
 };
 
+/// Only an arbitrary screened wildcard needs domain-age evidence. Explicit
+/// grants and the assigned system domain bypass age, not tunnel screening.
+pub fn needsAge(why: Why) bool {
+    return why == .screened;
+}
+
 pub const Decision = struct {
     allow: bool,
     why: Why,
@@ -286,6 +292,9 @@ test "assigned system domain is screened and shared only by DNS-enabled services
         try testing.expect(!p.setSystemDomain(bad));
     try testing.expect(p.system_domain == null);
     try testing.expect(p.setSystemDomain(""));
+    try testing.expect(needsAge(.screened));
+    try testing.expect(!needsAge(.system_domain));
+    try testing.expect(!needsAge(.granted));
 }
 
 test "malformed lookup lines fail the whole policy" {

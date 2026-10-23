@@ -117,6 +117,7 @@ pub const threshold_s: i64 = 90 * 86400;
 pub const fresh_s: i64 = 86400;
 pub const stale_s: i64 = 7 * 86400;
 pub const ct_fresh_s: i64 = 86400;
+pub const outage_recent_s: i64 = 3600;
 
 /// classify never lets evidence fetched before its 90-day boundary mature
 /// merely because the clock advanced. That boundary needs a fresh RDAP read.
@@ -261,6 +262,63 @@ pub fn decide(
                 return .{ .source = .crtsh, .verdict = .unknown };
             return .{ .source = .crtsh, .verdict = classifyCt(history, ct_fetched, now) };
         },
+    }
+}
+
+/// Cached is the typed form of one domain_age row. The worker must parse the
+/// SQLite row into this shape before using it; no persisted verdict is trusted.
+pub const Cached = struct {
+    domain: []const u8,
+    source: enum { rdap, crtsh, none },
+    status: enum { valid, history, unknown, @"error" },
+    registered_at: ?i64 = null,
+    effective_at: ?i64 = null,
+    ct_first_seen_at: ?i64 = null,
+    fetched_at: i64,
+    last_rdap_failure_at: ?i64 = null,
+    psl_generation: []const u8,
+    bootstrap_generation: []const u8,
+};
+
+/// cachedVerdict recomputes a verdict from dated evidence at every use. A
+/// previous mature result is never durable authority by itself. Stale RDAP
+/// and provisional CT require an RDAP failure recorded within the last hour.
+pub fn cachedVerdict(
+    row: Cached,
+    domain: []const u8,
+    psl_generation: []const u8,
+    bootstrap_generation: []const u8,
+    now: i64,
+) Verdict {
+    if (!dnsName(domain, false) or !mem.eql(u8, row.domain, domain) or
+        psl_generation.len == 0 or bootstrap_generation.len == 0 or
+        !mem.eql(u8, row.psl_generation, psl_generation) or
+        !mem.eql(u8, row.bootstrap_generation, bootstrap_generation) or
+        row.fetched_at < 0 or now < row.fetched_at) return .unknown;
+    const unavailable = if (row.last_rdap_failure_at) |failed|
+        failed >= 0 and failed <= now and now - failed <= outage_recent_s
+    else
+        false;
+    switch (row.source) {
+        .rdap => {
+            if (row.status != .valid or row.ct_first_seen_at != null) return .unknown;
+            const evidence: Evidence = .{
+                .registered = row.domain,
+                .created = row.registered_at orelse return .unknown,
+                .effective = row.effective_at orelse return .unknown,
+            };
+            const verdict = classify(evidence, row.fetched_at, now);
+            return if (verdict == .stale and !unavailable) .unknown else verdict;
+        },
+        .crtsh => {
+            if (row.status != .history or !unavailable or
+                row.registered_at != null or row.effective_at != null) return .unknown;
+            return classifyCt(.{
+                .registered = row.domain,
+                .first_seen = row.ct_first_seen_at orelse return .unknown,
+            }, row.fetched_at, now);
+        },
+        .none => return .unknown,
     }
 }
 
@@ -472,4 +530,58 @@ test "CT never overrides a young or malformed RDAP response" {
     );
     try t.expectEqual(.crtsh, fallback.source);
     try t.expectEqual(Verdict.mature, fallback.verdict);
+}
+
+test "cached evidence needs matching generations and current availability" {
+    const t = std.testing;
+    const fetched = timestamp("2026-10-23T00:00:00Z").?;
+    const created = timestamp("2020-01-01T00:00:00Z").?;
+    var row: Cached = .{
+        .domain = "example.com",
+        .source = .rdap,
+        .status = .valid,
+        .registered_at = created,
+        .effective_at = created,
+        .fetched_at = fetched,
+        .psl_generation = "psl-1",
+        .bootstrap_generation = "iana-1",
+    };
+    const check = struct {
+        fn at(value: Cached, now: i64) Verdict {
+            return cachedVerdict(value, "example.com", "psl-1", "iana-1", now);
+        }
+    }.at;
+    try t.expectEqual(Verdict.mature, check(row, fetched + fresh_s));
+    try t.expectEqual(Verdict.unknown, check(row, fetched + fresh_s + 1));
+    row.last_rdap_failure_at = fetched + fresh_s + 1;
+    try t.expectEqual(Verdict.stale, check(row, fetched + fresh_s + 1));
+    try t.expectEqual(Verdict.unknown, check(row, fetched + fresh_s + outage_recent_s + 2));
+    row.last_rdap_failure_at = fetched + stale_s + 1;
+    try t.expectEqual(Verdict.unknown, check(row, fetched + stale_s + 1));
+    try t.expectEqual(Verdict.unknown, check(row, fetched - 1));
+    try t.expectEqual(Verdict.unknown, cachedVerdict(row, "other.com", "psl-1", "iana-1", fetched));
+    try t.expectEqual(
+        Verdict.unknown,
+        cachedVerdict(row, "example.com", "psl-2", "iana-1", fetched),
+    );
+    try t.expectEqual(
+        Verdict.unknown,
+        cachedVerdict(row, "example.com", "psl-1", "iana-2", fetched),
+    );
+
+    row.source = .crtsh;
+    row.status = .history;
+    row.registered_at = null;
+    row.effective_at = null;
+    row.ct_first_seen_at = created;
+    row.last_rdap_failure_at = null;
+    try t.expectEqual(Verdict.unknown, check(row, fetched));
+    row.last_rdap_failure_at = fetched + ct_fresh_s;
+    try t.expectEqual(Verdict.mature, check(row, fetched + ct_fresh_s));
+    try t.expectEqual(Verdict.unknown, check(row, fetched + ct_fresh_s + 1));
+    row.ct_first_seen_at = fetched - threshold_s + 1;
+    row.last_rdap_failure_at = fetched;
+    try t.expectEqual(Verdict.young, check(row, fetched));
+    row.status = .unknown;
+    try t.expectEqual(Verdict.unknown, check(row, fetched));
 }

@@ -7,6 +7,7 @@ import sqlite3
 
 schema = Path(__file__).resolve().parents[1] / "cmd/unwound/age.sql"
 db = sqlite3.connect(":memory:")
+db.execute("PRAGMA foreign_keys=ON")
 db.executescript(schema.read_text())
 assert db.execute("PRAGMA user_version").fetchone() == (1,)
 
@@ -55,6 +56,25 @@ rejected(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
     (*request, 123),
 )
+rejected(
+    """INSERT INTO domain_age
+       (domain, source, status, fetched_at, retry_after, last_used_at,
+        psl_generation, bootstrap_generation, last_rdap_failure_at)
+       VALUES ('bad.example', 'none', 'error', 1, 2, 1, 'psl-1', 'iana-1', -1)""",
+    (),
+)
+rejected(
+    """INSERT INTO domain_age
+       (domain, source, status, fetched_at, retry_after, last_used_at,
+        psl_generation, bootstrap_generation, last_check_id)
+       VALUES ('other.example', 'none', 'unknown', 1, 2, 1,
+               'psl-1', 'iana-1', ?)""",
+    (check_id,),
+)
+rejected("UPDATE domain_age SET domain = 'other.example' WHERE domain = 'example.com'", ())
+rejected("UPDATE age_check SET domain = 'other.example' WHERE id = ?", (check_id,))
+db.execute("UPDATE age_check SET finished_at = ?, rdap_result = 'valid' WHERE id = ?",
+           (1790000001, check_id))
 rejected(
     """INSERT INTO domain_age
        (domain, source, status, registered_at, effective_at, fetched_at,
