@@ -15,7 +15,8 @@ ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; 
 ok  lease            grep -q '10\.0\.2\.15' /run/werewolf/network/lease.json
 ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
 ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
-ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
+ok  local-resolver   [ "$(readlink /etc/resolv.conf)" = /run/werewolf/network/resolv.conf ] && [ "$(cat /etc/resolv.conf)" = 'nameserver 127.0.0.53' ]
+ok  upstream-resolver [ "$(cat /run/werewolf/network/upstream)" = 'nameserver 10.0.2.3' ]
 ok  engine-jailed    p=$(ps -o pid,user | awk '$2 == "_dhcp" { print $1; exit }'); [ -n "$p" ] && ! readlink /proc/$p/root >/dev/null 2>&1 && m=$(cat /proc/$p/mountinfo) && [ -z "$m" ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } /^NoNewPrivs:/ { n = $2 } END { exit !(c == "0000000000000000" && s == 2 && n == 1) }' /proc/$p/status
 ok  parent-narrowed  p=$(for d in /proc/[0-9]*; do [ "$(cat $d/comm)" = dhcp-client ] && awk '/^Uid:/ { exit $2 != 73 }' $d/status && echo ${d#/proc/} && break; done); [ -n "$p" ] && awk '/^Uid:/ {u=($2 == 73 && $3 == 73 && $4 == 73 && $5 == 73)} /^CapEff:/ {c=$2} /^CapBnd:/ {b=$2} /^CapInh:/ {i=$2} /^CapAmb:/ {a=$2} /^NoNewPrivs:/ {n=$2} /^Seccomp:/ {s=$2} END {exit !(u && c == "0000000000001000" && b == c && i == "0000000000000000" && a == i && n == 1 && s == 2)}' /proc/$p/status
 # The packet engine must release its raw socket when the applying parent dies.
