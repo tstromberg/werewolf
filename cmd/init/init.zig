@@ -83,11 +83,11 @@ pub fn main(init: std.process.Init) !void {
     phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
-    if (m.oci()) phases.add("oci", bootMs());
     phase_age.start() catch |err| {
         say("age authority unavailable: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
+    if (m.oci()) phases.add("oci", bootMs());
 
     // No process may dump core, so a crash leaves no copy of its memory and
     // secrets behind. The hard limit is 0, so no process can raise it.

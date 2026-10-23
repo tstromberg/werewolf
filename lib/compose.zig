@@ -1161,6 +1161,17 @@ pub fn oci(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) 
     return out.items;
 }
 
+test "OCI service cannot alias the age cache directory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var failure: Failure = .{};
+    const yaml = "services:\n  unwound-age:\n    image: example.com/test:1\n" ++
+        "    exec: /app\n    user: root\n";
+    const fm = try testForm(gpa, "collision", yaml);
+    try testing.expectError(error.Form, oci(std.testing.io, gpa, Dir.cwd(), &.{fm}, &failure));
+}
+
 fn parseService(gpa: Allocator, s: form.Service, f: *Failure) !service.Service {
     var bad: service.Bad = .{};
     return service.parse(gpa, s.text, &bad) catch |err| switch (err) {

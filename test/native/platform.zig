@@ -20,6 +20,7 @@ const Check = enum {
     @"slot-commits",
     @"root-unlinked",
     @"root-verified",
+    @"age-cache-protected",
     cgrouped,
     reaped,
     sealed,
@@ -152,6 +153,7 @@ fn run(io: Io, a: Allocator, ctx: driver.Run, check: Check) !void {
             )) |name| loop = loop or std.mem.startsWith(u8, name, "loop");
             if (!loop) return error.RootBackingDevice;
         },
+        .@"age-cache-protected" => try ageCacheProtected(io, a),
         .cgrouped => {
             if (!try exists(io, "/run/cgroup/svc")) return;
             for (try leashed(io, a)) |name| {
@@ -186,6 +188,39 @@ fn run(io: Io, a: Allocator, ctx: driver.Run, check: Check) !void {
                 try file.sync(io);
             }
         },
+    }
+}
+
+fn ageCacheProtected(io: Io, a: Allocator) !void {
+    if (!try exists(io, "/usr/share/werewolf/age-enforce")) return error.AgeMarkerMissing;
+    const directory_path: [:0]const u8 = if (try exists(io, "/run/werewolf/nodata"))
+        "/run/werewolf-age-cache"
+    else
+        "/data/svc/unwound-age";
+    for ([_][:0]const u8{ directory_path, "/run/werewolf-age" }) |path| {
+        const mounted = try system.mount(io, a, path);
+        for ([_][]const u8{ "ro", "nosuid", "nodev", "noexec", "nosymfollow" }) |flag|
+            if (!hasFlag(mounted, flag)) return error.AgeMountFlags;
+        const rc = linux.mount(null, path, null, linux.MS.BIND | linux.MS.REMOUNT, 0);
+        if (linux.errno(rc) == .SUCCESS) return error.AgeRemounted;
+    }
+    const db_path: [:0]const u8 = if (std.mem.eql(u8, directory_path, "/data/svc/unwound-age"))
+        "/data/svc/unwound-age/age.db"
+    else
+        "/run/werewolf-age-cache/age.db";
+    if (linux.errno(linux.open(db_path, .{ .ACCMODE = .WRONLY }, 0)) != .ROFS)
+        return error.AgeCacheWritable;
+    if (linux.errno(linux.unlink("/run/werewolf-age/age.sock")) != .ROFS)
+        return error.AgeSocketReplaceable;
+    const mounts = try system.read(io, a, "/proc/self/mountinfo");
+    var lines = std.mem.splitScalar(u8, mounts, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "unwound-age") == null) continue;
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        for (0..4) |_| _ = fields.next() orelse return error.BadMountInfo;
+        const target = fields.next() orelse return error.BadMountInfo;
+        if (!std.mem.eql(u8, target, directory_path) and
+            !std.mem.eql(u8, target, "/run/werewolf-age")) return error.AgeMountAlias;
     }
 }
 

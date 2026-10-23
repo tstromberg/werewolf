@@ -97,10 +97,11 @@ the updater; review the data diff before building an image. The updater makes
 no network requests.
 `cmd/unwound/bootstrap.zig` selects a pinned IANA entry by longest label match
 and requires HTTPS. `make check-unwound-age-store`, `check-unwound-age`,
-`check-unwound-age-mount` and `check-unwound-age-authority` cover storage,
-DNS decisions and the Linux mount boundary. `AGE_LIVE=1` on the authority
-fixture exercises live RDAP. Initial boot under the full seal remains a
-separate release check. Old domains still face the other screens.
+`check-unwound-age-live`, `check-unwound-age-mount` and
+`check-unwound-age-authority` cover storage, live DNS decisions, provider
+failures and the Linux mount boundary. The shared native image check tries
+root writes and remounts on the booted cache, and checks for mount aliases.
+Old domains still face the other screens.
 
 [RFC 9083](https://www.rfc-editor.org/rfc/rfc9083.html#section-4.5) defines
 RDAP events; [RFC 9224](https://www.rfc-editor.org/rfc/rfc9224.html#section-4)

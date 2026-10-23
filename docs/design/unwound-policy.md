@@ -46,13 +46,14 @@ still apply.
 Explicit name/type grants work during screening outages and fix false positives.
 The assigned system domain and its descendants are granted to every service
 with DNS enabled, including supported types beyond A and AAAA. The automatic
-grant retains tunnel screening and bypasses the planned 90-day age gate.
+grant retains tunnel screening and bypasses the 90-day age gate.
 The FQDN from boot metadata takes precedence over DHCP option 15.
 Canonicalize all names to lowercase ASCII/A-labels without one terminal dot; accept
 only exact names, leading `*.` or bare `*`. No regex or substring matching.
 Screening uses bounded name shape, entropy, per-service name and site budgets,
-answer holding and answer trimming. See the [implementation plan](unwound-plan.md)
-for the actual limits. Age and endpoint lists remain deferred.
+answer holding and answer trimming. Screened wildcards also require domain-age
+evidence. See the [implementation plan](unwound-plan.md) for the actual limits.
+Endpoint lists remain deferred.
 Apply grants to aliases before follow-up/return; upstreams may already follow them.
 
 Builder adds `lookup` alongside `connect`, derives UID/service identity, and emits
@@ -73,10 +74,10 @@ The builder derives the user ID; the compiled policy's `dns-direct UID` line
 is an internal fence instruction, not form syntax. A top-level `net:` exception
 and a shared service user are refused.
 
-## Planned: age and endpoint evidence
+## Age and endpoint evidence
 
-The [age design](unwound-age.md) specifies the next implementation stage;
-none of it authorizes current queries. A reviewed endpoint list may identify
+The [age design](unwound-age.md) describes the enforced gate. A reviewed
+endpoint list may identify
 known out-of-band DNS endpoints,
 but an entry would express risk policy rather than prove maliciousness.
 
@@ -86,8 +87,8 @@ stored after that but needs a new check to authorize again.
 The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants
 need their own grant. On RDAP availability failure, crt.sh may provide a
 marked, 24-hour provisional decision from old CT history. It cannot override
-a young or ambiguous RDAP answer. An isolated fetcher uses [RDAP bootstrap]
-over HTTPS; a separate SQLite writer retains the last 20,000 domains and the
+a young or ambiguous RDAP answer. One isolated age authority uses [RDAP bootstrap]
+over HTTPS and SQLite to retain the last 20,000 domains and the
 requests that caused external checks. DNS workers receive bounded verdicts
 over IPC. UID and service namespace come from the source label; exact process
 identity needs a kernel-backed attribution path. The current local screen

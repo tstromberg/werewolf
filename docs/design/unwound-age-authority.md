@@ -76,7 +76,9 @@ root cannot replace the age authority on an unwound restart. The writer and
 its supervisor must be non-dumpable and have no surviving mount capability.
 
 The native mount fixture proves that root without `CAP_SYS_ADMIN` cannot
-replace the database, WAL or socket through its normal filesystem view. A
-full image boot must also check capability drops, mount broker calls and OCI
-bind aliases. The cache is not protected against tampering before this boot;
+replace the database, WAL or socket through its normal filesystem view. The
+shared native image check also tries root writes and remounts on boot and
+reboot, and refuses extra mounts exposing the age directory. Init protects
+the age mount before constructing OCI roots; image composition reserves its
+service name. The cache is not protected against tampering before this boot;
 unknown or expired evidence never gives a mature verdict.

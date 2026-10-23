@@ -89,6 +89,12 @@ def inside():
             run('mount', '--bind', name, name)
             run('mount', '-o', 'remount,bind,ro,nosuid,nodev,noexec,nosymfollow', name)
             mounted = True
+            alias = Path(tempfile.mkdtemp(prefix='oci-age-alias-'))
+            run('mount', '--bind', name, str(alias))
+            for suffix in ('age.db', 'age.db-wal', 'age.db-shm'):
+                denied(alias / suffix)
+            run('umount', str(alias))
+            alias.rmdir()
             remount = subprocess.run(
                 ['setpriv', '--bounding-set=-sys_admin', 'mount',
                  '-o', 'remount,bind,rw', name],
