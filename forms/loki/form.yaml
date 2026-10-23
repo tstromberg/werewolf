@@ -40,7 +40,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/3100]
+    connect: [tcp/443 tcp/3100]
+    lookup: "*"
     read: /etc/caddy
     config:
       - loki-password /run/config/caddy/loki-password

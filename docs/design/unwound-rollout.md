@@ -13,11 +13,18 @@ request was made. `test/check-unwound-caddy` reproduces that audit in a Linux
 lab with Caddy installed. Other ACME endpoints and later Caddy versions still
 need observation before changing the provisional entropy threshold.
 
-Other application forms still need migration per service and testing of their
-actual query types; a blanket A/AAAA grant is insufficient for Mox's mail
-lookups. Unbound, Pi-hole, AdGuard Home and Blocky are DNS servers: their
-service-local `dns-direct: true`
-grant lets their declared upstream DNS connections through while their ordinary
+The bundled application forms now use `lookup:` for their ordinary host
+resolution. A form-level policy test compiles every bundled form. Mox uses
+`* all unfiltered` for mail record types and authenticates them through a
+local Unbound validator. Its immutable marker selects 127.0.0.1 as unwound's
+only upstream. Fence reserves that port for `_unwoundnet`. Unwound carries AD
+through its IPC and cache for unfiltered answers; it ignores remote upstream
+AD. `check-unwound-dnssec` verifies a signed TLSA answer, cache, and a broken
+signature. `check-unwound-dnssec-mox` requires Mox's "with dnssec" TLSA result.
+
+Unbound, Pi-hole, AdGuard Home and Blocky are DNS servers. Their service-local
+`dns-direct: true` grant lets their declared upstream DNS connections through
+while their ordinary
 `lookup:` calls use unwound. The grant derives its UID from the service user.
 Their listeners must avoid unwound's 127.0.0.53 socket. Unbound, AdGuard Home
 and Blocky bind loopback and the machine's current IPv4 address; Pi-hole binds

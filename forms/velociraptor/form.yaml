@@ -38,7 +38,8 @@ services:
       - tcp/8889 loopback
       - tcp/8001 loopback
       - tcp/8003 loopback
-    connect: [udp/53 tcp/53 tcp/8001]
+    connect: [tcp/8001]
+    lookup: "*"
     run: /usr/bin/velociraptor
     config:
       - admin-password /run/config/velociraptor/admin-password
@@ -58,7 +59,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8889]
+    connect: [tcp/443 tcp/8889]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as DOMAIN

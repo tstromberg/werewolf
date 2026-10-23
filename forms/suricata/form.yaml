@@ -45,7 +45,8 @@ services:
     exec: /usr/lib/werewolf/rules-fetch
     user: _rules
     pledge: stdio rpath wpath inet unix netlink connect proc
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     read: [/usr/share/suricata, /etc/suricata]
     share: shared
     memory: 128

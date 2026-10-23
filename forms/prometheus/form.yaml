@@ -28,7 +28,8 @@ services:
     # netlink: Go's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/9090]
-    connect: [tcp/80 tcp/443 tcp/8080 tcp/9090 tcp/9100 udp/53 tcp/53]
+    connect: [tcp/80 tcp/443 tcp/8080 tcp/9090 tcp/9100]
+    lookup: "*"
     config:
       - admin-password /run/config/prometheus/admin-password
       - tls-cert /run/config/prometheus/tls-cert optional

@@ -196,10 +196,12 @@ ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep p
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
+# Every guest binary is a static PIE, so ASLR moves its code and data, not only its
+# stack and heap; lib/elf.zig refuses an image with a fixed-address executable.
 define program
 $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wildcard lib/*.zig)
 	$$(zig_check)
-	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
+	zig build-exe -O ReleaseSafe -fstrip -fPIE -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
 $(foreach p,$(CMDS),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
@@ -403,7 +405,7 @@ _test/%.zig: ; zig test $*.zig
 SYSLOG_PROBE = $(BUILD)/syslog-init
 $(SYSLOG_PROBE): test/syslog-init.zig cmd/syslogd/policy.zig lib/seal.zig
 	$(zig_check)
-	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep seal --dep log-policy \
+	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep seal --dep log-policy \
 		-Mroot=$< -Mseal=lib/seal.zig -Mlog-policy=cmd/syslogd/policy.zig -femit-bin=$@
 .PHONY: check-syslog fuzz-syslog
 SYSLOG_FUZZ_RUNS ?= 100000
@@ -607,7 +609,7 @@ ipe-kernel:
 IPE_PROBE = $(BUILD)/test/ipe-probe-root/usr/lib/werewolf/ipe-probe
 $(IPE_PROBE): test/ipe-init.zig lib/ipe.zig lib/dm.zig lib/verity.zig
 	$(zig_check)
-	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep dm --dep verity --dep ipe \
+	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep dm --dep verity --dep ipe \
 		-Mroot=$< -Mdm=lib/dm.zig -Mverity=lib/verity.zig -Mipe=lib/ipe.zig -femit-bin=$@
 check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE)
 	@[ "$(IPE)" = 1 ] || { echo "check-ipe: set IPE=1 and the kernel, key and certificate paths" >&2; exit 1; }
@@ -737,10 +739,10 @@ _check-shellfree:
 # The Linux kernel, private namespaces and a local DNS/TLS/DHCP fixture; no internet.
 $(BUILD)/dns-policy: test/dns-policy.zig $(wildcard lib/*.zig)
 	$(zig_check)
-	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
+	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
 $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $(wildcard lib/*.zig)
 	$(zig_check)
-	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
+	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
 		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm -Mposture=cmd/posture/posture.zig -femit-bin=$@
 check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress
 	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
@@ -765,9 +767,18 @@ check-lan: $(call program_bin,fence)
 
 # check-unwound runs the real fence and unwound against a fixture resolver
 # in private namespaces, as root, on Linux (cmd/unwound/README.md).
-.PHONY: check-unwound check-unwound-tunnels fuzz-unwound
+.PHONY: check-unwound check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels fuzz-unwound
 check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
 	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
+# Lab check with a freshly signed local TLSA zone and a deliberately invalid
+# signature. Requires named, unbound and BIND's dnssec tools in unwound-lab.
+check-unwound-dnssec: $(call program_bin,fence) $(call program_bin,unwound)
+	$(DNS_TEST_RUNNER) python3 test/check-unwound-dnssec $(call program_bin,fence) $(call program_bin,unwound)
+MOX_DNSSEC_BIN ?= $(BUILD)/mox/melange/usr/bin/mox
+check-unwound-dnssec-mox: $(call program_bin,fence) $(call program_bin,unwound)
+	@test -x "$(MOX_DNSSEC_BIN)" || { echo "build Mox or set MOX_DNSSEC_BIN" >&2; exit 1; }
+	$(DNS_TEST_RUNNER) python3 test/check-unwound-dnssec $(call program_bin,fence) \
+		$(call program_bin,unwound) $(MOX_DNSSEC_BIN)
 # Optional lab check: real iodine, dns2tcp and shellack clients against their
 # local servers, first directly and then through the screened resolver.
 SHELLACK ?= $(HOME)/src/shellack

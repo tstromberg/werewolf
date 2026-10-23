@@ -48,7 +48,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    connect: [tcp/443 tcp/8080]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
@@ -70,7 +71,8 @@ services:
     user: ollama
     pledge: stdio rpath wpath inet unix connect listen proc exec
     listen: [tcp/11434 loopback]
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     run: /usr/bin/ollama
     memory: 8192
     nofile: 65536
@@ -107,8 +109,8 @@ services:
     connect:
       - tcp/11434
       - tcp/443 tcp/80 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
+    lookup: "*"
     config: settings /run/config/open-webui/settings.json
     secret: WEBUI_ADMIN_PASSWORD /run/config/open-webui/admin-password
     setting:

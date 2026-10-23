@@ -28,6 +28,7 @@ const max_list = 32;
 
 const Settings = struct {
     lan_ip: []const u8,
+    local_only: bool = false,
     zones: []const []const u8 = &.{},
     servers: []const []const u8 = &.{},
     ipv6: bool = false,
@@ -51,8 +52,13 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         say(io, "trust anchor seeded from {s} into {s}", .{ image_anchor, anchor });
     }
 
+    const local_only = if (setting(gpa, environ, "UNBOUND_LOCAL_ONLY")) |mode|
+        std.mem.eql(u8, mode, "1")
+    else
+        false;
     const s: Settings = .{
-        .lan_ip = try lanAddress(io, gpa),
+        .lan_ip = if (local_only) "" else try lanAddress(io, gpa),
+        .local_only = local_only,
         .zones = try list(gpa, setting(gpa, environ, "UNBOUND_FORWARD_ZONES"), zone),
         .servers = try list(gpa, setting(gpa, environ, "UNBOUND_FORWARD_TO"), address),
         .ipv6 = try exists(io, inet6),
@@ -88,8 +94,11 @@ fn render(gpa: Allocator, s: Settings) ![]const u8 {
             "# (forms/unbound/README.md): change those, not this file.\n" ++
             "server:\n\tinterface: 127.0.0.1\n",
     );
-    try o.print("\tinterface: {s}\n", .{s.lan_ip});
-    try o.writeAll(if (s.ipv6) "\tinterface: ::0\n\tdo-ip6: yes\n" else "\tdo-ip6: no\n");
+    if (!s.local_only) try o.print("\tinterface: {s}\n", .{s.lan_ip});
+    try o.writeAll(if (s.ipv6)
+        if (s.local_only) "\tdo-ip6: yes\n" else "\tinterface: ::0\n\tdo-ip6: yes\n"
+    else
+        "\tdo-ip6: no\n");
     for (s.zones) |z| try o.print(
         "\tdomain-insecure: \"{s}.\"\n\tlocal-zone: \"{s}.\" nodefault\n",
         .{ z, z },
@@ -208,6 +217,20 @@ test "render: IPv4 alone, no forward zones" {
     ) != null);
     for ([_][]const u8{ "::0", "0.0.0.0", "forward-zone", "domain-insecure" }) |absent|
         try testing.expect(std.mem.find(u8, conf, absent) == null);
+}
+
+test "render: a local validator never binds the LAN address" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const conf = try render(arena.allocator(), .{
+        .lan_ip = "",
+        .local_only = true,
+        .ipv6 = true,
+    });
+    try testing.expect(std.mem.find(u8, conf, "interface: 127.0.0.1") != null);
+    try testing.expect(std.mem.find(u8, conf, "interface: ::1") == null);
+    try testing.expect(std.mem.find(u8, conf, "interface: ::0") == null);
+    try testing.expect(std.mem.find(u8, conf, "interface: 10.") == null);
 }
 
 test "render: forward zones, each insecure, to every server" {

@@ -1637,7 +1637,7 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
     try testing.expect(mem.find(
         u8,
         looker,
-        "lookup 300 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered\n",
+        "lookup 300 * A AAAA CNAME MX TXT SRV NS PTR CAA TLSA unfiltered\n",
     ) != null);
     const direct_form = try testForm(gpa, "resolver", "services:\n  resolver:\n" ++
         "    user: web\n    exec: /resolver\n    listen: [tcp/53 udp/53 lan]\n" ++

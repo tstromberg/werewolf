@@ -23,6 +23,10 @@ pub const resolv_text = "nameserver 127.0.0.53\n";
 pub const network_dir = "/run/werewolf/network";
 pub const upstream_name = "upstream";
 pub const upstream_path = network_dir ++ "/" ++ upstream_name;
+/// A form that ships this immutable file runs a DNSSEC-validating resolver
+/// on 127.0.0.1. DHCP cannot substitute a remote server for it.
+pub const local_validator_path = "/usr/share/werewolf/dnssec-local";
+pub const local_validator_text = "nameserver 127.0.0.1\n";
 
 pub const Users = struct {
     ids: [max_users]u32 = undefined,
@@ -134,6 +138,16 @@ pub fn resolvers(text: []const u8) !Resolvers {
     return result;
 }
 
+/// validatedLocal accepts only the fixed loopback resolver installed by a
+/// form, never a loopback address supplied by DHCP or a boot argument.
+pub fn validatedLocal(text: []const u8) !Resolvers {
+    if (!std.mem.eql(u8, text, local_validator_text)) return error.BadResolver;
+    var result: Resolvers = .{};
+    result.ips[0] = .{ 127, 0, 0, 1 };
+    result.len = 1;
+    return result;
+}
+
 pub const Socket = struct {
     fd: i32,
     seq: u32 = 1,
@@ -172,9 +186,9 @@ pub fn plan(u: Users, r: *const Resolvers, buf: *[max_rules]route.Rule) []const 
     for (r.ips[0..r.len]) |*ip| for ([_]route.Proto{ .udp, .tcp }) |proto| {
         for (u.ids[0..u.len]) |id| {
             buf[n] = .{
-                .priority = 99,
+                .priority = if (std.mem.eql(u8, ip, &[_]u8{ 127, 0, 0, 1 })) 6 else 99,
                 .action = 1,
-                .table = 254,
+                .table = if (std.mem.eql(u8, ip, &[_]u8{ 127, 0, 0, 1 })) 255 else 254,
                 .from_here = true,
                 .dst = ip,
                 .proto = proto,
@@ -232,6 +246,13 @@ test "resolver and user input is bounded, deduplicated and fails closed" {
         "nameserver 1.1.1.1\nnameserver 2.2.2.2\nnameserver 3.3.3.3\nnameserver 4.4.4.4\n",
     }) |bad| try testing.expectError(error.BadResolver, resolvers(bad));
     try testing.expectEqual(0, (try resolvers("")).len);
+    const local = try validatedLocal(local_validator_text);
+    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &local.ips[0]);
+    try testing.expectError(error.BadResolver, resolvers(local_validator_text));
+    try testing.expectError(error.BadResolver, validatedLocal("nameserver 127.0.0.2\n"));
+    var local_rules: [max_rules]route.Rule = undefined;
+    const routes = plan(try users("dns 54\n"), &local, &local_rules);
+    try testing.expectEqual(@as(u32, 255), routes[0].table);
     var full: Users = .{};
     for (0..max_users) |i| try full.add(@intCast(i));
     try testing.expectError(error.BadPolicy, full.add(100));

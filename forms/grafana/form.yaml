@@ -34,7 +34,8 @@ services:
     # root.
     run: /usr/share/grafana/data/plugins-bundled/
     listen: [tcp/3000 loopback]
-    connect: [tcp/443 tcp/80 tcp/9090 tcp/3100 udp/53 tcp/53]
+    connect: [tcp/443 tcp/80 tcp/9090 tcp/3100]
+    lookup: "*"
     # grafana-setup (forms/grafana/cmd/grafana-setup) keeps the secret key in
     # /data: the config's, else one it makes once. Grafana reads it from
     # there by $__file{}, below.
@@ -91,7 +92,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/3000]
+    connect: [tcp/443 tcp/3000]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL

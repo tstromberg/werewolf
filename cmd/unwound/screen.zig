@@ -82,7 +82,7 @@ pub fn trim(a: *wire.Answer, name: *const wire.Name, t: wire.Type) Dropped {
                 null
             else
                 &dropped.shape,
-            .txt, .caa => null,
+            .txt, .caa, .tlsa => null,
         };
         if (drop == null and (n == room(t) or r.rdata.len > max_data - used))
             drop = &dropped.room;
@@ -103,7 +103,7 @@ pub fn trim(a: *wire.Answer, name: *const wire.Name, t: wire.Type) Dropped {
 fn room(t: wire.Type) u8 {
     return switch (t) {
         .cname => 1,
-        .txt, .caa => 2,
+        .txt, .caa, .tlsa => 2,
         .a, .aaaa, .mx, .srv, .ns, .ptr => max_kept,
     };
 }

@@ -38,14 +38,14 @@ and a `detail` for each question that gets no answer; a lost one is counted.
    fence labels, `_unwound` and `_unwoundnet` in minimal, resolver at
    127.0.0.53, direct DNS grants refused unless a DNS service declares
    `dns-direct: true`, and `check-unwound`. Existing
-   applications still need migration; see [rollout](unwound-rollout.md).
+   bundled application forms have been migrated; see [rollout](unwound-rollout.md).
 4. **Screening `*`**, below. Done, including `check-unwound-tunnels`.
 5. **A cache for every grant**, below. Done.
 6. **DNS over TCP framing.** Done: one connection may carry successive or
    pipelined queries; unwound buffers the next frame until it answers the
    current one. `check-unwound` sends two frames in one write.
 
-Deferred: RDAP age, endpoint lists, process metadata, serving stale, DoT.
+Next: RDAP age. Endpoint lists, process metadata, stale answers and DoT are deferred.
 
 ## Cache
 
@@ -79,7 +79,7 @@ changing answers to receive it, and roomy records. Screening bounds each:
   NXDOMAIN, NODATA and a resolver's SERVFAIL too, since the attacker's server
   chooses those. Only "no resolver answered" is not kept: no resolver chose
   it, and keeping it would break lookups before the first DHCP lease.
-- Room: at most 4 A, AAAA, MX, SRV, NS or PTR, 2 TXT or CAA, 512 bytes of
+- Room: at most 4 A, AAAA, MX, SRV, NS or PTR, 2 TXT, CAA or TLSA, 512 bytes of
   data in all. Addresses fence's `public` refuses (lib/network.zig) are
   dropped, which also stops DNS rebinding; so are records naming a name of
   the wrong shape; the audit record counts each. The alias chain is not

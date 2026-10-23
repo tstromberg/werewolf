@@ -226,3 +226,44 @@ fn all(io: Io, gpa: Allocator) ![]const []const u8 {
     }.lt);
     return names.items;
 }
+
+test "every bundled form compiles its network policy" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = std.testing.io;
+    for (try all(io, gpa)) |name| {
+        var f: form.Failure = .{};
+        const chain = try form.chain(io, gpa, Dir.cwd(), name, &f);
+        const lines = form.netLines(gpa, chain, &f) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ name, f.text });
+            return err;
+        };
+        var passwd: std.ArrayList(u8) = .empty;
+        try passwd.appendSlice(gpa, "root:x:0:0:root:/root:/sbin/nologin\n" ++
+            "_unwoundnet:x:54:54::/var/empty:/sbin/nologin\n");
+        var users: std.StringHashMapUnmanaged(void) = .empty;
+        try users.put(gpa, "root", {});
+        try users.put(gpa, "_unwoundnet", {});
+        var next_uid: u32 = 1000;
+        for (lines) |line| {
+            var words = std.mem.tokenizeAny(u8, line, " \t\n");
+            const key = words.next() orelse continue;
+            if (!is(key, "connect") and !is(key, "lookup") and
+                !is(key, "listen") and !is(key, "metadata") and
+                !is(key, "dns-direct")) continue;
+            const user = words.next() orelse continue;
+            if (is(user, "all") or is(user, "tcp") or users.contains(user)) continue;
+            try users.put(gpa, user, {});
+            try passwd.appendSlice(gpa, try gpa.print(
+                "{s}:x:{d}:{d}::/var/empty:/sbin/nologin\n",
+                .{ user, next_uid, next_uid },
+            ));
+            next_uid += 1;
+        }
+        _ = compose.net(gpa, chain, passwd.items, &f) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ name, f.text });
+            return err;
+        };
+    }
+}

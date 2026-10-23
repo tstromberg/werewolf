@@ -25,7 +25,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8443]
+    connect: [tcp/443 tcp/8443]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
@@ -57,7 +58,8 @@ services:
     # netlink: Go lists the host's addresses for ICE.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/8443 loopback, udp/10000]
-    connect: [udp/3478 tcp/3478 udp/53 tcp/53]
+    connect: [udp/3478 tcp/3478]
+    lookup: "*"
     config:
       - operator-password /run/config/galene/operator-password
       - password /run/config/galene/password optional

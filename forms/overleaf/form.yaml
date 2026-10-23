@@ -52,7 +52,7 @@ services:
       - tcp/3000 tcp/3003 tcp/3009 tcp/3010 tcp/3013 tcp/3016 tcp/3026 tcp/3042 tcp/3054 tcp/3100 tcp/4000 tcp/8080
       - tcp/6379 tcp/27017
       - tcp/587 tcp/465 public
-      - udp/53 tcp/53
+    lookup: "*"
     write: /var/lib/overleaf
     config:
       - settings /run/config/overleaf/settings.json
@@ -138,7 +138,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/4000 tcp/3026 tcp/8080]
+    connect: [tcp/443 tcp/4000 tcp/3026 tcp/8080]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL

@@ -31,7 +31,7 @@ lookup 2001 alias-bad.example.test A
 lookup 2001 slow.example.test A
 lookup 2001 spoof.example.test A
 lookup 2002 * A AAAA
-lookup 2003 * A AAAA CNAME MX TXT SRV NS PTR CAA unfiltered
+lookup 2003 * A AAAA CNAME MX TXT SRV NS PTR CAA TLSA unfiltered
 lookup 2001 cached.example.test A
 lookup 2001 short.example.test A
 lookup 2001 zero.example.test A
@@ -85,7 +85,7 @@ def answer(query, tcp):
     question = query[12:end + 4]
     name = qname.lower()
 
-    def reply(records, rcode=0, flags=0x8180, ident=query[:2], q=question, authority=()):
+    def reply(records, rcode=0, flags=0x81a0, ident=query[:2], q=question, authority=()):
         return (ident + struct.pack('!HHHHH', flags | rcode, 1, len(records), len(authority), 0) + q +
                 b''.join(records) + b''.join(authority))
 
@@ -269,7 +269,7 @@ def parse(msg):
     at = 12
     for _ in range(qd):
         at = read_name(msg, at)[1] + 4
-    answers, ttls = [], []
+    answers, ttls, rdata = [], [], []
     for _ in range(an):
         name, at = read_name(msg, at)
         kind, _, ttl, size = struct.unpack('!HHIH', msg[at:at + 10])
@@ -277,8 +277,9 @@ def parse(msg):
         at += 10 + size
         answers.append(socket.inet_ntoa(data) if kind == 1 else kind)
         ttls.append(ttl)
+        rdata.append(data.hex())
     return {'id': msg[0] << 8 | msg[1], 'rcode': flags & 0xf, 'tc': bool(flags & 0x200), 'answers': answers,
-            'ttls': ttls}
+            'ttls': ttls, 'rdata': rdata, 'ad': bool(flags & 0x20)}
 
 def probe(r):
     reader, writer = os.pipe()
@@ -425,6 +426,7 @@ def checks(client, work):
     expect(ask(54, 'api.example.test', server=UPSTREAM), 0, ['192.0.2.10'], 'the upstream user')
     # Exact grants, by type, over UDP and TCP.
     expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'granted A')
+    assert not ask(2001, 'api.example.test')['ad'], 'AD from an untrusted upstream escaped'
     expect(ask(2001, 'API.Example.Test', tcp=True), 0, ['192.0.2.10'], 'granted A over TCP, any case')
     piped = ask(2001, 'api.example.test', pipeline=True, second='x.cdn.example.test')['results']
     assert [r['id'] for r in piped] == [0x4242, 0x4243], piped

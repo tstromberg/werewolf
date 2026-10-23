@@ -11,6 +11,9 @@ instructions](https://dist.werewolf-linux.org/boot/v1/mox/index.html).
 - mox runs as its own user. The root is read-only. Mail lives on `/data`.
 - The admin password and the relay password are files, not flags.
 - There is no shell, and no mailbox import.
+- A loopback-only Unbound validates DNSSEC for DANE. Mox resolves through
+  unwound, which preserves authenticated TLSA answers for its unfiltered
+  lookup grant. Other users cannot query Unbound directly.
 
 ## Getting Started
 
@@ -49,6 +52,8 @@ Mail starts empty. There is no mailbox import. Accounts are in the create comman
 
 - The relay password file has no newline.
 - The domain is the machine's mail name. It is not a flag you can change later.
+- `make check-unwound-dnssec-mox ARCH=aarch64` tests Mox's TLSA lookup with a
+  freshly signed zone in the local Linux lab VM.
 
 ### Network Exposure
 

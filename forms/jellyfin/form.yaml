@@ -79,7 +79,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8096]
+    connect: [tcp/443 tcp/8096]
+    lookup: "*"
     read: /etc/caddy
     config:
       - jellyfin-password /run/config/caddy/jellyfin-password

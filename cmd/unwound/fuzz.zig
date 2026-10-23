@@ -70,7 +70,7 @@ test "fuzz responses: accepted answers are chains that rebuild unchanged" {
 }
 
 fn response(_: void, smith: *t.Smith) !void {
-    const types = [_]wire.Type{ .a, .aaaa, .cname, .mx, .txt, .srv, .ns, .ptr, .caa };
+    const types = [_]wire.Type{ .a, .aaaa, .cname, .mx, .txt, .srv, .ns, .ptr, .caa, .tlsa };
     const qtype = types[smith.index(types.len)];
     var mix: [32]u8 = undefined;
     smith.bytes(&mix);
@@ -303,7 +303,7 @@ fn caching(_: void, smith: *t.Smith) !void {
         "example.net",
         "dnscat.9b7e01c7da2a5d06c3a1f4e2b8d90c13.example.com",
     };
-    const types = [_]wire.Type{ .a, .aaaa, .cname, .mx, .txt, .srv, .ns, .ptr, .caa };
+    const types = [_]wire.Type{ .a, .aaaa, .cname, .mx, .txt, .srv, .ns, .ptr, .caa, .tlsa };
     // standing is the screened answer last kept for each name and type.
     // There are fewer questions than places, so none is let go early.
     var standing: [names.len][types.len]?cache.Entry = @splat(@splat(null));
@@ -402,7 +402,7 @@ fn kept(e: *const cache.Entry, q: *const wire.Name, qtype: wire.Type, now: i64) 
         data += r.rdata.len;
         switch (r.type) {
             .a, .aaaa => try t.expect(network.public(r.rdata)),
-            .txt, .caa => {},
+            .txt, .caa, .tlsa => {},
             .cname,
             .ns,
             .ptr,

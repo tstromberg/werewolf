@@ -72,6 +72,7 @@ const Upstream = struct {
     channel: i32,
     network: i32,
     log: i32,
+    local_validator: bool,
     servers: dns.Resolvers = .{},
     stamp: [3]u64 = .{ 0, 0, 0 },
     /// checked is when the resolver file was last looked at, if ever.
@@ -86,8 +87,8 @@ const Upstream = struct {
 var u: Upstream = undefined;
 
 /// run confines this process and serves the frontend until it goes away.
-pub fn run(channel: i32, network: i32, log: i32) noreturn {
-    setup(channel, network, log) catch |err| {
+pub fn run(channel: i32, network: i32, log: i32, local_validator: bool) noreturn {
+    setup(channel, network, log, local_validator) catch |err| {
         var buf: [256]u8 = undefined;
         const why = std.mem.print(&buf, "setup: {s} ({s}: {t})", .{
             @errorName(err), sandbox.failed, sandbox.failed_errno,
@@ -110,13 +111,19 @@ fn die(log: i32, why: []const u8) noreturn {
     linux.exit_group(1);
 }
 
-fn setup(channel: i32, network: i32, log: i32) !void {
+fn setup(channel: i32, network: i32, log: i32, local_validator: bool) !void {
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
     if (try sys(
         linux.getrandom(&seed, seed.len, 0),
         "random seed",
     ) != seed.len) return error.ShortSeed;
-    u = .{ .channel = channel, .network = network, .log = log, .rng = .init(seed) };
+    u = .{
+        .channel = channel,
+        .network = network,
+        .log = log,
+        .local_validator = local_validator,
+        .rng = .init(seed),
+    };
     unwound.log_fd = log;
     unwound.side = "upstream";
     try sandbox.limit(.NOFILE, 16 + unwound.max_slots);
@@ -245,7 +252,10 @@ fn refresh() void {
     var buf: [4096]u8 = undefined;
     const n = linux.read(@intCast(fd), &buf, buf.len);
     if (linux.errno(n) != .SUCCESS or n == buf.len) return;
-    u.servers = dns.resolvers(buf[0..n]) catch .{};
+    u.servers = if (u.local_validator)
+        dns.validatedLocal(buf[0..n]) catch .{}
+    else
+        dns.resolvers(buf[0..n]) catch .{};
 }
 
 /// start tries the question's next resolver over UDP, or fails it.
@@ -258,7 +268,14 @@ fn start(i: u8) void {
         var mix: [32]u8 = undefined;
         u.rng.fill(std.mem.asBytes(&id));
         u.rng.fill(&mix);
-        p.sent_len = wire.writeQuery(&p.sent, id, &p.name, p.type, &mix).len;
+        p.sent_len = wire.writeQueryWithAd(
+            &p.sent,
+            id,
+            &p.name,
+            p.type,
+            &mix,
+            u.local_validator,
+        ).len;
         p.silence = .send_failed;
         p.fd = open(linux.SOCK.DGRAM, server) orelse continue;
         const rc = linux.sendto(p.fd, &p.sent, p.sent_len, 0, null, 0);
@@ -380,7 +397,7 @@ fn closeFd(p: *Pending) void {
 /// done sends the frontend a canonical answer to the question it asked.
 fn done(i: u8, a: *const wire.Answer) void {
     const p = &u.pending[i];
-    send(wire.writeResponse(
+    send(wire.writeResponseWithAd(
         &u.out,
         p.id,
         true,
@@ -389,6 +406,7 @@ fn done(i: u8, a: *const wire.Answer) void {
         a.slice(),
         a.negative,
         wire.response_max,
+        a.authenticated,
     ));
     closeFd(p);
     p.used = false;

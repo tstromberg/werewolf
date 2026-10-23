@@ -89,6 +89,7 @@ fn run() !void {
         "close inherited files",
     );
     try policy.parse(try readPolicy());
+    const local_validator = try readLocalValidator();
     const udp = try listener(linux.SOCK.DGRAM);
     const tcp = try listener(linux.SOCK.STREAM);
     _ = try sys(linux.listen(tcp, 64), "listen");
@@ -110,7 +111,7 @@ fn run() !void {
     if (try sys(linux.fork(), "fork upstream") == 0) {
         sandbox.tieTo(parent);
         try sandbox.closeAllBut(&.{ pair[1], network, log });
-        upstream.run(pair[1], network, log);
+        upstream.run(pair[1], network, log, local_validator);
     }
     _ = linux.close(pair[1]);
     _ = linux.close(network);
@@ -131,6 +132,7 @@ fn run() !void {
         .tcp = tcp,
         .channel = pair[0],
         .log = log,
+        .trust_ad = local_validator,
         .last_stats = now(),
     };
     f.say("{{\"event\":\"start\",\"services\":{d},\"grants\":{d},\"generation\":\"{x:0>8}\"}}", .{
@@ -173,6 +175,44 @@ fn readPolicy() ![]const u8 {
     }
     if (got != st.size) return error.UnsafePolicy;
     return policy_text[0..got];
+}
+
+/// readLocalValidator accepts only a root-owned immutable form marker. The
+/// upstream file must independently name the same loopback resolver.
+fn readLocalValidator() !bool {
+    const fd = linux.open(dns.local_validator_path, .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    switch (linux.errno(fd)) {
+        .NOENT => return false,
+        .SUCCESS => {},
+        else => return error.LocalValidator,
+    }
+    defer _ = linux.close(@intCast(fd));
+    var st: linux.Statx = undefined;
+    _ = try sys(linux.statx(
+        @intCast(fd),
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
+        &st,
+    ), "stat local validator");
+    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
+        st.size != dns.local_validator_text.len) return error.LocalValidator;
+    var buf: [dns.local_validator_text.len]u8 = undefined;
+    var have: usize = 0;
+    while (have < buf.len) {
+        const n = try sys(
+            linux.read(@intCast(fd), buf[have..].ptr, buf.len - have),
+            "read local validator",
+        );
+        if (n == 0) return error.LocalValidator;
+        have += n;
+    }
+    if (!std.mem.eql(u8, &buf, dns.local_validator_text)) return error.LocalValidator;
+    return true;
 }
 
 fn listener(kind: u32) !i32 {
@@ -312,6 +352,7 @@ const Frontend = struct {
     tcp: i32,
     channel: i32,
     log: i32,
+    trust_ad: bool,
     slots: [max_slots]Slot = @splat(.{}),
     pending: [dns.max_users]u16 = @splat(0),
     conns: [max_conns]Conn = @splat(.{}),
@@ -493,8 +534,9 @@ const Frontend = struct {
                 .answers = records.len,
                 .cached = true,
                 .dropped = e.dropped,
+                .authenticated = e.authenticated,
             });
-            return f.answer(client, q.id, q.rd, e.rcode, &q.name, q.type, records);
+            return f.answer(client, q.id, q.rd, e.rcode, &q.name, q.type, records, e.authenticated);
         }
         const free = for (&f.slots, 0..) |*slot, i| {
             if (!slot.used) break i;
@@ -548,7 +590,7 @@ const Frontend = struct {
     ) void {
         f.stats.refused += 1;
         f.audit(s, &q.name, q.type, false, why, line, x);
-        f.answer(client, q.id, q.rd, .refused, &q.name, q.type, &.{});
+        f.answer(client, q.id, q.rd, .refused, &q.name, q.type, &.{}, false);
     }
 
     /// busy answers SERVFAIL for want of room: detail names which.
@@ -563,7 +605,7 @@ const Frontend = struct {
         f.stats.busy += 1;
         f.stats.servfail += 1;
         f.audit(s, &q.name, q.type, false, "busy", line, .{ .detail = detail });
-        f.answer(client, q.id, q.rd, .servfail, &q.name, q.type, &.{});
+        f.answer(client, q.id, q.rd, .servfail, &q.name, q.type, &.{}, false);
     }
 
     fn ipcId(i: usize, gen: u8) u16 {
@@ -599,6 +641,7 @@ const Frontend = struct {
             const asked = wire.writeQuery(&buf, id, &slot.name, slot.type, null);
             var a: wire.Answer = undefined;
             wire.parseResponse(msg, asked, &a) catch f.fail("upstream sent garbage");
+            a.authenticated = a.authenticated and f.trust_ad;
             const t = @backingInt(slot.type);
             const refused: ?wire.Name = if (slot.type == .cname) null else for (a.slice()) |*r| {
                 if (r.type != .cname) continue;
@@ -625,6 +668,7 @@ const Frontend = struct {
             screen.trim(a, &slot.name, slot.type)
         else
             .{};
+        if (slot.screened) a.authenticated = false;
         const kept = if (ttl) |keep| caches[s].put(
             &screens[s],
             &screen_key,
@@ -642,10 +686,17 @@ const Frontend = struct {
             a.rcode,
             a.slice(),
             why,
-            .{ .dropped = dropped },
+            .{ .dropped = dropped, .authenticated = a.authenticated },
         );
         const records = e.records(&slot.name, now(), &f.records);
-        f.settle(i, true, e.rcode, records, why, .{ .dropped = e.dropped });
+        f.settle(
+            i,
+            true,
+            e.rcode,
+            records,
+            why,
+            .{ .dropped = e.dropped, .authenticated = e.authenticated },
+        );
     }
 
     /// settle finishes slot i's question and every question following it.
@@ -689,7 +740,7 @@ const Frontend = struct {
         done.ms = now() - slot.start;
         const t = @backingInt(slot.type);
         f.audit(slot.service, &slot.name, t, allow, why, slot.line, done);
-        f.answer(slot.client, slot.id, slot.rd, rcode, &slot.name, t, records);
+        f.answer(slot.client, slot.id, slot.rd, rcode, &slot.name, t, records, x.authenticated);
         f.pending[slot.service] -= 1;
         slot.used = false;
     }
@@ -734,11 +785,12 @@ const Frontend = struct {
         name: *const wire.Name,
         t: u16,
         records: []const wire.Record,
+        authenticated: bool,
     ) void {
         const limit: usize = if (client == .udp) wire.udp_max else wire.response_max;
         f.reply(
             client,
-            wire.writeResponse(
+            wire.writeResponseWithAd(
                 f.out[2..],
                 id,
                 rd,
@@ -747,6 +799,7 @@ const Frontend = struct {
                 records,
                 null,
                 limit,
+                authenticated,
             ),
         );
     }
@@ -806,6 +859,7 @@ const Frontend = struct {
         /// question asked while this one was out.
         cached: bool = false,
         merged: bool = false,
+        authenticated: bool = false,
     };
 
     /// audit records one decision: who asked what, the answer and why.
@@ -847,6 +901,7 @@ const Frontend = struct {
         if (x.alias) |a| w.print(",\"alias\":\"{s}\"", .{a.text()}) catch {};
         if (x.cached) w.writeAll(",\"cached\":true") catch {};
         if (x.merged) w.writeAll(",\"merged\":true") catch {};
+        if (x.authenticated) w.writeAll(",\"dnssec\":true") catch {};
         inline for (comptime std.meta.fieldNames(screen.Dropped)) |field| {
             const n = @field(x.dropped, field);
             if (n > 0) w.print(",\"dropped_" ++ field ++ "\":{d}", .{n}) catch {};

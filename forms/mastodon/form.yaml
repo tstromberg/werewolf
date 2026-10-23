@@ -59,7 +59,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80, tcp/443]
-    connect: [tcp/443 tcp/53 tcp/3000 tcp/4000]
+    connect: [tcp/443 tcp/3000 tcp/4000]
+    lookup: "*"
     read: /etc/caddy /data/svc/mastodon/system
     config: settings /run/config/caddy/settings.json
     setting: domain hostname as DOMAIN
@@ -126,9 +127,9 @@ services:
     listen: [tcp/3000 loopback]
     connect:
       - tcp/443 tcp/80 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     # What Paperclip runs on an upload, through /bin/sh: each by its narrow
     # link, with no network, its own pledge, and the upload's directory alone.
     run: /usr/bin/file /usr/bin/ffprobe /usr/bin/ffmpeg
@@ -192,9 +193,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect proc exec landlock seccomp
     connect:
       - tcp/443 tcp/80 tcp/587 public
-      - udp/53 tcp/53
       - /run/svc/postgres/.s.PGSQL.5432
       - /run/svc/valkey/valkey.sock
+    lookup: "*"
     # Its secrets, which the web's secrets.rb made (/usr/lib/mastodon/.env.production).
     read: /data/svc/mastodon/env
     write: /data/svc/mastodon/system

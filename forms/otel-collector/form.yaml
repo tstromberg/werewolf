@@ -42,7 +42,8 @@ services:
     # netlink: Go's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath watch inet netlink connect listen proc
     listen: [tcp/4317 tcp/4318]
-    connect: [tcp/4317 tcp/443 udp/53 tcp/53]
+    connect: [tcp/4317 tcp/443]
+    lookup: "*"
     config:
       - tls-cert /run/config/otel-collector/tls-cert
       - tls-key /run/config/otel-collector/tls-key

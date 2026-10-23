@@ -58,12 +58,18 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
         "prctl(PR_GET_MDWE=66); mmap(PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS)",
     },
     .{ "kernel-aslr", "/proc/sys/kernel/randomize_va_space; /proc/sys/vm/mmap_rnd_bits" },
+    .{
+        "kernel-kaslr",
+        "x86_64: /sys/kernel/boot_params/data: hdr.loadflags (0x211) bit 1, KASLR_FLAG;" ++
+            " aarch64: /dev/kmsg: kernel-facility KASLR enabled|disabled record",
+    },
     .{ "kernel-null-page", "/proc/sys/vm/mmap_min_addr" },
     .{ "kernel-bpf-jit", "/proc/sys/net/core/bpf_jit_harden" },
     .{ "kernel-oops", "/proc/sys/kernel/{panic_on_oops,warn_limit,panic}" },
     .{
         "kernel-cmdline",
-        "/proc/cmdline: parsed arguments, compared with /usr/share/werewolf/cmdline",
+        "/proc/cmdline: parsed arguments, compared with /usr/share/werewolf/cmdline and" ++
+            " the arguments that weaken address randomization",
     },
     .{ "kernel-userfaultfd", "/proc/sys/vm/unprivileged_userfaultfd" },
     .{ "kernel-vsyscall", "/proc/self/maps: mapping pathname [vsyscall]" },
@@ -431,6 +437,14 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         },
     },
     .{
+        "kernel-kaslr",
+        Brief{
+            .label = "Kernel base randomized",
+            .expr = "boot_params KASLR_FLAG|/dev/kmsg KASLR",
+            .want = "set|enabled",
+        },
+    },
+    .{
         "kernel-null-page",
         Brief{
             .label = "Low mappings blocked",
@@ -459,7 +473,7 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         Brief{
             .label = "Boot arguments enforced",
             .expr = "/proc/cmdline ∩ image cmdline",
-            .want = "all required arguments",
+            .want = "all required arguments; no weakening ones",
         },
     },
     .{

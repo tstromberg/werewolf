@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Verify real DNSSEC validation, TLSA and AD through fence and unwound.
+
+Run as root in the unwound-lab Linux VM with named, Unbound and BIND's
+dnssec-keygen/dnssec-signzone installed. All servers run in a private network
+and mount namespace; the signed zone is generated afresh for this test.
+"""
+import json
+import os
+from pathlib import Path
+import runpy
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+
+TLSA_HEX = 'a5' * 32
+POLICY = ('listen tcp 53 loopback\ndns 54\n'
+          'lookup 2001 * A AAAA TLSA NS unfiltered\n'
+          'lookup 2002 * A AAAA TLSA NS\n')
+MARKER = 'nameserver 127.0.0.1\n'
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def ready(addr):
+    last = None
+    for _ in range(20):
+        result = subprocess.run(['dig', '@' + addr, '_25._tcp.mail.signed.test',
+                                 'TLSA', '+noall', '+comments', '+answer', '+time=1', '+tries=1'],
+                                capture_output=True, text=True)
+        last = result
+        if result.returncode == 0 and TLSA_HEX in ''.join(result.stdout.lower().split()):
+            return
+        time.sleep(.1)
+    raise AssertionError('DNS server at ' + addr + ' did not answer TLSA: ' +
+                         repr((last.returncode, last.stdout, last.stderr)))
+
+
+def signed_zone(work):
+    (work / 'unsigned.zone').write_text(
+        '$ORIGIN signed.test.\n$TTL 300\n'
+        '@ IN SOA ns.signed.test. hostmaster.signed.test. (1 3600 600 86400 300)\n'
+        '@ IN NS ns.signed.test.\n'
+        'ns IN A 127.0.0.2\n'
+        'mail IN A 192.0.2.10\n'
+        'bad IN A 192.0.2.33\n'
+        '_25._tcp.mail IN TLSA 3 1 1 ' + TLSA_HEX + '\n')
+    key = run('dnssec-keygen', '-a', 'ECDSAP256SHA256', '-n', 'ZONE', '-f', 'KSK',
+              'signed.test', cwd=work, capture_output=True, text=True).stdout.strip()
+    zsk = run('dnssec-keygen', '-a', 'ECDSAP256SHA256', '-n', 'ZONE',
+              'signed.test', cwd=work, capture_output=True, text=True).stdout.strip()
+    with (work / 'unsigned.zone').open('a') as zone:
+        zone.write('$INCLUDE ' + key + '.key\n')
+        zone.write('$INCLUDE ' + zsk + '.key\n')
+    signed = subprocess.run(['dnssec-signzone', '-o', 'signed.test', '-f', 'signed.zone',
+                             'unsigned.zone', key + '.key', zsk + '.key'], cwd=work, capture_output=True,
+                            text=True)
+    assert signed.returncode == 0, signed.stderr
+    zone = (work / 'signed.zone').read_text()
+    assert '192.0.2.33' in zone
+    (work / 'signed.zone').write_text(zone.replace('192.0.2.33', '192.0.2.34'))
+    return work / (key + '.key')
+
+
+def inside(fence, unwound, parent_net, source, mox=None):
+    assert os.readlink('/proc/self/ns/net') != parent_net
+    run('mount', '--make-rprivate', '/')
+    with tempfile.TemporaryDirectory(prefix='werewolf-dnssec-') as dirname:
+        work = Path(dirname)
+        work.chmod(0o755)
+        key = signed_zone(work)
+        driver = runpy.run_path(source, run_name='dnssec_import')['DRIVER']
+        (work / 'driver.py').write_text(driver)
+        (work / 'driver.py').chmod(0o644)
+        binaries = work / 'bin'
+        binaries.mkdir(mode=0o755)
+        shutil.copyfile(unwound, binaries / 'unwound')
+        (binaries / 'unwound').chmod(0o755)
+        if mox:
+            shutil.copyfile(mox, binaries / 'mox')
+            (binaries / 'mox').chmod(0o755)
+        for name in ('audit', 'stderr', 'named.log', 'unbound.log'):
+            (work / name).touch(mode=0o666)
+        run('mount', '--bind', str(binaries), '/usr/local/bin')
+        for directory in ('/run', '/etc', '/usr/share', '/var'):
+            run('mount', '-t', 'tmpfs', 'tmpfs', directory)
+        Path('/etc/passwd').write_text('root:x:0:0:root:/root:/bin/sh\n')
+        Path('/etc/group').write_text('root:x:0:\n')
+        Path('/etc/bind').mkdir()
+        Path('/etc/unbound').mkdir()
+        trust_key = Path('/etc/unbound/zone.key')
+        shutil.copyfile(key, trust_key)
+        zone_dir = Path('/var/cache/bind')
+        zone_dir.mkdir(parents=True)
+        shutil.copyfile(work / 'signed.zone', zone_dir / 'signed.zone')
+        Path('/var/empty').mkdir(mode=0o755)
+        network = Path('/run/werewolf/network')
+        network.mkdir(parents=True)
+        (network / 'upstream').write_text(MARKER)
+        (network / 'resolv.conf').write_text('nameserver 127.0.0.53\n')
+        Path('/etc/resolv.conf').symlink_to(network / 'resolv.conf')
+        image = Path('/usr/share/werewolf')
+        image.mkdir()
+        (image / 'net').write_text(POLICY)
+        (image / 'dnssec-local').write_text(MARKER)
+        run('ip', 'link', 'set', 'lo', 'up')
+        run('ip', 'addr', 'add', '127.0.0.2/8', 'dev', 'lo')
+        named_conf = Path('/etc/bind/named.conf')
+        named_conf.write_text(
+            'options { directory "' + str(zone_dir) + '"; '
+            'listen-on port 53 { 127.0.0.2; }; listen-on-v6 { none; }; '
+            'recursion no; dnssec-validation no; allow-query { any; }; '
+            'pid-file "/run/named.pid"; };\n'
+            'zone "signed.test" { type primary; file "' + str(zone_dir / 'signed.zone') + '"; };\n')
+        unbound_conf = Path('/etc/unbound/unbound.conf')
+        unbound_conf.write_text(
+            'server:\n interface: 127.0.0.1\n port: 53\n do-ip6: no\n'
+            ' username: ""\n chroot: ""\n directory: "' + str(work) + '"\n'
+            ' use-syslog: no\n logfile: ""\n do-not-query-localhost: no\n'
+            ' access-control: 127.0.0.0/8 allow\n'
+            ' local-zone: "test." nodefault\n'
+            ' local-zone: "signed.test." nodefault\n'
+            ' module-config: "validator iterator"\n'
+            ' trust-anchor-file: "' + str(trust_key) + '"\n'
+            'stub-zone:\n name: "signed.test."\n stub-addr: 127.0.0.2@53\n')
+        with (work / 'named.log').open('w') as named_log, \
+             (work / 'unbound.log').open('w') as unbound_log:
+            named = subprocess.Popen(['/usr/sbin/named', '-g', '-c', str(named_conf), '-u', 'root'],
+                                     stdout=named_log, stderr=subprocess.STDOUT)
+            unbound = None
+            client = None
+            try:
+                ready('127.0.0.2')
+                unbound = subprocess.Popen(['/usr/sbin/unbound', '-d', '-c', str(unbound_conf)],
+                                           stdout=unbound_log, stderr=subprocess.STDOUT)
+                ready('127.0.0.1')
+                good = run('dig', '@127.0.0.1', '_25._tcp.mail.signed.test', 'TLSA',
+                           '+dnssec', '+noall', '+comments', '+answer', capture_output=True,
+                           text=True).stdout
+                assert ' ad;' in good and TLSA_HEX in ''.join(good.lower().split()), good
+                plain = run('dig', '@127.0.0.1', '_25._tcp.mail.signed.test', 'TLSA',
+                            '+noedns', '+adflag', '+noall', '+comments', '+answer',
+                            capture_output=True, text=True).stdout
+                assert ' ad;' in plain, plain
+                bad = run('dig', '@127.0.0.1', 'bad.signed.test', 'A', '+noall', '+comments',
+                          capture_output=True, text=True).stdout
+                assert 'SERVFAIL' in bad, bad
+                client = subprocess.Popen([fence, '/usr/bin/python3', '-u', str(work / 'driver.py'),
+                                           '/usr/local/bin/unwound', str(work / 'audit'),
+                                           str(work / 'stderr')], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, text=True)
+                assert select.select([client.stdout], [], [], 10)[0], 'fence timeout'
+                assert '"event":"fence"' in client.stdout.readline()
+                assert select.select([client.stdout], [], [], 10)[0], 'unwound timeout'
+                assert client.stdout.readline().strip() == 'ready', (work / 'stderr').read_text()
+
+                def ask(uid, name, kind):
+                    client.stdin.write(json.dumps({'uid': uid, 'name': name, 'type': kind}) + '\n')
+                    client.stdin.flush()
+                    assert select.select([client.stdout], [], [], 10)[0], (uid, name)
+                    return json.loads(client.stdout.readline())
+
+                tlsa = ask(2001, '_25._tcp.mail.signed.test', 52)
+                assert tlsa['rcode'] == 0 and tlsa['ad'], tlsa
+                assert tlsa['rdata'] == ['030101' + TLSA_HEX], tlsa
+                cached = ask(2001, '_25._tcp.mail.signed.test', 52)
+                assert cached['ad'] and cached['rdata'] == tlsa['rdata'], cached
+                screened = ask(2002, '_25._tcp.mail.signed.test', 52)
+                assert screened['rcode'] == 0 and not screened['ad'], screened
+                invalid = ask(2001, 'bad.signed.test', 1)
+                assert invalid['rcode'] == 2 and not invalid['ad'], invalid
+                remote = ask(2001, 'mail.signed.test', 1)
+                assert remote['rcode'] == 0 and remote['ad'], remote
+                if mox:
+                    def as_mox_user():
+                        os.setgroups([])
+                        os.setgid(2001)
+                        os.setuid(2001)
+
+                    lookup = subprocess.run(['/usr/local/bin/mox', 'dns', 'lookup', 'tlsa',
+                                             '_25._tcp.mail.signed.test'],
+                                            preexec_fn=as_mox_user, capture_output=True, text=True,
+                                            timeout=10)
+                    assert lookup.returncode == 0 and TLSA_HEX in ''.join(
+                        lookup.stdout.lower().split()) and 'with dnssec' in lookup.stdout.lower(), lookup
+                    print('mox TLSA lookup:', lookup.stdout.strip())
+                root = ask(0, '_25._tcp.mail.signed.test', 52)
+                assert root.get('error') == 'Permission denied', root
+                audit = (work / 'audit').read_text()
+                assert '"dnssec":true' in audit, audit
+                print('check-unwound-dnssec: passed')
+            except BaseException:
+                for name in ('named.log', 'unbound.log', 'stderr', 'audit'):
+                    print('--- ' + name + '\n' + (work / name).read_text()[-6000:], file=sys.stderr)
+                raise
+            finally:
+                for process in (client, unbound, named):
+                    if process is not None and process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) in (6, 7) and sys.argv[1] == '--inside':
+        inside(*sys.argv[2:])
+    elif len(sys.argv) in (3, 4):
+        if sys.platform != 'linux' or os.geteuid() != 0:
+            sys.exit('check-unwound-dnssec needs root on Linux')
+        source = Path(__file__).with_name('check-unwound')
+        run('unshare', '--net', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
+            '--inside', str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
+            os.readlink('/proc/self/ns/net'), str(source.resolve()),
+            *([str(Path(sys.argv[3]).resolve())] if len(sys.argv) == 4 else []))
+    else:
+        sys.exit(__doc__)

@@ -76,6 +76,19 @@ const Mode = enum { up, keep };
 /// privilege to open anything later.
 fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     var log: Log = .{};
+    const local_validator = blk: {
+        const text = Dir.cwd().readFileAlloc(
+            io,
+            dns_policy.local_validator_path,
+            gpa,
+            .limited(64),
+        ) catch |err| switch (err) {
+            error.FileNotFound => break :blk false,
+            else => return err,
+        };
+        if (!std.mem.eql(u8, text, dns_policy.local_validator_text)) return error.BadValidator;
+        break :blk true;
+    };
     try Dir.cwd().createDirPath(io, state_dir);
     const nic = switch (mode) {
         .up => arg_nic,
@@ -107,15 +120,21 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         gpa,
         .limited(64 << 10),
     ));
-    const dns_servers = if (mode == .keep) try dns_policy.resolvers(Dir.cwd().readFileAlloc(
-        io,
-        dns_policy.upstream_path,
-        gpa,
-        .limited(1024),
-    ) catch |err| switch (err) {
-        error.FileNotFound => "",
-        else => return err,
-    }) else dns_policy.Resolvers{};
+    const dns_servers = if (mode == .keep) blk: {
+        const text = Dir.cwd().readFileAlloc(
+            io,
+            dns_policy.upstream_path,
+            gpa,
+            .limited(1024),
+        ) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return err,
+        };
+        break :blk if (local_validator)
+            try dns_policy.validatedLocal(text)
+        else
+            try dns_policy.resolvers(text);
+    } else dns_policy.Resolvers{};
     const dns_socket = if (mode == .keep and dns_users.len > 0)
         try dns_policy.Socket.open()
     else
@@ -163,6 +182,7 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         .dns_users = dns_users,
         .dns_servers = dns_servers,
         .dns_socket = dns_socket,
+        .local_validator = local_validator,
     };
     try p.confine();
     p.run();
@@ -494,6 +514,7 @@ const Parent = struct {
     dns_users: dns_policy.Users,
     dns_servers: dns_policy.Resolvers,
     dns_socket: ?dns_policy.Socket,
+    local_validator: bool,
 
     /// confine keeps only CAP_NET_ADMIN, lets Landlock limit writes to
     /// /run/werewolf/network, and installs a seccomp filter that kills the
@@ -570,8 +591,11 @@ const Parent = struct {
                         .reason = "the new lease differs",
                     });
                 };
-                var servers: dns_policy.Resolvers = .{};
-                for (m.lease.dns[0..m.lease.ndns]) |ip| try servers.add(ip);
+                var servers: dns_policy.Resolvers = if (p.local_validator)
+                    try dns_policy.validatedLocal(dns_policy.local_validator_text)
+                else
+                    .{};
+                if (!p.local_validator) for (m.lease.dns[0..m.lease.ndns]) |ip| try servers.add(ip);
                 if (p.dns_socket) |*socket| try dns_policy.replace(
                     socket,
                     p.dns_users,
@@ -579,7 +603,7 @@ const Parent = struct {
                     servers,
                 );
                 p.dns_servers = servers;
-                try p.link.apply(p.dir, m.lease, &p.log, p.nic);
+                try p.link.apply(p.dir, m.lease, &p.log, p.nic, p.local_validator);
                 var bind_ip: [16]u8 = undefined;
                 try writeFile(p.dir, "service-address", ipText(&bind_ip, m.lease.addr));
                 p.applied = m.lease;
@@ -1000,7 +1024,7 @@ const Link = struct {
     /// resolvers. Reapplying the same lease changes nothing. A refused MTU or
     /// route is logged and skipped, because the address is already on and
     /// failing would end keep, and with it every later renewal.
-    fn apply(l: *Link, dir: i32, w: Wire, log: *Log, nic: []const u8) !void {
+    fn apply(l: *Link, dir: i32, w: Wire, log: *Log, nic: []const u8, local_validator: bool) !void {
         try l.setAddr(linux.SIOCSIFADDR, w.addr, "SIOCSIFADDR");
         try l.setAddr(linux.SIOCSIFNETMASK, w.mask, "SIOCSIFNETMASK");
         if (w.mtu != 0) {
@@ -1025,7 +1049,7 @@ const Link = struct {
                 .errno = sandbox.errnoName(sandbox.failed_errno),
             });
         };
-        {
+        if (!local_validator) {
             var text: [max_dns * 28]u8 = undefined;
             var tw: Io.Writer = .fixed(&text);
             for (w.dns[0..w.ndns]) |d| try tw.print(

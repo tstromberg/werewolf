@@ -28,7 +28,8 @@ services:
     user: caddy
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443 tcp/53 udp/53 tcp/8008]
+    connect: [tcp/443 tcp/8008]
+    lookup: "*"
     read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: domain hostname required as SERVER_NAME
@@ -52,7 +53,7 @@ services:
     listen: [tcp/8008 loopback]
     connect:
       - tcp/443 tcp/8448 public
-      - udp/53 tcp/53
+    lookup: "*"
     config:
       - admin-password /run/config/continuwuity/admin-password
       - settings /run/config/continuwuity/settings.json

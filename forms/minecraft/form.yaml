@@ -38,7 +38,8 @@ services:
     # netlink: the JVM lists the host's addresses.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/25565]
-    connect: [tcp/443 tcp/53 udp/53]
+    connect: [tcp/443]
+    lookup: "*"
     config: settings /run/config/minecraft/settings.json
     setting: players string... required
     render: json minecraft.json

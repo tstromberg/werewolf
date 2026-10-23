@@ -8,6 +8,10 @@
 # machine's settings. See forms/mox/README.md.
 base: prod
 
+# Mox needs authenticated DNSSEC answers for DANE. Unbound validates locally;
+# unwound still applies Mox's lookup policy before forwarding to it.
+with: [unbound]
+
 recipes:
   - ../../../packages/mox/mox.yaml
 
@@ -20,6 +24,22 @@ check:
   skip: [http-answering]
 
 services:
+  # The validating resolver is reachable on loopback alone. Unwound is its
+  # only local client; Unbound itself recurses to authoritative DNS servers.
+  unbound:
+    exec: /usr/bin/unbound -d -p -c /etc/unbound/unbound.conf
+    before: /usr/lib/werewolf/unbound-setup
+    user: unbound
+    pledge: stdio rpath wpath inet unix netlink connect listen
+    listen: [tcp/53 udp/53 loopback]
+    dns-direct: true
+    connect: [udp/53 tcp/53]
+    lookup: "*"
+    read: [/etc/unbound]
+    memory: 256
+    nofile: 8192
+    env: [UNBOUND_LOCAL_ONLY=1]
+
   # Mox, as its own user: it may bind its mail and web ports and no other,
   # reach public addresses on the ports mail and ACME use, and write only
   # /data/svc/mox: configuration, mailboxes, queue, certificates. It runs
@@ -35,7 +55,7 @@ services:
     listen: [tcp/25 tcp/443 tcp/465 tcp/587 tcp/993]
     connect:
       - tcp/25 tcp/443 tcp/465 tcp/587 public
-      - udp/53 tcp/53
+    lookup: "* all unfiltered"
     config:
       - admin-password /run/config/mox/admin-password
       - relay-password /run/config/mox/relay-password optional

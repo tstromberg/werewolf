@@ -55,7 +55,8 @@ services:
     user: squid
     pledge: stdio rpath wpath inet unix connect listen
     listen: [tcp/3128]
-    connect: [tcp/443 public, udp/53 tcp/53]
+    connect: [tcp/443 public]
+    lookup: "*"
     read: [/etc/squid.conf /etc/mime.conf /etc/errorpage.css]
     write: /dev/shm
     config: settings /run/config/squid/settings.json
