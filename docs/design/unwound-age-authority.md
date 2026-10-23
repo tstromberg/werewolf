@@ -37,8 +37,11 @@ foreign keys, trusted schema disabled and WAL requested. It records a check's
 first request, then atomically stores the provider result and cache row. A
 late response cannot replace newer evidence. Reads recompute the age verdict
 from dated evidence. Its host test uses the pinned SQLite code; run
-`make check-unwound-age-store`. The worker process and IPC are still to be
-built.
+`make check-unwound-age-store`. An observe-only child and bounded request
+channel are present. It logs `age_observe` with DNS ID, QNAME, qtype, transport,
+source label, UID and policy generation. A full channel increments `age_lost`;
+assigned system domains and explicit grants bypass it. Database access and
+external checks are not connected.
 
 `test/check-unwound-age-mount` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers

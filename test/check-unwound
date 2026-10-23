@@ -586,7 +586,20 @@ def checks(client, work):
     assert {'udp', 'tcp'} <= {s['proto'] for s in seen}
 
     # Every decision is audited: who, what, why and the rule.
-    audit = [json.loads(l.split(': ', 1)[1]) for l in (work / 'audit').read_text().splitlines()]
+    for _ in range(50):
+        audit = [json.loads(l.split(': ', 1)[1]) for l in (work / 'audit').read_text().splitlines()]
+        if any(a.get('event') == 'age_observe' and a.get('qname') == 'poll.example.test'
+               for a in audit):
+            break
+        time.sleep(.02)
+    observations = [a for a in audit if a.get('event') == 'age_observe']
+    assert any(a.get('uid') == 2002 and a.get('qname') == 'poll.example.test'
+               and a.get('boundary') == 'unknown' and a.get('domain') is None
+               and a.get('dns_id') == 0x4242 and a.get('qtype') == 1
+               and a.get('transport') == 'udp' and a.get('source') == '127.53.0.2'
+               and a.get('rule') == 10 for a in observations), observations
+    assert not any(a.get('qname') == 'host.corp.lan.test' for a in observations), observations
+    assert not any(a.get('qname') == 'open.example.test' for a in observations), observations
     queries = [a for a in audit if a.get('event') == 'query']
     def find(**want):
         return [a for a in queries if all(a.get(k) == v for k, v in want.items())]

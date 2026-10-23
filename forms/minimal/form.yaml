@@ -39,7 +39,8 @@ archs:
 # shares, so none may signal it (cmd/seal-watch). _update is the updater's
 # network half, which fetches the packages and CVE sources it reads.
 # _unwound answers every program's DNS at 127.0.0.53, and _unwoundnet asks
-# the resolvers for it: the one user that may (cmd/unwound).
+# the resolvers for it: the one user that may (cmd/unwound). _unwoundage is
+# the separate observe-only age child; it has no database or network yet.
 accounts:
   groups:
     - groupname: tty
@@ -62,6 +63,8 @@ accounts:
       gid: 53
     - groupname: _unwoundnet
       gid: 54
+    - groupname: _unwoundage
+      gid: 55
   users:
     - username: _updater
       uid: 77
@@ -106,6 +109,11 @@ accounts:
     - username: _unwoundnet
       uid: 54
       gid: 54
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _unwoundage
+      uid: 55
+      gid: 55
       homedir: /var/empty
       shell: /sbin/nologin
 

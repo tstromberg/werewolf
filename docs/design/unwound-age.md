@@ -1,7 +1,7 @@
 # Domain age for screened DNS
 
-Status: offline classifier, pinned data and SQLite schema, 2026-10-23. No age
-decision is active in unwound. This builds on the [allowance policy](unwound-policy.md).
+Status: PSL boundary observations only. No age decision is active; see the
+[allowance policy](unwound-policy.md).
 
 ## Decision
 
@@ -89,6 +89,9 @@ request fields can be trusted and how the SQLite files must be protected.
 
 ## Rollout and checks
 
+An `_unwoundage` child now logs PSL boundaries for screened wildcard requests;
+its bounded channel cannot change DNS answers. It has no database or network.
+
 The offline classifier in `cmd/unwound/age.zig` covers PSL exact, wildcard,
 exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, expiry and clock boundaries with the
@@ -96,15 +99,14 @@ history parsing; and threshold, expiry and clock boundaries with the
 PSL and IANA versions are retained for audit, not cache invalidation. It
 accepts only normalized ASCII PSL input. `tools/update-unwound-age-data`
 converts the official PSL to A-labels with `idna==3.20` and pins it alongside
-the IANA RDAP DNS bootstrap in the source tree's `cmd/unwound/data`. The future
-worker will include these reviewed files in the image. `sources.json` records
+the IANA RDAP DNS bootstrap in `cmd/unwound/data`. The observer embeds the PSL;
+the future fetcher will use the RDAP file. `sources.json` records
 source URLs, SHA-256 hashes, versions and generation details. Refresh by
 downloading the two official URLs into local files and passing both paths to
 the updater; review the data diff before building an image. The updater makes
 no network requests; the planned worker will use the pinned image files.
-`cmd/unwound/bootstrap.zig` selects a pinned IANA entry by label-wise longest
-match and requires HTTPS. Run fetchers
-against fixture HTTPS servers and inspect audit records in observe mode.
+`cmd/unwound/bootstrap.zig` selects a pinned IANA entry by longest label match
+and requires HTTPS. Test fetchers with fixture HTTPS servers in observe mode.
 Enable the gate after native tests cover initial boot, renewal, restart,
 outage, rollback, CT fallback, LRU eviction, provenance, file authority and
 bounded miss floods. Audit records

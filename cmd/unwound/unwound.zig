@@ -10,7 +10,8 @@
 //! queries, decides them, and answers. Its child is upstream.zig: as
 //! _unwoundnet, the one user fence lets reach the resolvers, it forwards
 //! what the frontend allowed. Each side treats the other's messages as
-//! input to check. See docs/design/unwound.md and cmd/unwound/README.md.
+//! input to check. An observe-only age child classifies screened requests
+//! without changing answers. See docs/design/unwound.md and cmd/unwound/README.md.
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
@@ -20,6 +21,8 @@ const Policy = @import("policy.zig").Policy;
 const screen = @import("screen.zig");
 const cache = @import("cache.zig");
 const upstream = @import("upstream.zig");
+const age_ipc = @import("age_ipc.zig");
+const age_worker = @import("age_worker.zig");
 const sys = sandbox.sys;
 
 const frontend_id = 53;
@@ -114,6 +117,13 @@ fn run() !void {
         0,
         &domain_pair,
     ), "system domain channel");
+    var age_pair: [2]i32 = undefined;
+    _ = try sys(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+        &age_pair,
+    ), "age observation channel");
     const parent = linux.getpid();
     if (try sys(linux.fork(), "fork upstream") == 0) {
         sandbox.tieTo(parent);
@@ -123,7 +133,13 @@ fn run() !void {
     _ = linux.close(pair[1]);
     _ = linux.close(domain_pair[1]);
     _ = linux.close(network);
-    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], domain_pair[0], log });
+    if (try sys(linux.fork(), "fork age observer") == 0) {
+        sandbox.tieTo(parent);
+        try sandbox.closeAllBut(&.{ age_pair[1], log });
+        age_worker.run(age_pair[1], log, &policy);
+    }
+    _ = linux.close(age_pair[1]);
+    try sandbox.closeAllBut(&.{ udp, tcp, pair[0], domain_pair[0], age_pair[0], log });
     log_fd = log;
     side = "frontend";
     if (try sys(
@@ -134,12 +150,13 @@ fn run() !void {
     try sandbox.dropTo(frontend_id, "/var/empty");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
-    try confine(udp, tcp, pair[0], domain_pair[0], log);
+    try confine(udp, tcp, pair[0], domain_pair[0], age_pair[0], log);
     var f: Frontend = .{
         .udp = udp,
         .tcp = tcp,
         .channel = pair[0],
         .domain_channel = domain_pair[0],
+        .age_channel = age_pair[0],
         .log = log,
         .trust_ad = local_validator,
         .last_stats = now(),
@@ -282,7 +299,14 @@ fn openLog() !i32 {
 
 /// confine allows the frontend reads and writes on what it holds, accepts
 /// on its listener, and nothing that opens a file or makes a socket.
-fn confine(udp: i32, tcp: i32, channel: i32, domain_channel: i32, log: i32) !void {
+fn confine(
+    udp: i32,
+    tcp: i32,
+    channel: i32,
+    domain_channel: i32,
+    age_channel: i32,
+    log: i32,
+) !void {
     var f: sandbox.Filter = .{};
     f.allowArg("recvfrom", 0, @intCast(udp));
     f.allowArg("sendto", 0, @intCast(udp));
@@ -290,6 +314,7 @@ fn confine(udp: i32, tcp: i32, channel: i32, domain_channel: i32, log: i32) !voi
     f.allowArg("recvfrom", 0, @intCast(channel));
     f.allowArg("sendto", 0, @intCast(channel));
     f.allowArg("recvfrom", 0, @intCast(domain_channel));
+    f.allowArg("sendto", 0, @intCast(age_channel));
     f.allowArg("write", 0, @intCast(log));
     // TCP clients' descriptors are made by accept4; nothing else can be.
     inline for (.{
@@ -359,6 +384,7 @@ const Stats = struct {
     busy: u64 = 0,
     malformed: u64 = 0,
     lost: u64 = 0,
+    age_lost: u64 = 0,
     /// cached counts questions answered from the cache; merged, those that
     /// waited on the same question already out.
     cached: u64 = 0,
@@ -370,6 +396,7 @@ const Frontend = struct {
     tcp: i32,
     channel: i32,
     domain_channel: i32,
+    age_channel: i32,
     log: i32,
     trust_ad: bool,
     slots: [max_slots]Slot = @splat(.{}),
@@ -377,6 +404,7 @@ const Frontend = struct {
     conns: [max_conns]Conn = @splat(.{}),
     open: [dns.max_users]u8 = @splat(0),
     seq: u64 = 0,
+    age_seq: u64 = 0,
     stats: Stats = .{},
     reported: Stats = .{},
     last_stats: i64,
@@ -386,7 +414,7 @@ const Frontend = struct {
     records: [wire.max_records]wire.Record = undefined,
 
     fn serve(f: *Frontend) noreturn {
-        var fds: [4 + max_conns]linux.pollfd = undefined;
+        var fds: [5 + max_conns]linux.pollfd = undefined;
         var which: [max_conns]u8 = undefined;
         while (true) {
             // A read may have brought in the start of another TCP query.
@@ -398,19 +426,21 @@ const Frontend = struct {
             fds[1] = .{ .fd = f.udp, .events = linux.POLL.IN, .revents = 0 };
             fds[2] = .{ .fd = f.tcp, .events = linux.POLL.IN, .revents = 0 };
             fds[3] = .{ .fd = f.domain_channel, .events = linux.POLL.IN, .revents = 0 };
-            var n: usize = 4;
+            fds[4] = .{ .fd = f.age_channel, .events = 0, .revents = 0 };
+            var n: usize = 5;
             for (&f.conns, 0..) |*c, i| if (c.fd >= 0 and !c.waiting) {
                 fds[n] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
-                which[n - 4] = @intCast(i);
+                which[n - 5] = @intCast(i);
                 n += 1;
             };
             const rc = linux.poll(&fds, n, 1000);
             if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .INTR) f.fail("poll");
             if (fds[3].revents != 0) f.domainUpdate();
+            if (fds[4].revents != 0) f.fail("age observer closed");
             if (fds[0].revents != 0) f.answers();
             if (fds[1].revents != 0) f.datagrams();
             if (fds[2].revents != 0) f.accept();
-            for (fds[4..n], which[0 .. n - 4]) |p, i| if (p.revents != 0) f.readConn(i);
+            for (fds[5..n], which[0 .. n - 5]) |p, i| if (p.revents != 0) f.readConn(i);
             f.expire();
         }
     }
@@ -568,6 +598,7 @@ const Frontend = struct {
                 .bits = r.bits,
             });
         };
+        if (@import("policy.zig").needsAge(d.why)) f.observeAge(s, &q, d.line, t, client);
         if (caches[s].find(q.name.text(), t, now())) |e| {
             f.stats.cached += 1;
             const records = e.records(&q.name, now(), &f.records);
@@ -618,6 +649,45 @@ const Frontend = struct {
         if (linux.errno(linux.sendto(f.channel, ask.ptr, ask.len, 0, null, 0)) != .SUCCESS) {
             f.stats.busy += 1;
             f.settle(i, true, .servfail, &.{}, "busy", .{ .detail = "channel" });
+        }
+    }
+
+    fn observeAge(
+        f: *Frontend,
+        s: u8,
+        q: *const wire.Query,
+        line: u16,
+        t: wire.Type,
+        client: Client,
+    ) void {
+        f.age_seq +%= 1;
+        const request: age_ipc.Request = .{
+            .request_id = f.age_seq,
+            .dns_id = q.id,
+            .qtype = t,
+            .service = s,
+            .line = line,
+            .policy_generation = policy.generation,
+            .transport = switch (client) {
+                .udp => .udp,
+                .tcp => .tcp,
+            },
+            .name = q.name,
+        };
+        var buf: [age_ipc.max_len]u8 = undefined;
+        const packet = age_ipc.encode(&buf, &request);
+        const sent = linux.sendto(
+            f.age_channel,
+            packet.ptr,
+            packet.len,
+            linux.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        if (linux.errno(sent) == .AGAIN) {
+            f.stats.age_lost += 1;
+        } else if (linux.errno(sent) != .SUCCESS or sent != packet.len) {
+            f.fail("age observer channel");
         }
     }
 
@@ -803,9 +873,9 @@ const Frontend = struct {
                 f.say("{{\"event\":\"stats\",\"queries\":{d},\"cached\":{d},\"merged\":{d},\"" ++
                     "refused\":{d},\"tunnel\":{d},\"servfail\":{d},\"busy\":{d},\"malformed\":{d" ++
                     "},\"" ++
-                    "lost\":{d}}}", .{
+                    "lost\":{d},\"age_lost\":{d}}}", .{
                     s.queries,  s.cached, s.merged,    s.refused, s.tunnel,
-                    s.servfail, s.busy,   s.malformed, s.lost,
+                    s.servfail, s.busy,   s.malformed, s.lost,    s.age_lost,
                 });
             }
         }
