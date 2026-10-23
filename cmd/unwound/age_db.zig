@@ -75,6 +75,17 @@ pub const Result = struct {
     bootstrap_generation: []const u8,
 };
 
+pub const Probe = struct {
+    decision: age.Decision = .{ .source = .none, .verdict = .unknown },
+    /// A missing row is due immediately. An unknown cached result may hold
+    /// off another external check until the provider retry window ends.
+    retry_after: i64 = 0,
+
+    pub fn due(p: Probe, now: i64) bool {
+        return p.decision.verdict != .mature and now >= p.retry_after;
+    }
+};
+
 const Statement = struct {
     handle: *sqlite3_stmt,
 
@@ -241,9 +252,9 @@ pub const Db = struct {
     /// Read dated evidence only. The verdict is always recomputed against now.
     /// Touch an LRU row at most once per hour to avoid one WAL write per DNS
     /// query while keeping active domains in the 20,000-row cache.
-    pub fn decision(db: *Db, domain: []const u8, now: i64) !age.Decision {
+    pub fn probe(db: *Db, domain: []const u8, now: i64) !Probe {
         const found = try db.readDecision(domain, now) orelse
-            return .{ .source = .none, .verdict = .unknown };
+            return .{};
         if (now >= 3600) {
             var s = try db.prepare("UPDATE domain_age SET last_used_at=?2 " ++
                 "WHERE domain=?1 AND last_used_at<=?3");
@@ -256,9 +267,13 @@ pub const Db = struct {
         return found;
     }
 
-    fn readDecision(db: *Db, domain: []const u8, now: i64) !?age.Decision {
+    pub fn decision(db: *Db, domain: []const u8, now: i64) !age.Decision {
+        return (try db.probe(domain, now)).decision;
+    }
+
+    fn readDecision(db: *Db, domain: []const u8, now: i64) !?Probe {
         var s = try db.prepare("SELECT source,status,registered_at,effective_at," ++
-            "ct_first_seen_at,fetched_at FROM domain_age WHERE domain=?1");
+            "ct_first_seen_at,fetched_at,retry_after FROM domain_age WHERE domain=?1");
         defer s.close();
         try s.text(1, domain);
         const rc = sqlite3_step(s.handle);
@@ -292,12 +307,15 @@ pub const Db = struct {
             .fetched_at = sqlite3_column_int64(s.handle, 5),
         };
         return .{
-            .source = switch (evidence.source) {
-                .rdap => .rdap,
-                .crtsh => .crtsh,
-                .none => .none,
+            .decision = .{
+                .source = switch (evidence.source) {
+                    .rdap => .rdap,
+                    .crtsh => .crtsh,
+                    .none => .none,
+                },
+                .verdict = age.cachedVerdict(evidence, domain, now),
             },
-            .verdict = age.cachedVerdict(evidence, domain, now),
+            .retry_after = sqlite3_column_int64(s.handle, 6),
         };
     }
 };
@@ -407,6 +425,8 @@ test "age check provenance and evidence complete atomically" {
         try scalar(&db, "SELECT last_used_at FROM domain_age WHERE domain='example.com'"),
     );
     try t.expectEqual(age.Verdict.unknown, (try db.decision("absent.com", 120)).verdict);
+    try t.expect((try db.probe("absent.com", 120)).due(120));
+    try t.expect(!(try db.probe("example.com", 120)).due(120));
     try t.expectError(error.CheckMismatch, db.finishCheck(id, good));
 
     var newer_trigger = trigger;
@@ -433,4 +453,39 @@ test "age check provenance and evidence complete atomically" {
     const decision = try db.decision("example.com", newer.fetched_at);
     try t.expectEqual(age.Verdict.mature, decision.verdict);
     try t.expectEqual(.rdap, decision.source);
+}
+
+test "unknown evidence observes its retry window" {
+    const t = std.testing;
+    var db = try Db.openWith(":memory:", false);
+    defer db.close();
+    const id = try db.beginCheck(.{
+        .domain = "example.com",
+        .started_at = 100,
+        .cause = .miss,
+        .request_id = 1,
+        .dns_id = 2,
+        .qname = "a.example.com",
+        .qtype = 1,
+        .transport = .udp,
+        .source_label = "127.53.0.1",
+        .service_uid = 1001,
+        .policy_namespace = "uid:1001",
+        .policy_generation = 1,
+    });
+    try db.finishCheck(id, .{
+        .domain = "example.com",
+        .finished_at = 101,
+        .rdap_result = .@"error",
+        .source = .none,
+        .status = .@"error",
+        .fetched_at = 101,
+        .retry_after = 3701,
+        .psl_generation = "test",
+        .bootstrap_generation = "test",
+    });
+    const before = try db.probe("example.com", 3700);
+    try t.expectEqual(age.Verdict.unknown, before.decision.verdict);
+    try t.expect(!before.due(3700));
+    try t.expect((try db.probe("example.com", 3701)).due(3701));
 }
