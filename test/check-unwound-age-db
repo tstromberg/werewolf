@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Exercise the age database's provenance and evidence constraints."""
+
+from pathlib import Path
+import sqlite3
+
+
+schema = Path(__file__).resolve().parents[1] / "cmd/unwound/age.sql"
+db = sqlite3.connect(":memory:")
+db.executescript(schema.read_text())
+assert db.execute("PRAGMA user_version").fetchone() == (1,)
+
+request = (
+    "example.com", 1790000000, "miss", 17, 1234,
+    "www.example.com", 1, "udp", "127.53.0.8", 208,
+    "web", 4, "uid_only",
+)
+db.execute(
+    """INSERT INTO age_check
+       (domain, started_at, cause, request_id, dns_id, qname, qtype,
+        transport, source_label, service_uid, policy_namespace,
+        policy_generation, provenance)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    request,
+)
+check_id = db.execute("SELECT id FROM age_check").fetchone()[0]
+db.execute(
+    """INSERT INTO domain_age
+       (domain, source, status, registered_at, effective_at, fetched_at,
+        retry_after, last_used_at, psl_generation, bootstrap_generation,
+        last_check_id)
+       VALUES (?, 'rdap', 'valid', ?, ?, ?, ?, ?, ?, ?, ?)""",
+    ("example.com", 1500000000, 1500000000, 1790000000,
+     1790086400, 1790000000, "psl-1", "bootstrap-1", check_id),
+)
+assert db.execute(
+    "SELECT qname, service_uid, policy_namespace, process_pid "
+    "FROM age_check WHERE id = ?", (check_id,)
+).fetchone() == ("www.example.com", 208, "web", None)
+
+
+def rejected(sql, params):
+    try:
+        db.execute(sql, params)
+    except sqlite3.IntegrityError:
+        return
+    raise AssertionError("invalid age evidence or invented process identity accepted")
+
+
+rejected(
+    """INSERT INTO age_check
+       (domain, started_at, cause, request_id, dns_id, qname, qtype,
+        transport, source_label, service_uid, policy_namespace,
+        policy_generation, provenance, process_pid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    (*request, 123),
+)
+rejected(
+    """INSERT INTO domain_age
+       (domain, source, status, registered_at, effective_at, fetched_at,
+        retry_after, last_used_at, psl_generation, bootstrap_generation)
+       VALUES ('young.example', 'crtsh', 'valid', NULL, NULL,
+               1790000000, 1790086400, 1790000000, 'psl-1', 'bootstrap-1')""",
+    (),
+)
+
+# Evicting a domain's cached verdict must not erase the triggering request.
+db.execute("DELETE FROM domain_age WHERE domain = 'example.com'")
+assert db.execute("SELECT qname FROM age_check WHERE id = ?", (check_id,)).fetchone() == (
+    "www.example.com",)
+
+db.executemany(
+    """INSERT INTO domain_age
+       (domain, source, status, fetched_at, retry_after, last_used_at,
+        psl_generation, bootstrap_generation)
+       VALUES (?, 'none', 'unknown', 1790000000, 1790003600, ?, 'psl-1', 'bootstrap-1')""",
+    ((f"d{i}.example", i) for i in range(20001)),
+)
+assert db.execute("SELECT count(*) FROM domain_age").fetchone() == (20000,)
+assert db.execute("SELECT 1 FROM domain_age WHERE domain='d0.example'").fetchone() is None
+assert db.execute("SELECT 1 FROM domain_age WHERE domain='d20000.example'").fetchone() == (1,)
+print("age database: provenance, evidence and eviction constraints pass")

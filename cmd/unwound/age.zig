@@ -1,6 +1,6 @@
 //! Offline domain-age evidence parsing. No network or policy decision lives
-//! here. The RDAP worker will use this to prepare bounded age snapshots;
-//! unwound must not authorize names from an unverified snapshot.
+//! here. The age worker will use this to validate bounded evidence before
+//! writing SQLite; unwound must not authorize from unverified evidence.
 const std = @import("std");
 const mem = std.mem;
 
@@ -113,11 +113,12 @@ pub const Evidence = struct {
 };
 
 pub const Verdict = enum { unknown, young, mature, stale };
-pub const threshold_s: i64 = 30 * 86400;
+pub const threshold_s: i64 = 90 * 86400;
 pub const fresh_s: i64 = 86400;
 pub const stale_s: i64 = 7 * 86400;
+pub const ct_fresh_s: i64 = 86400;
 
-/// classify never lets evidence fetched before its 30-day boundary mature
+/// classify never lets evidence fetched before its 90-day boundary mature
 /// merely because the clock advanced. That boundary needs a fresh RDAP read.
 pub fn classify(e: Evidence, fetched: i64, now: i64) Verdict {
     if (now < fetched or fetched < e.effective or e.effective < e.created) return .unknown;
@@ -170,6 +171,68 @@ pub fn rdap(gpa: mem.Allocator, name: []const u8, body: []const u8, fetched: i64
     if (earliest_reset != null and earliest_reset.? < first) return null;
     if (last < first) return null;
     return .{ .registered = name, .created = first, .effective = last };
+}
+
+/// CT history proves a matching certificate was logged, not that the domain
+/// has remained registered. Only an RDAP availability failure may use this
+/// weaker evidence as a provisional result.
+pub const CtHistory = struct {
+    registered: []const u8,
+    first_seen: i64,
+};
+
+/// crtsh reads a bounded crt.sh JSON result. For a timestamp without an
+/// offset, this parser treats the service's value as UTC.
+/// Any malformed entry makes the whole response unknown.
+pub fn crtsh(gpa: mem.Allocator, name: []const u8, body: []const u8, fetched: i64) ?CtHistory {
+    if (body.len == 0 or body.len > 256 << 10 or !dnsName(name, false)) return null;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const Entry = struct { name_value: []const u8, min_entry_timestamp: []const u8 };
+    const data = std.json.parseFromSliceLeaky(
+        []const Entry,
+        arena.allocator(),
+        body,
+        .{ .ignore_unknown_fields = true },
+    ) catch return null;
+    if (data.len > 512) return null;
+    var earliest: ?i64 = null;
+    for (data) |entry| {
+        if (entry.name_value.len > 4096) return null;
+        var names = mem.splitScalar(u8, entry.name_value, '\n');
+        var matches = false;
+        while (names.next()) |raw| {
+            const n = mem.trim(u8, raw, " \t\r");
+            const host = if (mem.startsWith(u8, n, "*.")) n[2..] else n;
+            var lower: [253]u8 = undefined;
+            if (host.len == 0 or host.len > lower.len) continue;
+            for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+            if (dnsName(lower[0..host.len], false) and (std.ascii.eqlIgnoreCase(host, name) or
+                (host.len > name.len and host[host.len - name.len - 1] == '.' and
+                    std.ascii.eqlIgnoreCase(host[host.len - name.len ..], name)))) matches = true;
+        }
+        if (!matches) continue;
+        const when = ctTimestamp(entry.min_entry_timestamp) orelse return null;
+        if (when > fetched) return null;
+        earliest = @min(earliest orelse when, when);
+    }
+    return .{ .registered = name, .first_seen = earliest orelse return null };
+}
+
+pub fn classifyCt(history: CtHistory, fetched: i64, now: i64) Verdict {
+    if (now < fetched or fetched < history.first_seen or now - fetched > ct_fresh_s)
+        return .unknown;
+    if (fetched - history.first_seen < threshold_s) return .young;
+    return .mature;
+}
+
+fn ctTimestamp(value: []const u8) ?i64 {
+    if (value.len < 19 or value.len + 1 > 48) return null;
+    if (value[value.len - 1] == 'Z') return timestamp(value);
+    var buf: [48]u8 = undefined;
+    @memcpy(buf[0..value.len], value);
+    buf[value.len] = 'Z';
+    return timestamp(buf[0 .. value.len + 1]);
 }
 
 /// timestamp parses RFC 3339 whole seconds, optional fractions and offsets.
@@ -295,6 +358,7 @@ test "RDAP age takes registration resets and refuses ambiguous evidence" {
 
 test "age at the threshold needs a fresh fetch; mature evidence expires" {
     const t = std.testing;
+    try t.expectEqual(@as(i64, 90 * 86400), threshold_s);
     const e: Evidence = .{ .registered = "example.com", .created = 1, .effective = 1000 };
     try t.expectEqual(Verdict.young, classify(e, 1000, 1000 + threshold_s - 1));
     try t.expectEqual(Verdict.unknown, classify(e, 1000, 1000 + threshold_s));
@@ -303,4 +367,27 @@ test "age at the threshold needs a fresh fetch; mature evidence expires" {
     try t.expectEqual(Verdict.stale, classify(e, fetched, fetched + fresh_s + 1));
     try t.expectEqual(Verdict.unknown, classify(e, fetched, fetched + stale_s + 1));
     try t.expectEqual(Verdict.unknown, classify(e, fetched, fetched - 1));
+}
+
+test "crt.sh fallback uses matching log-entry time and expires in one day" {
+    const t = std.testing;
+    const fetched = timestamp("2026-10-23T00:00:00Z").?;
+    const body =
+        "[{\"name_value\":\"foo.example.com.evil.org\",\"min_entry_timestamp\":\"2010-01-01T00:0" ++
+        "0:00\"}," ++
+        "{\"name_value\":\"*.EXAMPLE.COM\",\"min_entry_timestamp\":\"2026-01-01T00:00:00.123\"}]";
+    const found = crtsh(t.allocator, "example.com", body, fetched).?;
+    try t.expectEqual(timestamp("2026-01-01T00:00:00Z").?, found.first_seen);
+    try t.expectEqual(Verdict.mature, classifyCt(found, fetched, fetched + ct_fresh_s));
+    try t.expectEqual(Verdict.unknown, classifyCt(found, fetched, fetched + ct_fresh_s + 1));
+    try t.expect(crtsh(t.allocator, "other.com", body, fetched) == null);
+    const future =
+        "[{\"name_value\":\"example.com\",\"min_entry_timestamp\":\"2026-10-24T00:00:00\"}]";
+    try t.expect(crtsh(t.allocator, "example.com", future, fetched) == null);
+    const young =
+        "[{\"name_value\":\"example.com\",\"min_entry_timestamp\":\"2026-10-01T00:00:00\"}]";
+    try t.expectEqual(
+        Verdict.young,
+        classifyCt(crtsh(t.allocator, "example.com", young, fetched).?, fetched, fetched),
+    );
 }

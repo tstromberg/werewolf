@@ -45,7 +45,7 @@ and a `detail` for each question that gets no answer; a lost one is counted.
    pipelined queries; unwound buffers the next frame until it answers the
    current one. `check-unwound` sends two frames in one write.
 
-Next: RDAP age. Endpoint lists, process metadata, stale answers and DoT are deferred.
+Next: [domain age](unwound-age.md); offline code exists, live enforcement does not.
 
 ## Cache
 

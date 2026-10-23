@@ -1,72 +1,103 @@
 # Domain age for screened DNS
 
-Status: offline classifier and fixture work, 2026-10-23. No age decision is
+Status: offline classifier and SQLite schema, 2026-10-23. No age decision is
 active in unwound. This builds on the [allowance policy](unwound-policy.md).
 
 ## Decision
 
 Only a screened `lookup: "*"` uses age. Exact and `*.NAME` grants remain the
 operator's explicit trust. Age is one more screen after local name shape and
-endpoint checks. An effective registration younger than 30 days is refused.
-Unknown or stale evidence is refused once age enforcement is enabled. The
-first release measures coverage without changing answers; enforcement follows
-only after its bootstrap and restart paths work in a native image.
+endpoint checks. The default cutoff is 90 days after effective registration.
+Unknown evidence is refused once enforcement is enabled. The first release
+measures coverage without changing answers; enforcement follows only after
+native boot, restart and integrity checks pass.
 
 The age belongs to the registered domain, never the whole QNAME. Use the
 ICANN section of the Public Suffix List (PSL) to find that boundary. A name
 below a PRIVATE rule is a tenant: its provider's old registration does not
 prove the tenant's age. Such a tenant needs an explicit grant or a verified
-tenant-specific source. Local names, unknown suffixes, and a name that is
-itself a public suffix have no RDAP registration age.
+tenant-specific source. Local names, unknown suffixes and public suffixes
+have no RDAP registration age.
 
 Use the top-level RDAP `domain` object's events. Its `ldhName` must equal
 the requested registered domain. A `registration` event records initial
 creation; a later `reregistration` or `reinstantiation` resets the effective
 age. Conflicting dates for one event action, a missing creation event, a
-future date, and a date after fetch are unknown. `last changed`, transfer,
-expiration and entity events do not establish creation. Certificate times
-and CT history cannot substitute for registry age.
+future date and a date after fetch are unknown. `last changed`, transfer,
+expiration and entity events do not establish creation.
+
+If RDAP is unavailable, query crt.sh for the same registered domain's CT
+history. Use the earliest matching log-entry timestamp, never certificate
+`notBefore`. An old certificate does not prove continuous registration: a
+domain can expire and be registered again. An RDAP answer saying young or
+giving ambiguous dates is not a transport failure and must never be
+overridden by CT. During an RDAP outage, old CT history may give a
+*provisional* mature decision for at most 24 hours, marked `crtsh` in the
+audit, while RDAP retries continue. No CT result, a young CT result or an
+invalid/oversized response leaves age unknown. Measure provisional decisions
+in observe mode before enabling this weaker fallback.
 
 ## Data path
 
-1. The frontend sends only the derived registered domain to a bounded local
-   miss queue. It never performs HTTPS and never sends a full QNAME. Repeated
-   misses for a domain coalesce across services.
-2. A separate `_rdap` worker uses an image-pinned IANA RDAP bootstrap and PSL
-   generation. It picks the label-wise longest bootstrap match and only HTTPS
-   URLs. Its own lookup grant covers the bootstrap and selected registry
-   hosts; its network grant is public TCP 443. It cannot edit DNS policy.
-3. The worker validates TLS, response type and size, JSON depth, domain
+1. The frontend sends the derived registered domain and triggering DNS
+   request metadata to a bounded local miss queue. It never performs HTTPS.
+   The external worker receives only the registered domain, never a full
+   QNAME. Repeated misses coalesce. The first triggering request is recorded
+   with the external check; other requests retain their normal DNS audit.
+2. An isolated `_rdap` fetcher uses an image-pinned IANA RDAP bootstrap and
+   PSL generation. It picks the label-wise longest bootstrap match and only
+   HTTPS URLs. Its own lookup grant covers bootstrap and registry hosts; its
+   network grant is public TCP 443. It cannot edit DNS policy or the database.
+3. The fetcher validates TLS, response type and size, JSON depth, domain
    identity and event dates. Redirects and referrals remain within vetted
-   HTTPS public destinations, at a small hop limit. Retry-After and failures
-   produce short-lived unknown results. No HTTP request can be initiated by
-   a malformed DNS name or a PRIVATE tenant.
-4. It writes a root-mediated atomic snapshot with domain, effective event,
-   fetch and expiry times, source URL, bootstrap and PSL generations. The
-   frontend reads a validated snapshot at start and on generation change.
-   Missing, partial, rolled-back or expired data never authorizes a name.
+   HTTPS public destinations, at a small hop limit. RDAP availability
+   failures may trigger a separate bounded crt.sh HTTPS query. No HTTP request
+   can be initiated by a malformed DNS name or PRIVATE tenant.
+4. A dedicated `_unwoundage` worker owns SQLite in `/data/svc/unwound-age`,
+   using `cmd/unwound/age.sql`. It writes evidence and one `age_check` row per
+   external check in a transaction, then serves validated verdicts over a
+   private channel. Neither DNS process opens the database. Missing, partial,
+   rolled-back or expired evidence never authorizes a name.
 
-Bound the worker to 100,000 records or 64 MiB, a daily refresh with jitter,
-one-hour negative results, per-service and per-registry miss rates, and no
-more than seven days of stale mature evidence during a registry outage.
-At the 30-day threshold evidence must be fresh. A clock behind snapshot
-creation or bootstrap publication makes the evidence unknown. The current
-screen's name and site budgets still apply while the updater is unavailable.
+Keep the most recently used 20,000 registered domains. A domain row has no
+fixed lifetime: it can remain indefinitely if it stays in the LRU set, but
+each verdict is recomputed from dated evidence and refreshed daily with
+jitter. Eviction means unknown, never allow. Cache unknown/errors for one hour
+or a longer server Retry-After, with bounded per-service and per-registry miss
+rates. Bound database bytes as well as rows, since QNAMEs and URIs vary.
+SQLite WAL, `-wal` and `-shm` files all live in the worker's private directory
+and have one writer. Keep the check history independent of domain eviction for
+a bounded audit period; pin each cached domain's `last_check_id` row while
+pruning older audit rows. The SQL trigger enforces the 20,000-domain limit.
+
+RDAP evidence fetched after the 90-day boundary is fresh for one day. Mature
+RDAP evidence may remain usable for at most seven days from fetch during a
+registry outage, logged as stale. At the boundary evidence must be fresh.
+crt.sh provisional evidence is fresh for at most 24 hours and never gets the
+seven-day stale allowance. A clock behind fetch or bootstrap publication
+makes evidence unknown. The current name/site budgets still apply.
+
+## Request provenance and file authority
+
+The [age evidence authority](unwound-age-authority.md) specifies which
+request fields can be trusted and how the SQLite files must be protected.
 
 ## Rollout and checks
 
 The offline classifier in `cmd/unwound/age.zig` covers PSL exact, wildcard,
-exception and PRIVATE rules; RDAP registration and resets; and threshold,
-staleness and clock boundaries. It accepts only normalized ASCII PSL input.
-The updater must convert Unicode PSL rules to A-labels before using it. Run
-the updater with fixture HTTPS servers and inspect audit records without
-enforcement. Enable the age gate after native tests prove initial boot,
-renewal, restart, outage, rollback, and bounded miss floods. Audit records
+exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
+history parsing; and threshold, staleness and clock boundaries with the
+90-day default. It accepts only
+normalized ASCII PSL input. The updater must convert Unicode PSL rules to
+A-labels before using it. Run fetchers against fixture HTTPS servers and
+inspect audit records in observe mode. Enable the gate after native tests
+cover initial boot, renewal, restart, outage, rollback, CT fallback, LRU
+eviction, provenance, file authority and bounded miss floods. Audit records
 name the derived domain, evidence generation and decision, never the RDAP
-response body. A domain's age is not evidence that it is safe: compromised
-old domains still face the other screens.
+response body. Old domains still face the other screens.
 
 [RFC 9083](https://www.rfc-editor.org/rfc/rfc9083.html#section-4.5) defines
 RDAP events; [RFC 9224](https://www.rfc-editor.org/rfc/rfc9224.html#section-4)
 defines bootstrap matching. The [PSL](https://publicsuffix.org/list/) has
-separate ICANN and PRIVATE sections.
+separate ICANN and PRIVATE sections. [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html)
+describes CT log entries, which do not report registration age.

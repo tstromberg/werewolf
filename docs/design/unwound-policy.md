@@ -76,25 +76,16 @@ none of it authorizes current queries. A reviewed endpoint list may identify
 known out-of-band DNS endpoints,
 but an entry would express risk policy rather than prove maliciousness.
 
-Age defaults to 30 days from the current registry [RDAP] registration event. Match the
-domain object; absent/conflicting/future dates mean unknown. Renewal is not creation.
-CT's earliest log-entry time supports history, not ownership/registration age; neither
-certificate notBefore nor old CT overrides young/unknown RDAP. Use the [PSL] ICANN
-boundary for registry queries; PRIVATE tenants cannot borrow provider age. Unknown
-age, internal names and PRIVATE tenants need explicit grants; no CT-only fallback.
-An isolated updater queries [RDAP bootstrap] HTTPS endpoints, with a fixed bootstrap
-DNS policy. Send only registrable domains after local endpoint/entropy checks, never
-full QNAMEs. Bound/coalesce misses per service/provider; restrict redirects/referrals,
-reject private destinations and cap HTTP/JSON sizes, depth and time. DNS workers read
-snapshots only. Persist domain/source/event/fetch/expiry/provenance, shared by services.
-Refresh daily with jitter; mature records may remain usable for seven days from fetch
-during outages, logged as stale. Cache unknown/errors one hour; honor Retry-After.
-Require fresh evidence at the age threshold. Cap records at 100,000/64 MiB; eviction
-means unknown. Atomically validate snapshots; signed lists/PSL have expiry and rollback
-protection. Expired data or uncertain time cannot authorize screened names.
-An updater would add age/source/fetch time and data generations to audit records.
-The current local screen uses a 3.5-bit entropy threshold for labels of at least
-24 characters and enforces bounded distinct-name rates.
+Age defaults to 90 days from the current registry [RDAP] registration event.
+The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants
+need their own grant. On RDAP availability failure, crt.sh may provide a
+marked, 24-hour provisional decision from old CT history. It cannot override
+a young or ambiguous RDAP answer. An isolated fetcher uses [RDAP bootstrap]
+over HTTPS; a separate SQLite writer retains the last 20,000 domains and the
+requests that caused external checks. DNS workers receive bounded verdicts
+over IPC. UID and service namespace come from the source label; exact process
+identity needs a kernel-backed attribution path. The current local screen
+keeps its 3.5-bit entropy threshold and distinct-name budgets.
 
 ## Drawbacks
 
