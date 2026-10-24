@@ -40,13 +40,13 @@ Omitted types mean A AAAA; explicit lists replace that line's default. Grants un
 `all` expands to the image's supported query types, never DNS ANY, transfers or UPDATE.
 Exact names and `*.domain` are deliberate grants without age/endpoint/entropy checks.
 The latter covers descendants, not the apex; it grants the entire subtree's authority.
-Broad `*` grants refuse the compiled [callback and tunnel domain list](../../cmd/unwound/endpoints.zig)
-and IP-prefixed hostnames. This includes dotted/dashed IPv4, integer/hex IPv4,
-and dashed IPv6 prefixes under any DNS suffix; ordinary reverse PTR names remain
-available. The block uses whole suffixes and label boundaries, including the
-listed apex. It runs before cache access, age checks and upstream DNS, and applies
-to alias targets too. A matching exact name or `*.domain` grant overrides the
-block for its service and query types, regardless of grant order.
+Broad `*` grants refuse the compiled [callback and tunnel domain
+list](../../cmd/unwound/endpoints.zig) and IP-prefixed hostnames. This includes
+dotted/dashed IPv4, integer/hex IPv4, and dashed IPv6 prefixes under any DNS suffix;
+ordinary reverse PTR names remain available. The block uses whole suffixes and label
+boundaries, including the listed apex. It runs before cache access, age checks and
+upstream DNS, and applies to alias targets too. A matching exact name or `*.domain`
+grant overrides the block for its service and query types, regardless of grant order.
 Bare `*` screens names; `unfiltered` removes only that line's screening. Require `*`
 with it. The endpoint defaults still require a named grant even with `unfiltered`.
 Type limits, quotas, parsing, audit and local resolution through unwound
@@ -68,8 +68,8 @@ It grants local resolver transport automatically; HTTP egress still needs `conne
 Unknown types/modifiers fail the build. No process-supplied namespace authorizes DNS.
 Allow service-scoped lookup grants for native/OCI services; reject shared service UIDs.
 Whole-service replacement replaces DNS grants too; do not merge inherited grants back.
-Non-service users use `net: lookup USER PATTERN [TYPE...|all] [unfiltered]`.
-Reject legacy bare `dns USER`/`connect: dns` at migration; never silently grant `*`.
+Non-service users use `net: lookup USER PATTERN [TYPE...|all] [unfiltered]`. Reject
+legacy bare `dns USER`/`connect: dns` at migration; never silently grant `*`.
 
 `dns-direct: true` is a service-local exception for a DNS server with its own
 non-root user and a port 53 or 853 listener. It grants only the upstream DNS

@@ -12,9 +12,8 @@ base: prod
 
 with: [caddy]
 
-# Build locally until this musl package is published in the application feed.
-recipes:
-  - ../../../packages/net/pihole-curl/pihole-curl.yaml
+packages:
+  - pihole-curl
 
 # Gravity uses our HTTP(S)-only curl. Git updates are not part of this
 # read-only service; remove its libcurl consumers before their libraries.

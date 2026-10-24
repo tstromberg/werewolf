@@ -449,7 +449,8 @@ fn parsePolicy(text: []const u8) !Policy {
                 _ = words.next();
             }
             if (std.mem.eql(u8, words.peek() orelse "", "loopback")) {
-                if (proto != .tcp or any or p.connect[p.nconnect].public or p.connect[p.nconnect].lan)
+                if (proto != .tcp or any or p.connect[p.nconnect].public or
+                    p.connect[p.nconnect].lan)
                     return error.BadPolicy;
                 p.connect[p.nconnect].loopback = true;
                 _ = words.next();
@@ -873,7 +874,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     for (p.connect[0..p.nconnect], 0..) |c, i| {
         if (c.proto == .icmp or c.any or c.loopback) continue;
         const seen = for (p.connect[0..i]) |d| {
-            if (!d.loopback and d.proto == c.proto and d.port == c.port and (!d.lan or c.lan)) break true;
+            if (!d.loopback and d.proto == c.proto and d.port == c.port and (!d.lan or
+                c.lan)) break true;
         } else false;
         const r: Rule = .{
             .priority = pref.in_allow,
@@ -1365,10 +1367,15 @@ test "loopback-only TCP grants do not open an Internet port" {
             for (rules) |r| {
                 if (r.proto != null and r.proto != .tcp) continue;
                 if (r.uid != null and r.uid.? != uid) continue;
-                if (r.dport != null and (port_number < r.dport.? or port_number > (r.dport_last orelse r.dport.?))) continue;
+                if (r.dport != null and (port_number < r.dport.? or
+                    port_number > (r.dport_last orelse r.dport.?))) continue;
                 if (r.sport != null and r.sport.? != 40000) continue;
                 if (r.src != null) continue;
-                if (r.dst) |dst| if (!prefixMatches(destination, dst, r.dst_len orelse @intCast(dst.len * 8))) continue;
+                if (r.dst) |dst| if (!prefixMatches(
+                    destination,
+                    dst,
+                    r.dst_len orelse @intCast(dst.len * 8),
+                )) continue;
                 // Model the local table for the addresses used below.
                 if (r.table == RT_TABLE_LOCAL and !std.mem.eql(u8, destination, &loopback_ip) and
                     !std.mem.eql(u8, destination, &loopback6)) continue;
@@ -1381,7 +1388,10 @@ test "loopback-only TCP grants do not open an Internet port" {
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
         const planned = plan(p, family, &rules);
         const local: []const u8 = if (family == linux.AF.INET) &loopback_ip else &loopback6;
-        const remote: []const u8 = if (family == linux.AF.INET) &.{ 1, 1, 1, 1 } else &v6(&.{ 0x26, 0x06, 0x47, 0 }, 1);
+        const remote: []const u8 = if (family == linux.AF.INET)
+            &.{ 1, 1, 1, 1 }
+        else
+            &v6(&.{ 0x26, 0x06, 0x47, 0 }, 1);
         try std.testing.expectEqual(FR_ACT_TO_TBL, decide(planned, 207, local, 32402));
         try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 207, remote, 32402));
         try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 208, remote, 32402));

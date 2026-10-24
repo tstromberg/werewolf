@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Check the live cloud runner's pass/fail decisions without cloud credentials."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+runner = Path('test/cloud').resolve()
+mock = '''import json, os, pathlib, sys
+tool = pathlib.Path(sys.argv[0]).name
+args = sys.argv[1:]
+state = pathlib.Path(os.environ['CLOUD_TEST_STATE'])
+bad = os.environ.get('CLOUD_TEST_BAD', '')
+if tool == 'sleep':
+    pass
+elif tool == 'ssh-keygen':
+    if args[args.index('-t') + 1] == 'ed25519-sk':
+        assert '-O' in args and args[args.index('-O') + 1] == 'verify-required', args
+    key = pathlib.Path(args[args.index('-f') + 1])
+    key.write_text('disposable test key')
+    key.with_suffix('.pub').write_text('sk-ssh-ed25519@openssh.com fixture')
+elif tool == 'howl':
+    if args[0] == 'create':
+        assert ('--build' in args) == (os.environ['CLOUD_MODE'] == 'build'), args
+        config = pathlib.Path(args[args.index('--config') + 1])
+        assert (config / 'users').read_text().startswith('t admin sk-')
+        state.write_text((config / 'hostname').read_text().strip())
+        print(args[1] + '\\t192.0.2.1\\tprod-ssh')
+    elif args[0] == 'console':
+        markers = {
+            'verity': "stage0: slot a: root.erofs, read-only, verified",
+            'secureboot': 'stage0: Secure Boot enforced outside setup mode',
+            'tpm': 'stage0: TPM release authorization checked; reset authority protected',
+            'ipe': 'stage0: IPE: only this root image may execute; policy administration removed',
+            'sshd': 'Server listening on 0.0.0.0 port 22',
+        }
+        for check, marker in markers.items():
+            if bad != check: print(marker)
+        print('cloud-metadata: ' + json.dumps(dict(event='config', provider=os.environ['CLOUD_TEST_PROVIDER']), separators=(',', ':')))
+        print('posture: fail=' + ('boot-rollback-protected' if bad == 'posture' else '') + ' pass=100 ' + json.dumps(dict(host=state.read_text()), separators=(',', ':')))
+        if bad == 'disabled': print('posture: fail= pass=100 disabled=tpm {}')
+elif tool == 'ssh':
+    if 'SecurityKeyProvider=' not in ' '.join(args):
+        print('Permission denied (publickey)', file=sys.stderr)
+        sys.exit(255)
+    user = args[-2].split('@')[0]
+    if bad == 'ssh-' + user:
+        print('Permission denied (publickey)', file=sys.stderr)
+        sys.exit(255)
+    if args[-1] == 'cat /run/werewolf/posture.json':
+        required = ('boot-secure-boot', 'boot-rollback-protected', 'boot-ipe-enforced', 'kernel-lockdown', 'kernel-seal', 'files-root-verity', 'network-fence-unbypassable')
+        print(json.dumps(dict(host=state.read_text(), root=True, dev=False, disabled=[], checks=[dict(id=check, result='skip' if bad == 'runtime' else 'pass') for check in required], known=dict(unexpected=[], now_passing=[]))))
+    else:
+        print('root\\n0' if user == 'root' or bad == 't-is-root' else 't\\n12345')
+elif tool == 'aws':
+    if 'describe-availability-zones' in args: print('us-west-2')
+    elif 'describe-images' in args and 'TpmSupport' in ' '.join(args):
+        print('None' if bad == 'provider' else 'v2.0')
+    elif 'describe-instances' in args and 'ImageId' in ' '.join(args): print('ami-test')
+elif tool == 'gcloud':
+    if 'get-value' in args: print('test-project')
+    elif 'describe' in args and 'projects' in args: print('test-project')
+    elif 'describe' in args and 'instances' in args:
+        print('True\\tFalse\\tTrue' if bad == 'provider' else 'True\\tTrue\\tTrue')
+elif tool == 'az':
+    if 'config' in args: print('test-group')
+    elif 'group' in args: print('westus2')
+    elif 'vm' in args:
+        print(json.dumps(dict(os=None, security=dict(securityType='TrustedLaunch', uefiSettings=dict(secureBootEnabled=True, vTpmEnabled=bad != 'provider')))))
+else:
+    sys.exit('unexpected command: ' + tool + repr(args))
+'''
+
+with tempfile.TemporaryDirectory(prefix='ww-cloud-checks-') as temporary:
+    root = Path(temporary)
+    (root / 'bin').mkdir()
+    (root / 'test').mkdir()
+    for name in ('cloud-console', 'azure-security', 'cloud-posture'):
+        shutil.copyfile(runner.with_name(name), root / 'test' / name)
+    for name in ('howl', 'aws', 'gcloud', 'az', 'ssh', 'ssh-keygen', 'sleep'):
+        path = root / 'bin' / name
+        path.write_text('#!' + sys.executable + '\n' + mock)
+        path.chmod(0o700)
+    provider = root / 'test-sk.so'
+    provider.touch()
+    env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
+               HOWL=str(root / 'bin/howl'), SSH_SK_PROVIDER=str(provider),
+               CLOUD_TEST_STATE=str(root / 'hostname'), CLOUD_NAME='ww-cloud-test',
+               POSTURE_KNOWN='', CLOUD_KEEP='0', CLOUD_SIZE='test-size')
+
+    def run(cloud, mode, bad=''):
+        result = subprocess.run(['sh', str(runner), cloud, 'prod-ssh', 'aarch64'],
+                                cwd=root, env=dict(env, CLOUD_MODE=mode,
+                                                  CLOUD_TEST_PROVIDER=cloud,
+                                                  CLOUD_TEST_BAD=bad),
+                                capture_output=True, text=True, timeout=30)
+        assert (result.returncode == 0) == (not bad), (cloud, mode, bad, result.stdout, result.stderr)
+        return result.stdout
+
+    for cloud in ('aws', 'azure', 'gcp'):
+        for mode in ('build', 'download'):
+            output = run(cloud, mode)
+            for check in ('ssh-login-t', 'ssh-login-root', 'tpm-authorization',
+                          'ipe-enforced', 'secure-boot', 'posture', 'runtime-protections', 'reconfigure', 'delete'):
+                assert 'ok     ' + check in output, (cloud, mode, check, output)
+        assert 'FAIL' in run(cloud, 'build', 'provider')
+    for bad in ('verity', 'secureboot', 'tpm', 'ipe', 'sshd', 'posture',
+                'disabled', 'ssh-t', 'ssh-root', 't-is-root', 'runtime'):
+        assert 'FAIL' in run('aws', 'build', bad), bad
+
+print('pass   cloud-checks: both modes and users; missing protections, provider flags and wrong identities fail')

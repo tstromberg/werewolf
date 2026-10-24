@@ -29,6 +29,8 @@ pub const Build = struct {
     dev_shell: bool = true,
     /// ipe makes the image require IPE: stage0 activates its signed release policy.
     ipe: bool = false,
+    /// tpm requires the measured release pair and rollback journal at boot.
+    tpm: bool = false,
     /// posture_known is test/posture-known: the posture checks every form
     /// of a kind fails.
     posture_known: []const u8 = "",
@@ -961,6 +963,7 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
         if (!mem.eql(u8, first, kind) and !mem.eql(u8, first, @tagName(b.arch))) continue;
         while (it.next()) |id| {
             if (b.ipe and mem.eql(u8, id, "boot-ipe-enforced")) continue;
+            if (b.tpm and mem.eql(u8, id, "boot-rollback-protected")) continue;
             try out.print(gpa, "{s} {s}\n", .{ id, unbuilt(id, excuse) });
         }
     }
@@ -1421,7 +1424,12 @@ fn netLine(
             const p = port(t, if (proto[0] == 'u') "udp/" else "tcp/") orelse return false;
             try out.append(gpa, try gpa.print(
                 "connect {s} {s} {d}{s}",
-                .{ who, proto, p, if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "" },
+                .{
+                    who,
+                    proto,
+                    p,
+                    if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "",
+                },
             ));
         }
         return true;
@@ -1757,7 +1765,11 @@ test "prune: relative and clean paths only" {
     var f: Failure = .{};
     const got = try prune(gpa, &.{try testForm(gpa, "valkey", "prune:\n  - usr/bin/bash\n")}, &f);
     try testing.expectEqualStrings("usr/bin/bash", got[0]);
-    const spaced = try prune(gpa, &.{try testForm(gpa, "plex", "prune:\n  - usr/lib/plexmediaserver/Plex Script Host\n")}, &f);
+    const spaced = try prune(
+        gpa,
+        &.{try testForm(gpa, "plex", "prune:\n  - usr/lib/plexmediaserver/Plex Script Host\n")},
+        &f,
+    );
     try testing.expectEqual(1, spaced.len);
     try testing.expectEqualStrings("usr/lib/plexmediaserver/Plex Script Host", spaced[0]);
     for ([_][]const u8{ "/usr/bin/bash", "./usr", "../etc", "usr/", "usr/..", "usr/." }) |p| {
@@ -1880,6 +1892,15 @@ test "IPE builds retain unrelated weaknesses and remove closed kernel gaps" {
     try testing.expect(mem.find(u8, got, "boot-ipe-enforced") == null);
     try testing.expect(mem.find(u8, got, "boot-rollback-protected") != null);
     try testing.expect(mem.find(u8, got, "programs-no-shell deliberate") != null);
+    const protected = try weaknesses(gpa, top, .{
+        .arch = .aarch64,
+        .ipe = true,
+        .tpm = true,
+        .posture_known = "* boot-ipe-enforced boot-rollback-protected\n",
+    });
+    try testing.expect(mem.find(u8, protected, "boot-ipe-enforced") == null);
+    try testing.expect(mem.find(u8, protected, "boot-rollback-protected") == null);
+    try testing.expect(mem.find(u8, protected, "programs-no-shell deliberate") != null);
 }
 
 test "pledge: a path inside a strict service's directory fails the build" {

@@ -617,7 +617,7 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
     return idx;
 }
 
-/// Werewolf signs both the programs/forms repository and the hardened feed.
+/// Werewolf signs the programs/forms repository and both pinned feeds.
 /// Other keys still sign one configured index, and extra copies are refused.
 fn countIndexSigner(
     gpa: Allocator,
@@ -626,18 +626,22 @@ fn countIndexSigner(
 ) !void {
     const entry = try signers.getOrPut(gpa, name);
     const count: u8 = if (entry.found_existing) entry.value_ptr.* else 0;
-    const maximum: u8 = if (std.mem.eql(u8, name, package.repository_key)) 2 else 1;
+    const maximum: u8 = if (std.mem.eql(u8, name, package.repository_key))
+        1 + package.pinned_repositories.len
+    else
+        1;
     if (count >= maximum) return error.DuplicateApkIndex;
     entry.value_ptr.* = count + 1;
 }
 
-test "the programs index and hardened index may share the packages key" {
+test "the programs index and pinned feeds may share the packages key" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
     var signers: std.StringHashMapUnmanaged(u8) = .empty;
-    try countIndexSigner(gpa, &signers, package.repository_key);
-    try countIndexSigner(gpa, &signers, package.repository_key);
+    for (0..1 + package.pinned_repositories.len) |_| {
+        try countIndexSigner(gpa, &signers, package.repository_key);
+    }
     try testing.expectError(
         error.DuplicateApkIndex,
         countIndexSigner(gpa, &signers, package.repository_key),
@@ -829,6 +833,14 @@ fn composeInto(u: *Update, r: Root) !void {
             else => @compileError("werewolf runs on aarch64 and x86_64"),
         },
         .dev = dev != null,
+        .ipe = if (u.read(meta_dir ++ "/ipe")) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        },
+        .tpm = if (u.read(meta_dir ++ "/tpm/protocol")) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        },
         .dev_shell = if (dev) |mode|
             !std.mem.eql(u8, std.mem.trim(u8, mode, "\n"), "ssh")
         else

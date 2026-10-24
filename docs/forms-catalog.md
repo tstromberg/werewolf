@@ -29,7 +29,7 @@ Open a service's guide first: many need credentials or certificates before
 they start, and `howl pack --build --with FORM -h` lists the form's
 configuration flags. `--build` uses this checkout. Secure deployment is the
 default, and a prebuilt download needs a published protected image for the
-form, host and architecture: see the [host support table](../README.md#secure-boot)
+form, host and architecture: see the [host support table](../cmd/howl/README.md)
 and the [howl guide](../cmd/howl/README.md).
 
 ## Images and downloads

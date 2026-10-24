@@ -17,31 +17,21 @@ make hooks          # run test, lint and check-sshd before each commit
 Zig is pinned to the version in the Makefile's `ZIG_VERSION`. Zig changes between
 releases; when it moves, `make fix` (tools/zigfix.zig) rewrites most of what changed.
 
-## Package sources
+## Package dependencies
 
-Third-party applications, hardened runtimes and libraries live in the sibling
-`../packages` checkout under `CATEGORY/NAME/`. Forms and
-distro-specific packages remain here with their source. Building howl or a base
-form needs only this repository; forms with third-party recipes need that checkout.
+Forms consume third-party applications, hardened runtimes and libraries by package
+name from the signed feeds declared by `minimal`. Image locks record exact package
+versions and checksums for each architecture. Building and testing forms needs no
+sibling package checkout or package repository commit pin.
 
-CI runs `tools/checkout-packages` to provision and verify the contexts pinned in
-`release/package-sources.json`. Use `--check` to verify existing local sources
-without fetching. Commit reviewed package changes first, then use `--pin` to record
-their immutable commit and content hash. Publish that commit before updating the
-Werewolf lock so CI can fetch exactly the reviewed source.
-Add new context directories to that JSON file before pinning them.
+The separate packages repository owns recipes, source pins, patches, native package
+tests and publication. Publish a dependency there before adding it to a form's
+`packages` list. Form integration tests verify the resulting installed packages.
+An unavailable package fails the build; forms do not rebuild it from source.
 
-The hourly package promotion workflow proposes pins only after verifying signed
-publication records for every application context on both architectures. Its PR
-runs the ordinary form checks and merges only the tested commit. Setup and
-failure handling are in [the design](docs/design/package-promotion.md). The
-promotion tool and its tests need Go 1.27 or newer. Normal manual `--pin` remains
-available for reviewed source changes.
-
-Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,
-`WEREWOLF_PACKAGES_REF`. GitHub Actions reads the same repository variables.
-Package changes must be published with the pinned bytes before CI can fetch them.
-Existing user-managed checkouts are verified without overwriting local changes.
+Werewolf's own software and private development packages may keep recipes beside
+their source in a form's `melange/` directory. This is separate from consumption of
+published third-party packages. See [the design](docs/design/package-promotion.md).
 
 ## Find your way around
 

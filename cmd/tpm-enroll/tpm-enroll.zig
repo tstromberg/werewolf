@@ -95,6 +95,30 @@ fn run(init: std.process.Init) !void {
 }
 
 fn openChannel(io: std.Io, gpa: std.mem.Allocator) !std.Io.File {
+    const choice = read(io, gpa, "/enrollment/channel", 16) catch |err| switch (err) {
+        error.FileNotFound => "virtio",
+        else => return err,
+    };
+    if (std.mem.eql(u8, choice, "serial")) {
+        // Only an immutable, signed initramfs can select serial transport.
+        // GCP exposes a second PL011 on Arm and a second UART on x86.
+        // Keep kernel/audit output on the first port. Neither runs a getty.
+        const device = if (@import("builtin").cpu.arch == .aarch64)
+            "/dev/ttyAMA1"
+        else
+            "/dev/ttyS1";
+        const channel = try openDevice(io, device);
+        errdefer channel.close(io);
+        var raw = try std.posix.tcgetattr(channel.handle);
+        raw.iflag = .{};
+        raw.oflag = .{};
+        raw.lflag = .{};
+        raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw.cc[@backingInt(std.posix.V.TIME)] = 0;
+        try std.posix.tcsetattr(channel.handle, .FLUSH, raw);
+        return channel;
+    }
+    if (!std.mem.eql(u8, choice, "virtio")) return error.BadBootstrapChannel;
     for (0..1000) |_| {
         if (try findChannel(io, gpa)) |name| return openDevice(io, name);
         var delay: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };

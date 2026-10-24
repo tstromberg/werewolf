@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Require actual runtime protection checks; declared weaknesses cannot excuse them."""
+import copy
+import json
+import sys
+
+
+REQUIRED = {'boot-secure-boot', 'boot-rollback-protected', 'boot-ipe-enforced',
+            'kernel-lockdown', 'kernel-seal', 'files-root-verity', 'network-fence-unbypassable'}
+
+
+def valid(report, hostname):
+    if not isinstance(report, dict):
+        return False
+    checks = {entry.get('id'): entry.get('result') for entry in report.get('checks', [])
+              if isinstance(entry, dict)}
+    known = report.get('known')
+    return (report.get('host') == hostname and report.get('root') is True
+            and not report.get('dev') and not report.get('disabled')
+            and all(checks.get(check) == 'pass' for check in REQUIRED)
+            and isinstance(known, dict) and known.get('unexpected') == []
+            and known.get('now_passing') == [])
+
+
+if sys.argv[1:] == ['--test']:
+    good = dict(host='fixture', root=True, dev=False, disabled=[],
+                checks=[dict(id=check, result='pass') for check in REQUIRED],
+                known=dict(unexpected=[], now_passing=[]))
+    assert valid(good, 'fixture')
+    assert not valid(good, 'another-host')
+    for check in REQUIRED:
+        for result in ('fail', 'skip'):
+            changed = copy.deepcopy(good)
+            next(entry for entry in changed['checks'] if entry['id'] == check)['result'] = result
+            assert not valid(changed, 'fixture')
+        changed = copy.deepcopy(good)
+        changed['checks'] = [entry for entry in changed['checks'] if entry['id'] != check]
+        assert not valid(changed, 'fixture')
+    for changes in (dict(disabled=['tpm']), dict(dev=True), dict(root=False),
+                    dict(known=None), dict(known=dict(unexpected=['kernel-seal'], now_passing=[])),
+                    dict(known=dict(unexpected=[], now_passing=['network-no-login']))):
+        assert not valid(dict(good, **changes), 'fixture')
+    print('pass   cloud-posture: no missing, skipped, failed or explicitly disabled runtime protection can pass')
+else:
+    try:
+        accepted = len(sys.argv) == 2 and valid(json.load(sys.stdin), sys.argv[1])
+    except (ValueError, TypeError, AttributeError):
+        accepted = False
+    sys.exit(0 if accepted else 1)

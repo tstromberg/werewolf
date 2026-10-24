@@ -68,6 +68,14 @@ class BootstrapImage(unittest.TestCase):
                        __import__('re').findall(r'"((?:[^"\\]|\\.)*)"', literal))
         self.assertEqual(builder.BOOT_POLICY.decode(), text)
 
+    def test_serial_channel_is_in_signed_initramfs_and_has_no_private_inputs(self):
+        archive = builder.initrd(b'agent', b'public key', b'signed factory', b'signed policy', 'serial')
+        content = entries(archive)
+        self.assertEqual(content.pop('enrollment/channel')[1], b'serial')
+        self.assertEqual(content, entries(builder.initrd(b'agent', b'public key', b'signed factory', b'signed policy')))
+        with self.assertRaises(ValueError):
+            builder.initrd(b'agent', b'public key', b'signed factory', b'signed policy', '/dev/tpmrm0')
+
     def test_signed_command_line_has_no_workload_or_administration_options(self):
         self.assertEqual(builder.CMDLINE.split(), [b'rdinit=/init', b'werewolf.native=1',
                                                   b'werewolf.secure=1', b'werewolf.bootstrap=1'])

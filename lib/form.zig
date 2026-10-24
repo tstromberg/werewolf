@@ -468,6 +468,7 @@ pub const keys = [_]Key{
     .{ .name = "with", .shape = .list },
     .{ .name = "packages", .shape = .list },
     .{ .name = "recipes", .shape = .list },
+    .{ .name = "imports", .shape = .list },
     .{ .name = "repositories", .shape = .list },
     .{ .name = "keyring", .shape = .list },
     .{ .name = "archs", .shape = .list },

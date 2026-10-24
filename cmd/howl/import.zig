@@ -1,128 +1,242 @@
-//! import builds the read-only ext4 disk `howl create --import` attaches.
-//! The label is werewolf-import. The files are the directory's top level,
-//! mode 0644, so the service can read them and nothing in the image is
-//! executed. See docs/design/data-import.md.
-
+//! Immutable, data-only import disks. Existing artifacts are never overwritten.
 const std = @import("std");
+const data = @import("import-data");
 const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const Why = howl.Why;
-
+pub const Mode = data.Mode;
 pub const label = "werewolf-import";
-const image_name = "import.img";
+pub const Record = struct {
+    version: u8 = 1,
+    id: []const u8,
+    mode: Mode,
+    sha256: []const u8,
+    bytes: u64,
+};
 
-/// write builds dir/import.img from src, a directory of files or one file.
-pub fn write(io: Io, gpa: Allocator, src: []const u8, dir: []const u8, why: *Why) !void {
-    const out = try gpa.print("{s}/{s}", .{ dir, image_name });
-    const stage = try gpa.print("{s}/import.d", .{dir});
-    defer Dir.cwd().deleteTree(io, stage) catch {};
-    const n = try stageFiles(io, gpa, src, stage, why);
-    const bin = findMke2fs(io, gpa) orelse
-        return why.refuse("no mke2fs; on macOS, brew install e2fsprogs", .{});
-    Dir.cwd().deleteFile(io, out) catch {};
-    // 16 MiB holds the filesystem's own tables. The rest is the files.
-    // mke2fs will not create a file that has no size.
-    const blocks = try gpa.print("{d}", .{@max(
-        @as(u64, 4096),
-        (try stagedBytes(io, stage) + (16 << 20) + 4095) / 4096,
-    )});
-    // No orphan_file: ext4 otherwise reads 512 blocks at every mount.
-    try howl.run(io, why, &.{
-        bin,    "-q", "-F", "-t",           "ext4", "-b",             "4096", "-L",  label,
-        "-m",   "0",  "-O", "^orphan_file", "-E",   "root_owner=0:0", "-d",   stage, out,
-        blocks,
-    });
-    howl.say(io, "import: {d} {s} on {s}", .{ n, if (n == 1) "file" else "files", out });
+pub fn path(a: Allocator, dir: []const u8, record: Record) ![]const u8 {
+    if (record.version != 1 or !data.validId(record.id) or
+        !data.validId(record.sha256)) return error.ImportRecord;
+    return a.print("{s}/imports/{s}/disk.img", .{ dir, record.id });
 }
 
-/// existing returns dir/import.img when a previous create left one.
-pub fn existing(io: Io, gpa: Allocator, dir: []const u8) !?[]const u8 {
-    const path = try gpa.print("{s}/{s}", .{ dir, image_name });
-    Dir.cwd().access(io, path, .{}) catch return null;
-    return path;
+pub fn validate(io: Io, a: Allocator, dir: []const u8, record: Record) ![]const u8 {
+    const name = try path(a, dir, record);
+    const file = try data.openRegular(io, .cwd(), name);
+    defer file.close(io);
+    if ((try file.stat(io)).size != record.bytes) return error.ImportChecksum;
+    const hash = std.fmt.bytesToHex(try data.fileHash(io, file), .lower);
+    if (!std.mem.eql(u8, &hash, record.sha256)) return error.ImportChecksum;
+    return name;
 }
 
-fn stageFiles(io: Io, gpa: Allocator, src: []const u8, stage: []const u8, why: *Why) !usize {
-    const st = Dir.cwd().statFile(io, src, .{ .follow_symlinks = false }) catch |err|
-        return why.refuse("--import {s}: {s}", .{ src, @errorName(err) });
-    Dir.cwd().deleteTree(io, stage) catch {};
-    try Dir.cwd().createDirPath(io, stage);
-    switch (st.kind) {
-        .sym_link => return why.refuse("--import {s}: a symlink", .{src}),
-        .file => {
-            if (st.permissions.toMode() & 0o6000 != 0)
-                return why.refuse("--import {s}: setuid or setgid", .{src});
-            const base = std.fs.path.basename(src);
-            if (!want(base)) return why.refuse("--import {s}: no files", .{src});
-            try copyFile(io, src, try gpa.print("{s}/{s}", .{ stage, base }));
-            return 1;
+pub fn recordAt(io: Io, a: Allocator, dir: []const u8, file: []const u8) !Record {
+    const f = try data.openRegular(io, .cwd(), try a.print("{s}/{s}", .{ dir, file }));
+    defer f.close(io);
+    var buf: [1024]u8 = undefined;
+    var reader = f.readerStreaming(io, &buf);
+    return std.json.parseFromSliceLeaky(
+        Record,
+        a,
+        try reader.interface.allocRemaining(a, .limited(2048)),
+        .{},
+    );
+}
+
+/// Absence is optional; a declared disk which is missing or corrupt is an error.
+pub fn existing(io: Io, a: Allocator, dir: []const u8) !?[]const u8 {
+    const record = recordAt(io, a, dir, "import.json") catch |err| switch (err) {
+        error.FileNotFound => {
+            const legacy = try a.print("{s}/import.img", .{dir});
+            const f = data.openRegular(io, .cwd(), legacy) catch |old| switch (old) {
+                error.FileNotFound => return null,
+                else => return old,
+            };
+            f.close(io);
+            return legacy;
         },
-        .directory => {},
-        else => return why.refuse("--import {s}: not a file or directory", .{src}),
+        else => return err,
+    };
+    return try validate(io, a, dir, record);
+}
+
+pub fn activate(io: Io, a: Allocator, dir: []const u8, record: Record, replace: bool) !void {
+    _ = try validate(io, a, dir, record);
+    var parent = try Dir.cwd().openDir(io, dir, .{ .follow_symlinks = false });
+    defer parent.close(io);
+    const text = try std.json.Stringify.valueAlloc(a, record, .{});
+    var nonce: [16]u8 = undefined;
+    Io.random(io, &nonce);
+    const temp = try a.print(".import-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    const f = try parent.createFile(
+        io,
+        temp,
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
+    defer f.close(io);
+    defer parent.deleteFile(io, temp) catch {};
+    try f.writeStreamingAll(io, text);
+    try f.sync(io);
+    if (replace)
+        try parent.rename(temp, parent, "import.json", io)
+    else
+        try parent.renamePreserve(temp, parent, "import.json", io);
+    try data.syncDir(io, parent);
+}
+
+pub fn write(io: Io, a: Allocator, src: []const u8, dir: []const u8, why: *Why) !void {
+    const record = try prepare(io, a, src, dir, .init, why);
+    if (try existing(io, a, dir) != null) {
+        const active = try recordAt(io, a, dir, "import.json");
+        if (std.mem.eql(u8, active.id, record.id)) return;
+        return why.refuse(
+            "a different import already exists; use howl import or howl sync for the next cold " ++
+                "start",
+            .{},
+        );
     }
-    var from = Dir.cwd().openDir(io, src, .{ .iterate = true }) catch |err|
-        return why.refuse("--import {s}: {s}", .{ src, @errorName(err) });
+    try activate(io, a, dir, record, false);
+}
+
+pub fn prepare(
+    io: Io,
+    a: Allocator,
+    src: []const u8,
+    dir: []const u8,
+    mode: Mode,
+    why: *Why,
+) !Record {
+    const given = if (std.mem.trimEnd(u8, src, "/").len == 0)
+        "/"
+    else
+        std.mem.trimEnd(u8, src, "/");
+    const source_info = try Dir.cwd().statFile(io, given, .{ .follow_symlinks = false });
+    if (source_info.kind != .file and source_info.kind != .directory) return error.ImportFileType;
+    const container = if (source_info.kind == .directory)
+        given
+    else
+        std.fs.path.dirname(given) orelse ".";
+    var from = try Dir.cwd().openDir(io, container, .{ .iterate = true, .follow_symlinks = false });
     defer from.close(io);
-    var n: usize = 0;
-    var it = from.iterate();
-    while (try it.next(io)) |e| {
-        if (!want(e.name)) continue;
-        switch (e.kind) {
-            .file => {
-                const one = try from.statFile(io, e.name, .{ .follow_symlinks = false });
-                if (one.permissions.toMode() & 0o6000 != 0)
-                    return why.refuse("--import {s}: {s} is setuid or setgid", .{ src, e.name });
-                try copyFile(
-                    io,
-                    try gpa.print("{s}/{s}", .{ src, e.name }),
-                    try gpa.print("{s}/{s}", .{ stage, e.name }),
-                );
-                n += 1;
-            },
-            .sym_link => return why.refuse("--import {s}: {s} is a symlink", .{ src, e.name }),
-            .directory => {},
-            else => return why.refuse("--import {s}: {s} is not a file", .{ src, e.name }),
-        }
+    const source_path = try from.realPathFileAlloc(io, ".", a);
+    const destination_path = if (Dir.cwd().realPathFileAlloc(io, dir, a)) |real|
+        real
+    else |err| blk: {
+        if (err != error.FileNotFound) return err;
+        const parent = try Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(dir) orelse ".", a);
+        break :blk try a.print("{s}/{s}", .{ parent, std.fs.path.basename(dir) });
+    };
+    if (source_info.kind == .directory and (std.mem.eql(u8, source_path, destination_path) or
+        (std.mem.startsWith(u8, destination_path, source_path) and
+            destination_path[source_path.len] == '/')))
+        return why.refuse("import destination is inside its source", .{});
+    try Dir.cwd().createDirPath(io, dir);
+    try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{ .follow_symlinks = false });
+    var nonce: [16]u8 = undefined;
+    Io.random(io, &nonce);
+    const work = try a.print("{s}/.import-build-{s}", .{ dir, std.fmt.bytesToHex(nonce, .lower) });
+    try Dir.cwd().createDir(io, work, .fromMode(0o700));
+    defer Dir.cwd().deleteTree(io, work) catch {};
+    const stage_path = try a.print("{s}/files", .{work});
+    var stage = try Dir.cwd().createDirPathOpen(
+        io,
+        stage_path,
+        .{ .open_options = .{ .iterate = true } },
+    );
+    defer stage.close(io);
+    try (Io.File{
+        .handle = stage.handle,
+        .flags = .{ .nonblocking = false },
+    }).setPermissions(io, .fromMode(0o755));
+    var totals: data.Totals = undefined;
+    if (source_info.kind == .directory) {
+        totals = try data.snapshot(io, a, from, stage);
+    } else {
+        // A one-file snapshot uses the same safe copy path as a directory.
+        const name = std.fs.path.basename(given);
+        totals = try data.snapshotFile(io, from, stage, name);
     }
-    if (n == 0) return why.refuse("--import {s}: no files", .{src});
-    return n;
-}
-
-/// want is a name that goes on the disk. Dotfiles are a host's clutter.
-/// import-failed is init's marker on the mounted directory.
-fn stagedBytes(io: Io, stage: []const u8) !u64 {
-    var dir = try Dir.cwd().openDir(io, stage, .{ .iterate = true });
-    defer dir.close(io);
-    var n: u64 = 0;
-    var it = dir.iterate();
-    while (try it.next(io)) |e| {
-        if (e.kind != .file) continue;
-        n += (try dir.statFile(io, e.name, .{})).size;
-    }
-    return n;
-}
-
-fn want(name: []const u8) bool {
-    if (name.len == 0 or name[0] == '.') return false;
-    return !std.mem.eql(u8, name, "import-failed");
-}
-
-fn copyFile(io: Io, from: []const u8, to: []const u8) !void {
-    var in = try Dir.cwd().openFile(io, from, .{ .follow_symlinks = false });
-    defer in.close(io);
-    var out = try Dir.cwd().createFile(io, to, .{ .permissions = .fromMode(0o644) });
-    defer out.close(io);
-    var buf: [1 << 16]u8 = undefined;
-    while (true) {
-        const n = in.readStreaming(io, &.{&buf}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (n == 0) break;
-        try out.writeStreamingAll(io, buf[0..n]);
-    }
+    if (totals.files == 0) return error.ImportEmpty;
+    const id = try data.identity(io, a, stage, mode);
+    const home = try a.print("{s}/imports/{s}", .{ dir, id });
+    if (recordAt(io, a, home, "record.json")) |cached| {
+        if (!std.mem.eql(u8, cached.id, &id) or cached.mode != mode) return error.ImportRecord;
+        _ = try validate(io, a, dir, cached);
+        return cached;
+    } else |err| if (err != error.FileNotFound) return err;
+    try data.writeHeader(io, a, stage, data.manifest, .{ .mode = mode, .id = &id });
+    try stage.setFilePermissions(
+        io,
+        data.manifest,
+        .fromMode(0o644),
+        .{ .follow_symlinks = false },
+    );
+    const image = try a.print("{s}/disk.img", .{work});
+    const image_file = try Dir.cwd().createFile(
+        io,
+        image,
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
+    image_file.close(io);
+    const bin = findMke2fs(io, a) orelse return why.refuse("no mke2fs; install e2fsprogs", .{});
+    const overhead = try std.math.add(u64, 32 << 20, try std.math.mul(u64, totals.files, 16384));
+    const size = try std.math.add(u64, totals.bytes, overhead);
+    const blocks = try a.print("{d}", .{try std.math.add(u64, size, 4095) / 4096});
+    try howl.run(
+        io,
+        why,
+        &.{
+            bin,
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-b",
+            "4096",
+            "-L",
+            label,
+            "-m",
+            "0",
+            "-O",
+            "^orphan_file",
+            "-E",
+            "root_owner=0:0",
+            "-d",
+            stage_path,
+            image,
+            blocks,
+        },
+    );
+    const f = try data.openRegular(io, .cwd(), image);
+    defer f.close(io);
+    try f.sync(io);
+    const hash = std.fmt.bytesToHex(try data.fileHash(io, f), .lower);
+    const record: Record = .{
+        .id = try a.dupe(u8, &id),
+        .mode = mode,
+        .sha256 = try a.dupe(u8, &hash),
+        .bytes = (try f.stat(io)).size,
+    };
+    var parent = try Dir.cwd().openDir(io, work, .{});
+    defer parent.close(io);
+    const record_file = try parent.createFile(
+        io,
+        "record.json",
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
+    defer record_file.close(io);
+    try record_file.writeStreamingAll(io, try std.json.Stringify.valueAlloc(a, record, .{}));
+    try record_file.sync(io);
+    try parent.deleteTree(io, "files");
+    try data.syncDir(io, parent);
+    try Dir.cwd().createDirPath(io, try a.print("{s}/imports", .{dir}));
+    try Dir.cwd().renamePreserve(work, .cwd(), home, io);
+    var imports = try Dir.cwd().openDir(io, try a.print("{s}/imports", .{dir}), .{});
+    defer imports.close(io);
+    try data.syncDir(io, imports);
+    return record;
 }
 
 fn findMke2fs(io: Io, gpa: Allocator) ?[]const u8 {
@@ -135,8 +249,8 @@ fn findMke2fs(io: Io, gpa: Allocator) ?[]const u8 {
     for (fixed) |p| {
         if (Dir.cwd().access(io, p, .{ .execute = true })) |_| return p else |_| {}
     }
-    var path = std.mem.tokenizeScalar(u8, howl.environ.get("PATH") orelse "", ':');
-    while (path.next()) |d| {
+    var search = std.mem.tokenizeScalar(u8, howl.environ.get("PATH") orelse "", ':');
+    while (search.next()) |d| {
         const p = gpa.print("{s}/mke2fs", .{d}) catch return null;
         if (Dir.cwd().access(io, p, .{ .execute = true })) |_| return p else |_| {}
     }
@@ -145,48 +259,91 @@ fn findMke2fs(io: Io, gpa: Allocator) ?[]const u8 {
 
 const testing = std.testing;
 
-test "import image is ext4 labelled werewolf-import" {
-    const io = testing.io;
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    if (findMke2fs(io, gpa) == null) return;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "shop.sql", .data = "select 1;\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = ".DS_Store", .data = "x" });
-    const src = std.fs.path.dirname(try tmp.dir.realPathFileAlloc(io, "shop.sql", gpa)).?;
-    var why: Why = .{};
-    const parent = try gpa.print("{s}/out", .{src});
-    try Dir.cwd().createDirPath(io, parent);
-    try write(io, gpa, src, parent, &why);
-    var f = try Dir.cwd().openFile(io, try gpa.print("{s}/import.img", .{parent}), .{});
-    defer f.close(io);
-    var head: [2048]u8 = undefined;
-    var got: usize = 0;
-    while (got < head.len) {
-        const n = f.readStreaming(io, &.{head[got..]}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (n == 0) break;
-        got += n;
-    }
-    try testing.expect(got >= 1160);
-    try testing.expectEqual(@as(u16, 0xEF53), std.mem.readInt(u16, head[1080..1082], .little));
-    try testing.expectEqualStrings(label, std.mem.sliceTo(head[1144..1160], 0));
+fn importFixture(
+    io: Io,
+    a: Allocator,
+    tmp: *testing.TmpDir,
+) !struct { source: []const u8, machine: []const u8 } {
+    try tmp.dir.createDir(io, "source", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "source/movie.ts", .data = "media" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    return .{
+        .source = try a.print("{s}/source", .{root}),
+        .machine = try a.print("{s}/machine", .{root}),
+    };
 }
 
-test "import refuses a symlink" {
+test "snapshot staging is recursive, immutable, repeatable and private" {
     const io = testing.io;
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const gpa = arena.allocator();
+    const a = arena.allocator();
+    if (findMke2fs(io, a) == null) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "shop.sql", .data = "select 1;\n" });
-    try tmp.dir.symLink(io, "shop.sql", "link.sql", .{});
-    const src = std.fs.path.dirname(try tmp.dir.realPathFileAlloc(io, "shop.sql", gpa)).?;
+    const f = try importFixture(io, a, &tmp);
+    try tmp.dir.createDir(io, "source/Movies", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "source/Movies/subtitle.srt", .data = "subtitle" });
     var why: Why = .{};
-    try testing.expectError(error.Refused, write(io, gpa, src, src, &why));
+    const record = try prepare(io, a, f.source, f.machine, .init, &why);
+    try activate(io, a, f.machine, record, false);
+    const image = (try existing(io, a, f.machine)).?;
+    try testing.expectEqual(
+        @as(u32, 0o600),
+        (try Dir.cwd().statFile(io, image, .{})).permissions.toMode() & 0o7777,
+    );
+    try testing.expectEqualStrings(
+        record.id,
+        (try prepare(io, a, f.source, f.machine, .init, &why)).id,
+    );
+    try write(io, a, f.source, f.machine, &why); // Same create is idempotent.
+    try tmp.dir.writeFile(io, .{ .sub_path = "source/movie.ts", .data = "changed" });
+    try testing.expectError(error.Refused, write(io, a, f.source, f.machine, &why));
+    try testing.expectEqualStrings(image, (try existing(io, a, f.machine)).?);
+    const next = try prepare(io, a, f.source, f.machine, .sync, &why);
+    try activate(io, a, f.machine, next, true);
+    _ = try validate(io, a, f.machine, record); // Previous snapshot retained.
+    try testing.expect(!std.mem.eql(u8, image, (try existing(io, a, f.machine)).?));
+}
+
+test "failed staging and corrupt artifacts cannot replace an active import" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (findMke2fs(io, a) == null) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const f = try importFixture(io, a, &tmp);
+    var why: Why = .{};
+    const record = try prepare(io, a, f.source, f.machine, .init, &why);
+    try activate(io, a, f.machine, record, false);
+    try tmp.dir.symLink(io, "/etc/passwd", "source/escape", .{});
+    try testing.expectError(error.ImportFileType, prepare(io, a, f.source, f.machine, .sync, &why));
+    _ = try validate(io, a, f.machine, record);
+    try Dir.cwd().writeFile(io, .{ .sub_path = try path(a, f.machine, record), .data = "corrupt" });
+    try testing.expectError(error.ImportChecksum, existing(io, a, f.machine));
+}
+
+test "source aliases, recursion into output and reserved names are refused" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const f = try importFixture(io, a, &tmp);
+    var why: Why = .{};
+    try tmp.dir.symLink(io, "source", "alias", .{ .is_directory = true });
+    const alias = try a.print("{s}/alias/", .{std.fs.path.dirname(f.source).?});
+    try testing.expectError(error.ImportFileType, prepare(io, a, alias, f.machine, .init, &why));
+    try testing.expectError(
+        error.Refused,
+        prepare(io, a, f.source, try a.print("{s}/output", .{f.source}), .init, &why),
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "source/import-failed", .data = "reserved" });
+    try testing.expectError(
+        error.ImportReservedName,
+        prepare(io, a, f.source, f.machine, .init, &why),
+    );
 }

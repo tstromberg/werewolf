@@ -1,14 +1,14 @@
 # Unmodified Plex; isolation lives here. No shell, JIT, discovery, DLNA,
 # UPnP, relay, downloaded plugins or runtime codec installation.
 base: prod
+imports: [init, sync]
 
 programs: [plex-loopback.so]
 
-# Build locally until the vendor package is published in the application feed.
-recipes:
-  - ../../../packages/devel/musl/musl.yaml
-  - ../../../packages/multimedia/plex/plex.yaml
-  - ../../../packages/www/caddy/caddy.yaml
+packages:
+  - musl-werewolf
+  - plexmediaserver
+  - caddy
 
 prune:
   - usr/lib/plexmediaserver/Plex Script Host
@@ -71,7 +71,7 @@ services:
     run:
       - /usr/lib/werewolf/plex-transcode
       - '"/usr/lib/plexmediaserver/Plex Media Scanner"'
-    read: /data/svc/plex-media
+    read: /data/svc/plex-media /run/svc/plex-media
     write: /run/svc/plex-transcode/jobs
     config:
       - plex-token /run/config/plex/token

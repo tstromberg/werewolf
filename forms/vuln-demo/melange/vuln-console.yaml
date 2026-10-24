@@ -1,7 +1,7 @@
 package:
   name: vuln-console
   version: 1.0.0
-  epoch: 0
+  epoch: 1
   description: Live containment console and exec-only demo SSH server
   copyright:
     - license: Apache-2.0
@@ -20,5 +20,5 @@ environment:
 pipeline:
   - runs: |
       CGO_ENABLED=0 go test ./...
-      CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags='-s -w' -o vuln-console .
+      CGO_ENABLED=0 go build -buildmode=pie -mod=readonly -trimpath -ldflags='-s -w' -o vuln-console .
       install -Dm755 vuln-console ${{targets.destdir}}/usr/lib/werewolf/vuln-console

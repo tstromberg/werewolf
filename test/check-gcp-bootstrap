@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Live GCP rootless bootstrap: provider EK, measured proof, encrypted enrollment.
+
+This is an enrollment test, not a qualification of protected workload deployment.
+Only howl launches/removes the VM. No --disable option or plaintext guest credential.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import struct
+import subprocess
+import tarfile
+import time
+
+
+def run(*args, timeout=180):
+    result = subprocess.run(list(map(str, args)), capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError('command failed: ' + str(args[0]) + '\n' + result.stderr.decode(errors='replace'))
+    return result.stdout
+
+
+def exact(process, count, timeout=90):
+    result = bytearray()
+    until = time.monotonic() + timeout
+    while len(result) < count:
+        remaining = until - time.monotonic()
+        if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+            raise RuntimeError('bootstrap serial response timed out')
+        data = os.read(process.stdout.fileno(), count - len(result))
+        if not data:
+            raise RuntimeError('bootstrap serial connection closed')
+        result += data
+    return bytes(result)
+
+
+def exercise(args):
+    os.umask(0o077)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%y%m%d%H%M%S')
+    name = 'ww-gcp-enroll-' + stamp
+    work = Path('build/check/gcp-bootstrap-' + stamp).resolve()
+    work.mkdir(parents=True, mode=0o700)
+    print('GCP bootstrap evidence: ' + str(work), flush=True)
+    howl, codec, policy = map(lambda p: str(Path(p).resolve()), (args.howl, args.codec, args.policy))
+    project = run('gcloud', 'config', 'get-value', 'project').decode().strip()
+    zone = os.environ.get('CLOUDSDK_COMPUTE_ZONE') or 'us-central1-a'
+    os.environ['CLOUDSDK_COMPUTE_ZONE'] = zone
+    def g(*words):
+        return run('gcloud', '--quiet', '--project', project, *words)
+    run('openssl', 'genrsa', '-out', work / 'permit.key', '2048')
+    run('openssl', 'pkey', '-in', work / 'permit.key', '-pubout', '-out', work / 'permit.pub')
+    run('openssl', 'req', '-new', '-x509', '-key', work / 'permit.key', '-subj',
+        '/CN=werewolf-gcp-bootstrap', '-days', '2', '-out', work / 'permit.crt')
+    machine = os.urandom(32)
+    release, workload_pcr = b'A' * 32, b'F' * 32
+    if args.workload:
+        bundle = Path(args.workload).resolve()
+        metadata = json.loads((bundle / 'boot.json').read_text())
+        request = dict(directory=str(bundle), boot_certificate=str(Path(args.boot_cert).resolve()),
+                       image_certificate=str(Path(args.ipe_cert).resolve()), channel=metadata['image']['channel'])
+        verified = json.loads(run(howl, '_boot-image', 'verify', request['directory'],
+                                  request['boot_certificate'], request['image_certificate'], request['channel'], args.arch))
+        release, workload_pcr = bytes(verified['release']), bytes(verified['pcr'])
+        (work / 'request.json').write_text(json.dumps(request))
+    if args.factory_slot:
+        release = (Path(args.factory_slot) / 'release.id').read_bytes()
+        workload_pcr = (Path(args.factory_slot) / 'pcr11').read_bytes()
+        if any(len(value) != 32 or value == bytes(32) for value in (release, workload_pcr)):
+            raise RuntimeError('invalid measured factory slot')
+    state = b'werewolf.boot/2\0' + machine + bytes(32) + release * 2 + workload_pcr
+    (work / 'factory.state').write_bytes(state)
+    run(policy, 'permit-pair', work / 'permit.pub', work / 'factory.state', work / 'factory.message')
+    run('openssl', 'dgst', '-sha256', '-sign', work / 'permit.key', '-out', work / 'factory.sig', work / 'factory.message')
+    factory = state + (work / 'factory.sig').read_bytes()
+    (work / 'factory.permit').write_bytes(factory)
+    with (work / 'reset.credentials').open('xb') as secret:
+        secret.write(os.urandom(64))
+        secret.flush()
+        os.fsync(secret.fileno())
+    # Persist both the authority and its directory entries before any TPM
+    # mutation. A power loss must not strand a provisioned VM without custody.
+    for filename in ('permit.key', 'permit.pub', 'factory.permit'):
+        with (work / filename).open('rb') as retained:
+            os.fsync(retained.fileno())
+    directory_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    kernel = Path(args.kernel).resolve()
+    if kernel.name.endswith('.tar'):
+        with tarfile.open(kernel) as archive:
+            found = [m for m in archive if m.isfile() and Path(m.name).name.startswith('vmlinuz')]
+            if len(found) != 1 or found[0].size > 128 << 20:
+                raise RuntimeError('ambiguous bootstrap kernel')
+            data = archive.extractfile(found[0]).read()
+        kernel = work / 'vmlinuz'
+        kernel.write_bytes(data)
+    image = work / 'image'
+    run('python3', 'tools/build-tpm-bootstrap', '--arch', args.arch,
+        '--agent', Path(args.agent).resolve(), '--kernel', kernel, '--stub', Path(args.stub).resolve(),
+        '--publisher', work / 'permit.pub', '--factory', work / 'factory.permit',
+        '--boot-key', Path(args.boot_key).resolve(), '--boot-cert', Path(args.boot_cert).resolve(),
+        '--ipe-key', Path(args.ipe_key).resolve(), '--ipe-cert', Path(args.ipe_cert).resolve(),
+        '--output', image, '--codec', codec, '--channel', 'serial')
+    shutil.copyfile(args.boot_cert, image / 'boot.crt')
+    info = json.loads((image / 'manifest.json').read_text())
+    process = None
+    cloud_image = None
+    try:
+        launch = run(howl, '_cloud-bootstrap', 'gcp', name, image, work / 'permit.crt', timeout=600)
+        (work / 'launch.log').write_bytes(launch)
+        cloud_image = launch.decode().strip().split('\t')[1]
+        run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
+        identity = json.loads((work / 'identity.json').read_text())
+        (work / 'ek.pem').write_text(identity['endorsement_key'])
+        run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', work / 'serial.key')
+        serial_log = (work / 'serial-client.log').open('wb')
+        process = subprocess.Popen(['gcloud', '--quiet', '--project', project, 'compute',
+            'connect-to-serial-port', name, '--zone', zone,
+            '--port', '2',
+            '--extra-args', 'replay-from=0,on-dropped-output=disconnect,max-connections=1',
+            '--ssh-key-file', str(work / 'serial.key')],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=serial_log, bufsize=0)
+        # Discard bounded gateway/replay output only before readiness;
+        # proof frames themselves must be exact.
+        prefix = bytearray()
+        ready_until = time.monotonic() + 90
+        for _ in range(1 << 20):
+            prefix += exact(process, 1, timeout=max(0, ready_until - time.monotonic()))
+            if prefix.endswith(b'WWREADY1'):
+                break
+            if b'tpm-enroll: refused:' in prefix and b'\n' in prefix.split(b'tpm-enroll: refused:', 1)[1]:
+                raise RuntimeError('bootstrap refused before attestation: ' + prefix[-512:].decode(errors='replace'))
+        else:
+            raise RuntimeError('bootstrap readiness exceeded its bound')
+        (work / 'boot.log').write_bytes(prefix[:-8])
+        context = machine + hashlib.sha256(factory).digest() + bytes.fromhex(info['pcr11']) + os.urandom(32)
+        (work / 'context').write_bytes(context)
+        process.stdin.write(b'WWCHAL01' + context)
+        process.stdin.flush()
+        if exact(process, 8) != b'WWENROL1':
+            raise RuntimeError('invalid GCP enrollment proof frame')
+        for field in ('ek.pub', 'ak.pub', 'quote.msg', 'quote.sig'):
+            size = struct.unpack('>H', exact(process, 2))[0]
+            if not 0 < size <= 1024:
+                raise RuntimeError('invalid GCP attestation field length')
+            (work / field).write_bytes(exact(process, size))
+        proof = [work / field for field in ('context', 'ek.pem', 'ek.pub', 'ak.pub', 'quote.msg', 'quote.sig')]
+        run(codec, 'verify', *proof)
+        for offset in (0, 32, 64, 96):
+            altered = bytearray(context)
+            altered[offset] ^= 1
+            (work / 'wrong-context').write_bytes(altered)
+            refused = subprocess.run([codec, 'verify', str(work / 'wrong-context'),
+                                      *map(str, proof[1:])], capture_output=True, timeout=20)
+            if refused.returncode == 0:
+                raise RuntimeError('GCP quote accepted a foreign machine, factory, PCR or challenge')
+        # Re-read the provider pin before delivering any reset authority.
+        run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
+        run(codec, 'wrap', *proof, work / 'reset.credentials', work / 'permit.key',
+            work / 'permit.pub', work / 'capsule')
+        capsule = (work / 'capsule').read_bytes()
+        process.stdin.write(b'WWCAPS01' + struct.pack('>H', len(capsule)) + capsule)
+        process.stdin.flush()
+        if exact(process, 8) != b'WWDONE01' or exact(process, 32).hex() != info['anchor']:
+            raise RuntimeError('GCP bootstrap protected readback failed')
+        until = time.monotonic() + 90
+        while time.monotonic() < until:
+            console = subprocess.run([howl, 'console', name, '--on', 'gcp'], capture_output=True, timeout=20)
+            (work / 'console.log').write_bytes(console.stdout)
+            if b'TpmAlreadyProvisioned' in console.stdout:
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError('GCP bootstrap did not refuse enrollment replay after reboot')
+        result = dict(
+            provider='gcp', instance=name, instance_id=identity['instance_id'],
+            bootstrap_pcr11=info['pcr11'], anchor=info['anchor'],
+            attestation='verified against provider EK', reset_authority='host custody',
+            workload_handover=False, replay='refused', foreign_context='refused', status='pass')
+        if args.workload:
+            provider = Path('build/host/test-sk.so').resolve()
+            run('ssh-keygen', '-q', '-t', 'ed25519-sk', '-O', 'verify-required', '-w', provider,
+                '-N', '', '-f', work / 'operator-sk')
+            config = work / 'config'
+            config.mkdir()
+            public = (work / 'operator-sk.pub').read_text()
+            (config / 'users').write_text('t admin ' + public)
+            (config / 'authorized_keys').write_text(public)
+            (config / 'hostname').write_text(name + '\n')
+            handover = run(howl, '_cloud-workload', 'gcp', name, work / 'request.json',
+                           work / 'factory.permit', work / 'permit.crt', work / 'identity.json',
+                           config, timeout=900)
+            (work / 'handover.log').write_bytes(handover)
+            address = handover.decode().strip().split('\t')[1]
+            def ssh(user, command):
+                return subprocess.run(['ssh', '-i', str(work / 'operator-sk'),
+                    '-o', 'SecurityKeyProvider=' + str(provider), '-o', 'IdentitiesOnly=yes',
+                    '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' + str(work / 'known_hosts'),
+                    '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
+                    user + '@' + address, command], capture_output=True, text=True, timeout=20)
+            logins = {}
+            for user in ('t', 'root'):
+                until = time.monotonic() + 90
+                while time.monotonic() < until:
+                    login = ssh(user, 'id -un; id -u')
+                    if login.returncode == 0:
+                        break
+                    time.sleep(3)
+                parts = login.stdout.strip().splitlines()
+                if (login.returncode or len(parts) != 2 or parts[0] != user or
+                    not parts[1].isdigit() or ((int(parts[1]) == 0) != (user == 'root'))):
+                    raise RuntimeError('GCP SSH login failed for ' + user + ': ' + login.stderr)
+                logins[user] = dict(name=parts[0], uid=int(parts[1]))
+            required = {'boot-secure-boot', 'boot-rollback-protected', 'boot-ipe-enforced',
+                        'kernel-lockdown', 'kernel-seal', 'files-root-verity', 'network-fence-unbypassable'}
+            until = time.monotonic() + 120
+            while time.monotonic() < until:
+                observed = ssh('root', 'cat /run/werewolf/posture.json')
+                if observed.returncode == 0:
+                    report = json.loads(observed.stdout)
+                    break
+                time.sleep(3)
+            else:
+                raise RuntimeError('GCP did not publish runtime posture')
+            (work / 'posture.json').write_text(json.dumps(report, indent=2) + '\n')
+            checks = {check['id']: check['result'] for check in report['checks']}
+            if (report.get('root') is not True or report.get('disabled') or report.get('dev') or report.get('host') != name or
+                any(checks.get(check) != 'pass' for check in required) or
+                report.get('known') is None or report['known']['unexpected'] or report['known']['now_passing']):
+                raise RuntimeError('GCP runtime posture failed: ' + str(report.get('known')))
+            run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
+            result.update(workload_handover=True, ssh=logins, posture='pass')
+            print('pass   GCP prod-ssh: same enrolled TPM, verified root, Secure Boot, IPE, seal, fence and both SSH accounts', flush=True)
+        (work / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        print('pass   GCP bootstrap: provider-pinned TPM, measured quote, encrypted credentials and protected readback', flush=True)
+    finally:
+        machine_dir = Path('build/machines') / name
+        record = machine_dir / 'image'
+        if cloud_image is None and record.is_file():
+            cloud_image = record.read_text().strip()
+        extra_images = [(machine_dir / 'workload-image').read_text().strip()] if (machine_dir / 'workload-image').is_file() else []
+        extra_disks = [(machine_dir / entry).read_text().strip() for entry in ('bootstrap-disk', 'workload-disk')
+                       if (machine_dir / entry).is_file()]
+        if process:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+            serial_log.close()
+        console = subprocess.run([howl, 'console', name, '--on', 'gcp'], capture_output=True)
+        (work / 'console.log').write_bytes(console.stdout)
+        subprocess.run([howl, 'delete', name, '--on', 'gcp'], check=True)
+        for disk in extra_disks:
+            deletion = subprocess.run(['gcloud', '--quiet', '--project', project, 'compute', 'disks',
+                                      'delete', disk, '--zone', zone], capture_output=True, text=True, timeout=90)
+            if deletion.returncode and 'was not found' not in deletion.stderr:
+                raise RuntimeError('GCP disk cleanup failed: ' + deletion.stderr)
+        if cloud_image:
+            g('compute', 'images', 'delete', cloud_image)
+        for image in extra_images:
+            g('compute', 'images', 'delete', image)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--howl', default='build/host/howl')
+    parser.add_argument('--codec', default='build/host/tpm-bootstrap')
+    parser.add_argument('--policy', default='build/host/tpm-policy')
+    parser.add_argument('--arch', choices=['aarch64', 'x86_64'], default='aarch64')
+    parser.add_argument('--factory-slot')
+    parser.add_argument('--workload', help='authenticated prod-ssh boot bundle to test on the same enrolled VM')
+    for option in ('kernel', 'agent', 'stub', 'ipe-key', 'ipe-cert', 'boot-key', 'boot-cert'):
+        parser.add_argument('--' + option, required=True)
+    exercise(parser.parse_args())

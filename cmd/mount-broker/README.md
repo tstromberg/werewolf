@@ -12,21 +12,18 @@ fence puts every process in a Landlock domain that refuses `mount`, `umount` and
 `pivot_root`, root's included. Three callers must still touch filesystems the machine
 does not keep mounted writable: slot-keep (the EFI entry, at commit), slot-update (a new
 slot and TPM boot state), and stage 3 (shutting `/data` and `/boot` down). init starts
-the broker before it execs fence, so the broker alone stays outside that domain.
-Programs ask through `lib/broker.zig`.
+the broker outside fence; programs ask through `lib/broker.zig`.
 
 ## Goals
 
 - No program but the broker can mount after boot.
 - The broker fixes devices, paths and mount options; callers request named operations.
-- Authority to ask is an inherited socketpair descriptor per role, never a path in
-  `/run`.
+- Authority to ask is an inherited socketpair descriptor per role, never a `/run` path.
 
 ## Non-Goals
 
-- Serving any process that did not inherit a role descriptor.
-- Choosing a filesystem by path. It goes by UUID or FAT serial, from the kernel command
-  line only, parsed as stage0 parses it (`lib/cmdline.zig`).
+Serving processes without a role descriptor or choosing filesystems by path. UUID or
+FAT serial comes only from the kernel command line, parsed through `lib/cmdline.zig`.
 
 ## Detailed design
 
@@ -100,5 +97,4 @@ Programs ask through `lib/broker.zig`.
   an empty packet or EOF also closes it. Replies are never silently dropped while
   retaining a channel. `make check-mount-broker` exercises the real confined broker
   in a private Linux mount namespace, including reply-queue saturation.
-- **Tested**: `check-slot`, `check-updater`, protected A/B lifecycle tests and every
-  shutdown.
+- **Tested**: `check-slot`, `check-updater`, protected A/B tests and every shutdown.

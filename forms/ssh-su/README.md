@@ -51,10 +51,10 @@ two-key policy, supply both enrolled key paths to `ssh-add`. Each permitted hop
 needs compatible OpenSSH. Do not forward an everyday agent holding other keys.
 
 For a local machine, `howl ssh alice@NAME` discovers FIDO keys in `~/.ssh` and
-performs this setup using the machine's existing host-key pin. `--identity KEY`
-selects keys explicitly; repeat it for additional credentials. `--no-agent` skips
-forwarding and allows the first connection to establish a pin, which you must
-verify. Lima's login key can still authenticate locally but is not auto-forwarded.
+performs this setup. On first use it pins the host key with an authentication-free
+handshake. `--identity KEY` selects keys explicitly; repeat it for additional
+credentials. `--no-agent` skips forwarding. Lima's login key can still authenticate
+locally but is not auto-forwarded.
 Expiration leaves sessions open but prevents new authentication; reconnect to reload.
 
 Inside the session, run `su`. Approve the local agent request and complete the

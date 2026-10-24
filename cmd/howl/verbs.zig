@@ -30,8 +30,9 @@ const testing = std.testing;
 
 /// sshTo is howl ssh [[USER@]NAME] [-- COMMAND...]. It execs ssh as the local user into a
 /// machine here, run's without a name: under QEMU on its forwarded port,
-/// under Firecracker at its tap address, and on Lima at the lease or forwarded
-/// port. Dev Lima runs use the address recorded for their current boot.
+/// under Firecracker at its tap address, on Lima at the lease or forwarded
+/// port, or on GCP at its external address. Dev Lima runs use the address
+/// recorded for their current boot.
 pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     var rest: []const []const u8 = args;
     var command: []const []const u8 = &.{};
@@ -62,20 +63,8 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     const explicit_identities = identities.items.len > 0;
     if (no_agent and explicit_identities)
         return why.refuse("--no-agent cannot be combined with --identity", .{});
-    if (!no_agent and !explicit_identities) try identities.appendSlice(
-        gpa,
-        try @import("keys.zig").securityIdentities(io, gpa),
-    );
-    const managed_agent = identities.items.len > 0;
     const target = try sshTarget(gpa, machine_args.items, why);
     rest = target.args;
-    const user = target.user orelse blk: {
-        const result = try std.process.run(gpa, io, .{ .argv = &.{ "id", "-un" } });
-        const local = std.mem.trim(u8, result.stdout, " \r\n");
-        if (result.term != .exited or result.term.exited != 0 or !sshUser(local))
-            return why.refuse("cannot determine local user; specify USER@NAME", .{});
-        break :blk local;
-    };
     // One word that names no machine is most likely a command: say how.
     if (command.len == 0 and rest.len == 1 and !std.mem.startsWith(u8, rest[0], "-")) {
         if (Dir.cwd().access(
@@ -88,6 +77,12 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         );
     }
     const name, const on = try machineArgs(io, gpa, rest, why);
+    const user = target.user orelse blk: {
+        const local = try @import("keys.zig").currentUserName(io, gpa, why);
+        if (!sshUser(local))
+            return why.refuse("cannot determine local user; specify USER@NAME", .{});
+        break :blk local;
+    };
     const dir = try machineDir(gpa, name);
     const dev_marker = Dir.cwd().readFileAlloc(
         io,
@@ -96,6 +91,16 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         .limited(32),
     ) catch null;
     const dev_access = dev_marker != null;
+    // Lima provisions its own NoCloud identity for the configured user, and
+    // developer machines have a howl-managed key. Prefer those credentials
+    // over forwarding local FIDO keys when they are available.
+    const lima_identity = if (on == .lima and !dev_access and !explicit_identities)
+        try lima.sshIdentity(io, gpa, name, user)
+    else
+        null;
+    if (!no_agent and !explicit_identities and lima_identity == null and !dev_access)
+        try identities.appendSlice(gpa, try @import("keys.zig").securityIdentities(io, gpa));
+    const managed_agent = identities.items.len > 0;
     // The guest keeps its host key in /data, so trust it on first use and
     // pin it by name in the machine's directory, not by an address another
     // machine may get later. Developer and ordinary sshd use distinct host
@@ -195,11 +200,9 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         else
             limaAddress(managed, lima.addressOf(io, gpa, name));
         // Lima's NoCloud account accepts its own key, not necessarily ~/.ssh's.
-        if (!dev_access and
-            !explicit_identities) if (try lima.sshIdentity(io, gpa, name, user)) |identity|
-        {
+        if (lima_identity) |identity| {
             try pinned.appendSlice(gpa, &.{ "-i", identity });
-        };
+        }
         const port = lima.sshPort(io, gpa, name);
         if (addr) |a| {
             try argv.append(gpa, "ssh");
@@ -213,8 +216,18 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         } else {
             return why.refuse("{s}: no SSH address available", .{name});
         }
+    } else if (on == .gcp) {
+        const place = try gcp.place(io, gpa, why);
+        if (try gcp.formOf(io, gpa, place, name, why) == null)
+            return why.refuse("no machine {s} in GCP zone {s}", .{ name, place.zone });
+        try gcp.ensureSshReachable(io, gpa, place, name, why);
+        const host = gcp.address(io, gpa, place, name) orelse
+            return why.refuse("{s}: no external SSH address in GCP", .{name});
+        try argv.append(gpa, "ssh");
+        try argv.appendSlice(gpa, pinned.items);
+        try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, host }));
     } else return why.refuse(
-        "ssh reaches machines here (qemu, firecracker, lima, bhyve); {t}'s address is in " ++
+        "ssh reaches machines here (qemu, firecracker, lima, bhyve, gcp); {t}'s address is in " ++
             "create's summary",
         .{on},
     );
@@ -227,6 +240,7 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         user,
         identities.items,
         argv.items,
+        command.len,
         why,
     );
     const err = std.process.replace(io, .{ .argv = argv.items });

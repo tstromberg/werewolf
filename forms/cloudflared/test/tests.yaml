@@ -22,7 +22,7 @@ suites:
               body:
                 contains: cloudflared
             await: 60s
-          - listeners: tcp
+          - listeners: {protocol: tcp, port: 2000}
             expect:
               equals:
                 - protocol: tcp

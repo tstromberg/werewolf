@@ -180,7 +180,7 @@ mkdir -p $(dir $@)
 endef
 
 # A program may import any library; a library, only what its --dep flags name.
-LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
+LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
 	-Mverity=lib/verity.zig -Mipe=lib/ipe.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig \
 	--dep sandbox -Mnet-rule=lib/net-rule.zig --dep network --dep net-rule --dep sandbox -Mdns=lib/dns.zig -Mhostkey=lib/hostkey.zig \
@@ -191,7 +191,7 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
+ZIG_MODULES = --dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -288,15 +288,17 @@ $(TEST_SK): tools/test-sk.zig
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/ci-forms: ; python3 test/ci-forms-test
 	python3 test/check-dispatch
 _test/cloud-console: ; python3 test/cloud-console --test
+	python3 test/cloud-checks
+	python3 test/cloud-posture --test
 	python3 test/consumer-trust
 	python3 test/check-host-keys
 _test/probes:
@@ -332,6 +334,7 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/greenbone/test/web.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/moodle/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/langflow/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
@@ -339,8 +342,8 @@ _test/probes:
 _test/form-coverage: ; python3 test/form-coverage --probes
 _test/bhyve-network: ; python3 test/check-bhyve-network
 _test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
-_test/package-sources: ; python3 test/package-sources
-_test/package-pins: ; go -C tools/package-pins test ./...
+_test/package-consumers: build/host/form
+	python3 test/package-consumers
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing
@@ -441,8 +444,10 @@ check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SY
 
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
+	@python3 test/howl-protections $(HOWL)
 	@python3 test/howl-test $(HOWL)
 	@python3 test/howl-ssh $(HOWL)
+	@python3 test/howl-current-user $(HOWL)
 	@python3 test/howl-forms $(HOWL)
 	@python3 test/native-tests-regression
 	@zig test test/native/driver.zig
@@ -686,6 +691,9 @@ _check-legacy-%: | _check-shared
 # Native clients are a separate generated form, never DEV and never a member
 # of /etc/sv. Compare their baseline before booting, then reuse one data disk.
 .PHONY: check-native-tests _check-native-tests
+.PHONY: check-plex-import
+check-plex-import: $(HOWL)
+	test/check-plex-import $(HOWL)
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
 	@python3 test/native-tests describe $* $(ARCH) >/dev/null
@@ -927,7 +935,7 @@ _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
 		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt test/check-secureboot \
 		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
-		-m $(CHECK_MEMORY) -no-reboot
+		-m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci
 _check-metadata:
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
@@ -995,6 +1003,13 @@ check-gcp-metadata: $(HOWL) $(TEST_SK)
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
 
+# Exercise both checkout builds and published downloads without downgrades.
+.PHONY: check-prod-ssh-clouds
+check-prod-ssh-clouds:
+	@failed=0; for mode in build download; do for cloud in aws azure gcp; do \
+		$(MAKE) --no-print-directory check-$$cloud CLOUD_MODE=$$mode || failed=1; \
+	done; done; exit $$failed
+
 # Explicit live lifecycle tests; cloud credentials are never required by PR CI.
 .PHONY: check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox check-bhyve-secureboot _check-provider-ab
 check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox: check-ab-%:
@@ -1022,11 +1037,13 @@ examples:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example local $$f || status=1; done; exit $$status
 examples-gcp:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example gcp $$f || status=1; done; exit $$status
-_check-cloud: $(HOWL)
+_check-cloud: $(HOWL) $(TEST_SK)
 	@mkdir -p $(CHECK)
 	@runner=$$(mktemp '$(CHECK)/cloud-$(CLOUD).XXXXXXXX') && \
 		trap 'rm -f "$$runner"' EXIT && cp test/cloud "$$runner" && chmod 700 "$$runner" && \
-		HOWL=$(HOWL) "$$runner" $(CLOUD) $(FORM) $(ARCH)
+		HOWL=$(HOWL) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) CLOUD_MODE=$(or $(CLOUD_MODE),build) \
+		POSTURE_KNOWN='$(filter-out ?boot-secure-boot boot-rollback-protected boot-ipe-enforced,$(POSTURE_KNOWN))' \
+		"$$runner" $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot
 	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) \
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose

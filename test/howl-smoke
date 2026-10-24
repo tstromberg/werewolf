@@ -52,6 +52,13 @@ echo "$out" | grep -q 'as it is' || fail "one form alone should run as it is: $o
 rm -rf "$smoke"
 "$howl" form --build --with caddy --packages curl -o "$smoke" -n >/dev/null 2>&1 || fail "howl form -n"
 [ ! -e "$smoke" ] || fail "form -n left $smoke"
+out=$("$howl" form --build --with prod-ssh -o "$smoke" -n 2>&1) ||
+	fail "prod-ssh's replacement of the sshd service collided with its base: $out"
+[ ! -e "$smoke" ] || fail "prod-ssh form -n left $smoke"
+out=$("$howl" form --build --with prod-ssh --services.other.exec /bin/true \
+	--services.other.listen tcp/22 -o "$smoke" -n 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q 'both listen on tcp/22' ||
+	fail "prod-ssh accepted a different service on its SSH port: $out"
 ! "$howl" run --build caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"
 ! "$howl" _build --with minimal --disk-args x slot >/dev/null 2>&1 || fail "_build took --disk-args without disk"
 # forms/mastodon/README.md's line, packed as create packs it: one --domain

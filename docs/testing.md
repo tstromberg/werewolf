@@ -17,22 +17,13 @@ Image publishing requires further checks ([form-images.md](form-images.md)).
 [Local iteration](design/local-test-iteration.md) keeps the VM running between changes.
 
 PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
-[Greenbone](../forms/greenbone/README.md#testing-status) tests GMP/OSP, database roles,
-Valkey ACLs, shared mounts and persistence; `legacy: true` retains its DEV checks. Logs:
-`build/ARCH/check/FORM-native/`. These local QEMU runs are separate from protected
-lifecycle evidence.
+[Greenbone](../forms/greenbone/README.md#testing-status) covers GMP/OSP, database roles,
+Valkey ACLs, mounts and persistence; `legacy: true` retains DEV checks.
+Logs: `build/ARCH/check/FORM-native/`. Protected lifecycle evidence is separate.
 
-For a native driver edit, keep one disposable VM running and replace only that driver:
-
-```sh
-howl test --with postgresql --iterate
-howl test --with postgresql --iterate --driver test-postgres
-howl test --with postgresql --iterate --driver test-postgres --phase verify
-howl test --with postgresql --iterate --reset   # discard guest state
-howl test --with postgresql --iterate --stop
-```
-
-Native drivers default to 128 MiB; `memory` (16–8192 MiB) sizes their test cgroup.
+For driver edits, [iteration](design/local-test-iteration.md) keeps a disposable VM
+running and replaces only the selected driver. Native drivers default to 128 MiB;
+`memory` (16–8192 MiB) sizes their test cgroup.
 An optional driver `allow` list permits `python:native`, `node:native` or
 `java:native` in that driver's runtime namespace. Production grants stay unchanged;
 the payload comparison rejects blanket grants and undeclared files.
@@ -44,7 +35,6 @@ kernel; changing its bytes resets the VM. This profile explicitly disables IPE.
 make test           # every program's and library's unit tests, in seconds
 make -j check       # boot every form, and a slot, side by side, and check each
 make check-FORM     # one form; check-shellfree-FORM boots it as it ships
-make check-apps     # application-carrier forms with supplied code
 make check-posture  # concurrent scans, stale probes and fresh audit evidence
 make check-dns      # Linux: resolver, DHCP and TLS fixtures in private namespaces
 python3 test/form-coverage --list   # each form's integration cases
@@ -60,44 +50,34 @@ root, or as a user with subordinate ids.
 
 ## What `make check` does
 
-It builds and boots every form under QEMU, then a slot with a native EFI partition.
-Each runs [test/checks](../test/checks) as root on the serial console, then powers off.
-Passing requires a successful boot, all expected check results and a clean shutdown.
+It boots every form and a slot with native EFI under QEMU. Passing requires a successful
+boot, expected [checks](../test/checks) as root, and a clean shutdown.
 
-The checks need a shell, and most forms have none. So each form is built with `DEV=1`,
-which adds BusyBox and a separate developer SSH listener, and once more as it ships
-(`check-shellfree-<form>`), where [test/boot](../test/boot) runs nothing on the machine
-and judges it by its posture line and by what `forms/<form>/test/console` says the
-console must and must not show.
+Legacy checks add BusyBox and developer SSH with `DEV=1`. Shipping-image checks
+(`check-shellfree-<form>`) use [test/boot](../test/boot) to judge posture and expected
+console output (`forms/<form>/test/console`) without running guest commands.
 
-The checks try what an attacker would, and expect to be refused: lower lockdown, read
-`/dev/mem` or another process's memory, undo a one-way sysctl, find a setuid file,
-listen on an undeclared port, run a program from `/tmp`; and as `nobody`, write to
-`/run`, see another user's processes, plant a link in `/tmp` for root to follow. A
-socket must listen on every declared port and answer HTTP where the port speaks it;
-another protocol is tested in `forms/FORM/test/checks`, with `forms/FORM/test/config`
-giving the services what they need. The first check: nothing was refused during boot.
+Checks attack lockdown, memory access, one-way sysctls, setuid, undeclared listeners,
+execution from `/tmp`, and `nobody` writing `/run`, seeing others' processes or planting
+links. Declared ports must listen and answer their protocol; form-specific checks and
+configuration live in `forms/FORM/test/`. Boot must have no unexpected refusals.
 
-`make check-people-persist` (also in `check-cloud`) boots one persistent data
-volume through account enrollment, retirement, conflicting people and NoCloud
-requests, and reactivation. It checks private-file ownership and access, then
-boots copies with corrupt and missing reservation tables and requires refusal
-before service handover. Logs live in `build/ARCH/check/people-persist/`.
-Seed creation needs `xorriso` on Linux (`tools/install-deps`) or macOS's `hdiutil`.
+`make check-people-persist` (also in `check-cloud`) tests enrollment, retirement,
+conflicting people/NoCloud requests and reactivation on one persistent volume. It checks
+private files and refuses corrupt or missing reservation tables before services start.
+Logs: `build/ARCH/check/people-persist/`. Seeds need `xorriso` (Linux) or `hdiutil`
+(Mac).
 
-`make check-privilege-boundaries` builds a disposable protected Lima image with
-one probe added to `playground`. Real SSH logins exercise credentials, inherited
-descriptors, cross-user files, PTYs, forwarding refusal, concurrent sessions,
-SFTP, daemon restart, and selected kernel restrictions. Secure Boot, TPM and IPE
-remain enabled. The fixture is deleted; logs and its profile remain under
-`build/security-probes/`. The existing `werewolf-run` instance is untouched.
+`make check-privilege-boundaries` tests real SSH credentials, inherited descriptors,
+cross-user files, PTYs, forwarding refusal, concurrent sessions, SFTP, daemon restart
+and kernel restrictions in a disposable protected `playground` Lima VM. Secure Boot,
+TPM and IPE stay enabled. Logs/profile: `build/security-probes/`; `werewolf-run` stays.
 
-`make check-mount-broker LINUX_TEST_RUNNER=sudo` runs the real confined broker
-in a private Linux mount namespace. It checks role restrictions, malformed
-requests, stalled readers, and staged-file integrity. CI runs it beside the
-updater construction tests. On macOS, a disposable Linux Lima VM can supply
-`LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` runs bounded
-wire-parser fuzzing without performing privileged operations.
+`make check-mount-broker LINUX_TEST_RUNNER=sudo` tests the confined broker's roles,
+malformed requests, stalled readers and staged-file integrity in a Linux mount
+namespace. CI runs it beside updater construction tests; macOS can use
+`LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` fuzzes its wire
+parser.
 
 Other boots cover what one boot cannot:
 
@@ -181,12 +161,11 @@ keeps every line.
 
 ## CI
 
-[check.yml](../.github/workflows/check.yml) runs host tests on both architectures,
-four `forms` shards, three `shellfree` shards, and four platform groups.
-[test/ci-forms](../test/ci-forms) checks existing targets one form at a time,
-cleans successful images/disks, and retains logs, locks, and native results.
-Failures keep their images. Platform boots share CPUs within their memory budget.
-[test/ci-setup](../test/ci-setup) installs pinned tools.
+[check.yml](../.github/workflows/check.yml) runs host tests on both architectures, four
+`forms` shards, three `shellfree` shards and four platform groups.
+[ci-forms](../test/ci-forms) checks forms serially, cleaning successful images and
+retaining failures, logs, locks and native results. Platform boots share CPUs within a
+memory budget; [ci-setup](../test/ci-setup) installs pinned tools.
 
 Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
 `make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.

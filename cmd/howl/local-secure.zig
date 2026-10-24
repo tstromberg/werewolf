@@ -9,6 +9,7 @@ const progress = @import("progress.zig");
 const qemu = @import("qemu.zig");
 const bhyve = @import("bhyve.zig");
 const booting = @import("boot.zig");
+const import_disk = @import("import.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -67,6 +68,74 @@ const Publisher = struct {
 };
 
 pub const Reuse = enum { miss, running, configure };
+
+/// Stage immutable data for the next cold start. A running VM retains its
+/// already-open disk; no guest disk, enrollment, or live service is modified.
+pub fn importData(
+    io: Io,
+    gpa: Allocator,
+    args: []const []const u8,
+    mode: import_disk.Mode,
+    why: *howl.Why,
+) !void {
+    const retry = args.len == 3 and std.mem.eql(u8, args[1], "--retry") and
+        @import("import-data").validId(args[2]);
+    if ((args.len != 2 and !retry) or !howl.isMachineName(args[0]))
+        return why.refuse(
+            "howl {s} NAME DIR; or howl import NAME --retry SNAPSHOT-ID",
+            .{if (mode == .sync) "sync" else "import"},
+        );
+    const name = args[0];
+    const dir = try howl.machineDir(gpa, name);
+    Dir.cwd().access(io, try gpa.print("{s}/authority/profile.json", .{dir}), .{}) catch
+        return why.refuse("{s} is not a protected local machine created by howl", .{name});
+    const lock = try Dir.cwd().createFile(
+        io,
+        try gpa.print("{s}/secure.lock", .{dir}),
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    );
+    defer lock.close(io);
+    try lock.lock(io, .exclusive);
+    const profile = try parseProfile(
+        gpa,
+        try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/authority/profile.json", .{dir}),
+            gpa,
+            .limited(64 << 10),
+        ),
+    );
+    const definition = profile.configuration orelse return error.MissingBootConfiguration;
+    try @import("boot-config.zig").check(definition, profile.spec.form);
+    const retained = if (retry)
+        try import_disk.recordAt(
+            io,
+            gpa,
+            try gpa.print("{s}/imports/{s}", .{ dir, args[2] }),
+            "record.json",
+        )
+    else
+        null;
+    if (retained) |record| if (!std.mem.eql(u8, record.id, args[2])) return error.ImportRecord;
+    const wanted = @tagName(if (retained) |record| record.mode else mode);
+    const supported = for (definition.imports) |allowed| {
+        if (std.mem.eql(u8, allowed, wanted)) break true;
+    } else false;
+    if (!supported) return why.refuse(
+        "{s} does not support {s} imports",
+        .{ profile.spec.form, wanted },
+    );
+    if (profile.provider != .lima and profile.provider != .qemu)
+        return why.refuse("imports currently support protected Lima and QEMU machines", .{});
+    const record = retained orelse try import_disk.prepare(io, gpa, args[1], dir, mode, why);
+    try import_disk.activate(io, gpa, dir, record, true);
+    howl.say(
+        io,
+        "{s}: {s} staged ({s}); selected for the next full stop/start; previous snapshots are " ++
+            "retained",
+        .{ name, wanted, record.id },
+    );
+}
 
 /// Host enrollment files cannot establish whether a Lima instance still exists.
 pub fn reconcileLima(io: Io, gpa: Allocator, name: []const u8, why: *howl.Why) !void {
@@ -329,8 +398,8 @@ fn admit(
     const arch = try howl.localArch(why);
     if (provider == .lima and arch != .aarch64)
         return why.refuse("the secured Lima profile currently requires arm64", .{});
-    if (o.import_dir != null)
-        return why.refuse("protected deployment does not yet support --import", .{});
+    if (o.import_dir != null and provider == .bhyve)
+        return why.refuse("protected bhyve import attachment is not supported", .{});
     return arch;
 }
 
@@ -1208,6 +1277,12 @@ pub fn create(
         );
         Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
     }
+    if (o.import_dir) |source| {
+        // Validate and snapshot before enrolling a new guest. A repeat may
+        // reuse the same input, but never replace an existing import implicitly.
+        try import_disk.write(io, gpa, source, at, why);
+    }
+    _ = try import_disk.existing(io, gpa, at);
     var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
     Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority})) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -1252,7 +1327,9 @@ pub fn create(
             "the secured provider cannot change",
             .{},
         );
-        try howl.reconfigurable(o, name, profile.spec.form, provider, why);
+        var changes = o;
+        changes.import_dir = null; // The immutable import was checked above.
+        try howl.reconfigurable(changes, name, profile.spec.form, provider, why);
         for ([3][]const u8{
             "enrolled",
             "credentials/owner.auth",
@@ -1923,6 +2000,7 @@ fn startQemu(
         .guest_web = guest_web,
         .tpm_socket = try gpa.print("{s}/tpm.sock", .{try sockets(gpa, at)}),
         .owner = true,
+        .import_disk = try import_disk.existing(io, gpa, at),
     }, qemu.accel(io));
     if (!(try steps.exec(
         &.{.{ .argv = try permitForwarding(gpa, profile, at, args) }},
@@ -2012,10 +2090,22 @@ fn permitForwarding(
 
 fn permitQemuCommand(io: Io, gpa: Allocator, profile: Profile, at: []const u8) ![]const u8 {
     const vars = try std.mem.replaceOwned(u8, gpa, try gpa.print("{s}/vars.fd", .{at}), ",", ",,");
-    const args = try permitForwarding(gpa, profile, at, &.{
+    const base: []const []const u8 = &.{
         "qemu-system-aarch64",                                                      "-drive",
         try gpa.print("if=pflash,format=raw,unit=1,readonly=on,file={s}", .{vars}),
-    });
+    };
+    const args = try permitForwarding(gpa, profile, at, base);
+    // Append after Lima's own disks so imports never renumber its boot disk.
+    const trailing = if (try import_disk.existing(io, gpa, at)) |disk| blk: {
+        const drive = try gpa.print(
+            "file={s},format=raw,if=virtio,readonly=on",
+            .{try std.mem.replaceOwned(u8, gpa, disk, ",", ",,")},
+        );
+        break :blk try gpa.print(
+            " -drive '{s}'",
+            .{try std.mem.replaceOwned(u8, gpa, drive, "'", "'\\''")},
+        );
+    } else "";
     var command: std.ArrayList(u8) = .empty;
     for (args, 0..) |arg, i| {
         if (i > 0) try command.append(gpa, ' ');
@@ -2028,7 +2118,10 @@ fn permitQemuCommand(io: Io, gpa: Allocator, profile: Profile, at: []const u8) !
     const wrapper = try gpa.print("{s}/qemu-private", .{at});
     const file = try Dir.cwd().createFile(io, wrapper, .{ .permissions = .fromMode(0o700) });
     defer file.close(io);
-    try file.writeStreamingAll(io, try gpa.print("#!/bin/sh\nexec {s} \"$@\"\n", .{command.items}));
+    try file.writeStreamingAll(
+        io,
+        try gpa.print("#!/bin/sh\nexec {s} \"$@\"{s}\n", .{ command.items, trailing }),
+    );
     return gpa.print("'{s}'", .{try std.mem.replaceOwned(u8, gpa, wrapper, "'", "'\\''")});
 }
 
