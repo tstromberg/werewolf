@@ -292,7 +292,7 @@ TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig li
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/probes
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/ci-forms: ; python3 test/ci-forms-test
 	python3 test/check-dispatch
@@ -339,8 +339,8 @@ _test/probes:
 _test/form-coverage: ; python3 test/form-coverage --probes
 _test/bhyve-network: ; python3 test/check-bhyve-network
 _test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
-_test/package-sources: ; python3 test/package-sources
-_test/package-pins: ; go -C tools/package-pins test ./...
+_test/package-consumers: build/host/form
+	python3 test/package-consumers
 _test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing

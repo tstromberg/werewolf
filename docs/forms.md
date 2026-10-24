@@ -88,12 +88,14 @@ path. Two users or groups with the same name or id fail the build.
 
 Third-party software comes from a signed feed by package name: `../packages` builds
 what Wolfi lacks or ships unfit, rarely what it ships (named `-werewolf`), and
-`../packages/lang` also holds the runtimes Werewolf patches. `minimal` lists both feeds; a
-name either covers comes from it or the build fails. A recipe is for werewolf's own
-software or a package in development: `recipes: [../../../packages/net/zot/zot.yaml]`,
-or `melange/*.yaml` beside its source, as in `forms/vuln-demo`. Melange builds in
+`../packages/lang` also holds the runtimes Werewolf patches. `minimal` lists both
+feeds; a name either covers comes from it or the build fails. Built-in forms declare
+published dependencies in `packages`; their builds need no package source checkout.
+Image locks pin the resolved APK versions and checksums for each architecture.
+Recipes for Werewolf's own software or private development packages stay beside
+their source in `melange/*.yaml`, as in `forms/vuln-demo`. Melange builds those in
 QEMU or bubblewrap, overlays the packages and checks shared-library dependencies.
-See [package source setup](../CONTRIBUTING.md#package-sources) for checkout and CI pins.
+See [package dependencies](../CONTRIBUTING.md#package-dependencies).
 
 ## Private configuration files
 
