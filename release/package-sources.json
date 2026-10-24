@@ -38,9 +38,9 @@
         "zot"
       ],
       "name": "packages",
-      "ref": "3bede92b25dec9070a6d4fe10643f483e0b473cd",
+      "ref": "db810d72fd181fbcf0eb07281841e32117364d71",
       "repository": "https://github.com/werewolf-linux/packages.git",
-      "sha256": "5e80b2cd40227e50d08b31dc70d2ed1fc8afc3b1fdb5b6ccf96bfe5ce472e663"
+      "sha256": "329acebecf76cc20ef80d7f9164795d37053ebeef219cc4d29592b223fc36228"
     },
     {
       "contexts": [
