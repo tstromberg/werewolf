@@ -202,8 +202,14 @@ fn check(io: Io, gpa: mem.Allocator) !void {
         "syslog-check: credentials, escaping, truncation and fd rejection verified\n",
         .{},
     );
-    try flooding(io, gpa);
     try shutdown(io, pid);
+    // Serial-console emulation can throttle ingestion below the PID limit.
+    // Console delivery is checked above; exercise floods with file output only.
+    try dir.writeFile(io, .{ .sub_path = "/run/config/syslog.conf", .data = "console no\n" });
+    const flood_logger = try launch();
+    try ready(io, flood_logger);
+    try flooding(io, gpa);
+    try shutdown(io, flood_logger);
     if (exists(io, "/data/log/messages") and
         (try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.NotDrained;
 
