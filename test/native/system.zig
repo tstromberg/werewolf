@@ -378,6 +378,8 @@ pub fn connectRules(a: Allocator, raw: []const u8, uid: u32) !Json {
             if (icmp or any) return error.NetworkPolicy;
             if (std.mem.eql(u8, s, "lan")) {
                 if (tcp or all) return error.NetworkPolicy;
+            } else if (std.mem.eql(u8, s, "loopback")) {
+                if (!tcp) return error.NetworkPolicy;
             } else if (!std.mem.eql(u8, s, "public")) return error.NetworkPolicy;
         }
         if (words.next() != null) return error.NetworkPolicy;

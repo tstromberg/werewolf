@@ -6,7 +6,7 @@ OpenJDK 27; see [form.yaml](form.yaml). The current product is the `solr` form.
 ## Security Posture
 
 - No Bash, BusyBox, shell entrypoint, or bundled JVM.
-- The signed hardened-packages JVM, a separate service UID and bounded memory.
+- The signed hardened JVM, a separate service UID and bounded memory.
 - Writable state confined to Solr's own persistent home and runtime directory.
 - No outbound connections. Log4Shell's normal outbound lookup is contained.
 - This deliberately pinned application has updates disabled.

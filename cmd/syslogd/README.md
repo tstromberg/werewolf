@@ -26,18 +26,19 @@ A compromised receiver can submit false records to its writer.
 
 Init links `/dev/log` into root-owned `/run/syslog`. Setup locks the directory,
 binds the socket and opens nonblocking console and read-only kernel descriptors.
-Read `/run/config/syslog.conf`, else `/etc/werewolf/syslog.conf`, once.
-Defaults: `console yes`, `file yes`, `max-mib 1024`.
-The parser accepts each key once; `max-mib` ranges from 16 to 1048576.
+Read `/run/config/syslog.conf`, else `/etc/werewolf/syslog.conf`, once. Defaults:
+`console yes`, `file yes`, `max-mib 1024` (16..1048576). Reject repeated keys.
 RAM `/data` means console-only. Restart to change configuration.
 
 The receiver becomes `_syslog` (75), chrooted to `/var/empty`, without
 capabilities, under Landlock and a descriptor-specific seccomp filter. It
 receives kernel PID/UID/GID credentials, closes and refuses passed descriptors,
-and rejects truncated messages. Datagrams are at most 2048 bytes, with 100 per
-UID per second and 256 sender slots. Escape controls, quotes, backslashes and
-non-ASCII bytes. `source: syslog` and credentials belong to the receiver;
-sender text cannot set metadata. Remap claimed kernel priorities to LOG_USER.
+and rejects truncated messages. Datagrams are at most 2048 bytes, with 1,000 per
+PID per second, no UID quota and 1,024 slots, reusable after 60 idle seconds.
+Escape controls, quotes, backslashes and non-ASCII bytes. Sender text cannot set
+metadata. Remap claimed kernel priorities to LOG_USER.
+Receiver-generated flood notices name UID/PID and suppressed counts, at most
+once per PID/minute and four globally/second, including pending drops after silence.
 
 Read kernel records in bounded batches, without merging fragments. Facility
 zero gets `source: kernel`; userspace-injected kmsg gets `source: kmsg`. Keep
@@ -63,8 +64,8 @@ and sync `.gz.tmp`, publish `.gz` exclusively, sync the directory, then remove
 the plain source and sync again. Recovery discards partial temporaries only
 when their source remains, and verifies duplicate gzip content before unlink.
 
-The budget includes stored bytes and 8 MiB reserved for compression scratch.
-There are at most 8192 closed segments, plus bounded recovery files. Exhaustion
+The budget includes stored bytes and 8 MiB compression scratch; at most 8192
+closed segments, plus bounded recovery files. Exhaustion
 drops new file records without evicting younger archives. File errors suspend
 file output and retry each minute. The console has its own 64 KiB queue.
 `/run/syslog/status` reports file/kernel health, loss counts and a boottime
@@ -74,14 +75,13 @@ status and alert on losses. Console loss summaries are rate limited.
 
 ## Drawbacks
 
-Unlimited ingestion needs unlimited storage. Retention trusts the clock and
-durable `/data`. Non-ASCII escapes represent original bytes, not decoded UTF-8.
+Delivery is best effort, including DNS logs. Retention trusts the clock and durable
+`/data`. Non-ASCII escapes represent original bytes, not decoded UTF-8.
 
 ## Alternatives Considered
 
-- zstd or external logrotate: gzip encoding is already available in Zig.
-- Number-only names or birth time: closing time keeps record age across rotations.
-- Evict oldest on pressure: violates the requested 90-day minimum.
+- Gzip is available in Zig; closing time preserves age across rotations.
+- Evicting oldest on pressure violates the 90-day minimum.
 
 ## Security Considerations
 
@@ -95,6 +95,6 @@ Pin and verify console/kmsg devices; seccomp permits only reads on the kmsg fd.
 Sync new file and directory entries, then active writes each second. Shutdown
 stops applications first and gives the logger five seconds to drain before
 unmounting `/data`. Abrupt power loss can lose recent unsynced messages.
-`make check-syslog` boots Linux to test confinement, origins, feedback, storage
-pressure and shutdown. `make fuzz-syslog SYSLOG_FUZZ_RUNS=100000` runs four
-coverage-guided targets for framing, kernel input, policy and gzip recovery.
+`make check-syslog` tests confinement, provenance, floods, storage and shutdown.
+`make fuzz-syslog SYSLOG_FUZZ_RUNS=100000` covers framing, kernel input,
+policy and gzip recovery.

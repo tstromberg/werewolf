@@ -5,7 +5,7 @@
 # user pulls; only those the settings name push or delete. zot keeps the
 # images in /data/svc/zot, deduplicated, and collects what no tag holds.
 # Wolfi's zot has every extension; werewolf's application feed builds the
-# registry alone, with none (../packages/zot/zot.yaml). See
+# registry alone, with none (../packages/net/zot/zot.yaml). See
 # forms/zot/README.md.
 base: prod
 

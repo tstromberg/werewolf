@@ -68,6 +68,15 @@ Local engines and Proxmox attach the tar read-only; clouds take base64 user data
 their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
 delete keeps the image. Nothing gets in until `--allow-from me|CIDR` opens the ports.
 
+**SSH.** `howl ssh` and `howl ssh NAME` log in as your local username.
+Use `howl ssh root@NAME` for root, including `root@werewolf-run` for the
+unnamed run machine. `howl ssh USER@NAME -- COMMAND...` selects another account.
+Connections to Lima's NoCloud account also offer Lima's identity key. A missing
+account or failed login does not fall back to root. Developer SSH only accepts root, so
+use `root@NAME` for a `--dev` VM.
+Local FIDO keys enter a dedicated, constrained 20-hour agent; `--identity KEY` selects
+keys, `--no-agent` skips forwarding. Requires a pin; see [su](../../forms/ssh-su/README.md).
+
 **Second create.** The machine keeps its disk and takes the new config; another form,
 `--app`, or `--import` is refused. `howl run` reuses matching protected inputs and
 resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only disk the

@@ -231,7 +231,7 @@ if {$passed < 20} {
 # background with its output and exit status going to files, and only the
 # console is watched, so the end of the command is never taken for the end
 # of QEMU. host returns the exit status and output.
-proc host {cmd} {
+proc host {cmd {seconds 60}} {
 	global log
 	set out $log.host
 	file delete -force $out $out.rc $out.rc.tmp
@@ -240,7 +240,7 @@ proc host {cmd} {
 	# Rename the status into place, so $out.rc exists only once it is
 	# complete: a redirection creates the file before echo writes to it.
 	exec sh -c "$quoted </dev/null >'$out' 2>&1; echo \$? >'$out.rc.tmp'; mv '$out.rc.tmp' '$out.rc'" &
-	set deadline [expr {[clock seconds] + 60}]
+	set deadline [expr {[clock seconds] + $seconds}]
 	while {![file exists $out.rc] && [clock seconds] < $deadline} {
 		expect {
 			-timeout 1
@@ -440,6 +440,13 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 			say FAIL ssh-keys-only "something but a key was offered:\n$out"
 			incr failed
 		}
+	}
+	if {[info exists env(SSH_MODE)] && $env(SSH_MODE) in {ssh-su prod-ssh playground}} {
+		set prefix [string range $env(SSH_KEY) 0 end-4]
+		lassign [host [list python3 test/ssh-su $env(SSH_PORT) $prefix $env(SSH_SK_PROVIDER) $env(SSH_MODE)] 180] status out
+		if {$status == 0} {
+			say ok ssh-su $out
+		} else { say FAIL ssh-su $out; incr failed }
 	}
 }
 }

@@ -3,7 +3,7 @@
 # AF_PACKET socket and promiscuous mode. Its pledge has packet and the
 # bind() that socket needs, and no inet, so it cannot fetch. The engine
 # is werewolf's whole Suricata, built without -march=native and without
-# its Python tools (../packages/suricata), and reads
+# its Python tools (../packages/security/suricata), and reads
 # /usr/share/suricata/suricata.yaml. rules-fetch, as _rules, caches
 # Emerging Threats Open on the data partition and refreshes it.
 # Suricata does not own that cache. The unix control socket is off,

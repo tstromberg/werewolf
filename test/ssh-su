@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Exercise the su form in an already booted, disposable test VM."""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+
+port, prefix, provider, mode = sys.argv[1:]
+software = mode == "playground"
+prefix = str(Path(prefix).resolve())
+provider = str(Path(provider).resolve())
+ssh = ["ssh", "-F", "/dev/null", "-S", "none", "-p", port,
+       "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR",
+       "-o", "IdentitiesOnly=yes", "-o", f"SecurityKeyProvider={provider}",
+       "-i", prefix + "-sk-key"]
+
+
+def run(argv, **kwargs):
+    return subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, timeout=40, **kwargs)
+
+
+def check(name, result, success, message):
+    if (result.returncode == 0) != success or message not in result.stdout:
+        raise RuntimeError(f"{name}: exit {result.returncode}: {result.stdout}")
+    print(f"pass   {name}", flush=True)
+
+
+def admin(command):
+    result = run(ssh + ["root@127.0.0.1", command])
+    if result.returncode:
+        raise RuntimeError(result.stdout)
+    return result
+
+
+with tempfile.TemporaryDirectory(prefix="su-agent-", dir="/tmp") as tmp:
+    socket = str(Path(tmp) / "agent")
+    env = dict(os.environ, SSH_AUTH_SOCK=socket)
+    agent = subprocess.Popen(["ssh-agent", "-D", "-a", socket, "-P", provider],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if Path(socket).exists():
+                break
+            if agent.poll() is not None:
+                raise RuntimeError("test ssh-agent exited")
+            time.sleep(.05)
+        else:
+            raise RuntimeError("test ssh-agent did not start")
+
+        def identity(suffix, constraints=()):
+            for argv in (["ssh-add", "-D"], ["ssh-add", *constraints, prefix + suffix]):
+                result = run(argv, env=env)
+                if result.returncode:
+                    raise RuntimeError(result.stdout)
+
+        def elevate(command="su", forward=True, tty=True, user="operator"):
+            # The outer login uses its explicit key, independent of the one
+            # offered by the forwarded test agent to the inner connection.
+            flags = ["-A" if forward else "-a"] + (["-tt"] if tty else [])
+            return run(ssh + flags + [user + "@127.0.0.1", command], env=env,
+                       input="printf '\\nsu-result:%s:%s\\n' \"$(id -u)\" \"${SSH_AUTH_SOCK-unset}\"; exit\n")
+
+        identity("-sk-key")
+        check("su-root-login", elevate(), True, "su-result:0:unset")
+        check("su-agent-required", elevate(forward=False), False,
+              "su: agent forwarding required; reconnect with ssh -A")
+        check("su-terminal-required", elevate(tty=False), False, "su: unauthenticated session")
+        check("su-busybox-unprivileged", elevate(command="busybox su -c 'id -u' root"),
+              False, "")
+
+        # User configuration cannot replace the pin or run a local command.
+        admin("mkdir -p /data/home/operator/.ssh; "
+              "printf 'Host *\\n ProxyCommand /bin/false\\n' "
+              "> /data/home/operator/.ssh/config; "
+              "chown -R operator:operator /data/home/operator/.ssh")
+        check("su-ignores-user-config", elevate(), True, "su-result:0:unset")
+
+        admin("cp /run/werewolf/ssh_known_hosts /run/werewolf/su-test-pin; "
+              "printf 'werewolf-local ' > /run/werewolf/ssh_known_hosts; "
+              "cat /run/config/authorized_keys >> /run/werewolf/ssh_known_hosts")
+        try:
+            check("su-rejects-wrong-host", elevate(), False, "Host key verification failed")
+        finally:
+            admin("mv /run/werewolf/su-test-pin /run/werewolf/ssh_known_hosts")
+
+        # These keys are authorized for root, but their signatures lack a
+        # required property. Each attempt uses a new SSH authentication.
+        for suffix, name in [("-no-verify", "su-requires-verification"),
+                             ("-no-touch", "su-requires-presence"),
+                             ("-key", "su-rejects-software-key"),
+                             ("-stranger", "su-rejects-unlisted-key")]:
+            identity(suffix)
+            allowed = software and suffix in {"-no-verify", "-key"}
+            if allowed:
+                name = "su-local-software-key" if suffix == "-key" else "su-local-no-verification"
+            check(name, elevate(), allowed,
+                  "su-result:0:unset" if allowed else "Permission denied (publickey)")
+        identity("-sk-key")
+        check("su-fresh-authentication", elevate(), True, "su-result:0:unset")
+
+        # Four concurrent auth failures exceed the default source-penalty
+        # threshold. Another user must still be able to elevate immediately.
+        identity("-stranger")
+        burst = run(ssh + ["-A", "operator@127.0.0.1",
+                          "for n in 1 2 3 4; do "
+                          "ssh -F /etc/ssh/su_config -S none root@127.0.0.1 true & "
+                          "done; wait"], env=env)
+        if burst.stdout.count("Permission denied (publickey)") != 4:
+            raise RuntimeError(f"su-penalty-burst: {burst.stdout}")
+        identity("-sk-key")
+        check("su-other-user-after-failures", elevate(user="second"), True,
+              "su-result:0:unset")
+
+        # The documented same-host hop must work with destination constraints.
+        known_hosts = Path(tmp) / "known_hosts"
+        output = admin("cat /run/svc/sshd/host-key.pub").stdout
+        public = next((line for line in output.splitlines()
+                       if line.startswith("ssh-ed25519 ")), None)
+        if public is None:
+            raise RuntimeError(f"missing host public key: {output}")
+        known_hosts.write_text("server " + public + "\n")
+        identity("-sk-key", ("-t", "20h", "-H", str(known_hosts),
+                             "-h", "operator@server", "-h", "server>root@server"))
+        check("su-constrained-agent", elevate(), True, "su-result:0:unset")
+    finally:
+        agent.terminate()
+        agent.wait(timeout=5)

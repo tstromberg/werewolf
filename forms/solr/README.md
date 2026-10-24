@@ -4,7 +4,7 @@
 
 Apache Solr 10.0.0 on hardened OpenJDK 27, on loopback port 8983 at `/solr/`.
 The application package contains no Bash, BusyBox, JVM, or shell entrypoint.
-The JVM comes from the signed hardened-packages repository.
+The JVM comes from the signed hardened feed.
 
 ## Background
 

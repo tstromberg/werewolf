@@ -4,7 +4,7 @@
 # Encrypt, and hands its PHP to php-fpm; background jobs run every five
 # minutes. Wolfi's Nextcloud is a container's, a major release behind:
 # werewolf's application feed lays the release in /usr/share/nextcloud
-# (../packages/nextcloud/nextcloud.yaml), which no one on the machine can
+# (../packages/www/nextcloud/nextcloud.yaml), which no one on the machine can
 # change. Its config, apps from the app store and everyone's files are in
 # /data/svc/nextcloud. It is installed, with its administrator from the
 # config, before it serves, and upgraded by the image, never the web. See

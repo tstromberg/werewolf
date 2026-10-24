@@ -191,9 +191,9 @@ def run(args, label, check=True, timeout=300):
 
 def ssh(name, command, label, **kwargs):
     check = kwargs.pop('check', True)
-    result = run([howl, 'ssh', name, '--', command], label, check=False, **kwargs)
+    result = run([howl, 'ssh', 'root@' + name, '--', command], label, check=False, **kwargs)
     if check and result.returncode:
-        run([howl, 'ssh', name, '--', 'sv status /etc/sv/*; tail -30 /data/svc/autoupdate/log'],
+        run([howl, 'ssh', 'root@' + name, '--', 'sv status /etc/sv/*; tail -30 /data/svc/autoupdate/log'],
             name + '-failure-services', check=False, timeout=20)
         raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-3000:])
     return result

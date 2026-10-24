@@ -1,7 +1,7 @@
 # mastodon: Mastodon, on ruby, with PostgreSQL, Valkey, Caddy, supercronic
 # and sh-shim beside it (form.yaml's with). Wolfi does not ship Mastodon:
 # werewolf's application feed builds it from a pinned release in Wolfi's
-# environment (../packages/mastodon/mastodon.yaml) into
+# environment (../packages/net-im/mastodon/mastodon.yaml) into
 # /usr/lib/mastodon, its assets compiled and its gems vendored. The
 # libraries they link are named below, so the updater keeps them current.
 # Three services run it: the web (etc/sv/mastodon), the streaming server
@@ -10,15 +10,15 @@
 base: ruby
 
 packages:
-  - mastodon
-  - nodejs-24
+  - mastodon>=4.7.3-r2
+  - nodejs-hardened>=26.12.1-r5002
   - jemalloc
   # Media: libvips in the web and jobs, by FFI; ffmpeg, ffprobe and file
   # each narrowed (docs/design/narrow.md).
-  - libvips
-  - ffmpeg-9.0
+  - libvips-hardened>=8.18.7-r1001
+  - ffmpeg-hardened>=9.0.2-r1003
   - file
-  # What ../packages/mastodon/mastodon.yaml's gems link, from Wolfi;
+  # What ../packages/net-im/mastodon/mastodon.yaml's gems link, from Wolfi;
   # the build fails if one is missing.
   - icu-libs
   - libidn

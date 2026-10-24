@@ -1,7 +1,7 @@
 base: node
 
 packages:
-  - n8n
+  - n8n>=2.44.6-r1
 
 weaknesses:
   programs-no-interpreters: hardened Node.js runs n8n

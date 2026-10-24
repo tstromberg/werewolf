@@ -100,6 +100,11 @@ fn run(io: Io, a: Allocator, ctx: driver.Run, check: Check) !void {
                         "test-platform: undeclared {s}/{d} on {s}\n",
                         .{ protocol, port, address },
                     );
+                    if (std.mem.eql(u8, protocol, "udp")) {
+                        // Keep the kernel UID and inode in the diagnostic:
+                        // unconnected UDP clients also appear in this table.
+                        std.debug.print("test-platform: UDP sockets:\n{s}\n", .{try system.read(io, a, "/proc/net/udp")});
+                    }
                     return error.UndeclaredListener;
                 }
             }

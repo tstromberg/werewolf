@@ -11,16 +11,18 @@ net:
 packages:
   - bash
 
-# sshd, its service and its policy, taking key files too: Lima's own, and
+# SSH-backed su, taking key files too: Lima's own, and
 # whatever ~/.ssh holds (OpenSSH's defaults, less RSA over SHA-1).
-with: [sshd]
+with: [ssh-su]
 sshd:
   pubkey-accepted-algorithms: "-ssh-rsa*"
+  pubkey-auth-options: touch-required
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers and HTTPS remain restricted
+  network-ssh-config: forwarded agents provide fresh authentication for su
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet

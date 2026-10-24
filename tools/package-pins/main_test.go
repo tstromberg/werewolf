@@ -172,3 +172,41 @@ print(hashlib.sha256((json.dumps(records,sort_keys=True,separators=(',',':'))+'\
 		}
 	}
 }
+
+func TestCategoryMovesPreserveIdentitiesAndMetadataIsDescriptive(t *testing.T) {
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	root := fixture(t)
+	write(filepath.Join(root, "example", "metadata.json"), `{"hardening":{"minimized":false}}`)
+	before, inputs, err := identities(root, []string{"example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "www"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "example"), filepath.Join(root, "www", "example")); err != nil {
+		t.Fatal(err)
+	}
+	after, nextInputs, err := identities(root, []string{"example"})
+	if err != nil || before != after || inputs["example"] != nextInputs["example"] {
+		t.Fatal("category move changed package identities", err)
+	}
+	write(filepath.Join(root, "www", "example", "metadata.json"), `{"hardening":{"minimized":true}}`)
+	described, describedInputs, err := identities(root, []string{"example"})
+	if err != nil || described == after || describedInputs["example"] != nextInputs["example"] {
+		t.Fatal("metadata must change reviewed source identity without rebuilding", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "net", "example"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(root, "net", "example", "metadata.json"), `{}`)
+	if _, _, err := identities(root, []string{"example"}); err == nil {
+		t.Fatal("ambiguous categories accepted")
+	}
+}

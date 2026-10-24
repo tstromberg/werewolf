@@ -6,7 +6,7 @@ model providers and local CPU ONNX inference on hardened Python 3.15. See
 
 ## Security Posture
 
-- Python comes from the signed hardened-packages repository.
+- Python comes from the signed hardened feed.
 - No shell or interpreter fetched from an upstream container.
 - One service user, private persistent data, bounded memory and no child execution.
 - Authentication is required; signup is disabled and the listener is private.
@@ -41,6 +41,9 @@ and tokenizer are packaged in read-only storage; the demo needs no model downloa
 - A direct single-process ASGI launcher avoids the CLI's multiprocessing supervisor.
 - The package includes base integrations plus OpenAI and Anthropic providers;
   optional provider extras require a rebuilt image.
+- External tracing integrations, Db2/Oracle/Cassandra/DuckDB drivers, uvloop,
+  Pyright and pytest helpers are omitted by default. Native graph traces and local
+  vector retrieval remain available.
 - Python upper-bound metadata is ported to 3.15; native dependencies are rebuilt
   where no matching wheel exists. Application endpoint implementations stay pinned.
 - The SQLite/local-storage deployment is single-node. Upstream's clustered `prod`

@@ -4,7 +4,7 @@
 # Wolfi does not ship LimeSurvey: werewolf's application feed lays the
 # project's release, pinned by sha256, in /usr/share/limesurvey,
 # read-only, with its tmp/ and upload/ links to /data
-# (../packages/limesurvey/limesurvey.yaml). The form brings its
+# (../packages/www/limesurvey/limesurvey.yaml). The form brings its
 # config.php, which turns the web installer off, and the installer that
 # sets the site up from the machine's settings before php-fpm serves it
 # (usr/share/werewolf-limesurvey/install.php). Plugins come with the image
@@ -24,7 +24,6 @@ packages:
   - php-8.5-gd            # charts, captchas, image questions
   - php-8.5-zip           # survey and theme archives
   - php-8.5-sodium        # encrypted answers and participant fields
-  - php-8.5-ldap          # sign-in against the institution's directory
   - php-8.5-dom
   - php-8.5-xml
   - php-8.5-simplexml
@@ -62,7 +61,7 @@ services:
   # php-fpm running LimeSurvey, as the php user: it reads its
   # configuration and the image, writes only its own directories (assets,
   # cache and uploads in /data/svc/php-fpm), and reaches MariaDB's socket,
-  # the mail relay's submission port and a directory's LDAPS port, and
+  # the mail relay's submission port, and
   # nothing else. Before it serves, install.php sets the site up from the
   # settings, so no first visitor claims it; a missing admin password hash
   # parks the service.
@@ -71,7 +70,8 @@ services:
   # directory (not /tmp, which the leash does not grant), and no looking
   # for changed files, since the image cannot change.
   php-fpm:
-    allow: [php:upload, php:inline, php:writable-source]
+    # Yii caches URL rules and database schemas as serialized objects.
+    allow: [php:upload, php:inline, php:writable-source, php:deserialize]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=192 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000
     before:
@@ -79,7 +79,7 @@ services:
       - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
     user: php
     pledge: stdio rpath wpath proc unix inet connect listen
-    connect: [tcp/587 tcp/636, /run/svc/mariadb/mariadb.sock]
+    connect: [tcp/587, /run/svc/mariadb/mariadb.sock]
     lookup: "*"
     memory: 768
     read: /etc/php

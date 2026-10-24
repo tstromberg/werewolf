@@ -213,26 +213,123 @@ pub fn validRecord(line: []const u8) bool {
     return true;
 }
 
-pub const Limiter = struct {
-    slots: [256]Slot = @splat(.{}),
-    const Slot = struct { uid: ?u32 = null, second: i64 = 0, count: u16 = 0 };
+pub const per_pid = 1000;
+pub const flood_interval = 60;
+pub const sender_idle = 60;
 
-    pub fn admit(l: *Limiter, uid: u32, second: i64) bool {
-        var empty: ?*Slot = null;
-        for (&l.slots) |*s| {
-            if (s.uid == uid) {
-                if (s.second != second) s.* = .{ .uid = uid, .second = second };
-                if (s.count >= 100) return false;
-                s.count += 1;
-                return true;
-            }
-            if (empty == null and (s.uid == null or s.second != second)) empty = s;
-        }
-        const s = empty orelse return false;
-        s.* = .{ .uid = uid, .second = second, .count = 1 };
-        return true;
+pub const Flood = struct {
+    scope: enum { pid, senders },
+    uid: ?u32,
+    pid: ?i32,
+    suppressed: u64,
+};
+
+const Suppression = struct {
+    count: u64 = 0,
+    reported: ?i64 = null,
+
+    fn due(s: *const Suppression, now: i64) bool {
+        return s.count > 0 and (s.reported == null or now - s.reported.? >= flood_interval);
+    }
+
+    fn take(s: *Suppression, now: i64) u64 {
+        const n = s.count;
+        s.count = 0;
+        s.reported = now;
+        return n;
     }
 };
+
+/// Count messages per PID in each monotonic second, using kernel credentials.
+/// UID is diagnostic metadata, never a quota. Pending drop counts survive idle
+/// time until reported; a full table refuses new senders, never resets an
+/// active sender's quota. A reused PID conservatively inherits its window.
+pub const Limiter = struct {
+    slots: [1024]Slot = @splat(.{}),
+    overflow: Suppression = .{},
+    notice_second: i64 = -1,
+    notice_count: u8 = 0,
+    cursor: usize = 0,
+
+    const Slot = struct {
+        pid: ?i32 = null,
+        uid: u32 = 0,
+        second: i64 = 0,
+        count: u16 = 0,
+        dropped: Suppression = .{},
+    };
+
+    pub fn admit(l: *Limiter, cred: Credentials, now: i64) bool {
+        var spare: ?*Slot = null;
+        const slot = for (&l.slots) |*s| {
+            if (s.pid == cred.pid) break s;
+            if (spare == null and (s.pid == null or
+                (now - s.second >= sender_idle and s.dropped.count == 0))) spare = s;
+        } else slot: {
+            const s = spare orelse {
+                l.overflow.count +|= 1;
+                return false;
+            };
+            s.* = .{ .uid = cred.uid, .pid = cred.pid, .second = now };
+            break :slot s;
+        };
+        slot.uid = cred.uid;
+        if (now > slot.second) {
+            slot.second = now;
+            slot.count = 0;
+        }
+        if (slot.count >= per_pid) {
+            slot.dropped.count +|= 1;
+            return false;
+        }
+        slot.count += 1;
+        return true;
+    }
+
+    /// Each PID gets an initial notice and at most one summary per minute,
+    /// including pending drops after it stops. Limit all notices to four per
+    /// second; round-robin scanning gives pending senders a turn.
+    pub fn notice(l: *Limiter, now: i64) ?Flood {
+        if (now > l.notice_second) {
+            l.notice_second = now;
+            l.notice_count = 0;
+        }
+        if (l.notice_count >= 4) return null;
+        const total = 1024 + 1;
+        for (0..total) |_| {
+            const at = l.cursor;
+            l.cursor = (l.cursor + 1) % total;
+            const slot = if (at < l.slots.len) &l.slots[at] else null;
+            const dropped = if (slot) |s| &s.dropped else &l.overflow;
+            if (!dropped.due(now)) continue;
+            l.notice_count += 1;
+            return .{
+                .scope = if (slot != null) .pid else .senders,
+                .uid = if (slot) |s| s.uid else null,
+                .pid = if (slot) |s| s.pid else null,
+                .suppressed = dropped.take(now),
+            };
+        }
+        return null;
+    }
+};
+
+pub fn floodRecord(out: []u8, seconds: i64, flood: Flood) ![]const u8 {
+    var time: [20]u8 = undefined;
+    var w: std.Io.Writer = .fixed(out);
+    try w.writeAll("syslogd: ");
+    try std.json.Stringify.value(.{
+        .time = try stamp(&time, seconds),
+        .source = "syslogd",
+        .event = "flood",
+        .scope = @tagName(flood.scope),
+        .uid = flood.uid,
+        .pid = flood.pid,
+        .suppressed = flood.suppressed,
+    }, .{}, &w);
+    try w.writeByte('\n');
+    return w.buffered();
+}
 
 pub const Queue = struct {
     bytes: [64 << 10]u8 = undefined,
@@ -373,13 +470,84 @@ test "config rejects duplicates, unknown settings and unsafe budgets" {
         try t.expectError(error.BadConfig, Config.parse(text));
 }
 
-test "rate limits are per UID and queue compaction preserves partial writes" {
+fn sender(uid: u32, pid: i32) Credentials {
+    return .{ .uid = uid, .gid = uid, .pid = pid };
+}
+
+test "a PID admits 1000 messages per second without sharing a UID allowance" {
     const t = std.testing;
     var l: Limiter = .{};
-    for (0..100) |_| try t.expect(l.admit(1, 10));
-    try t.expect(!l.admit(1, 10));
-    try t.expect(l.admit(2, 10));
-    try t.expect(l.admit(1, 11));
+    for (0..per_pid) |_| try t.expect(l.admit(sender(1, 10), 10));
+    try t.expect(!l.admit(sender(1, 10), 10));
+    // Several processes under the same UID each get the full allowance.
+    for (11..17) |pid| {
+        for (0..per_pid) |_| try t.expect(l.admit(sender(1, @intCast(pid)), 10));
+        try t.expect(!l.admit(sender(1, @intCast(pid)), 10));
+    }
+    try t.expect(!l.admit(sender(2, 10), 10));
+    try t.expect(l.admit(sender(2, 20), 10));
+    try t.expect(!l.admit(sender(1, 10), 9));
+    for (0..per_pid) |_| try t.expect(l.admit(sender(1, 10), 11));
+    try t.expect(!l.admit(sender(1, 10), 11));
+}
+
+test "a full sender table retains active quotas and reports overflow" {
+    const t = std.testing;
+    var l: Limiter = .{};
+    for (0..l.slots.len) |pid| try t.expect(l.admit(sender(1, @intCast(pid)), 0));
+    try t.expect(!l.admit(sender(1, 1024), 0));
+    for (1..per_pid) |_| try t.expect(l.admit(sender(1, 0), 0));
+    try t.expect(!l.admit(sender(1, 0), 0));
+    const pid_notice = l.notice(0).?;
+    try t.expectEqual(.pid, pid_notice.scope);
+    const overflow = l.notice(0).?;
+    try t.expectEqual(.senders, overflow.scope);
+    try t.expect(overflow.uid == null and overflow.pid == null);
+    try t.expectEqual(@as(u64, 1), overflow.suppressed);
+    try t.expect(l.admit(sender(1, 1024), sender_idle));
+}
+
+test "flood notices aggregate drops after traffic stops and bypass exhausted senders" {
+    const t = std.testing;
+    var l: Limiter = .{};
+    for (0..per_pid) |_| try t.expect(l.admit(sender(1, 10), 0));
+    for (0..7) |_| try t.expect(!l.admit(sender(1, 10), 0));
+    const flood = l.notice(0).?;
+    try t.expectEqual(.pid, flood.scope);
+    try t.expectEqual(@as(?u32, 1), flood.uid);
+    try t.expectEqual(@as(?i32, 10), flood.pid);
+    try t.expectEqual(@as(u64, 7), flood.suppressed);
+    for (0..3) |_| try t.expect(!l.admit(sender(1, 10), 0));
+    try t.expect(l.notice(flood_interval - 1) == null);
+    try t.expectEqual(@as(u64, 3), l.notice(flood_interval).?.suppressed);
+    try t.expect(l.notice(2 * flood_interval) == null);
+    var buf: [384]u8 = undefined;
+    const line = try floodRecord(&buf, 0, flood);
+    try t.expect(validRecord(line));
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, line[9..], .{});
+    defer parsed.deinit();
+    try t.expectEqualStrings("syslogd", parsed.value.object.get("source").?.string);
+    try t.expectEqualStrings("flood", parsed.value.object.get("event").?.string);
+    try t.expectEqual(@as(i64, 10), parsed.value.object.get("pid").?.integer);
+}
+
+test "a flood of identities cannot flood notices or starve pending summaries" {
+    const t = std.testing;
+    var l: Limiter = .{};
+    for (0..10) |pid| {
+        for (0..per_pid) |_| try t.expect(l.admit(sender(1, @intCast(pid)), 0));
+        try t.expect(!l.admit(sender(1, @intCast(pid)), 0));
+    }
+    for (0..4) |pid| try t.expectEqual(@as(?i32, @intCast(pid)), l.notice(0).?.pid);
+    try t.expect(l.notice(0) == null);
+    for (4..8) |pid| try t.expectEqual(@as(?i32, @intCast(pid)), l.notice(1).?.pid);
+    try t.expect(l.notice(1) == null);
+    for (8..10) |pid| try t.expectEqual(@as(?i32, @intCast(pid)), l.notice(2).?.pid);
+    try t.expect(l.notice(2) == null);
+}
+
+test "queue compaction preserves partial writes" {
+    const t = std.testing;
     var q: Queue = .{};
     const bytes: [40 << 10]u8 = @splat('a');
     try t.expect(q.append(&bytes));

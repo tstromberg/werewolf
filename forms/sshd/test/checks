@@ -1,0 +1,1 @@
+ok  sshd-no-package-su   [ ! -e /usr/bin/su ] && [ ! -L /usr/bin/su ]

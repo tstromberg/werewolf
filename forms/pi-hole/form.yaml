@@ -12,6 +12,21 @@ base: prod
 
 with: [caddy]
 
+# Build locally until this musl package is published in the application feed.
+recipes:
+  - ../../../packages/net/pihole-curl/pihole-curl.yaml
+
+# Gravity uses our HTTP(S)-only curl. Git updates are not part of this
+# read-only service; remove its libcurl consumers before their libraries.
+prune:
+  - oci/pi-hole/usr/bin/curl
+  - oci/pi-hole/usr/bin/git*
+  - oci/pi-hole/usr/libexec/git-core
+  - oci/pi-hole/usr/lib/libcurl.so*
+  - oci/pi-hole/usr/lib/libbrotli*.so*
+  - oci/pi-hole/usr/lib/libcares.so*
+  - oci/pi-hole/usr/lib/libpsl.so*
+
 check:
   # :53 speaks DNS, not HTTP. Caddy's HTTPS is forms/pi-hole/test/checks.
   skip: [http-answering]
@@ -40,7 +55,10 @@ services:
     listen: [tcp/53 udp/53 lan, tcp/8080 loopback]
     dns-direct: true
     connect: [udp/53 tcp/53, tcp/443 tcp/80 public]
-    lookup: "*"
+    lookup:
+      # The built-in blocklist must resolve before custom lists are configured.
+      - raw.githubusercontent.com
+      - "*"
     write: [/etc/pihole, /etc/dnsmasq.d, /var/log/pihole, /dev/shm]
     run:
       - /bin/bash
@@ -49,12 +67,14 @@ services:
       - /bin/grep
       - /usr/bin/env
       - /usr/bin/getent
-      - /usr/bin/curl
+      - /usr/bin/dig
+      - /usr/lib/werewolf-pihole/curl
       - /usr/bin/tput
     secret: FTLCONF_webserver_api_password /run/config/pi-hole/password
     memory: 512
     nofile: 4096
     env:
+      - PATH=/usr/lib/werewolf-pihole:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       - FTLCONF_dns_listeningMode=NONE
       - FTLCONF_misc_etc_dnsmasq_d=true
       # Quad9: no logs of who asked, and it refuses known malware domains.

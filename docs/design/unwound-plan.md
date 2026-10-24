@@ -23,8 +23,8 @@ same question already out, to wait for → upstream validates peer, port, ID, ec
 case, class and type, and returns the alias chain and the asked type, or a bare
 header and why none answered → frontend checks alias targets against the grants
 and builds the reply from scratch. 256 questions in flight, 32 per service; past
-that SERVFAIL, counted. Audit lines, JSON datagrams to `/dev/log`, give a `why`
-and a `detail` for each question that gets no answer; a lost one is counted.
+that SERVFAIL, counted. Best-effort audit JSON datagrams give a `why` and `detail`;
+logging failures never change DNS behavior. Count local send losses in stats.
 
 ## Phases
 

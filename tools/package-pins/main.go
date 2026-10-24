@@ -130,6 +130,22 @@ func record(root, path string) (map[string]any, error) {
 	return map[string]any{"path": filepath.ToSlash(rel), "sha256": hex.EncodeToString(h.Sum(nil)), "mode": mode}, nil
 }
 
+func contextDir(root, name string) (string, error) {
+	paths, err := filepath.Glob(filepath.Join(root, "*", name, "metadata.json"))
+	if err != nil {
+		return "", err
+	}
+	flat := filepath.Join(root, name)
+	info, flatErr := os.Lstat(flat)
+	if flatErr == nil && info.IsDir() && len(paths) == 0 {
+		return flat, nil
+	}
+	if os.IsNotExist(flatErr) && len(paths) == 1 {
+		return filepath.Dir(paths[0]), nil
+	}
+	return "", fmt.Errorf("missing or ambiguous context: %s", name)
+}
+
 func identities(root string, contexts []string) (string, map[string]string, error) {
 	contexts = append([]string(nil), contexts...)
 	sort.Strings(contexts)
@@ -142,7 +158,10 @@ func identities(root string, contexts []string) (string, map[string]string, erro
 		if !contextName.MatchString(name) || name == "." || name == ".." || inputs[name] != "" {
 			return "", nil, fmt.Errorf("invalid or duplicate context: %s", name)
 		}
-		dir := filepath.Join(root, name)
+		dir, err := contextDir(root, name)
+		if err != nil {
+			return "", nil, err
+		}
 		info, err := os.Lstat(dir)
 		if err != nil {
 			return "", nil, err
@@ -165,7 +184,19 @@ func identities(root string, contexts []string) (string, map[string]string, erro
 			r["context"] = name
 			all.Write(canonical(r))
 		}
-		paths = append(paths, filepath.Join(root, "tools.lock.json"), filepath.Join(root, "scripts/build.py"), filepath.Join(root, "scripts/common.py"))
+		buildPaths := []string{}
+		for _, path := range paths {
+			if path != filepath.Join(dir, "metadata.json") {
+				buildPaths = append(buildPaths, path)
+			}
+		}
+		paths = append(buildPaths, filepath.Join(root, "tools.lock.json"), filepath.Join(root, "scripts/build.py"), filepath.Join(root, "scripts/common.py"))
+		catalog := filepath.Join(root, "scripts/catalog.py")
+		if _, err := os.Lstat(catalog); err == nil {
+			paths = append(paths, catalog)
+		} else if !os.IsNotExist(err) {
+			return "", nil, err
+		}
 		sortPaths(paths)
 		records := []map[string]any{}
 		for _, path := range paths {
@@ -173,8 +204,14 @@ func identities(root string, contexts []string) (string, map[string]string, erro
 			if err != nil {
 				return "", nil, err
 			}
+			if rel, err := filepath.Rel(dir, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				r["path"] = filepath.ToSlash(filepath.Join(name, rel))
+			}
 			records = append(records, r)
 		}
+		sort.Slice(records, func(i, j int) bool {
+			return slices.Compare(strings.Split(records[i]["path"].(string), "/"), strings.Split(records[j]["path"].(string), "/")) < 0
+		})
 		inputs[name] = sum(canonical(records))
 	}
 	return hex.EncodeToString(all.Sum(nil)), inputs, nil

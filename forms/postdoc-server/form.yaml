@@ -5,7 +5,7 @@
 # port for them. Every route but /_/health wants the bearer token from
 # the config. Operators reach the machine by security key (the sshd
 # form). Wolfi does not ship postdoc: werewolf's application feed builds it
-# (../packages/postdoc-server/postdoc.yaml). Its rules and model are
+# (../packages/net/postdoc-server/postdoc.yaml). Its rules and model are
 # downloaded at start into /data/svc/postdoc. See
 # forms/postdoc-server/README.md.
 base: prod

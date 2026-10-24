@@ -10,7 +10,7 @@ base: prod-ssh
 packages:
   - jellyfin
   - jellyfin-web
-  - caddy-werewolf
+  - caddy
 
 # Taken back of werewolf's defaults (lib/allow.zig): .NET compiles
 # Jellyfin to machine code as it runs.

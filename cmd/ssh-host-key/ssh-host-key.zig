@@ -3,7 +3,7 @@
 //! given, it copies the key to COPY (or makes it there for this boot alone
 //! when /data is unavailable or on RAM). See README.md.
 //!
-//!     ssh-host-key KEY [COPY]
+//!     ssh-host-key KEY [COPY [KNOWN_HOSTS]]
 
 const std = @import("std");
 const hostkey = @import("hostkey");
@@ -16,20 +16,23 @@ pub fn main(init: std.process.Init) void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = init.minimal.args.toSlice(gpa) catch std.process.exit(1);
-    const copy: ?[]const u8 = if (args.len == 3) args[2] else null;
-    if ((args.len != 2 and args.len != 3) or !std.fs.path.isAbsolute(args[1]) or
-        (copy != null and !std.fs.path.isAbsolute(copy.?)))
-    {
-        log(io, .{ .event = "host-key", .why = "usage: ssh-host-key KEY [COPY]" });
+    if (args.len < 2 or args.len > 4) {
+        log(io, .{ .event = "host-key", .why = "usage: ssh-host-key KEY [COPY [KNOWN_HOSTS]]" });
         std.process.exit(1);
     }
-    run(io, gpa, args[1], copy) catch |err| {
+    for (args[1..]) |path| if (!std.fs.path.isAbsolute(path)) {
+        log(io, .{ .event = "host-key", .why = "paths must be absolute" });
+        std.process.exit(1);
+    };
+    const copy: ?[]const u8 = if (args.len >= 3) args[2] else null;
+    const known_hosts: ?[]const u8 = if (args.len == 4) args[3] else null;
+    run(io, gpa, args[1], copy, known_hosts) catch |err| {
         log(io, .{ .event = "host-key", .key = copy orelse args[1], .why = @errorName(err) });
         std.process.exit(1);
     };
 }
 
-fn run(io: Io, gpa: Allocator, key: []const u8, copy: ?[]const u8) !void {
+fn run(io: Io, gpa: Allocator, key: []const u8, copy: ?[]const u8, known_hosts: ?[]const u8) !void {
     const dir = std.fs.path.dirname(key) orelse return error.NoDataToKeepItIn;
     const nodata = linux.errno(linux.access("/run/werewolf/nodata", linux.F_OK)) == .SUCCESS;
     const has_dir = if (Dir.cwd().access(io, dir, .{})) |_| true else |_| false;
@@ -77,13 +80,53 @@ fn run(io: Io, gpa: Allocator, key: []const u8, copy: ?[]const u8) !void {
         " \n",
     );
     var fp: [hostkey.fingerprint_len]u8 = undefined;
+    const fingerprint = hostkey.fingerprint(public, &fp) orelse return error.NotAPublicKey;
+    if (known_hosts) |path| try publish(io, gpa, path, try knownHost(gpa, public));
     log(io, .{
         .event = "host-key",
         .key = at,
         .from = from,
-        .fingerprint = hostkey.fingerprint(public, &fp) orelse return error.NotAPublicKey,
+        .fingerprint = fingerprint,
         .public = public,
     });
+}
+
+fn knownHost(gpa: Allocator, public: []const u8) ![]const u8 {
+    if (std.mem.findAny(u8, public, "\r\n\x00") != null) return error.NotAPublicKey;
+    var words = std.mem.tokenizeAny(u8, public, " \t");
+    const kind = words.next() orelse return error.NotAPublicKey;
+    const key = words.next() orelse return error.NotAPublicKey;
+    if (!std.mem.eql(u8, kind, "ssh-ed25519")) return error.NotAPublicKey;
+    return gpa.print("werewolf-local {s} {s}\n", .{ kind, key });
+}
+
+/// Only the public half is readable by callers. Rename before sshd starts;
+/// a failed write must not leave a partial pin for a concurrent client.
+fn publish(io: Io, gpa: Allocator, path: []const u8, text: []const u8) !void {
+    const tmp = try gpa.print("{s}.new", .{path});
+    Dir.cwd().deleteFile(io, tmp) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    var f = try Dir.cwd().createFile(
+        io,
+        tmp,
+        .{ .exclusive = true, .permissions = .fromMode(0o644) },
+    );
+    defer f.close(io);
+    errdefer Dir.cwd().deleteFile(io, tmp) catch {};
+    try f.writeStreamingAll(io, text);
+    try f.setPermissions(io, .fromMode(0o644));
+    try Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io);
+}
+
+test "localhost pin contains one host and no public-key comment" {
+    const gpa = std.testing.allocator;
+    const line = try knownHost(gpa, "ssh-ed25519 AAAA comment with spaces");
+    defer gpa.free(line);
+    try std.testing.expectEqualStrings("werewolf-local ssh-ed25519 AAAA\n", line);
+    for ([_][]const u8{ "ssh-ed25519", "ssh-rsa AAAA", "ssh-ed25519 AAAA\nevil AAAA" }) |bad|
+        try std.testing.expectError(error.NotAPublicKey, knownHost(gpa, bad));
 }
 
 fn log(io: Io, fields: anytype) void {

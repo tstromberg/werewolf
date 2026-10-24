@@ -78,6 +78,27 @@ socket must listen on every declared port and answer HTTP where the port speaks 
 another protocol is tested in `forms/FORM/test/checks`, with `forms/FORM/test/config`
 giving the services what they need. The first check: nothing was refused during boot.
 
+`make check-people-persist` (also in `check-cloud`) boots one persistent data
+volume through account enrollment, retirement, conflicting people and NoCloud
+requests, and reactivation. It checks private-file ownership and access, then
+boots copies with corrupt and missing reservation tables and requires refusal
+before service handover. Logs live in `build/ARCH/check/people-persist/`.
+Seed creation needs `xorriso` on Linux (`tools/install-deps`) or macOS's `hdiutil`.
+
+`make check-privilege-boundaries` builds a disposable protected Lima image with
+one probe added to `playground`. Real SSH logins exercise credentials, inherited
+descriptors, cross-user files, PTYs, forwarding refusal, concurrent sessions,
+SFTP, daemon restart, and selected kernel restrictions. Secure Boot, TPM and IPE
+remain enabled. The fixture is deleted; logs and its profile remain under
+`build/security-probes/`. The existing `werewolf-run` instance is untouched.
+
+`make check-mount-broker LINUX_TEST_RUNNER=sudo` runs the real confined broker
+in a private Linux mount namespace. It checks role restrictions, malformed
+requests, stalled readers, and staged-file integrity. CI runs it beside the
+updater construction tests. On macOS, a disposable Linux Lima VM can supply
+`LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` runs bounded
+wire-parser fuzzing without performing privileged operations.
+
 Other boots cover what one boot cannot:
 
 | Boot | Must | Where |

@@ -61,6 +61,24 @@ suites:
                 /session/valid: true
                 /session/sid:
                   matches: .+
+      - name: ph-minimal-curl
+        steps:
+          - file: /oci/pi-hole/usr/lib/werewolf-pihole/curl
+            expect: {type: file}
+          - file: /oci/pi-hole/usr/bin/curl
+            expect: {exists: false}
+          - file: /oci/pi-hole/usr/bin/git
+            expect: {exists: false}
+          - file: /oci/pi-hole/usr/lib/libcurl.so.4
+            expect: {exists: false}
+          - file: /oci/pi-hole/usr/lib/libbrotlidec.so.1
+            expect: {exists: false}
+          - file: /oci/pi-hole/usr/lib/libbrotlicommon.so.1
+            expect: {exists: false}
+          - file: /etc/sv/pi-hole/service
+            expect:
+              body:
+                contains: 'env PATH=/usr/lib/werewolf-pihole:'
       - name: ph-wrong
         steps:
           - fetch:

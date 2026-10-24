@@ -3,7 +3,7 @@
 ## Summary
 
 Remove glibc audit callbacks, constrain native loading and keep compression outside
-authentication processes. Implement and test loader policy in `../hardened-packages`.
+authentication processes. Implement and test loader policy in `../packages`.
 
 ## Background
 

@@ -120,7 +120,7 @@ fn isRecipePath(p: []const u8) bool {
 }
 
 test isRecipePath {
-    try std.testing.expect(isRecipePath("../packages/vaultwarden/vaultwarden.yaml"));
+    try std.testing.expect(isRecipePath("../packages/security/vaultwarden/vaultwarden.yaml"));
     try std.testing.expect(isRecipePath("../myapp/myapp.yaml"));
     try std.testing.expect(isRecipePath("/home/me/app.yaml"));
     for ([_][]const u8{

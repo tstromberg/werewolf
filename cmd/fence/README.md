@@ -15,6 +15,7 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
     listen tcp 22
     listen tcp 5432 loopback
     connect 207 tcp 443 public
+    connect 208 tcp 32402 loopback
     listen 207 udp 5353 lan
     connect 207 udp 5353 lan
     metadata 68
@@ -44,7 +45,9 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    metadata server from URL fetchers. Azure's wire server is closed to all. Arrivals
    pass to served ports, from connected ports, or as ICMP. Denied TCP, UDP, other
    transports, tunnels and IPsec get no reply; other protocols get "unreachable". Local
-   and loopback traffic always pass. Private TCP ports drop arrivals before reply
+   and loopback traffic normally pass. A TCP `loopback` connect permits its port
+   only on 127.0.0.1 and ::1, refusing other destinations before the local table;
+   it grants no Internet egress or reply allowance. Private TCP ports drop arrivals before reply
    allowances, even if a daemon binds all interfaces; local traffic reaches them first.
    Allowed traffic with no route fails as "network unreachable", not EACCES, so clients
    try the next address. UDP `lan` restricts unicast to connected subnets detected at

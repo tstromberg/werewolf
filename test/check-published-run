@@ -110,7 +110,7 @@ def run(args, label, check=True, timeout=300):
 def status():
     command = ('/usr/lib/werewolf/posture --json; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
                'printf "COMMITTED "; test -e /run/werewolf/committed && echo yes')
-    reply = run([howl, 'ssh', 'werewolf-run', '--', command], 'status', check=False, timeout=15)
+    reply = run([howl, 'ssh', 'root@werewolf-run', '--', command], 'status', check=False, timeout=15)
     if reply.returncode:
         return None
     text = reply.stdout.decode()

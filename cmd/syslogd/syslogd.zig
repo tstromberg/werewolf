@@ -550,7 +550,6 @@ const Receiver = struct {
     fn application(
         s: *Receiver,
         fds: Endpoints,
-        now: i64,
         input: *[p.max_input]u8,
         output: []u8,
     ) !bool {
@@ -559,7 +558,7 @@ const Receiver = struct {
             s.refused +|= 1;
             return true;
         };
-        if (!s.limiter.admit(cred.uid, now)) {
+        if (!s.limiter.admit(cred, seconds(.BOOTTIME))) {
             s.refused +|= 1;
             return true;
         }
@@ -569,6 +568,17 @@ const Receiver = struct {
         };
         s.deliver(fds, line, fds.echo);
         return true;
+    }
+
+    fn floods(s: *Receiver, fds: Endpoints, now: i64) void {
+        var buf: [384]u8 = undefined;
+        for (0..4) |_| {
+            const flood = s.limiter.notice(now) orelse break;
+            const line = p.floodRecord(&buf, seconds(.REALTIME), flood) catch unreachable;
+            // Receiver-generated notices bypass sender limits; their own limit
+            // bounds output even when many UIDs or PIDs flood at once.
+            s.deliver(fds, line, fds.echo);
+        }
     }
 
     fn kernel(s: *Receiver, fds: Endpoints) bool {
@@ -684,8 +694,9 @@ fn receive(fds: Endpoints) void {
     state.publish(fds, published, kernel >= 0);
     if (published) _ = linux.write(ready, "1", 1);
     while (!stopping.load(.monotonic)) {
-        flush(&state.queue, console);
         const now = seconds(.BOOTTIME);
+        state.floods(fds, now);
+        flush(&state.queue, console);
         if (now != last_status) {
             state.publish(fds, published, kernel >= 0);
             last_status = now;
@@ -746,15 +757,16 @@ fn receive(fds: Endpoints) void {
         if (pollfds[0].revents & linux.POLL.IN == 0) continue;
         // Bound each batch so floods cannot starve shutdown or diagnostics.
         for (0..128) |_| {
-            if (!(state.application(fds, now, &input, &output) catch linux.exit_group(1))) break;
+            if (!(state.application(fds, &input, &output) catch linux.exit_group(1))) break;
         }
     }
     _ = linux.ftruncate(ready, 0);
     state.publish(fds, false, kernel >= 0);
     // The application services have stopped. Drain a bounded final batch.
     for (0..4096) |_| {
-        if (!(state.application(fds, seconds(.BOOTTIME), &input, &output) catch break)) break;
+        if (!(state.application(fds, &input, &output) catch break)) break;
     }
+    state.floods(fds, seconds(.BOOTTIME));
     if (kernel >= 0) _ = state.kernel(fds);
     if (writer >= 0) {
         _ = linux.shutdown(writer, linux.SHUT.WR);

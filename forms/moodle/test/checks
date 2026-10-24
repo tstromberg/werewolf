@@ -31,3 +31,5 @@ ok  moodle-private   u=$(id -u moodle); [ "$(stat -c '%u:%a' /run/svc/moodle/adm
 # Cron runs every minute, as moodle-cron: wait for its first run, which
 # Moodle records.
 ok  moodle-cron      i=0; until [ "$(chpst -u postgres psql -h /run/svc/postgres -d postgres -tAc "SELECT value FROM moodle.mdl_config_plugins WHERE plugin = 'tool_task' AND name = 'lastcronstart'" 2>/dev/null)" -gt 0 ] 2>/dev/null; do i=$((i + 1)); [ $i -le 165 ] || { echo "no cron run in 165 s"; exit 1; }; sleep 1; done
+
+ok  moodle-no-soap ! test -e /usr/lib/php/modules/soap.so

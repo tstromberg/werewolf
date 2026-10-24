@@ -1,21 +1,18 @@
-//! people turns the config's users file into accounts: what init does at
-//! boot, and cloud-metadata again as the metadata server's config changes
-//! (docs/forms.md, People). It touches no file: it reads the account files
-//! and the users file as text and returns the text to write, so init and
-//! cloud-metadata make the same accounts, and a test needs no machine.
+//! people turns the config's users file and durable identity table into
+//! accounts at boot and during metadata polling (docs/forms.md, People).
 //!
 //! The users file names an account alone, or one SSH key per line as
 //! `NAME [admin] TYPE KEY [COMMENT]`
 //! (lib/form.zig peopleFile). A person gets uid and gid userId(name), home
 //! /data/home/NAME, the shell given, and a password of "*", which sshd
 //! takes a key for where "!" would refuse one. An admin's keys are root's
-//! too. The people made before, named in `made`, are taken out first, so a
-//! person the config no longer names loses the account and its keys; any
-//! other account stays. A line that is not one, or a name or id an account
-//! has, is refused with a line of why, and the rest are made.
+//! too. A person the config no longer names keeps locked account entries
+//! and loses its keys; any other account stays. Malformed lines and names
+//! or IDs that conflict with an account are refused with a reason.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
+const linux = std.os.linux;
 
 /// Person is one of the users file's people.
 pub const Person = struct { name: []const u8, keys: []const []const u8, admin: bool };
@@ -30,7 +27,7 @@ pub const Files = struct {
 };
 
 /// Keys is a person's keys file: its name, and its lines.
-pub const Keys = struct { name: []const u8, text: []const u8 };
+pub const Keys = struct { name: []const u8, text: []const u8, id: u32 = 0 };
 
 /// Change is what apply asks for: the account files as they become, the
 /// names made (the next apply's `made`), each person's keys file, the
@@ -45,13 +42,20 @@ pub const Change = struct {
     root_keys: []const u8,
     removed: []const []const u8,
     refused: []const []const u8,
+    identities: []const Identity = &.{},
+    nocloud_name: []const u8 = "",
 };
 
-/// userId returns a person's uid and gid: an FNV-1a hash of the name, in
-/// [2^29, 2^30), the same on every machine, clear of system and service ids,
-/// so a home on /data keeps its owner from one image to the next.
+pub const Source = enum { people, nocloud };
+pub const Identity = struct { source: Source, name: []const u8, id: u32 };
+pub const NoCloud = struct { name: []const u8, id: u32, keys: []const u8 };
+
+/// userId returns a person's uid and gid in [2^16, 2^30). The fixed FNV-1a
+/// mapping is stable across machines; the durable identity table still checks
+/// every collision before this ID can own a file.
 pub fn userId(name: []const u8) u32 {
-    return (1 << 29) | (std.hash.Fnv1a_32.hash(name) & ((1 << 29) - 1));
+    const span: u64 = (1 << 30) - (1 << 16);
+    return (1 << 16) + @as(u32, @intCast((@as(u64, std.hash.Fnv1a_32.hash(name)) * span) >> 32));
 }
 
 /// parse reads the users file. A line that is not one goes to refused.
@@ -93,62 +97,99 @@ pub fn parse(
     return out.items;
 }
 
-/// apply works out the accounts the users file asks for, from the files as
-/// they are. shell is each person's: ash where busybox gives one.
-pub fn apply(
+/// applyReserved derives account files from the durable identity table. At
+/// boot it also accepts one NoCloud request; polling leaves that account as it
+/// is and changes only people. The caller persists new identities before it
+/// publishes any of these files or changes a home.
+pub fn applyReserved(
     gpa: Allocator,
     files: Files,
+    identities: []const Identity,
     text: []const u8,
     shell: []const u8,
-) Allocator.Error!Change {
+    nocloud: ?NoCloud,
+    boot: bool,
+) !Change {
     var refused: std.ArrayList([]const u8) = .empty;
-    const people = try parse(gpa, text, &refused);
-
-    // The people made before go first; what the config names comes back
-    // below, and what it no longer names does not.
-    var before: std.ArrayList([]const u8) = .empty;
+    const wanted = try parse(gpa, text, &refused);
+    var old: std.ArrayList([]const u8) = .empty;
     var it = mem.tokenizeScalar(u8, files.made, '\n');
-    while (it.next()) |n| try before.append(gpa, n);
-    var passwd = try without(gpa, files.passwd, before.items);
-    var group = try without(gpa, files.group, before.items);
-    var shadow = try without(gpa, files.shadow, before.items);
+    while (it.next()) |name| try old.append(gpa, name);
+    // Remove only the accounts that this publisher owns. NoCloud and image
+    // accounts stay in place during metadata polling.
+    var owned: std.ArrayList([]const u8) = .empty;
+    try owned.appendSlice(gpa, old.items);
+    for (identities) |r| {
+        if (boot and (hasEntry(files.passwd, r.name) or hasEntry(files.group, r.name) or
+            hasEntry(files.shadow, r.name) or
+            (try idInUseNumber(gpa, files.passwd, r.id)) or
+            (try idInUseNumber(gpa, files.group, r.id)))) return error.AccountConflict;
+        if (r.source != .people) continue;
+        try owned.append(gpa, r.name);
+    }
+    var passwd = try without(gpa, files.passwd, owned.items);
+    var group = try without(gpa, files.group, owned.items);
+    var shadow = try without(gpa, files.shadow, owned.items);
+    var records: std.ArrayList(Identity) = .empty;
+    try records.appendSlice(gpa, identities);
+    var keys: std.ArrayList(Keys) = .empty;
+    var active_nocloud: []const u8 = "";
+
+    if (boot) {
+        if (nocloud) |nc| {
+            if (validNoCloudName(nc.name) and nc.id >= 500 and nc.id <= 60000 and
+                !conflicts(records.items, .nocloud, nc.name, nc.id) and
+                !hasEntry(passwd.items, nc.name) and !hasEntry(group.items, nc.name) and
+                !hasEntry(shadow.items, nc.name) and
+                !(try idInUseNumber(gpa, passwd.items, nc.id)) and
+                !(try idInUseNumber(gpa, group.items, nc.id)))
+            {
+                try ensureRecord(gpa, &records, .nocloud, nc.name, nc.id);
+                try appendAccount(gpa, &passwd, &group, &shadow, nc.name, nc.id, "/bin/ash", false);
+                try keys.append(gpa, .{ .name = nc.name, .text = nc.keys, .id = nc.id });
+                active_nocloud = nc.name;
+            } else try refused.append(gpa, "NoCloud name or UID is already reserved");
+        }
+        for (records.items) |r| {
+            if (r.source != .nocloud or mem.eql(u8, r.name, active_nocloud)) continue;
+            try appendAccount(gpa, &passwd, &group, &shadow, r.name, r.id, "/sbin/nologin", true);
+        }
+    }
 
     var made: std.ArrayList(u8) = .empty;
-    var keys: std.ArrayList(Keys) = .empty;
     var root_keys: std.ArrayList(u8) = .empty;
-    for (people) |p| {
-        const id = try gpa.print("{d}", .{userId(p.name)});
-        if (mem.eql(u8, p.name, "root") or hasEntry(passwd.items, p.name) or
-            hasEntry(group.items, p.name) or idInUse(passwd.items, id) or idInUse(group.items, id))
+    for (wanted) |p| {
+        const id = userId(p.name);
+        if (mem.eql(u8, p.name, "root") or
+            conflicts(records.items, .people, p.name, id) or
+            hasEntry(passwd.items, p.name) or hasEntry(group.items, p.name) or
+            hasEntry(shadow.items, p.name) or
+            (try idInUseNumber(gpa, passwd.items, id)) or
+            (try idInUseNumber(gpa, group.items, id)))
         {
-            try refused.append(gpa, try gpa.print(
-                "'{s}': a name or uid {s} an account has",
-                .{ p.name, id },
-            ));
+            try refused.append(gpa, try gpa.print("'{s}': name or UID is already reserved", .{p.name}));
             continue;
         }
-        try passwd.print(
-            gpa,
-            "{s}:x:{s}:{s}::/data/home/{s}:{s}\n",
-            .{ p.name, id, id, p.name, shell },
-        );
-        try group.print(gpa, "{s}:x:{s}:\n", .{ p.name, id });
-        try shadow.print(gpa, "{s}:*:0:0:99999:7:::\n", .{p.name});
+        try ensureRecord(gpa, &records, .people, p.name, id);
+        try appendAccount(gpa, &passwd, &group, &shadow, p.name, id, shell, false);
         try made.print(gpa, "{s}\n", .{p.name});
-        var text_: std.ArrayList(u8) = .empty;
+        var key_text: std.ArrayList(u8) = .empty;
         for (p.keys) |k| {
-            try text_.print(gpa, "{s}\n", .{k});
+            try key_text.print(gpa, "{s}\n", .{k});
             if (p.admin) try root_keys.print(gpa, "{s}\n", .{k});
         }
-        try keys.append(gpa, .{ .name = p.name, .text = text_.items });
+        try keys.append(gpa, .{ .name = p.name, .text = key_text.items, .id = id });
+    }
+    for (records.items) |r| {
+        if (r.source != .people or hasLine(made.items, r.name)) continue;
+        try appendAccount(gpa, &passwd, &group, &shadow, r.name, r.id, "/sbin/nologin", true);
     }
     var removed: std.ArrayList([]const u8) = .empty;
-    for (before.items) |b| {
-        const kept = for (keys.items) |k| {
-            if (mem.eql(u8, k.name, b)) break true;
-        } else false;
-        if (!kept) try removed.append(gpa, b);
-    }
+    // A previous attempt may already have replaced `made` before key
+    // removal failed. Sweep every retired reservation on every retry.
+    for (records.items) |r| if (r.source == .people and !hasLine(made.items, r.name)) {
+        try removed.append(gpa, r.name);
+    };
     return .{
         .passwd = passwd.items,
         .group = group.items,
@@ -158,7 +199,334 @@ pub fn apply(
         .root_keys = root_keys.items,
         .removed = removed.items,
         .refused = refused.items,
+        .identities = records.items,
+        .nocloud_name = active_nocloud,
     };
+}
+
+fn hasLine(lines: []const u8, name: []const u8) bool {
+    var it = mem.tokenizeScalar(u8, lines, '\n');
+    while (it.next()) |line| if (mem.eql(u8, line, name)) return true;
+    return false;
+}
+
+fn validNoCloudName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 32 or
+        (!std.ascii.isLower(name[0]) and name[0] != '_')) return false;
+    for (name[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and
+        c != '_' and c != '-') return false;
+    return true;
+}
+
+fn conflicts(records: []const Identity, source: Source, name: []const u8, id: u32) bool {
+    for (records) |r| {
+        if (mem.eql(u8, r.name, name) or r.id == id) {
+            if (r.source != source or !mem.eql(u8, r.name, name) or r.id != id) return true;
+        }
+    }
+    return false;
+}
+
+fn ensureRecord(gpa: Allocator, records: *std.ArrayList(Identity), source: Source, name: []const u8, id: u32) Allocator.Error!void {
+    for (records.items) |r| if (r.source == source and mem.eql(u8, r.name, name) and r.id == id) return;
+    try records.append(gpa, .{ .source = source, .name = name, .id = id });
+}
+
+fn idInUseNumber(gpa: Allocator, file: []const u8, id: u32) Allocator.Error!bool {
+    return idInUse(file, try gpa.print("{d}", .{id}));
+}
+
+fn appendAccount(gpa: Allocator, passwd: *std.ArrayList(u8), group: *std.ArrayList(u8), shadow: *std.ArrayList(u8), name: []const u8, id: u32, shell: []const u8, locked: bool) Allocator.Error!void {
+    try passwd.print(gpa, "{s}:x:{d}:{d}::/data/home/{s}:{s}\n", .{ name, id, id, name, shell });
+    try group.print(gpa, "{s}:x:{d}:\n", .{ name, id });
+    try shadow.print(gpa, "{s}:{s}:0:0:99999:7:::\n", .{ name, if (locked) "!" else "*" });
+}
+
+/// Refuse to publish an account over a retained home owned by another ID.
+/// O_PATH inspects a mode 0700 home without giving the publisher file access.
+/// The caller holds a root-owned /data/home directory descriptor.
+pub fn checkHomes(home_fd: i32, keys: []const Keys) !void {
+    for (keys) |k| {
+        const name = try std.heap.page_allocator.dupeSentinel(u8, k.name, 0);
+        defer std.heap.page_allocator.free(name);
+        const rc = linux.openat(home_fd, name, .{
+            .PATH = true,
+            .DIRECTORY = true,
+            .NOFOLLOW = true,
+            .CLOEXEC = true,
+        }, 0);
+        if (linux.errno(rc) == .NOENT) continue;
+        if (linux.errno(rc) != .SUCCESS) return error.HomeOwner;
+        const fd: i32 = @intCast(rc);
+        defer _ = linux.close(fd);
+        var st: linux.Statx = undefined;
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+            .TYPE = true,
+            .UID = true,
+            .GID = true,
+        }, &st)) != .SUCCESS or st.mode & linux.S.IFMT != linux.S.IFDIR or
+            st.uid != k.id or st.gid != k.id) return error.HomeOwner;
+    }
+}
+
+/// Create homes only after the reservation is durable. A retained home was
+/// checked before publication and is checked again before any ownership change.
+pub fn ensureHomes(home_fd: i32, keys: []const Keys) !void {
+    for (keys) |k| {
+        const name = try std.heap.page_allocator.dupeSentinel(u8, k.name, 0);
+        defer std.heap.page_allocator.free(name);
+        const made = linux.mkdirat(home_fd, name, 0o700);
+        const created = linux.errno(made) == .SUCCESS;
+        if (!created and linux.errno(made) != .EXIST) return error.HomeCreationFailed;
+        const rc = linux.openat(home_fd, name, .{
+            .ACCMODE = .RDONLY,
+            .PATH = !created,
+            .DIRECTORY = true,
+            .NOFOLLOW = true,
+            .CLOEXEC = true,
+        }, 0);
+        if (linux.errno(rc) != .SUCCESS) return error.HomeCreationFailed;
+        const fd: i32 = @intCast(rc);
+        defer _ = linux.close(fd);
+        var st: linux.Statx = undefined;
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+            .TYPE = true,
+            .UID = true,
+            .GID = true,
+        }, &st)) != .SUCCESS or st.mode & linux.S.IFMT != linux.S.IFDIR)
+            return error.HomeOwner;
+        if (created) {
+            if (st.uid != 0 or st.gid != 0 or
+                linux.errno(linux.fchmod(fd, 0o700)) != .SUCCESS or
+                linux.errno(linux.fchown(fd, k.id, k.id)) != .SUCCESS)
+                return error.HomeOwner;
+        } else if (st.uid != k.id or st.gid != k.id) return error.HomeOwner;
+    }
+}
+
+pub fn openHomeDir(data_fd: i32) !i32 {
+    const made = linux.mkdirat(data_fd, "home", 0o755);
+    if (linux.errno(made) != .SUCCESS and linux.errno(made) != .EXIST)
+        return error.HomeDirectory;
+    const rc = linux.openat(data_fd, "home", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.HomeDirectory;
+    const fd: i32 = @intCast(rc);
+    errdefer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .GID = true,
+    }, &st)) != .SUCCESS or st.uid != 0 or st.gid != 0 or
+        st.mode & linux.S.IFMT != linux.S.IFDIR or st.mode & 0o777 != 0o755)
+        return error.HomeDirectory;
+    return fd;
+}
+
+const max_ledger = 256 << 10;
+const max_identities = 4096;
+
+/// openLedgerDir accepts only the root-owned private directory on /data.
+/// The caller opens /data itself without following a link.
+pub fn openLedgerDir(data_fd: i32) !i32 {
+    var parent: linux.Statx = undefined;
+    if (linux.errno(linux.statx(data_fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .GID = true,
+    }, &parent)) != .SUCCESS or parent.uid != 0 or parent.gid != 0 or
+        parent.mode & linux.S.IFMT != linux.S.IFDIR or parent.mode & 0o022 != 0)
+        return error.DataDirectory;
+    const made = linux.mkdirat(data_fd, ".werewolf", 0o700);
+    if (linux.errno(made) != .SUCCESS and linux.errno(made) != .EXIST)
+        return error.LedgerDirectory;
+    const rc = linux.openat(data_fd, ".werewolf", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.LedgerDirectory;
+    const fd: i32 = @intCast(rc);
+    errdefer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .GID = true,
+    }, &st)) != .SUCCESS or st.uid != 0 or st.gid != 0 or
+        st.mode & linux.S.IFMT != linux.S.IFDIR or st.mode & 0o777 != 0o700)
+        return error.LedgerDirectory;
+    return fd;
+}
+
+/// freshData refuses enrollment over old data when no identity table exists.
+/// A new filesystem's empty lost+found and a crashed table temp are harmless.
+pub fn freshData(data_fd: i32) !bool {
+    if (linux.errno(linux.lseek(data_fd, 0, linux.SEEK.SET)) != .SUCCESS)
+        return error.ReadDirectory;
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = linux.getdents64(data_fd, &buf, buf.len);
+        if (linux.errno(n) != .SUCCESS) return error.ReadDirectory;
+        if (n == 0) return true;
+        var off: usize = 0;
+        while (off < n) {
+            if (off + 19 > n) return error.ReadDirectory;
+            const size = mem.readInt(u16, buf[off + 16 ..][0..2], .little);
+            if (size < 20 or off + size > n) return error.ReadDirectory;
+            const raw = buf[off + 19 .. off + size];
+            const end = mem.indexOfScalar(u8, raw, 0) orelse return error.ReadDirectory;
+            const name = raw[0..end];
+            if (!mem.eql(u8, name, ".") and !mem.eql(u8, name, "..")) {
+                if (mem.eql(u8, name, "lost+found") or mem.eql(u8, name, ".werewolf") or mem.eql(u8, name, "home")) {
+                    const z: [*:0]const u8 = if (mem.eql(u8, name, "lost+found")) "lost+found" else if (mem.eql(u8, name, "home")) "home" else ".werewolf";
+                    const sub = linux.openat(data_fd, z, .{
+                        .ACCMODE = .RDONLY,
+                        .DIRECTORY = true,
+                        .NOFOLLOW = true,
+                        .CLOEXEC = true,
+                    }, 0);
+                    if (linux.errno(sub) != .SUCCESS) return false;
+                    const sub_fd: i32 = @intCast(sub);
+                    defer _ = linux.close(sub_fd);
+                    if (!(try emptyDir(sub_fd, mem.eql(u8, name, ".werewolf")))) return false;
+                } else return false;
+            }
+            off += size;
+        }
+    }
+}
+
+fn emptyDir(fd: i32, allow_temp: bool) !bool {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = linux.getdents64(fd, &buf, buf.len);
+        if (linux.errno(n) != .SUCCESS) return error.ReadDirectory;
+        if (n == 0) return true;
+        var off: usize = 0;
+        while (off < n) {
+            if (off + 19 > n) return error.ReadDirectory;
+            const size = mem.readInt(u16, buf[off + 16 ..][0..2], .little);
+            if (size < 20 or off + size > n) return error.ReadDirectory;
+            const raw = buf[off + 19 .. off + size];
+            const end = mem.indexOfScalar(u8, raw, 0) orelse return error.ReadDirectory;
+            const name = raw[0..end];
+            if (!mem.eql(u8, name, ".") and !mem.eql(u8, name, "..") and
+                !(allow_temp and mem.eql(u8, name, "identities.new"))) return false;
+            off += size;
+        }
+    }
+}
+
+pub fn loadLedger(gpa: Allocator, dir: i32) ![]const Identity {
+    const rc = linux.openat(dir, "identities", .{
+        .ACCMODE = .RDONLY,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+        .NONBLOCK = true,
+    }, 0);
+    if (linux.errno(rc) == .NOENT) return error.NoLedger;
+    if (linux.errno(rc) != .SUCCESS) return error.BadLedger;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .MODE = true,
+        .UID = true,
+        .GID = true,
+        .SIZE = true,
+        .NLINK = true,
+    }, &st)) != .SUCCESS or st.uid != 0 or st.gid != 0 or
+        st.mode & linux.S.IFMT != linux.S.IFREG or st.mode & 0o777 != 0o600 or
+        st.nlink != 1 or st.size > max_ledger) return error.BadLedger;
+    const buf = try gpa.alloc(u8, @intCast(st.size));
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = linux.read(fd, buf[off..].ptr, buf.len - off);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.BadLedger;
+        off += n;
+    }
+    return parseLedger(gpa, buf);
+}
+
+pub fn parseLedger(gpa: Allocator, data: []const u8) ![]const Identity {
+    if (!mem.startsWith(u8, data, "werewolf-identities 1\n") or data.len > max_ledger)
+        return error.BadLedger;
+    if (data[data.len - 1] != '\n') return error.BadLedger;
+    var out: std.ArrayList(Identity) = .empty;
+    var lines = mem.splitScalar(u8, data["werewolf-identities 1\n".len..], '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) {
+            if (lines.next() != null) return error.BadLedger;
+            break;
+        }
+        var fields = mem.splitScalar(u8, line, ' ');
+        const tag = fields.next() orelse return error.BadLedger;
+        const name = fields.next() orelse return error.BadLedger;
+        const uid_text = fields.next() orelse return error.BadLedger;
+        const gid_text = fields.next() orelse return error.BadLedger;
+        if (fields.next() != null) return error.BadLedger;
+        const source: Source = if (mem.eql(u8, tag, "p")) .people else if (mem.eql(u8, tag, "n")) .nocloud else return error.BadLedger;
+        const uid = std.fmt.parseInt(u32, uid_text, 10) catch return error.BadLedger;
+        const gid = std.fmt.parseInt(u32, gid_text, 10) catch return error.BadLedger;
+        if (mem.eql(u8, name, "root") or uid != gid or
+            (source == .people and (!isName(name) or uid != userId(name))) or
+            (source == .nocloud and (!validNoCloudName(name) or uid < 500 or uid > 60000)))
+            return error.BadLedger;
+        for (out.items) |r| if (mem.eql(u8, r.name, name) or r.id == uid) return error.BadLedger;
+        if (out.items.len == max_identities) return error.BadLedger;
+        try out.append(gpa, .{ .source = source, .name = name, .id = uid });
+    }
+    return out.items;
+}
+
+pub fn commitLedger(gpa: Allocator, dir: i32, identities: []const Identity) !void {
+    if (identities.len > max_identities) return error.LedgerFull;
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(gpa, "werewolf-identities 1\n");
+    for (identities) |r| try out.print(gpa, "{s} {s} {d} {d}\n", .{
+        if (r.source == .people) @as([]const u8, "p") else "n", r.name, r.id, r.id,
+    });
+    if (out.items.len > max_ledger) return error.LedgerFull;
+    _ = linux.unlinkat(dir, "identities.new", 0);
+    const rc = linux.openat(dir, "identities.new", .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o600);
+    if (linux.errno(rc) != .SUCCESS) return error.LedgerWrite;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < out.items.len) {
+        const n = linux.write(fd, out.items[off..].ptr, out.items.len - off);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.LedgerWrite;
+        off += n;
+    }
+    if (linux.errno(linux.fsync(fd)) != .SUCCESS or
+        linux.errno(linux.renameat(dir, "identities.new", dir, "identities")) != .SUCCESS)
+        return error.LedgerWrite;
+    try syncLedger(dir);
+}
+
+/// Retry the durability barrier even when a previous rename made the new
+/// rows visible. The table file was synced before that rename.
+pub fn syncLedger(dir: i32) !void {
+    if (linux.errno(linux.fsync(dir)) != .SUCCESS) return error.LedgerWrite;
 }
 
 /// without returns the account file less the lines of the names given.
@@ -249,7 +617,7 @@ test "keyless people have stable real accounts, no SSH keys or admin rights" {
         .group = "root:x:0:\n",
         .shadow = "root:!:::::::\n",
     };
-    const first = try apply(gpa, base, "alice\nbob\n", "/sbin/nologin");
+    const first = try applyReserved(gpa, base, &.{}, "alice\nbob\n", "/sbin/nologin", null, true);
     try testing.expectEqual(2, first.keys.len);
     try testing.expectEqualStrings("", first.keys[0].text);
     try testing.expectEqualStrings("", first.root_keys);
@@ -258,7 +626,7 @@ test "keyless people have stable real accounts, no SSH keys or admin rights" {
         first.passwd,
         try gpa.print("alice:x:{d}:{d}:", .{ userId("alice"), userId("alice") }),
     ) != null);
-    const next = try apply(
+    const next = try applyReserved(
         gpa,
         .{
             .passwd = first.passwd,
@@ -266,8 +634,11 @@ test "keyless people have stable real accounts, no SSH keys or admin rights" {
             .shadow = first.shadow,
             .made = first.made,
         },
+        first.identities,
         "carol\nalice\nalice admin\nroot\n",
         "/sbin/nologin",
+        null,
+        false,
     );
     try testing.expectEqual(2, next.keys.len);
     try testing.expectEqual(2, next.refused.len);
@@ -280,7 +651,7 @@ test "keyless people have stable real accounts, no SSH keys or admin rights" {
     ) != null);
 }
 
-test "apply: accounts for the people named, admins' keys root's, the gone removed" {
+test "reserved accounts keep admin keys and lock absent people" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     const gpa = a.allocator();
@@ -293,11 +664,11 @@ test "apply: accounts for the people named, admins' keys root's, the gone remove
     const k1 = "sk-ssh-ed25519@openssh.com AAAA1 tom@yubikey";
     const k2 = "sk-ssh-ed25519@openssh.com AAAA2 tom@spare";
     const k3 = "sk-ssh-ed25519@openssh.com AAAA3 ann";
-    const c = try apply(gpa, base, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++ k3 ++
+    const c = try applyReserved(gpa, base, &.{}, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++ k3 ++
         "\nroot " ++ k3 ++ "\nBad x\nnginx " ++ k3 ++
-        "\ntom command=\"/bin/sh\" ssh-ed25519 AAAA1\ntom ssh-ed25519 not-base64!\n\n", "/bin/ash");
+        "\ntom command=\"/bin/sh\" ssh-ed25519 AAAA1\ntom ssh-ed25519 not-base64!\n\n", "/bin/ash", null, true);
     const tom = userId("tom");
-    try testing.expect(tom >= 1 << 29 and tom < 1 << 30);
+    try testing.expect(tom >= 1 << 16 and tom < 1 << 30);
     try testing.expectEqualStrings(try gpa.print(
         "root:x:0:0::/root:/bin/sh\nnginx:x:384260303:384260303::/var/empty:/sbin/nologin\n" ++
             "tom:x:{d}:{d}::/data/home/tom:/bin/ash\nann:x:{d}:{d}::/data/home/ann:/bin/ash\n",
@@ -313,18 +684,126 @@ test "apply: accounts for the people named, admins' keys root's, the gone remove
 
     // Applied again with ann gone and a new person: ann's lines go, and
     // tom's are made afresh, so an edited key takes.
-    const again = try apply(gpa, .{
+    const again = try applyReserved(gpa, .{
         .passwd = c.passwd,
         .group = c.group,
         .shadow = c.shadow,
         .made = c.made,
-    }, "tom " ++ k2 ++ "\nbob " ++ k3 ++ "\n", "/sbin/nologin");
+    }, c.identities, "tom " ++ k2 ++ "\nbob " ++ k3 ++ "\n", "/sbin/nologin", null, false);
     try testing.expectEqualStrings("tom\nbob\n", again.made);
     try testing.expectEqual(1, again.removed.len);
     try testing.expectEqualStrings("ann", again.removed[0]);
-    try testing.expect(mem.find(u8, again.passwd, "ann:") == null);
+    try testing.expect(mem.find(u8, again.passwd, "ann:x:") != null);
+    try testing.expect(mem.find(u8, again.shadow, "ann:!:") != null);
     try testing.expect(mem.find(u8, again.passwd, "bob:x:") != null);
     try testing.expectEqualStrings("", again.root_keys);
     try testing.expectEqualStrings(k2 ++ "\n", again.keys[0].text);
     try testing.expectEqual(0, again.refused.len);
+}
+
+test "retired people keep their names and IDs through removal, collision, and return" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const base: Files = .{
+        .passwd = "root:x:0:0::/root:/bin/sh\n",
+        .group = "root:x:0:\n",
+        .shadow = "root:!:::::::\n",
+    };
+    try testing.expectEqual(userId("u2guv05clv"), userId("udm5vojgxd"));
+    try testing.expect(userId("alice") != userId("audit-2ola31"));
+    const first = try applyReserved(gpa, base, &.{}, "u2guv05clv ssh-ed25519 AAAA admin-key\n", "/bin/ash", null, true);
+    try testing.expectEqual(1, first.identities.len);
+    try testing.expect(mem.find(u8, first.shadow, "u2guv05clv:*:") != null);
+    const retired = try applyReserved(gpa, .{
+        .passwd = first.passwd,
+        .group = first.group,
+        .shadow = first.shadow,
+        .made = first.made,
+    }, first.identities, "", "/bin/ash", null, false);
+    try testing.expectEqual(1, retired.identities.len);
+    try testing.expectEqualStrings("u2guv05clv", retired.removed[0]);
+    try testing.expect(mem.find(u8, retired.passwd, "u2guv05clv:x:") != null);
+    try testing.expect(mem.find(u8, retired.passwd, ":/sbin/nologin\n") != null);
+    try testing.expect(mem.find(u8, retired.shadow, "u2guv05clv:!:") != null);
+    const retry = try applyReserved(gpa, .{
+        .passwd = retired.passwd,
+        .group = retired.group,
+        .shadow = retired.shadow,
+        .made = retired.made,
+    }, retired.identities, "", "/bin/ash", null, false);
+    try testing.expectEqual(1, retry.removed.len);
+    try testing.expectEqualStrings("u2guv05clv", retry.removed[0]);
+    const collision = try applyReserved(gpa, .{
+        .passwd = retired.passwd,
+        .group = retired.group,
+        .shadow = retired.shadow,
+        .made = retired.made,
+    }, retired.identities, "udm5vojgxd\n", "/bin/ash", null, false);
+    try testing.expectEqual(1, collision.refused.len);
+    try testing.expectEqualStrings("", collision.made);
+    try testing.expect(mem.find(u8, collision.passwd, "udm5vojgxd:") == null);
+    const returned = try applyReserved(gpa, .{
+        .passwd = retired.passwd,
+        .group = retired.group,
+        .shadow = retired.shadow,
+        .made = retired.made,
+    }, retired.identities, "u2guv05clv\n", "/bin/ash", null, false);
+    try testing.expectEqual(0, returned.refused.len);
+    try testing.expectEqual(1, returned.identities.len);
+    try testing.expect(mem.find(u8, returned.shadow, "u2guv05clv:*:") != null);
+}
+
+test "NoCloud cannot change a reserved name's UID or take a people name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const base: Files = .{
+        .passwd = "root:x:0:0::/root:/bin/sh\n",
+        .group = "root:x:0:\n",
+        .shadow = "root:!:::::::\n",
+    };
+    const first = try applyReserved(gpa, base, &.{}, "", "/bin/ash", .{ .name = "lima", .id = 1000, .keys = "" }, true);
+    try testing.expectEqualStrings("lima", first.nocloud_name);
+    const changed = try applyReserved(gpa, base, first.identities, "", "/bin/ash", .{ .name = "lima", .id = 1001, .keys = "" }, true);
+    try testing.expectEqual(1, changed.refused.len);
+    try testing.expectEqualStrings("", changed.nocloud_name);
+    try testing.expect(mem.find(u8, changed.shadow, "lima:!:") != null);
+    try testing.expect(mem.find(u8, changed.passwd, "lima:x:1000:1000:") != null);
+    const returned = try applyReserved(gpa, base, first.identities, "", "/bin/ash", .{ .name = "lima", .id = 1000, .keys = "" }, true);
+    try testing.expectEqualStrings("lima", returned.nocloud_name);
+    try testing.expectEqual(0, returned.refused.len);
+    const reused = try applyReserved(gpa, base, first.identities, "lima\n", "/bin/ash", null, true);
+    try testing.expectEqual(1, reused.refused.len);
+    try testing.expectEqualStrings("", reused.made);
+}
+
+test "identity table rejects duplicate names, IDs, and damaged rows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const alice = try gpa.print("p alice {d} {d}\n", .{ userId("alice"), userId("alice") });
+    const good = try std.mem.concat(gpa, u8, &.{ "werewolf-identities 1\n", alice });
+    try testing.expectEqual(1, (try parseLedger(gpa, good)).len);
+    try testing.expectError(error.BadLedger, parseLedger(gpa, try std.mem.concat(gpa, u8, &.{ good, alice })));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1001\n"));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 2\n"));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\np alice 1 1\n"));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn root 1000 1000\n"));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1000"));
+    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\n\nn lima 1000 1000\n"));
+}
+
+test "boot refuses a reserved identity that collides with an image account" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const id = userId("alice");
+    const records = [_]Identity{.{ .source = .people, .name = "alice", .id = id }};
+    const base: Files = .{
+        .passwd = try gpa.print("root:x:0:0::/root:/bin/sh\nservice:x:{d}:{d}::/:/sbin/nologin\n", .{ id, id }),
+        .group = try gpa.print("root:x:0:\nservice:x:{d}:\n", .{id}),
+        .shadow = "root:!:::::::\nservice:!:::::::\n",
+    };
+    try testing.expectError(error.AccountConflict, applyReserved(gpa, base, &records, "", "/bin/ash", null, true));
 }

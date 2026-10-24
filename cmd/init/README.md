@@ -40,7 +40,7 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
 3. **Config** (`config.zig`): one tar, from the first block device holding
    one; others are logged and ignored. A confined child (no capabilities,
    Landlock, seccomp) extracts it to `/run/config`. A NoCloud volume labelled
-   `cidata` adds a user, keys and Lima's data files, never replacing the tar's.
+   `cidata` stages a user and keys and adds Lima's data files, never replacing the tar's.
 4. **Network** (`network.zig`): `iface-up` with the command line's or the
    tar's address (`lib/network.zig`), else `dhcp-client up`. Router
    advertisements count on that NIC only. Without a disk config,
@@ -50,9 +50,13 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
    LUKS2 when the config has a `data.key`. Otherwise `/data` is an empty
    read-only tmpfs and `/run/werewolf/nodata` says why, which also stops a
    slot on probation from committing.
-6. **Image roots** (`oci.zig`), if the build listed any: binds for each,
+6. **Accounts** (`config.zig`): load the root-owned identity table on `/data`,
+   reserve accepted `users` and NoCloud identities, publish account files and
+   keys, then create checked homes. An old data volume without a table or a
+   conflicting retained home stops boot before services start.
+7. **Image roots** (`oci.zig`), if the build listed any: binds for each,
    made before fence forbids mounting ([adhoc.md](../../docs/design/adhoc.md)).
-7. **Seal** (`seal.zig`): core dumps off, helpers cut to CAP_SYS_BOOT,
+8. **Seal** (`seal.zig`): core dumps off, helpers cut to CAP_SYS_BOOT,
    seal-watch started, bounding set cut, seccomp installed. The mount broker
    (with three role socketpairs) and DHCP renewal start outside fence; then
    `exec fence runit`.

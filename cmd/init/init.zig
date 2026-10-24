@@ -83,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
     phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
+    m.accounts();
     phase_age.start() catch |err| {
         say("age authority unavailable: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
@@ -230,9 +231,8 @@ pub const Machine = struct {
     env: std.process.Environ.Map,
     cmd: cmdline.Cmdline = .{},
     nocloud_user: []const u8 = "",
-    /// users are the people the config's users file named, whose homes
-    /// data makes on /data (cmd/init/config.zig).
-    users: []const []const u8 = &.{},
+    nocloud_uid: u32 = 0,
+    nocloud_keys: []const u8 = "",
     /// configured is set when a disk held a config tar or a NoCloud seed;
     /// the cloud's metadata server is then not asked.
     configured: bool = false,
@@ -246,6 +246,7 @@ pub const Machine = struct {
     pub const network = phase_network.network;
     pub const config = phase_config.config;
     pub const metadata = phase_config.metadata;
+    pub const accounts = phase_config.accounts;
     pub const data = phase_data.data;
     pub const importDisk = phase_data.importDisk;
     pub const oci = phase_oci.oci;

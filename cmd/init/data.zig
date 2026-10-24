@@ -14,7 +14,6 @@ const mkdir = init.mkdir;
 const mount_bin = init.mount_bin;
 const say = init.say;
 const hasUstar = phase_config.hasUstar;
-const lookupIds = phase_config.lookupIds;
 
 const label = "werewolf-data";
 const import_label = "werewolf-import";
@@ -76,13 +75,8 @@ pub fn data(m: *Machine) void {
             say("/data is {s}", .{what});
         } else nodata(m, why);
     }
-    // Services make their own /data/svc/NAME. init makes a home for each
-    // person: the config's users, and the NoCloud user (Lima's).
-    if (!exists("/run/werewolf/nodata")) {
-        const passwd = m.read("/run/werewolf/passwd");
-        for (m.users) |user| home(m, passwd, user);
-        if (m.nocloud_user.len > 0) home(m, passwd, m.nocloud_user);
-    }
+    // Account publication and home creation follow the ledger load in
+    // config.accounts, after this mount is available.
     // The key now lives in the kernel's dm table. No service needs it, and
     // /run/config is where a service would look.
     _ = linux.unlink("/run/config/data.key");
@@ -415,21 +409,4 @@ test checkDue {
     std.mem.writeInt(u32, sb[0x44..0x48], 100, .little);
     try testing.expectEqual(null, checkDue(&sb, 1099));
     try testing.expect(checkDue(&sb, 1100) != null);
-}
-
-/// home makes /data/home/USER, the user's alone (0700), where the account
-/// files say user is; a missing account leaves the directory root's.
-fn home(m: *Machine, passwd: []const u8, user: []const u8) void {
-    const dir = m.fmtZ("/data/home/{s}", .{user});
-    m.mkdirAll(dir);
-    const rc = linux.open(
-        dir,
-        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
-        0,
-    );
-    if (linux.errno(rc) != .SUCCESS) return;
-    const fd: linux.fd_t = @intCast(rc);
-    defer _ = linux.close(fd);
-    if (lookupIds(passwd, user)) |ids| _ = linux.fchown(fd, ids.uid, ids.gid);
-    _ = linux.fchmod(fd, 0o700);
 }

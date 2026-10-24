@@ -56,7 +56,9 @@ before fence sets the network policy, when no config tar was found on a disk or 
   checks the metadata, and writes only its private cloud scratch directory.
   Once a minute it requests a fetch; unchanged or refused input sends a heartbeat.
   The root publisher receives bounded users/key records, derives IDs and paths
-  through `people.apply`, and keeps CHOWN alone under Landlock and seccomp.
+  through `people.applyReserved`, and keeps CHOWN alone under Landlock and seccomp.
+  A root-owned table on `/data` keeps old names and IDs reserved. Removed people
+  retain locked account entries, while their keys and admin grants disappear.
   Neither worker can write accounts or keys. Publication is acknowledged before
   advancing the last-applied config; failures are retried on the next poll.
   Both workers watch a publisher-only lifetime pipe, including during HTTP waits.

@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+mkdir -p "$1/caddy" "$1/plex"
+umask 077
+printf '%s\n' '{"domain":"localhost"}' >"$1/caddy/settings.json"
+printf '%s\n' '{"domain":"localhost"}' >"$1/plex/settings.json"
+# Deliberately invalid outside this fixture. Authentication refusals must
+# work without a real Plex account, and the worker needs no account at all.
+printf '%s\n' 'werewolf-test-owner-token-invalid' >"$1/plex/token"

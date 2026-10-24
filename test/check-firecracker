@@ -94,7 +94,7 @@ done
 
 # ssh reaches the machine through its tap, with the host's key, and runs
 # posture there again: the line must agree with the console's.
-again=$(ssh "$host" "cd $work && build/host/howl ssh $name -- /usr/lib/werewolf/posture --line" |
+again=$(ssh "$host" "cd $work && build/host/howl ssh root@$name -- /usr/lib/werewolf/posture --line" |
 	python3 -c 'import re,sys; print(re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", sys.stdin.read().replace("\r","")), end="")') ||
 	fail "ssh did not reach the machine"
 got2=$(printf '%s\n' "$again" | sed -E 's/.*fail=([^ ]*).*/\1/' | tr ',' ' ')

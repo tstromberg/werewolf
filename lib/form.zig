@@ -2077,13 +2077,13 @@ test "recipes resolve sibling contexts and retain distro source discovery" {
     try testing.expectEqualStrings("forms/demo/melange/z.yaml", local[1]);
     fm.spec = try testParse(gpa,
         \\recipes:
-        \\  - ../../../packages/solr/solr.yaml
-        \\  - ../../../packages/zot/zot.yaml
+        \\  - ../../../packages/databases/solr/solr.yaml
+        \\  - ../../../packages/net/zot/zot.yaml
     );
     const declared = try fm.recipes(io, gpa, tmp.dir);
     try testing.expectEqual(2, declared.len);
-    try testing.expectEqualStrings("../packages/solr/solr.yaml", declared[0]);
-    try testing.expectEqualStrings("../packages/zot/zot.yaml", declared[1]);
+    try testing.expectEqualStrings("../packages/databases/solr/solr.yaml", declared[0]);
+    try testing.expectEqualStrings("../packages/net/zot/zot.yaml", declared[1]);
     fm.spec = try testParse(gpa, "recipes: []");
     try testing.expectEqual(0, (try fm.recipes(io, gpa, tmp.dir)).len);
 }
@@ -2654,6 +2654,76 @@ test "load: check values of their kind" {
             _ = try load(io, gpa, tmp.dir, "x", &f);
         } else try testing.expectError(error.Form, load(io, gpa, tmp.dir, "x", &f));
     }
+}
+
+test "operator forms include ssh-su with production and local policies" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var f: Failure = .{};
+    for ([_][]const u8{ "prod-ssh", "playground" }) |name| {
+        const forms = try chain(testing.io, gpa, Dir.cwd(), name, &f);
+        try testing.expect(has(forms, "ssh-su"));
+        const local = mem.eql(u8, name, "playground");
+        try testing.expectEqual(local, try takesKeyFiles(gpa, forms));
+        const config = try sshdConfig(gpa, forms, &f);
+        try testing.expect(mem.indexOf(u8, config, "AllowAgentForwarding yes\n") != null);
+        try testing.expectEqual(!local, mem.indexOf(u8, config, "verify-required") != null);
+    }
+}
+
+test "su preserves stronger authentication and requires an explicit software-key override" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    // Use the shipped form so changing its policy cannot leave this test green.
+    const su = try Dir.cwd().readFileAlloc(io, "forms/ssh-su/form.yaml", gpa, .limited(16 << 10));
+    for ([_][2][]const u8{
+        .{ "minimal", "" },
+        .{ "sshd", "base: minimal\n" },
+        .{ "ssh-su", su },
+        .{ "strong", "base: sshd\nsshd:\n  authentication-methods: publickey,publickey\n" },
+        .{ "strong-su", "base: strong\nwith: [ssh-su]\n" },
+        .{ "software", "base: sshd\nsshd:\n  pubkey-accepted-algorithms: -ssh-rsa*\n" },
+        .{ "software-su", "base: software\nwith: [ssh-su]\n" },
+        .{
+            "local-su",
+            "base: software\nwith: [ssh-su]\nsshd:\n" ++
+                "  pubkey-accepted-algorithms: -ssh-rsa*\n  pubkey-auth-options: touch-required\n",
+        },
+    }) |entry| {
+        const dir = try gpa.print("forms/{s}", .{entry[0]});
+        try tmp.dir.createDirPath(io, dir);
+        try tmp.dir.writeFile(io, .{
+            .sub_path = try gpa.print("{s}/form.yaml", .{dir}),
+            .data = entry[1],
+        });
+    }
+    var f: Failure = .{};
+    const strong = try sshdConfig(gpa, try chain(io, gpa, tmp.dir, "strong-su", &f), &f);
+    try testing.expect(mem.indexOf(
+        u8,
+        strong,
+        "AuthenticationMethods publickey,publickey\n",
+    ) != null);
+    for ([_][]const u8{ "ssh-su", "software-su" }) |name| {
+        const forms = try chain(io, gpa, tmp.dir, name, &f);
+        try testing.expect(!try takesKeyFiles(gpa, forms));
+        const config = try sshdConfig(gpa, forms, &f);
+        try testing.expect(mem.indexOf(u8, config, "AuthenticationMethods ") == null);
+        try testing.expect(mem.indexOf(
+            u8,
+            config,
+            "PubkeyAuthOptions touch-required verify-required\n",
+        ) != null);
+    }
+    const local = try chain(io, gpa, tmp.dir, "local-su", &f);
+    try testing.expect(try takesKeyFiles(gpa, local));
+    const config = try sshdConfig(gpa, local, &f);
+    try testing.expect(mem.indexOf(u8, config, "PubkeyAuthOptions touch-required\n") != null);
 }
 
 test "sshd and bastion: what the image's sshd is given, along the chain" {

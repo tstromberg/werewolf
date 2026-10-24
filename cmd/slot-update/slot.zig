@@ -61,6 +61,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // Do what apko does and apk does not: busybox links, no setuid or setgid.
     u.step = "root";
     try busyboxLinks(u, r);
+    for (kernel_image.package_prune) |p| _ = try r.remove(u, p);
     // Compose first, while the account files are still the packages' own.
     u.step = "compose";
     try composeInto(u, r);

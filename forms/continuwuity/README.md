@@ -11,8 +11,10 @@ instructions](https://dist.werewolf-linux.org/boot/v1/continuwuity/index.html).
 - Continuwuity and Caddy run as their own users. The root is read-only.
 - Continuwuity listens on loopback. The public ports are Caddy's.
 - Registration is closed. The administrator is created from the config, once.
-- Federation reaches other servers on ports 443 and 8448. URL previews are allowlisted
-  to nothing.
+- Federation reaches other servers on ports 443 and 8448. URL previews, the terminal
+  admin console and Brotli/Zstd HTTP compression are omitted from the package.
+- RocksDB keeps its storage codecs for existing data. Embedded static assets retain
+  a separate pure-Rust Brotli implementation.
 
 ## Getting Started
 

@@ -86,11 +86,11 @@ def run(args, label, check=True, timeout=600, machine=None):
 
 def ssh_run(name, command, label, **kwargs):
     check = kwargs.pop('check', True)
-    result = run([howl, 'ssh', name, '--', command], label, check=False, machine=name, **kwargs)
+    result = run([howl, 'ssh', 'root@' + name, '--', command], label, check=False, machine=name, **kwargs)
     if check and result.returncode:
-        run([howl, 'ssh', name, '--', '/usr/lib/werewolf/slot-update outcome'],
+        run([howl, 'ssh', 'root@' + name, '--', '/usr/lib/werewolf/slot-update outcome'],
             name + '-failure-outcome', check=False, timeout=15, machine=name)
-        run([howl, 'ssh', name, '--', 'cat /data/svc/autoupdate/log'],
+        run([howl, 'ssh', 'root@' + name, '--', 'cat /data/svc/autoupdate/log'],
             name + '-updater-log', check=False, timeout=15, machine=name)
         raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-2400:])
     return result

@@ -327,8 +327,8 @@ test stampName {
     defer arena.deinit();
     const a = arena.allocator();
     try testing.expectEqualStrings(
-        "up_packages_vaultwarden_vaultwarden.yaml",
-        try stampName(a, "../packages/vaultwarden/vaultwarden.yaml"),
+        "up_packages_security_vaultwarden_vaultwarden.yaml",
+        try stampName(a, "../packages/security/vaultwarden/vaultwarden.yaml"),
     );
     try testing.expectEqualStrings(
         "up_up_apps_myapp_melange_x.yaml",

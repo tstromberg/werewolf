@@ -1,0 +1,196 @@
+version: 1
+suites:
+  - name: plex-readiness
+    readiness: true
+    cases:
+      - name: plex-identity
+        steps:
+          - fetch:
+              url: http://127.0.0.1:32400/identity
+            expect:
+              status: 200
+              body:
+                contains: 'version="1.43.5.11029-6bf8af3f0"'
+            await: 120s
+          - file: /run/svc/plex-transcode/control.sock
+            expect:
+              type: socket
+            await: 60s
+  - name: plex
+    fixtures:
+      plex-token: /run/config/plex/token
+    policy:
+      run: [/usr/lib/werewolf/plex-transcode]
+    cases:
+      - name: plex-public-tls
+        steps:
+          - fetch:
+              url: https://localhost/identity
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              body:
+                contains: MediaContainer
+            await: 60s
+      - name: plex-no-anonymous-options
+        steps:
+          - fetch:
+              url: https://localhost/:/prefs?TranscoderH264Options=dump-yuv%3D%2Ftmp%2Fevil.so
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: PUT
+            expect:
+              status:
+                one_of: [401, 403]
+      - name: plex-configured-token
+        steps:
+          - fetch:
+              url: https://localhost/:/prefs
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                X-Plex-Token: {fixture: plex-token}
+            expect:
+              status: 200
+              body:
+                contains: '<Setting '
+            await: 60s
+      - name: plex-missing-token
+        steps:
+          - fetch:
+              url: https://localhost/:/prefs
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status:
+                one_of: [401, 403]
+      - name: plex-identities
+        steps:
+          - service: plex
+            expect:
+              user: plex
+              capabilities: []
+              no_new_privileges: true
+          - service: plex-transcode
+            expect:
+              user: plex-transcode
+              capabilities: []
+              connect_rules: [tcp/32402 loopback]
+              no_new_privileges: true
+          - service: plex-media
+            expect:
+              user: plex-media
+              capabilities: []
+              connect_rules: []
+          - service: caddy
+            expect:
+              user: caddy
+          - service: plex-callbacks
+            expect:
+              user: plex-callbacks
+              connect_rules: [tcp/32400 loopback]
+      - name: plex-callbacks-no-owner-api
+        steps:
+          - fetch:
+              url: http://127.0.0.1:32402/:/prefs
+              method: PUT
+            expect:
+              status: 403
+          - fetch:
+              url: http://127.0.0.1:32402/video/:/transcode/session/test/test/progress
+            expect:
+              status: 403
+      - name: plex-immutable-codecs
+        steps:
+          - file: /data/svc/plex-media
+            expect:
+              type: directory
+              mode: '755'
+              uid: plex-media
+          - file: /usr/lib/plexmediaserver/Codecs
+            expect:
+              type: directory
+          - file: /usr/lib/plexmediaserver/Plex Transcoder
+            expect:
+              type: symlink
+              link: /usr/lib/werewolf/plex-transcode
+          - file: /usr/lib/plexmediaserver/Plex Script Host
+            expect:
+              exists: false
+      - name: plex-wrong-peer
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -version]
+            expect:
+              exit: {not_equals: 0}
+              stderr:
+                contains: '"event":"refused"'
+  - name: plex-transcoder
+    user: plex
+    groups: [plex-transcode]
+    policy:
+      pledge: stdio rpath unix connect proc exec
+      read: [/run/svc/plex-transcode]
+      connect: [/run/svc/plex-transcode/control.sock]
+      run: [/usr/lib/werewolf/plex-transcode]
+    cases:
+      - name: plex-transcoder-version
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -version]
+            expect:
+              exit: 0
+              stdout:
+                contains: ffmpeg version
+      - name: plex-real-h264-decode
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, rawvideo, -f, framemd5, '-']
+            expect:
+              exit: 0
+              stdout:
+                contains: '#format: frame checksums'
+      - name: plex-token-denied-to-transcoder
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, '/data/svc/plex/Plex Media Server/Preferences.xml', -f, 'null', '-']
+            expect:
+              exit: {not_equals: 0}
+              stderr:
+                contains: Permission denied
+      - name: plex-h264-output-readable-by-server
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -y, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, libx264, -preset, ultrafast, -f, h264, /run/svc/plex-transcode/jobs/werewolf-test.h264]
+            expect:
+              exit: 0
+          - file: /run/svc/plex-transcode/jobs/werewolf-test.h264
+            expect:
+              type: file
+              readable: true
+              size: {min: 1}
+      - name: plex-transcoder-network-denied
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, 'http://127.0.0.1:32400/identity', -f, 'null', '-']
+            expect:
+              exit: {not_equals: 0}
+      - name: plex-transcoder-media-readonly
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /data/svc/plex-media/evil.ts]
+            expect:
+              exit: {not_equals: 0}
+              stderr:
+                contains: Permission denied
+      - name: plex-transcoder-codecs-readonly
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /usr/lib/plexmediaserver/Codecs/evil.so]
+            expect:
+              exit: {not_equals: 0}
+      - name: plex-transcoder-survives-refusals
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, rawvideo, -f, framemd5, '-']
+            expect:
+              exit: 0
+              stdout:
+                contains: '#format: frame checksums'

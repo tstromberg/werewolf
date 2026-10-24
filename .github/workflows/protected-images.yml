@@ -52,8 +52,6 @@ jobs:
         env:
           WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
           WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
-          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
-          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
         run: tools/checkout-packages
       - name: Install pinned tools
         run: sudo test/ci-setup
@@ -85,8 +83,6 @@ jobs:
         env:
           WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
           WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
-          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
-          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
         run: tools/checkout-packages
       - name: Install pinned build and runtime tools
         run: sudo test/ci-setup

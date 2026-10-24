@@ -53,7 +53,7 @@ Type limits, quotas, parsing, audit and local resolution through unwound
 still apply.
 The assigned system domain and its descendants are granted to every service
 with DNS enabled, including supported types beyond A and AAAA. The automatic
-grant retains endpoint and tunnel screening and bypasses the 90-day age gate.
+grant retains endpoint and tunnel screening and bypasses the 30-day age gate.
 The FQDN from boot metadata takes precedence over DHCP option 15.
 Canonicalize all names to lowercase ASCII/A-labels without one terminal dot; accept
 only exact names, leading `*.` or bare `*`. No regex or substring matching.
@@ -84,7 +84,7 @@ and a shared service user are refused.
 The [age design](unwound-age.md) describes enforcement. Endpoint lists identify
 risk policy, rather than prove maliciousness.
 
-Age defaults to 90 days from the current registry [RDAP] registration event.
+Age defaults to 30 days from the current registry [RDAP] registration event.
 An RDAP answer can authorize from cache for seven days; the row can remain
 stored after that but needs a new check to authorize again.
 The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants

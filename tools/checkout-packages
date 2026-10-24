@@ -13,10 +13,25 @@ ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / 'release/package-sources.json'
 
 
+def context_dir(directory, name):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9+_.-]*', name) or name in {'.', '..'}:
+        raise ValueError('invalid package context: ' + name)
+    # Published pins can still reference the flat tree before the repository merge.
+    flat = directory / name
+    found = list(directory.glob('*/' + name + '/metadata.json'))
+    if flat.is_dir() and not found:
+        return flat
+    if not flat.exists() and not found:
+        raise ValueError('missing package context: ' + name)
+    if flat.exists() or len(found) != 1:
+        raise ValueError('ambiguous package context: ' + name)
+    return found[0].parent
+
+
 def digest(directory, contexts):
     value = hashlib.sha256()
     for context in sorted(contexts):
-        root = directory / context
+        root = context_dir(directory, context)
         if not root.is_dir():
             raise ValueError('missing package context: ' + str(root))
         for path in sorted(root.rglob('*')):
@@ -65,14 +80,14 @@ def main():
     if lock['format'] != 'werewolf-package-sources/1':
         raise ValueError('unknown package source lock format')
     for source in lock['sources']:
-        if source['name'] not in {'packages', 'hardened-packages'}:
+        if source['name'] != 'packages':
             raise ValueError('unknown sibling package repository')
         directory = ROOT.parent / source['name']
         if not args.check and not args.pin:
             checkout(source, directory)
         actual = digest(directory, source['contexts'])
         if args.pin:
-            if subprocess.check_output(['git', '-C', directory, 'status', '--porcelain', '--', *source['contexts']]):
+            if subprocess.check_output(['git', '-C', directory, 'status', '--porcelain', '--', *[str(context_dir(directory, name).relative_to(directory)) for name in source['contexts']]]):
                 raise ValueError('commit the reviewed package context changes before pinning: ' + str(directory))
             source['ref'] = subprocess.check_output(['git', '-C', directory, 'rev-parse', 'HEAD'], text=True).strip()
             source['sha256'] = actual

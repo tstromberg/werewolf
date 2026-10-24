@@ -36,7 +36,8 @@ trusted Werewolf checkout, including its publication key and source lock.
 Every signed `contexts/NAME/current.json` must match the candidate's build input
 hash and contain every APK and index for aarch64 and x86_64. Only then can `--write`
 atomically replace the lock. Unchanged context content produces no update.
-The hardened-packages entry stays fixed.
+Package names remain stable when their category directory changes. Runtime
+publication remains independent of application source promotion.
 
 ## Drawbacks
 

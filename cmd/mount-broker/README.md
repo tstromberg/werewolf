@@ -95,5 +95,10 @@ Programs ask through `lib/broker.zig`.
 
 - **Never exits** once listening: without it no slot can be kept, and the machine falls
   back to the slot that last worked. A failing `poll` pauses 100 ms before retrying.
+- **Stalled clients** cannot block replies to other roles. Sends, including owner
+  descriptor replies, are nonblocking. A failed send closes that role's channel;
+  an empty packet or EOF also closes it. Replies are never silently dropped while
+  retaining a channel. `make check-mount-broker` exercises the real confined broker
+  in a private Linux mount namespace, including reply-queue saturation.
 - **Tested**: `check-slot`, `check-updater`, protected A/B lifecycle tests and every
   shutdown.

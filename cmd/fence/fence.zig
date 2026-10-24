@@ -233,6 +233,7 @@ const Connect = struct {
     /// cannot reach the local network or the cloud's metadata server.
     public: bool = false,
     lan: bool = false,
+    loopback: bool = false,
 };
 
 const Prefix = network.Prefix;
@@ -360,6 +361,7 @@ const Policy = struct {
                 w.print(" {d}", .{c.port}) catch return out[0..i];
             if (c.public) w.writeAll(" public") catch return out[0..i];
             if (c.lan) w.writeAll(" lan") catch return out[0..i];
+            if (c.loopback) w.writeAll(" loopback") catch return out[0..i];
             out[i] = buf[start..w.end];
         }
         return out[0..p.nconnect];
@@ -444,6 +446,12 @@ fn parsePolicy(text: []const u8) !Policy {
                 if (proto != .udp or uid == null or p.connect[p.nconnect].public)
                     return error.BadPolicy;
                 p.connect[p.nconnect].lan = true;
+                _ = words.next();
+            }
+            if (std.mem.eql(u8, words.peek() orelse "", "loopback")) {
+                if (proto != .tcp or any or p.connect[p.nconnect].public or p.connect[p.nconnect].lan)
+                    return error.BadPolicy;
+                p.connect[p.nconnect].loopback = true;
                 _ = words.next();
             }
             p.nconnect += 1;
@@ -665,6 +673,29 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .uid = id,
         });
     }
+    // A loopback-only connector gets the named port on the two loopback
+    // addresses. Refuse every other destination before the local table,
+    // including another address assigned to this machine.
+    for (p.connect[0..p.nconnect]) |c| if (c.loopback) {
+        rules.add(.{
+            .priority = pref.loopback_allow,
+            .action = FR_ACT_TO_TBL,
+            .table = RT_TABLE_LOCAL,
+            .from_here = true,
+            .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_ip,
+            .proto = .tcp,
+            .dport = c.port,
+            .uid = c.uid,
+        });
+        rules.add(.{
+            .priority = pref.loopback_refuse,
+            .action = FR_ACT_PROHIBIT,
+            .from_here = true,
+            .proto = .tcp,
+            .dport = c.port,
+            .uid = c.uid,
+        });
+    };
     rules.add(.{
         .priority = pref.local_out,
         .action = FR_ACT_TO_TBL,
@@ -696,7 +727,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dport = port_number,
     });
     for (p.connect[0..p.nconnect]) |c| {
-        if (c.uid == null or !p.dns_direct.has(c.uid.?) or c.any or
+        if (c.loopback or c.uid == null or !p.dns_direct.has(c.uid.?) or c.any or
             (c.proto != .udp and c.proto != .tcp) or
             (c.port != 53 and c.port != 853)) continue;
         const r: Rule = .{
@@ -718,6 +749,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dport = port_number,
     });
     for (p.connect[0..p.nconnect]) |c| {
+        if (c.loopback) continue;
         const r: Rule = .{
             .priority = pref.out_allow,
             .action = FR_ACT_TO_TBL,
@@ -839,9 +871,9 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     // refuses a range that ends at 65535 (fib_rule_port_range_valid), so a
     // reply to that one port is dropped.
     for (p.connect[0..p.nconnect], 0..) |c, i| {
-        if (c.proto == .icmp or c.any) continue;
+        if (c.proto == .icmp or c.any or c.loopback) continue;
         const seen = for (p.connect[0..i]) |d| {
-            if (d.proto == c.proto and d.port == c.port and (!d.lan or c.lan)) break true;
+            if (!d.loopback and d.proto == c.proto and d.port == c.port and (!d.lan or c.lan)) break true;
         } else false;
         const r: Rule = .{
             .priority = pref.in_allow,
@@ -1324,6 +1356,42 @@ const example = "connect 0 tcp 443\nconnect 0 udp 53\nconnect all udp 53\nconnec
 test "a program runs under its own name" {
     try std.testing.expectEqualStrings("runit", std.mem.span(baseName("/usr/bin/runit")));
     try std.testing.expectEqualStrings("runit", std.mem.span(baseName("runit")));
+}
+
+test "loopback-only TCP grants do not open an Internet port" {
+    const p = try parsePolicy("connect 207 tcp 32402 loopback\n");
+    const decide = struct {
+        fn action(rules: []const Rule, uid: u32, destination: []const u8, port_number: u16) u8 {
+            for (rules) |r| {
+                if (r.proto != null and r.proto != .tcp) continue;
+                if (r.uid != null and r.uid.? != uid) continue;
+                if (r.dport != null and (port_number < r.dport.? or port_number > (r.dport_last orelse r.dport.?))) continue;
+                if (r.sport != null and r.sport.? != 40000) continue;
+                if (r.src != null) continue;
+                if (r.dst) |dst| if (!prefixMatches(destination, dst, r.dst_len orelse @intCast(dst.len * 8))) continue;
+                // Model the local table for the addresses used below.
+                if (r.table == RT_TABLE_LOCAL and !std.mem.eql(u8, destination, &loopback_ip) and
+                    !std.mem.eql(u8, destination, &loopback6)) continue;
+                return r.action;
+            }
+            return 0;
+        }
+    }.action;
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        const planned = plan(p, family, &rules);
+        const local: []const u8 = if (family == linux.AF.INET) &loopback_ip else &loopback6;
+        const remote: []const u8 = if (family == linux.AF.INET) &.{ 1, 1, 1, 1 } else &v6(&.{ 0x26, 0x06, 0x47, 0 }, 1);
+        try std.testing.expectEqual(FR_ACT_TO_TBL, decide(planned, 207, local, 32402));
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 207, remote, 32402));
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 208, remote, 32402));
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 207, remote, 443));
+    }
+    for ([_][]const u8{
+        "connect 207 udp 32402 loopback\n",
+        "connect 207 tcp any loopback\n",
+        "connect 207 tcp 443 public loopback\n",
+    }) |bad| try std.testing.expectError(error.BadPolicy, parsePolicy(bad));
 }
 
 test "policies" {

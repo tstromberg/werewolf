@@ -33,6 +33,9 @@ laptop, so the private half never leaves it.
   /data/svc/sshd/host-key /run/svc/sshd/host-key` when `sshd` reads from
   `/run/svc/sshd` and may also boot on RAM). KEY and COPY must be absolute
   paths.
+- An optional third path publishes a mode 0644 known-hosts file for the fixed
+  alias `werewolf-local`, atomically, before sshd starts. The su form supplies
+  `/run/werewolf/ssh_known_hosts`; only the public key is published.
 - **Kept**: if the key exists, it is used. If its public half is missing,
   `ssh-keygen -y` makes it again from the key; it is written beside its
   place, synced, and renamed in. When COPY is given, both halves are copied

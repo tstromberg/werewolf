@@ -252,7 +252,9 @@ fn withoutPins(gpa: Allocator, world: []const u8) ![]const u8 {
 /// but OUT/ro, sorted, each once: what the updater carries forward.
 fn overlayList(b: *B) ![]const u8 {
     var seen: std.array_hash_map.String(void) = .empty;
-    for (b.overlay[1..]) |dir| {
+    const ro = try b.path("{s}/ro", .{b.p.out});
+    for (b.overlay) |dir| {
+        if (mem.eql(u8, dir, ro)) continue;
         // A local-NAME package owns the app; copying the running slot's
         // files over its successor would undo an apply, including removals.
         if (b.deployment != null and b.spec.app != null and
@@ -560,11 +562,18 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     // libarchive otherwise matches at any path component: pruning the host's
     // usr/bin/bash must not remove an OCI service's own interpreter as well.
     for (pruned) |p| try argv.appendSlice(b.gpa, &.{ "--exclude", try b.path("^{s}", .{p}) });
+    const overlay_flags = argv.items.len;
+    for (image.package_prune) |p|
+        try argv.appendSlice(b.gpa, &.{ "--exclude", try b.path("^{s}", .{p}) });
     try argv.appendSlice(b.gpa, &.{
         try b.path("@{s}", .{mtree}),
         try b.path("@{s}", .{rootfs}),
-        try b.path("@{s}", .{overlay}),
     });
+    try b.run(argv.items, .{});
+    // Package-only pruning must not discard a form's replacement.
+    argv.shrinkRetainingCapacity(overlay_flags);
+    argv.items[1] = "-rf";
+    try argv.append(b.gpa, try b.path("@{s}", .{overlay}));
     try b.run(argv.items, .{});
     // An image service runs in its own tree, which lacks werewolf's
     // programs: a form's `before` helpers, and service-config for its

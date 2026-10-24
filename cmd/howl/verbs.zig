@@ -28,7 +28,7 @@ const isMachineName = howl.isMachineName;
 const flagValue = howl.flagValue;
 const testing = std.testing;
 
-/// sshTo is howl ssh [NAME] [-- COMMAND...]. It execs ssh as root into a
+/// sshTo is howl ssh [[USER@]NAME] [-- COMMAND...]. It execs ssh as the local user into a
 /// machine here, run's without a name: under QEMU on its forwarded port,
 /// under Firecracker at its tap address, and on Lima at the lease or forwarded
 /// port. Dev Lima runs use the address recorded for their current boot.
@@ -39,6 +39,42 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         rest = args[0..i];
         command = args[i + 1 ..];
         break;
+    };
+    var identities: std.ArrayList([]const u8) = .empty;
+    var machine_args: std.ArrayList([]const u8) = .empty;
+    var no_agent = false;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        if (std.mem.eql(u8, rest[i], "--no-agent")) {
+            no_agent = true;
+            continue;
+        }
+        if (std.mem.eql(u8, rest[i], "--identity") or
+            std.mem.startsWith(u8, rest[i], "--identity="))
+        {
+            const flag, const value = try flagValue(rest, &i, why);
+            _ = flag;
+            const path = Dir.cwd().realPathFileAlloc(io, value, gpa) catch
+                return why.refuse("{s}: cannot read identity path", .{value});
+            try identities.append(gpa, path);
+        } else try machine_args.append(gpa, rest[i]);
+    }
+    const explicit_identities = identities.items.len > 0;
+    if (no_agent and explicit_identities)
+        return why.refuse("--no-agent cannot be combined with --identity", .{});
+    if (!no_agent and !explicit_identities) try identities.appendSlice(
+        gpa,
+        try @import("keys.zig").securityIdentities(io, gpa),
+    );
+    const managed_agent = identities.items.len > 0;
+    const target = try sshTarget(gpa, machine_args.items, why);
+    rest = target.args;
+    const user = target.user orelse blk: {
+        const result = try std.process.run(gpa, io, .{ .argv = &.{ "id", "-un" } });
+        const local = std.mem.trim(u8, result.stdout, " \r\n");
+        if (result.term != .exited or result.term.exited != 0 or !sshUser(local))
+            return why.refuse("cannot determine local user; specify USER@NAME", .{});
+        break :blk local;
     };
     // One word that names no machine is most likely a command: say how.
     if (command.len == 0 and rest.len == 1 and !std.mem.startsWith(u8, rest[0], "-")) {
@@ -65,13 +101,32 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     // machine may get later. Developer and ordinary sshd use distinct host
     // keys, so their aliases are distinct too. delete removes both.
     var pinned: std.ArrayList([]const u8) = .empty;
+    const alias = try sshAlias(gpa, name, dev_access);
+    const known_hosts = try gpa.print("{s}/known_hosts", .{dir});
     try pinned.appendSlice(gpa, &.{
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", try gpa.print("UserKnownHostsFile={s}/known_hosts", .{dir}),
-        "-o", try gpa.print("HostKeyAlias={s}", .{try sshAlias(gpa, name, dev_access)}),
-        "-o", "LogLevel=ERROR",
+        "-o",
+        if (managed_agent)
+            "StrictHostKeyChecking=yes"
+        else
+            "StrictHostKeyChecking=accept-new",
+        "-o",
+        try gpa.print("UserKnownHostsFile={s}", .{known_hosts}),
+        "-o",
+        try gpa.print("HostKeyAlias={s}", .{alias}),
+        "-o",
+        "LogLevel=ERROR",
     });
-    if (dev_marker != null and !std.mem.eql(u8, dev_marker.?, "custom\n")) {
+    if (managed_agent) try pinned.appendSlice(gpa, &.{
+        "-F",                             "/dev/null",
+        "-S",                             "none",
+        "-A",                             "-o",
+        "IdentityAgent=SSH_AUTH_SOCK",    "-o",
+        "IdentityFile=none",              "-o",
+        "GlobalKnownHostsFile=/dev/null",
+    }) else try pinned.append(gpa, "-a");
+    if (!explicit_identities and dev_marker != null and
+        !std.mem.eql(u8, dev_marker.?, "custom\n"))
+    {
         try pinned.appendSlice(gpa, &.{
             "-i", try @import("keys.zig").devPrivatePath(io, gpa),
             "-o", "IdentitiesOnly=yes",
@@ -92,7 +147,7 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         ) orelse return why.refuse("{s}: no ssh port on record", .{name});
         try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
         try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, "root@127.0.0.1");
+        try argv.append(gpa, try gpa.print("{s}@127.0.0.1", .{user}));
     } else if (on == .bhyve) {
         if (!try bhyve.exists(
             io,
@@ -107,12 +162,15 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         if (number == 0) return why.refuse("{s}: no SSH listener on record", .{name});
         try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
         try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, try gpa.print("root@{s}", .{host}));
+        try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, host }));
     } else if (on == .firecracker) {
         try argv.append(gpa, "ssh");
         if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
         try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
+        try argv.append(
+            gpa,
+            try gpa.print("{s}@{s}", .{ user, (try firecracker.net(gpa, name)).guest }),
+        );
     } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
         // A machine Lima manages has no vzNAT lease of its own: one under its
@@ -136,31 +194,24 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             try devAddress(current, why)
         else
             limaAddress(managed, lima.addressOf(io, gpa, name));
-        // Root, by Lima's forwarded port, when its config tar gave root keys.
-        const secured = std.mem.find(u8, yaml, "# werewolf lima: secure\n") != null;
-        const port = if (dev_access or ((managed or secured) and try rootKeyed(io, gpa, dir)))
-            lima.sshPort(io, gpa, name)
-        else
-            null;
+        // Lima's NoCloud account accepts its own key, not necessarily ~/.ssh's.
+        if (!dev_access and
+            !explicit_identities) if (try lima.sshIdentity(io, gpa, name, user)) |identity|
+        {
+            try pinned.appendSlice(gpa, &.{ "-i", identity });
+        };
+        const port = lima.sshPort(io, gpa, name);
         if (addr) |a| {
             try argv.append(gpa, "ssh");
             if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
             try argv.appendSlice(gpa, pinned.items);
-            try argv.append(gpa, try gpa.print("root@{s}", .{a}));
+            try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, a }));
         } else if (port) |p| {
             try argv.appendSlice(gpa, &.{ "ssh", "-p", p });
             try argv.appendSlice(gpa, pinned.items);
-            try argv.append(gpa, "root@127.0.0.1");
+            try argv.append(gpa, try gpa.print("{s}@127.0.0.1", .{user}));
         } else {
-            try argv.appendSlice(gpa, &.{ "limactl", "shell", name });
-            // ssh hands the guest's shell the command's words joined; so
-            // does this, where limactl would run them as one program.
-            if (command.len > 0) try argv.appendSlice(gpa, &.{
-                "sh",
-                "-c",
-                try std.mem.join(gpa, " ", command),
-            });
-            command = &.{};
+            return why.refuse("{s}: no SSH address available", .{name});
         }
     } else return why.refuse(
         "ssh reaches machines here (qemu, firecracker, lima, bhyve); {t}'s address is in " ++
@@ -168,6 +219,16 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         .{on},
     );
     try argv.appendSlice(gpa, command);
+    if (managed_agent) return @import("ssh-agent.zig").start(
+        io,
+        gpa,
+        known_hosts,
+        alias,
+        user,
+        identities.items,
+        argv.items,
+        why,
+    );
     const err = std.process.replace(io, .{ .argv = argv.items });
     return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
 }
@@ -203,25 +264,35 @@ test "Lima SSH uses a current developer address and ignores managed leases" {
     try testing.expectError(error.Refused, devAddress("-oProxyCommand=bad", &why));
 }
 
-/// rootKeyed reports whether the config tar in dir gives root keys.
-fn rootKeyed(io: Io, gpa: Allocator, dir: []const u8) !bool {
-    const tar = Dir.cwd().readFileAlloc(
-        io,
-        try gpa.print("{s}/config.tar", .{dir}),
-        gpa,
-        .limited(64 << 20),
-    ) catch return false;
-    var r: Io.Reader = .fixed(tar);
-    var name_buf: [Dir.max_path_bytes]u8 = undefined;
-    var link_buf: [Dir.max_path_bytes]u8 = undefined;
-    var it: std.tar.Iterator = .init(
-        &r,
-        .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
-    );
-    while (it.next() catch return false) |e| {
-        if (std.mem.eql(u8, e.name, "authorized_keys")) return true;
+/// Separate USER@NAME before machineArgs resolves NAME's engine and directory.
+fn sshTarget(gpa: Allocator, args: []const []const u8, why: *Why) !struct {
+    args: []const []const u8,
+    user: ?[]const u8,
+} {
+    const out = try gpa.dupe([]const u8, args);
+    var user: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        if (std.mem.eql(u8, out[i], "--on")) {
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, out[i], "-")) continue;
+        if (std.mem.findScalar(u8, out[i], '@')) |at| {
+            if (user != null or !sshUser(out[i][0..at]) or !isMachineName(out[i][at + 1 ..]))
+                return why.refuse("{s}: expected USER@NAME", .{out[i]});
+            user = out[i][0..at];
+            out[i] = out[i][at + 1 ..];
+        }
     }
-    return false;
+    return .{ .args = out, .user = user };
+}
+
+fn sshUser(user: []const u8) bool {
+    if (user.len == 0 or user[0] == '-') return false;
+    for (user) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and
+        c != '.') return false;
+    return true;
 }
 
 /// Stop keeps a named QEMU disk and every protected machine's authority. The

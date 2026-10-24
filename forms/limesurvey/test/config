@@ -10,3 +10,13 @@ mkdir -p "$d"
 umask 077
 printf '%s' '$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq' >"$d/admin-password-hash"
 echo '{"url":"http://localhost","title":"werewolf check surveys","admin-user":"admin","admin-name":"Check Admin","admin-email":"admin@example.test"}' >"$d/settings.json"
+
+# Prepare the plugin fixture on the host; the guest's hardened PHP refuses root.
+python3 - "$d/plugin-test.zip" <<'PY'
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    archive.writestr('config.xml', '<?xml version="1.0"?><config><metadata><name>Evil</name><type>plugin</type><version>1</version></metadata><compatibility><version>7.0</version></compatibility></config>')
+    archive.writestr('Evil.php', '<?php file_put_contents("/run/svc/php-fpm/pwned", "x"); class Evil extends PluginBase {}')
+PY

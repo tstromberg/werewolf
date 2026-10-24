@@ -2,6 +2,8 @@
 
 The default `howl run` environment provides an interactive SSH shell and accepts
 ordinary SSH key files. Its software and permissions are in [form.yaml](form.yaml).
+It includes [SSH-backed su](../ssh-su/README.md), with software keys allowed for
+the local VM. The root key must be available through a forwarded agent.
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/playground/index.html).

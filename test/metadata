@@ -8,7 +8,8 @@ only through an IMDSv2 session token, Hetzner's plainly, Azure's with
 Metadata: true. Anything else is refused.
 
 PAYLOAD is good (a config tar with a hostname and root's key), people
-(good, with a users file naming tom, an admin) or hostile (a symlink and
+(good, with a users file naming tom, an admin), people2 (tom with a new key),
+or hostile (a symlink and
 a ../ entry beside them), base64-encoded as a cloud holds it; or
 FIRST>THEN@N, which serves FIRST for the first N user-data requests and
 THEN after, as a config changed at the cloud, which the machine's
@@ -46,6 +47,8 @@ def config_tar(payload):
             add("authorized_keys", b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl werewolf-check-key\n")
         if payload == "people":
             add("users", b"tom admin sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGx0 tom@yubikey\n")
+        if payload == "people2":
+            add("users", b"tom admin sk-ssh-ed25519@openssh.com AAAA2 tom@spare\n")
     return base64.b64encode(out.getvalue())
 
 

@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Build a disposable protected Lima image and probe real SSH sessions.
+
+Usage: python3 test/check-privilege-boundaries [HOWL]
+Keeps logs and a build manifest under build/security-probes; deletes the VM.
+"""
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+howl = str(Path(sys.argv[1] if len(sys.argv) > 1 else "build/host/howl").resolve())
+name = f"ww-security-{os.getpid()}"
+work = Path("build/security-probes") / name
+work.mkdir(parents=True)
+config = work / "config"
+config.mkdir()
+
+
+def run(argv, timeout=60, **kwargs):
+    return subprocess.run(argv, text=True, capture_output=True, timeout=timeout, **kwargs)
+
+
+def require(label, result, success=True, contains=None):
+    output = result.stdout + result.stderr
+    (work / f"{label}.log").write_text(output)
+    if (result.returncode == 0) != success or (contains and contains not in output):
+        raise RuntimeError(f"{label}: exit {result.returncode}; see {work / (label + '.log')}")
+    print(f"PASS {label}", flush=True)
+    return output
+
+
+keys = {}
+for user in ("root", "auditone", "audittwo"):
+    key = work / user
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    keys[user] = key
+(config / "users").write_text("".join(f"{u} {keys[u].with_suffix('.pub').read_text()}" for u in ("auditone", "audittwo")))
+(config / "hostname").write_text("privilege-probe\n")
+try:
+    # Stream the lengthy build to a log without an unbounded in-memory buffer.
+    print(f"Building protected fixture {name}; log: {work / 'build.log'}", flush=True)
+    with (work / "build.log").open("w") as log:
+        subprocess.run([howl, "create", name, "--on", "lima", "--with", "test/privilege-probes",
+                        "--build", "--yes", "--config", str(config),
+                        "--root-keys", str(keys["root"].with_suffix('.pub'))],
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
+    port = run(["limactl", "list", name, "--format", "{{.SSHLocalPort}}"])
+    if port.returncode or not port.stdout.strip().isdigit():
+        raise RuntimeError("no Lima SSH port")
+    common = ["-F", "/dev/null", "-S", "none", "-p", port.stdout.strip(),
+              "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "IdentitiesOnly=yes",
+              "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={work / 'known_hosts'}"]
+
+    def ssh(user, command, tty=False, extra=()):
+        return run(["ssh", *common, "-i", str(keys[user]), "-tt" if tty else "-T", *extra,
+                    f"{user}@127.0.0.1", command], stdin=subprocess.DEVNULL)
+
+    deadline = time.monotonic() + 60
+    while True:
+        ready = ssh("root", "test -s /run/werewolf/posture.json")
+        if ready.returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            require("ssh-ready", ready)
+        time.sleep(.5)
+    require("baseline", ssh("root", "uname -a; cat /proc/cmdline; "
+                            "stat -c '%u:%g:%a %n' /data/.werewolf/identities; "
+                            "cat /etc/sv/sshd/service; cat /run/werewolf/posture.json"))
+    for user in ("auditone", "audittwo"):
+        require(f"{user}-setup", ssh(user, "umask 077; printf private > ~/private; "
+                                    "mkdir -p ~/.ssh; printf 'id -u > ~/rc.uid\\n' > ~/.ssh/rc"))
+        for tty in (False, True):
+            require(f"{user}-probe-{'pty' if tty else 'pipe'}",
+                    ssh(user, "/usr/lib/werewolf/privilege-probe", tty),
+                    contains="PASS cannot-regain-root")
+        peer = "audittwo" if user == "auditone" else "auditone"
+        require(f"{user}-home-isolation", ssh(user,
+            f"test \"$(cat ~/rc.uid)\" = \"$(id -u)\" && "
+            f"! cat /data/home/{peer}/private 2>~/denied && grep -q 'Permission denied' ~/denied"))
+        require(f"{user}-no-remote-forward", ssh(user, "true", extra=(
+            "-o", "ExitOnForwardFailure=yes", "-R", "0:127.0.0.1:22")), False,
+            "remote port forwarding failed")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(ssh, user, "/usr/lib/werewolf/privilege-probe")
+                   for user in ("auditone", "audittwo", "auditone", "audittwo")]
+        for i, future in enumerate(futures):
+            require(f"concurrent-{i}", future.result(), contains="PASS no-inherited-authority-descriptors")
+    payload = work / "payload"
+    payload.write_text("SFTP remains usable under the same login policy.\n")
+    downloaded = work / "downloaded"
+    sftp_options = ["-P" if arg == "-p" else arg for arg in common]
+    # sftp's -S selects the SSH executable, unlike ssh's control socket flag.
+    del sftp_options[2:4]
+    sftp_options += ["-o", "ControlPath=none"]
+    require("sftp", run(["sftp", *sftp_options, "-i", str(keys["auditone"]), "-b", "-", "auditone@127.0.0.1"],
+                        input=f"put {payload.resolve()} transferred\nget transferred {downloaded.resolve()}\n"))
+    if payload.read_bytes() != downloaded.read_bytes():
+        raise RuntimeError("SFTP content mismatch")
+    old_pid = require("sshd-before-restart", ssh("root", "cat /etc/sv/sshd/supervise/pid")).strip()
+    restart = ssh("root", "sv restart /etc/sv/sshd")
+    (work / "restart-sshd.log").write_text(restart.stdout + restart.stderr)
+    # Restart may terminate the session requesting it. Require a new daemon
+    # and a working unprivileged session, rather than accepting disconnect alone.
+    deadline = time.monotonic() + 60
+    while True:
+        current = ssh("root", "cat /etc/sv/sshd/supervise/pid")
+        if current.returncode == 0 and current.stdout.strip() != old_pid:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("sshd did not restart")
+        time.sleep(.5)
+    require("after-restart", ssh("auditone", "/usr/lib/werewolf/privilege-probe"))
+    # The runtime facts and exact source-built manifest remain with the results.
+    manifest = Path("build/machines") / name / "authority/profile.json"
+    if manifest.exists():
+        (work / "profile.json").write_text(manifest.read_text())
+    print(f"PASS privilege boundaries; evidence: {work}", flush=True)
+finally:
+    serial = Path.home() / ".lima" / name / "serial.log"
+    if serial.exists():
+        (work / "serial.log").write_bytes(serial.read_bytes())
+    manifest = Path("build/machines") / name / "authority/profile.json"
+    if manifest.exists():
+        (work / "profile.json").write_text(manifest.read_text())
+    result = run([howl, "delete", name, "--on", "lima"], timeout=120)
+    (work / "cleanup.log").write_text(result.stdout + result.stderr)
+    if result.returncode:
+        print(f"Cleanup failed: see {work / 'cleanup.log'}", file=sys.stderr)

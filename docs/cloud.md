@@ -84,6 +84,17 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 
 ## Signed boot
 
+| Provider | Werewolf Secure Boot | Caveats |
+|---|---|---|
+| QEMU | Verified, x86_64 and arm64 | Linux default includes host custody and persistent TPM; x86 needs SMM |
+| AWS EC2 | Firmware verified, arm64 | Protected default blocked pending TPM custody; NitroTPM alone is insufficient |
+| Google Compute Engine | Firmware verified, arm64 | Protected default blocked pending TPM custody; vTPM alone is insufficient |
+| Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
+| Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
+| Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
+| bhyve | Manual enrollment verified on bilbo, x86_64; unsupported on arm64 | Protected howl deployment remains gated; ARM64 runs experimentally but has an unresolved virtio TX soak failure ([status](testing-live.md#bhyve)) |
+| Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
+
 New `howl create` machines on AWS, GCP and Azure use signed loaders and UKIs. The host
 retains the boot signer; public certificates enroll the provider's firmware. Uploading a
 release requires its `FORM-ARCH-boot.crt` beside the disk. Both the actual loader and
@@ -124,8 +135,9 @@ Each fetch uses two processes ([programs.md](programs.md)):
 The polling supervisor runs those confined fetches once a minute. Its
 Landlock rules also let it update the account files, keys and homes. It
 keeps the capabilities needed to own those files and to drop its fetcher
-to `_cloud`. Accepted changes replace the running machine's people and
-root keys; rejected data leaves the last accepted set in place. Other
+to `_cloud`. Accepted changes lock absent people, remove their keys, and keep
+their names and IDs reserved on `/data`. Active people and root keys are
+updated; rejected data leaves the last accepted set in place. Other
 config takes effect at the next boot.
 
 A fetcher that misbehaves can hand the parent no more than a well-formed

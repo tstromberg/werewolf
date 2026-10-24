@@ -11,17 +11,10 @@
 base: prod
 
 packages:
-  - postgresql-17
+  - postgresql-17>=17.10-r1000
   - posix-libc-utils-bin  # locale -a, without ldd or its bash dependency
 
 dev: [postgresql-17-client]  # peer-authenticated SQL checks
-
-paths:
-  # PAM's password helper, setgid shadow, arrives through PostgreSQL's
-  # libraries. Nothing here authenticates with a password.
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).

@@ -215,6 +215,14 @@ endef
 $(foreach p,$(filter-out unwound-age,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
 
+$(PROGRAMS)/plex-loopback/usr/lib/werewolf/plex-loopback.so: forms/plex/lib/plex-loopback.zig Makefile
+	$(zig_check)
+	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-musl -fallow-shlib-undefined $< -femit-bin=$@
+	# Select the form's maintained musl for Plex's self-bootstrapping ELFs.
+	mkdir -p $(PROGRAMS)/plex-loopback/usr/lib/plexmediaserver/lib
+	ln -sfn /usr/lib/werewolf-musl/libc.so $(PROGRAMS)/plex-loopback/usr/lib/plexmediaserver/lib/libc.so
+	ln -sfn libc.so $(PROGRAMS)/plex-loopback/usr/lib/plexmediaserver/lib/ld-musl-$(ARCH).so.1
+
 # howl makes programs before it builds an image.
 programs: $(foreach p,$(CMDS),$(call program_bin,$(p))) $(foreach c,$(FORM_CMDS),$(call form_bin,$(c)))
 
@@ -434,6 +442,7 @@ check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SY
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
 	@python3 test/howl-test $(HOWL)
+	@python3 test/howl-ssh $(HOWL)
 	@python3 test/howl-forms $(HOWL)
 	@python3 test/native-tests-regression
 	@zig test test/native/driver.zig
@@ -641,7 +650,7 @@ check-image-updater-uki: $(HOWL)
 		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
 		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
-check-cloud:     check-metadata check-nodata check-lease check-static check-people $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
+check-cloud:     check-metadata check-nodata check-lease check-static check-people check-people-persist $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check-platform: check-integrity check-cloud check-persist check-syslog
 check: check-forms check-shellfree check-platform
 	@echo "check: every form, and a slot, passed"
@@ -771,6 +780,21 @@ check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordi
 	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-installer-test
 	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-coordinator-test
 
+.PHONY: check-mount-broker check-privilege-boundaries
+$(BUILD)/mount-broker-test: cmd/mount-broker/mount-broker.zig $(wildcard lib/*.zig)
+	zig test -target $(ARCH)-linux-musl --test-no-exec -femit-bin=$@ $(call ZIG_MODULES,cmd/mount-broker/mount-broker.zig)
+check-mount-broker: $(call program_bin,mount-broker) $(BUILD)/mount-broker-test
+	$(LINUX_TEST_RUNNER) unshare --mount --fork sh -ec 'mount --make-rprivate /; mount -t tmpfs tmpfs /run; mkdir /run/runit; python3 test/check-mount-broker "$$1" "$$2"' fixture $(call program_bin,mount-broker) $(BUILD)/mount-broker-test
+check-privilege-boundaries: $(HOWL)
+	python3 test/check-privilege-boundaries $(HOWL)
+
+BROKER_FUZZ_RUNS ?= 50000
+.PHONY: fuzz-broker
+fuzz-broker:
+	@rm -f test/broker-fuzz/.zig-cache/f/crash
+	zig build --build-file test/broker-fuzz/build.zig --fuzz=$(BROKER_FUZZ_RUNS) --summary all
+	@test ! -e test/broker-fuzz/.zig-cache/f/crash || { echo 'broker parser fuzz crash'; exit 1; }
+
 check-lan: $(call program_bin,fence)
 	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
 
@@ -860,7 +884,7 @@ fuzz-unwound:
 .PHONY: _check-prod-console-image
 _check-prod-console-image: | _check-shared check-prod
 	@$(call built,prod-console,$(CHECK_MAKE) FORM=prod image)
-check-lease check-nodata check-metadata: | _check-prod-console-image
+check-lease check-nodata check-metadata check-people-persist: | _check-prod-console-image
 	@$(CHECK_MAKE) FORM=prod _$@
 check-static check-verity: | _check-shared check-minimal
 	@$(CHECK_MAKE) FORM=minimal _$@
@@ -907,6 +931,10 @@ _check-secureboot: $(HOWL)
 _check-metadata:
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
+
+.PHONY: check-people-persist _check-people-persist
+_check-people-persist:
+	@$(CHECK_ENV) python3 test/check-people-persist $(CHECK_QEMU)
 
 # Each run copies x86_64's UEFI variables, sparing the template; splash-time=0 skips edk2's 5 s wait.
 UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \

@@ -2,10 +2,12 @@
 
 ## Summary
 
-unwound answers DNS at 127.0.0.53 with per-service name and type grants. It forwards
-allowed queries to DHCP's resolvers, caches and audits answers, and screens `*`
-grants for tunnels. See the [design](../../docs/design/unwound.md),
-[allowances](../../docs/design/unwound-policy.md) and [plan](../../docs/design/unwound-plan.md).
+unwound answers every program's DNS at 127.0.0.53 and decides, per service, which
+names and types it may look up. It forwards what is allowed to the resolvers DHCP
+named, caches and audits it, and screens `*` grants to limit DNS tunnels. See
+[the design](../../docs/design/unwound.md),
+[the policy](../../docs/design/unwound-policy.md) and
+[the plan](../../docs/design/unwound-plan.md).
 
 ## Background
 
@@ -29,34 +31,29 @@ policy as `lookup UID PATTERN TYPE... [unfiltered]` lines. Fence gives each UID 
 one a loopback label, 127.53.x.y, which the kernel picks as the source of that UID's
 queries; no other user can send from it, and root has none unless granted.
 
-Root setup reads policy, binds 127.0.0.53:53 UDP/TCP, opens `/dev/log`, and forks.
-The frontend becomes `_unwound` (53) in `/var/empty`: Landlock allows no files;
-seccomp permits I/O on held descriptors and `accept4` on its listener. It parses,
-decides, screens and audits queries, passing them over a `SOCK_SEQPACKET` pair.
-The upstream becomes `_unwoundnet` (54), which alone may reach the assigned
-resolvers on port 53. It can make IPv4 sockets and read the upstream file at
-`/run/werewolf/network/upstream`. A private channel carries the assigned domain:
-every DNS-enabled service can query it and its descendants, subject to screening.
-Boot metadata's FQDN precedes DHCP option 15; renewal updates grants live.
+Setup reads the policy and binds 127.0.0.53:53, then forks. The frontend runs
+as `_unwound` in `/var/empty`, with no file or socket creation; it checks and
+audits each query. The `_unwoundnet` child alone reaches DHCP's resolvers and
+reads network state. It sends the assigned domain to the frontend. Boot FQDN
+wins over DHCP option 15; renewal and removal take effect without a restart.
 
-Each attempt uses a fresh socket/port, random ID and 0x20 case; answers must echo
-the question. Each resolver gets two one-second UDP tries and TCP on truncation;
-silence gives SERVFAIL. The frontend keeps aliases and records of the asked type,
-checks alias grants, and rebuilds replies with TTLs capped at an hour.
+Each upstream attempt uses a fresh socket and source port, a random ID and
+0x20 case; an answer must repeat the question exactly. Two tries per resolver
+of a second each over UDP, then TCP on truncation. A question no resolver
+answers comes back as a bare header and why: SERVFAIL. The frontend keeps
+only the alias chain and records of the asked type, checks each alias target
+against the grants, and builds the reply from scratch, TTLs capped at an hour.
 
-Each service caches 256 answers by positive minimum TTL or negative SOA TTL
-(RFC 2308), without failures. Duplicate questions wait; eviction is LRU. Screened
-`*` grants refuse data-shaped names, budget new names/sites per service hourly,
-hold answers five minutes (early eviction charges the name again), and return
-at most four records of public addresses or well-shaped names, without aliases.
+Each service caches up to 256 answers. Positive answers use their least TTL;
+negative answers use the SOA's TTL (RFC 2308); failures are not cached.
+Screened `*` grants bound name shape, new sites and names per hour, and answers.
+They hold answers for five minutes and keep at most four public addresses or
+well-shaped names, without aliases.
 
-Broad `*` grants, including `unfiltered`, refuse callback, request capture,
-tunnel and address-to-DNS domains in the [endpoint list](endpoints.zig), including
-their descendants. Dotted/dashed IPv4, integer/hex IPv4 and dashed IPv6 prefixes
-are refused under any suffix; reverse PTR names remain available. Exact and
-`*.domain` grants override these defaults for their service/types; the assigned
-system domain does not. Checks precede cache, age and forwarding and cover aliases,
-including cached aliases and direct CNAME answers.
+All broad `*` grants exclude the compiled [endpoint list](endpoints.zig) and
+hostnames beginning with encoded IPv4 or IPv6 addresses. Exact and
+`*.domain` grants override these defaults; the assigned domain does not.
+Refusal precedes cache, age checks and forwarding, and includes alias targets.
 
 Audit records are JSON datagrams to syslogd, `unwound: {"event":"query",...}`,
 with the UID, name, type, decision, why, rule line, policy generation, rcode
@@ -66,17 +63,18 @@ and latency. A question that gets no answer, or less of one, says why:
 |---|---|---|
 | `no_grant`, `unsupported`, `alias` | (the type, or `alias`'s target) | REFUSED |
 | `endpoint` | `callback_domain`, `ip_prefix` | REFUSED |
-| `tunnel` | `long_name`, `many_labels`, `long_label`, `random_label`, `random_name`, with `bits` | REFUSED |
+| `tunnel` | name shape or entropy, with `bits` | REFUSED |
 | `budget` | `new_sites`, `new_names` | REFUSED |
 | `busy` | `slots`, `service_slots`, `channel`, `connections` | SERVFAIL |
-| `unanswered` | `no_resolvers`, `send_failed`, `timeout`, `tcp_failed`, `busy` | SERVFAIL |
+| `unanswered` | resolver failure, timeout or busy | SERVFAIL |
 | `timeout` | | SERVFAIL |
-| `malformed`, `unsupported` | `short`, `response`, `format`, `tcp_length`, `opcode_or_class` | FORMERR, REFUSED or none |
+| `malformed`, `unsupported` | framing, format or class | FORMERR or REFUSED |
 | `screened` | `dropped_nonpublic`, `dropped_shape`, `dropped_room` | fewer records |
 
-An answer from the cache is marked `cached`; one that waited, `merged`. A
-per-minute `stats` record counts queries, cached, merged, refusals, tunnel
-signs, failures, busy and lost audit lines.
+Cached answers say `cached`; waiting ones say `merged`. DNS logging is best effort.
+Logger failures never change DNS policy or answers. Stats count local write losses;
+syslogd reports later drops. If syslog is absent at startup, logs go to stderr.
+TCP connections accept pipelined queries, answering one frame at a time.
 
 ## Drawbacks
 

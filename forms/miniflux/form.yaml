@@ -3,7 +3,7 @@
 # certificate from Let's Encrypt; Miniflux, on loopback, keeps its tables
 # in a schema of its own and fetches feeds from public addresses alone.
 # Wolfi does not ship Miniflux: werewolf's application feed builds it
-# from a pinned release (../packages/miniflux/miniflux.yaml). Its
+# from a pinned release (../packages/www/miniflux/miniflux.yaml). Its
 # administrator comes from the config before it serves. See
 # forms/miniflux/README.md.
 base: prod

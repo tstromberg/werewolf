@@ -1119,6 +1119,12 @@ fn plan(
     // come from its repository instead (compose.published).
     var bins: std.ArrayList([]const u8) = .empty;
     var overlay: std.ArrayList([]const u8) = .empty;
+    // Local APKs are packages just like apko's: the form must be able to
+    // replace one of their files with a confined helper or configuration.
+    // Lay them before the form, retaining slot.lay's refusal to follow links.
+    const recipes = try melange.recipes(io, gpa, chain);
+    if (recipes.len > 0)
+        try overlay.append(gpa, try gpa.print("{s}/melange", .{p.out}));
     try overlay.append(gpa, try gpa.print("{s}/ro", .{p.out}));
     if (!s.published) {
         try bins.append(gpa, try gpa.print("{s}/init/init", .{p.programs}));
@@ -1169,16 +1175,13 @@ fn plan(
     mem.sortUnstable([]const u8, sorted, {}, lessThan);
     try overlay.appendSlice(gpa, sorted);
 
-    // Then the compiled parts, a tutorial's application and melange's
-    // packages, then --app.
+    // Then the compiled parts, a tutorial's application, then --app.
     var made: std.ArrayList([]const u8) = .empty;
     if (app.example(name)) |e| {
         try overlay.append(gpa, try gpa.print("{s}/application", .{p.out}));
         try made.append(gpa, try app.compiled(gpa, p.out, e));
     }
-    const recipes = try melange.recipes(io, gpa, chain);
     if (recipes.len > 0) {
-        try overlay.append(gpa, try gpa.print("{s}/melange", .{p.out}));
         try made.append(gpa, try gpa.print("{s}/melange.stamp", .{p.out}));
     }
     var staged: std.ArrayList([]const u8) = .empty;

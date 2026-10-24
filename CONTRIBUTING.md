@@ -19,10 +19,10 @@ releases; when it moves, `make fix` (tools/zigfix.zig) rewrites most of what cha
 
 ## Package sources
 
-Third-party application packaging lives in a sibling `../packages` checkout;
-explicit hardening ports and runtimes live in `../hardened-packages`. Forms and
+Third-party applications, hardened runtimes and libraries live in the sibling
+`../packages` checkout under `CATEGORY/NAME/`. Forms and
 distro-specific packages remain here with their source. Building howl or a base
-form needs only this repository; forms with third-party recipes need the siblings.
+form needs only this repository; forms with third-party recipes need that checkout.
 
 CI runs `tools/checkout-packages` to provision and verify the contexts pinned in
 `release/package-sources.json`. Use `--check` to verify existing local sources
@@ -39,9 +39,8 @@ promotion tool and its tests need Go 1.27 or newer. Normal manual `--pin` remain
 available for reviewed source changes.
 
 Repository/ref overrides are `WEREWOLF_PACKAGES_REPOSITORY`,
-`WEREWOLF_PACKAGES_REF` and the corresponding `WEREWOLF_HARDENED_PACKAGES_*`.
-GitHub Actions reads the same repository variables. The new package repository
-and hardening port must be published with the pinned bytes before CI can fetch them.
+`WEREWOLF_PACKAGES_REF`. GitHub Actions reads the same repository variables.
+Package changes must be published with the pinned bytes before CI can fetch them.
 Existing user-managed checkouts are verified without overwriting local changes.
 
 ## Find your way around
@@ -51,8 +50,7 @@ Existing user-managed checkouts are verified without overwriting local changes.
 | `cmd/NAME/` | one program per job, written in Zig, each with a README on how it works |
 | `cmd/howl/` | `howl`, the command users build and run machines with |
 | `lib/` | code the programs share: sandboxing, seccomp promises, verity, forms |
-| `../packages/NAME/` | third-party Melange recipes, patches, locks and bootstrap sources |
-| `../hardened-packages/` | hardened runtimes and explicit hardening ports |
+| `../packages/CATEGORY/NAME/` | recipes or Wolfi derivations, maintenance metadata, patches, locks and tests |
 | `forms/NAME/` | a form: `form.yaml` (its packages, and what werewolf adds), `rootfs/`, `test/` ([forms/README.md](forms/README.md)) |
 | `test/` | the scripts `make check` boots and attacks machines with |
 | `release/` | building, signing and publishing releases |
