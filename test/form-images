@@ -509,8 +509,13 @@ class Images(unittest.TestCase):
                 logs.mkdir(parents=True)
                 images.write(logs / 'gates.json', {'passed': True})
         output = self.root / 'gated'
-        with contextlib.chdir(self.root), patch.object(images, 'native'), patch.object(images, 'run', side_effect=run) as called:
-            self.assertTrue(images.gate(lifecycle, output, 'qemu', 'x86_64', ['minimal', 'prod-ssh', 'playground']))
+        previous = Path.cwd()
+        os.chdir(self.root)
+        try:
+            with patch.object(images, 'native'), patch.object(images, 'run', side_effect=run) as called:
+                self.assertTrue(images.gate(lifecycle, output, 'qemu', 'x86_64', ['minimal', 'prod-ssh', 'playground']))
+        finally:
+            os.chdir(previous)
         self.assertEqual(3, called.call_count)
         self.assertEqual({'prod-ssh'}, {p.name for p in output.iterdir()})
         self.assertEqual('prod-ssh', (output / 'prod-ssh/bundle/production').read_text())

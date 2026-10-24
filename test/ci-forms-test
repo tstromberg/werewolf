@@ -137,9 +137,13 @@ class PlatformInputs(unittest.TestCase):
         env = {key: value for key, value in os.environ.items()
                if key not in {'MAKEFLAGS', 'MFLAGS', 'MAKELEVEL', 'GNUMAKEFLAGS', 'MAKEFILES'}}
         for name in ('bastion', 'people'):
-            with self.subTest(form=name):
-                result = subprocess.run(['make', '-n', 'MAKE=echo', 'check-' + name],
-                                        cwd=ROOT, env=env, text=True, capture_output=True, check=True)
+            with self.subTest(form=name), tempfile.TemporaryDirectory() as directory:
+                # Recursive recipes execute even with -n. Their build-log
+                # redirects must not overwrite a simultaneous integration run.
+                result = subprocess.run(['make', '-n', 'MAKE=echo', 'BUILD=' + directory,
+                                         'check-' + name],
+                                        cwd=ROOT, env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn('test/' + name + '-form ', result.stdout)
                 self.assertIn('/' + name + '-check image', result.stdout)
                 self.assertNotIn('FORM=' + name + ' image', result.stdout)

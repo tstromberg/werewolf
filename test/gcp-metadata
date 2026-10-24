@@ -231,7 +231,7 @@ def main():
     print("GCP metadata logs: " + str(p), flush=True)
     (p / "config").mkdir()
     for which in ["root", "declared", "instance", "project"]:
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519-sk", "-w", provider,
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519-sk", "-O", "verify-required", "-w", provider,
                         "-N", "", "-C", "gcp-metadata-" + which, "-f", str(p / which)], check=True)
     (p / "config/authorized_keys").write_text((p / "root.pub").read_text())
     (p / "config/hostname").write_text("gcp-metadata-check\n")
