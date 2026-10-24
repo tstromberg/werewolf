@@ -59,11 +59,12 @@ builds from source with your own keys. `howl` also deploys to FreeBSD, NetBSD, P
 AWS, GCP and Azure ([Secure Boot status](docs/cloud.md#signed-boot)).
 
 A **form** declares a VM's software and permissions. Browse the
-[catalog](docs/forms-catalog.md) (`howl forms`), start with [Caddy](forms/caddy/README.md)
-or [PostgreSQL](forms/postgresql/README.md), [build your own](docs/forms.md), or follow
-a tutorial: [Python](examples/python/README.md), [PHP](examples/php/README.md),
-[Node.js](examples/nodejs/README.md), [Go](examples/go/README.md),
-[Rust](examples/rust/README.md), [ASP.NET Core](examples/aspnet/README.md).
+[catalog](docs/forms-catalog.md) (`howl forms`), start with
+[Caddy](forms/caddy/README.md) or [PostgreSQL](forms/postgresql/README.md), [build your
+own](docs/forms.md), or follow a tutorial: [Python](examples/python/README.md),
+[PHP](examples/php/README.md), [Node.js](examples/nodejs/README.md),
+[Go](examples/go/README.md), [Rust](examples/rust/README.md), [ASP.NET
+Core](examples/aspnet/README.md).
 
 ## Get involved
 

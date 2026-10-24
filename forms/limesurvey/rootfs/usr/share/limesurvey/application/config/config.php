@@ -59,6 +59,8 @@ if (!empty($werewolf['smtp'])) {
 
 return array(
     'components' => array(
+        // LimeSurvey caches PHP objects; keep hardened PHP's deserialization guard.
+        'cache' => array('class' => 'system.caching.CDummyCache'),
         'db' => array(
             'connectionString' => 'mysql:unix_socket=/run/svc/mariadb/mariadb.sock;dbname=limesurvey',
             'emulatePrepare' => true,

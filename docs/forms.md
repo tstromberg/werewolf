@@ -149,5 +149,4 @@ while Landlock, seccomp and limits stay per service.
 *Settings* are per-machine values that are not secret, such as routes or a
 database URL. See the [syntax, types and formats](settings.md#syntax).
 
-Building and shipping an application on these forms is
-[applications.md](applications.md).
+[Application packaging](applications.md) covers building and shipping on these forms.

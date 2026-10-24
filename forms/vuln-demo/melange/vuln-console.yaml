@@ -20,5 +20,5 @@ environment:
 pipeline:
   - runs: |
       CGO_ENABLED=0 go test ./...
-      CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags='-s -w' -o vuln-console .
+      CGO_ENABLED=0 go build -buildmode=pie -mod=readonly -trimpath -ldflags='-s -w' -o vuln-console .
       install -Dm755 vuln-console ${{targets.destdir}}/usr/lib/werewolf/vuln-console

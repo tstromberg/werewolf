@@ -26,8 +26,9 @@ not require a Plex account.
 
 ### Local test deployment (lima, qemu, firecracker)
 
-Save your existing Plex account's authentication token as `plex-token`,
-mode 0600. See [Plex's token instructions](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
+Save your existing Plex account's authentication token as `plex-token`, mode 0600. See
+[Plex's token
+instructions](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 A short-lived `claim-` code is not an account token.
 
 ```sh

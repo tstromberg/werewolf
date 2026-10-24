@@ -18,14 +18,12 @@ init starts the broker before fence, outside that domain. Callers use
 
 - No program but the broker can mount after boot.
 - The broker fixes devices, paths and mount options; callers request named operations.
-- Authority to ask is an inherited socketpair descriptor per role, never a path in
-  `/run`.
+- Authority is an inherited socketpair descriptor per role, never a path in `/run`.
 
 ## Non-Goals
 
 - Serving any process that did not inherit a role descriptor.
-- Choosing a filesystem by path. It goes by UUID or FAT serial, from the kernel command
-  line only, parsed as stage0 parses it (`lib/cmdline.zig`).
+- Choosing paths: UUIDs and FAT serials come only from `lib/cmdline.zig`, as in stage0.
 
 ## Detailed design
 

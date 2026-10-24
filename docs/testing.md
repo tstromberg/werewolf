@@ -7,20 +7,18 @@ howl test --with caddy
 howl test --with caddy --arch x86_64
 ```
 
-Most forms run `make -k check-FORM check-shellfree-FORM`: integration tests in a DEV VM,
-then posture and console checks of the shipping form. Forms with `test/native.json`,
-such as `postgresql`, instead run compiled Zig drivers under leash as service clients,
-without shell or SSH ([driver guide](testing-native.md)). A generated form pins the
-production package closure and is
-compared with production before boot ([design](design/image-release-testing.md)).
-Image publishing requires further checks ([form-images.md](form-images.md)).
-[Local iteration](design/local-test-iteration.md) keeps the VM running between changes.
+`make -k check-FORM check-shellfree-FORM` runs integration tests, then shipping-form
+posture and console checks. Forms with native plans run compiled service clients under
+leash without shell or SSH ([driver guide](testing-native.md)). Their generated test
+form pins and is compared with the production package closure before boot
+([design](design/image-release-testing.md)). Publishing adds [image
+gates](form-images.md). [Local iteration](design/local-test-iteration.md) keeps the VM
+running between changes.
 
-PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
-[Greenbone](../forms/greenbone/README.md#testing-status) tests GMP/OSP, database roles,
-Valkey ACLs, shared mounts and persistence; `legacy: true` retains its DEV checks. Logs:
-`build/ARCH/check/FORM-native/`. These local QEMU runs are separate from protected
-lifecycle evidence.
+PostgreSQL tests SQL, redirects, no TCP and encrypted persistence;
+[Greenbone](../forms/greenbone/README.md#testing-status) tests GMP/OSP, roles, Valkey
+ACLs, mounts and persistence. `legacy: true` retains DEV checks. Logs are in
+`build/ARCH/check/FORM-native/`; local QEMU tests are separate from protected evidence.
 
 For a native driver edit, keep one disposable VM running and replace only that driver:
 
@@ -32,13 +30,11 @@ howl test --with postgresql --iterate --reset   # discard guest state
 howl test --with postgresql --iterate --stop
 ```
 
-Native drivers default to 128 MiB; `memory` (16–8192 MiB) sizes their test cgroup.
-An optional driver `allow` list permits `python:native`, `node:native` or
-`java:native` in that driver's runtime namespace. Production grants stay unchanged;
-the payload comparison rejects blanket grants and undeclared files.
-Iteration uses SSH with `sh-shim`, without BusyBox. It is not release evidence.
-Run the plain command after editing. `KERNEL_ROOTFS=/path/rootfs.tar` tests a candidate
-kernel; changing its bytes resets the VM. This profile explicitly disables IPE.
+Drivers use 128 MiB by default; `memory` accepts 16–8192 MiB. Their `allow` list may
+include `python:native`, `node:native` or `java:native`, scoped to the driver only.
+Payload comparison rejects blanket grants and undeclared files. Iteration uses
+SSH/sh-shim without BusyBox, disables IPE and is not release evidence. Rerun normally
+after edits. `KERNEL_ROOTFS=/path/rootfs.tar` tests kernels; byte changes reset the VM.
 
 ```sh
 make test           # every program's and library's unit tests, in seconds
@@ -53,10 +49,9 @@ python3 test/form-coverage --list   # each form's integration cases
 [Live tests](testing-live.md) cover network, cloud and remote hosts; see
 [secure boot tests](testing-secure-boot.md) for Secure Boot, TPM and signed updates.
 
-Besides the build's tools, `make check` needs QEMU, `expect` and `mke2fs` (`brew install
-qemu e2fsprogs` on a Mac); the tutorial forms also need Go, rustup with the
-architecture's Linux musl target, the .NET 10 SDK and a JDK. `make check-dns` runs as
-root, or as a user with subordinate ids.
+`make check` also needs QEMU, `expect` and `mke2fs` (`brew install qemu e2fsprogs` on
+macOS); tutorials need Go, rustup with Linux musl targets, .NET 10 and a JDK.
+`make check-dns` needs root or subordinate ids.
 
 ## What `make check` does
 
@@ -64,11 +59,9 @@ It builds and boots every form under QEMU, then a slot with a native EFI partiti
 Each runs [test/checks](../test/checks) as root on the serial console, then powers off.
 Passing requires a successful boot, all expected check results and a clean shutdown.
 
-The checks need a shell, and most forms have none. So each form is built with `DEV=1`,
-which adds BusyBox and a separate developer SSH listener, and once more as it ships
-(`check-shellfree-<form>`), where [test/boot](../test/boot) runs nothing on the machine
-and judges it by its posture line and by what `forms/<form>/test/console` says the
-console must and must not show.
+Forms run twice: `DEV=1` adds BusyBox/developer SSH for shell checks;
+`check-shellfree-<form>` boots the shipping form. [test/boot](../test/boot) judges its
+posture and expected console patterns in `forms/<form>/test/console`.
 
 The checks try what an attacker would, and expect to be refused: lower lockdown, read
 `/dev/mem` or another process's memory, undo a one-way sysctl, find a setuid file,
@@ -78,26 +71,21 @@ socket must listen on every declared port and answer HTTP where the port speaks 
 another protocol is tested in `forms/FORM/test/checks`, with `forms/FORM/test/config`
 giving the services what they need. The first check: nothing was refused during boot.
 
-`make check-people-persist` (also in `check-cloud`) boots one persistent data
-volume through account enrollment, retirement, conflicting people and NoCloud
-requests, and reactivation. It checks private-file ownership and access, then
-boots copies with corrupt and missing reservation tables and requires refusal
-before service handover. Logs live in `build/ARCH/check/people-persist/`.
-Seed creation needs `xorriso` on Linux (`tools/install-deps`) or macOS's `hdiutil`.
+`make check-people-persist` (`check-cloud`) tests enrollment, retirement, conflicts,
+NoCloud and reactivation on one data volume, including private-file access and refusal
+of missing/corrupt identity tables before service handover. Logs are in
+`build/ARCH/check/people-persist/`. Seeds need Linux `xorriso` or macOS `hdiutil`.
 
-`make check-privilege-boundaries` builds a disposable protected Lima image with
-one probe added to `playground`. Real SSH logins exercise credentials, inherited
-descriptors, cross-user files, PTYs, forwarding refusal, concurrent sessions,
-SFTP, daemon restart, and selected kernel restrictions. Secure Boot, TPM and IPE
-remain enabled. The fixture is deleted; logs and its profile remain under
-`build/security-probes/`. The existing `werewolf-run` instance is untouched.
+`make check-privilege-boundaries` uses a disposable protected Lima image to test real
+SSH credentials, descriptors, cross-user files, PTYs, forwarding refusal, concurrent
+sessions, SFTP, daemon restart and kernel restrictions. Secure Boot, TPM and IPE stay
+enabled. Logs/profile remain in `build/security-probes/`; `werewolf-run` is untouched.
 
-`make check-mount-broker LINUX_TEST_RUNNER=sudo` runs the real confined broker
-in a private Linux mount namespace. It checks role restrictions, malformed
-requests, stalled readers, and staged-file integrity. CI runs it beside the
-updater construction tests. On macOS, a disposable Linux Lima VM can supply
-`LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` runs bounded
-wire-parser fuzzing without performing privileged operations.
+`make check-mount-broker LINUX_TEST_RUNNER=sudo` tests the confined broker's roles,
+malformed requests, stalled readers and staged-file integrity in a private mount
+namespace. CI runs it with updater construction tests. macOS can use a disposable
+Linux VM via `LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` tests
+the wire parser without privileged operations.
 
 Other boots cover what one boot cannot:
 
@@ -112,23 +100,19 @@ Other boots cover what one boot cannot:
 | the slot | find `root.erofs` by UUID, keep `/boot` read-only, commit its EFI entry once healthy for a minute | a 128 MiB ext4 and a FAT EFI partition with one counted entry |
 | each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image](../test/check-legacy-image); the shared image workflow |
 
-Each machine gets a blank disk, a config disk with a fixed test `data.key` (LUKS2
-`/data`) and forwarded ports (22200 and 23200 plus its place among the forms), so
-`make -j` runs them together. test/boot waits for events up to a limit, with no fixed
-delays. On an M4, `make -j8 check` takes about 25 s for forms and another minute for
-the slot to commit. Logs stay in `build/<arch>/check/`.
+Each machine gets blank/config disks, a fixed test LUKS2 key and distinct forwarded
+ports (22200 and 23200 plus its form index), so `make -j` can run them together.
+test/boot waits for bounded events; logs stay in `build/<arch>/check/`.
 
 ## Form integration coverage
 
-A service or application form needs at least five distinct cases through the running
-service: read/write, authentication, wrong-password rejection, unsupported operations,
-configured content or persistence across reboot. Assertions about one operation count as
-one case; name it for the behaviour tested. Shared boot and posture checks do not count.
-`python3 test/form-coverage` enforces the minimum in `make test`; `--list` finds each
-form's cases. The [exceptions](../test/form-coverage-exceptions) explain shared suites
-for foundations and runtime-only forms. Review still judges case quality. `make
-check-apps` builds the `-app` forms and `php` with
-[test/app-fixtures](../test/app-fixtures) and tests their HTTP behaviour.
+A service/application form needs five distinct cases through its running service:
+read/write, authentication, refusals, configured content or reboot persistence. Name
+each behaviour; assertions about one operation count once, and shared boot/posture
+checks do not count. `python3 test/form-coverage` enforces this in `make test`;
+`--list` shows cases and [exceptions](../test/form-coverage-exceptions) explain shared
+suites. Review judges quality. `make check-apps` tests HTTP for `-app` forms and `php`
+using [test/app-fixtures](../test/app-fixtures).
 
 ## Writing a check
 

@@ -171,5 +171,4 @@ Freed memory is not wiped, for its cost: memory is cleared on
 allocation, slab caches stay separate and page allocation is shuffled.
 CPU mitigations are not forced on every process; werewolf's long-lived
 programs ask for them. Reverse-path filtering conflicts with fence's
-per-user routing. `posture --extended` reports these. The seal costs
-about 25 ns a call (`getpid` on an M4 Max: 150 ns against 125).
+per-user routing. `posture --extended` reports these.
