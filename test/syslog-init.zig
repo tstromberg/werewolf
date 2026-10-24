@@ -203,14 +203,13 @@ fn check(io: Io, gpa: mem.Allocator) !void {
         .{},
     );
     try shutdown(io, pid);
-    // Serial console output can cap the receiver below its per-second PID
-    // quota in QEMU. Keep the earlier console checks, then test flooding with
-    // file output alone so the sender can reach that quota.
+    // Serial-console emulation can throttle ingestion below the PID limit.
+    // Console delivery is checked above; exercise floods with file output only.
     try dir.writeFile(io, .{ .sub_path = "/run/config/syslog.conf", .data = "console no\n" });
-    const flood_pid = try launch();
-    try ready(io, flood_pid);
+    const flood_logger = try launch();
+    try ready(io, flood_logger);
     try flooding(io, gpa);
-    try shutdown(io, flood_pid);
+    try shutdown(io, flood_logger);
     if (exists(io, "/data/log/messages") and
         (try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.NotDrained;
 
