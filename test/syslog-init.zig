@@ -202,8 +202,15 @@ fn check(io: Io, gpa: mem.Allocator) !void {
         "syslog-check: credentials, escaping, truncation and fd rejection verified\n",
         .{},
     );
-    try flooding(io, gpa);
     try shutdown(io, pid);
+    // Serial console output can cap the receiver below its per-second PID
+    // quota in QEMU. Keep the earlier console checks, then test flooding with
+    // file output alone so the sender can reach that quota.
+    try dir.writeFile(io, .{ .sub_path = "/run/config/syslog.conf", .data = "console no\n" });
+    const flood_pid = try launch();
+    try ready(io, flood_pid);
+    try flooding(io, gpa);
+    try shutdown(io, flood_pid);
     if (exists(io, "/data/log/messages") and
         (try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.NotDrained;
 
