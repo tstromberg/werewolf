@@ -115,5 +115,6 @@ registration, library management, metadata fetching or client playback. Those ne
 real account test, deferred for now. The exploratory namespace playback fixture is
 compatibility evidence only. `test/check-plex-import` exercises the import lifecycle in
 a disposable protected Plex VM. Production IPE/verified-boot client playback remains
-unvalidated. Native VM checks run with the project's usual secureboot/TPM/IPE test
-exclusions.
+unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can be exercised
+with `IPE=1` and the signed kernel inputs described in the testing guide. The
+protected import fixture checks all three protections.

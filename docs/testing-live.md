@@ -34,14 +34,32 @@ of its own, so a network flake fails only it.
 
 ## `make check-gcp`, `check-aws` and `check-azure`
 
-Protected cloud deployment is currently blocked: AWS and GCP lack the completed provider
-TPM bootstrap and permit transport, and Azure also lacks reliable firmware enforcement.
+Normal protected cloud deployment is currently blocked: AWS and GCP lack the completed
+provider lifecycle and reachable permit transport, and Azure also lacks reliable firmware enforcement.
 These checks must fail until those paths are implemented and validated; they never add
 `--disable`. See [cloud TPM enrollment](design/cloud-tpm-enrollment.md) and [signed boot
 status](cloud.md#signed-boot).
 
-`make check-prod-ssh-clouds` runs all three providers with `--build` and then with
-published downloads. A single provider defaults to `CLOUD_MODE=build`; use
+On 2026-10-24, the internal GCP path passed provider-pinned EK verification, measured
+attestation, encrypted enrollment with host-held reset credentials, reboot replay refusal,
+and factory disk handover on the same instance and TPM. The source-built `prod-ssh`
+then accepted both `t` (nonzero UID) and `root` (UID 0) with a verification-required
+security key. Root posture passed Secure Boot, TPM rollback protection, IPE, lockdown,
+seal, verity and fence, with no disabled protections or unexpected/stale weaknesses.
+Evidence is retained locally in `build/check/gcp-bootstrap-261024183249/`; the VM,
+disks and images were deleted. This does not qualify normal create, non-build downloads
+or cloud updates.
+
+`test/check-gcp-bootstrap --workload BUNDLE` exercises that internal path. It takes
+explicit measured kernel, bootstrap agent, stub and signing-key/certificate paths; its
+`--help` lists them. `--provider aws` selects AWS; `--workload` also attempts its
+same-instance factory handover and both SSH accounts. The AWS test refuses
+disabled account Serial Console access unless the operator explicitly supplies
+`--enable-aws-serial-console`, and restores disabled access even after test failures.
+These test switches never relax Secure Boot, TPM or IPE checks.
+
+`make check-prod-ssh-clouds` runs GCP, AWS, then Azure, with both `--build` and
+published downloads for each. A single provider defaults to `CLOUD_MODE=build`; use
 `CLOUD_MODE=download` for its non-build path. Each case must pass independently.
 
 [test/cloud](../test/cloud) runs `prod-ssh`'s disk, as a release makes it, on a real

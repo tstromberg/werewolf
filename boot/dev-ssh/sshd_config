@@ -14,7 +14,6 @@ KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 HostbasedAuthentication no
 IgnoreRhosts yes
-UsePAM no
 StrictModes yes
 KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com
 HostKeyAlgorithms ssh-ed25519

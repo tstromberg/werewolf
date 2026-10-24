@@ -98,7 +98,7 @@ def accounts(active):
             f"ok {user}-home [ \"$(stat -c '%u:%g:%a' {home})\" = {uid}:{uid}:700 ]",
         ]
         if active:
-            checks.append(f"ok {user}-key [ \"$(stat -c '%u:%a' /run/werewolf/keys/{user})\" = {uid}:600 ] && grep -q '{KEY}' /run/werewolf/keys/{user}")
+            checks.append(f"ok {user}-key [ \"$(stat -c '%u:%g:%a' /run/werewolf/keys/{user})\" = 0:{uid}:640 ] && grep -q '{KEY}' /run/werewolf/keys/{user}")
         else:
             checks.append(f"ok {user}-revoked [ ! -e /run/werewolf/keys/{user} ]")
     checks += [

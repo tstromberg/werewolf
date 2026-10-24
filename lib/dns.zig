@@ -66,20 +66,66 @@ pub fn normalizeSystemDomain(raw: []const u8, out: *[253]u8) ?[]const u8 {
     return out[0..n];
 }
 
+/// Uids is a policy line's user: one uid, or every uid from first to last,
+/// written FIRST-LAST, as compose writes `:people` (lib/people.zig ids).
+pub const Uids = struct {
+    first: u32,
+    last: u32,
+
+    pub fn one(id: u32) Uids {
+        return .{ .first = id, .last = id };
+    }
+
+    /// parse reads N or FIRST-LAST. The kernel's invalid uid, 2^32-1, and
+    /// an empty range are refused.
+    pub fn parse(word: []const u8) !Uids {
+        const dash = std.mem.findScalar(u8, word, '-');
+        const first = std.fmt.parseInt(u32, word[0 .. dash orelse word.len], 10) catch
+            return error.BadPolicy;
+        const last = if (dash) |d|
+            std.fmt.parseInt(u32, word[d + 1 ..], 10) catch return error.BadPolicy
+        else
+            first;
+        if (first > last or last == std.math.maxInt(u32)) return error.BadPolicy;
+        return .{ .first = first, .last = last };
+    }
+
+    pub fn has(u: Uids, id: u32) bool {
+        return u.first <= id and id <= u.last;
+    }
+
+    /// format writes the user as policy text: N, or FIRST-LAST.
+    pub fn format(u: Uids, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{d}", .{u.first});
+        if (u.last != u.first) try w.print("-{d}", .{u.last});
+    }
+
+    /// jsonStringify writes a uid as a number, a range as "FIRST-LAST".
+    pub fn jsonStringify(u: Uids, jw: anytype) !void {
+        if (u.first == u.last) return jw.write(u.first);
+        var buf: [21]u8 = undefined;
+        try jw.write(std.mem.print(&buf, "{f}", .{u}) catch unreachable);
+    }
+};
+
 pub const Users = struct {
-    ids: [max_users]u32 = undefined,
+    ids: [max_users]Uids = undefined,
     len: usize = 0,
 
-    pub fn add(u: *Users, id: u32) !void {
-        if (id == std.math.maxInt(u32)) return error.BadPolicy;
-        for (u.ids[0..u.len]) |existing| if (existing == id) return;
+    /// add records id once. Users that overlap without being the same are
+    /// refused, so each uid has one label and one set of grants.
+    pub fn add(u: *Users, id: Uids) !void {
+        for (u.ids[0..u.len]) |existing| {
+            if (existing.first == id.first and existing.last == id.last) return;
+            if (existing.first <= id.last and id.first <= existing.last) return error.BadPolicy;
+        }
         if (u.len == max_users) return error.BadPolicy;
         u.ids[u.len] = id;
         u.len += 1;
     }
 
     pub fn has(u: Users, id: u32) bool {
-        for (u.ids[0..u.len]) |existing| if (existing == id) return true;
+        for (u.ids[0..u.len]) |existing| if (existing.has(id)) return true;
         return false;
     }
 };
@@ -92,8 +138,8 @@ pub fn users(text: []const u8) !Users {
         var words = std.mem.tokenizeAny(u8, line, " \t\r");
         if (!std.mem.eql(u8, words.next() orelse "", "dns")) continue;
         const id = std.fmt.parseInt(u32, words.next() orelse "", 10) catch return error.BadPolicy;
-        if (words.next() != null) return error.BadPolicy;
-        try result.add(id);
+        if (words.next() != null or id == std.math.maxInt(u32)) return error.BadPolicy;
+        try result.add(.one(id));
     }
     return result;
 }
@@ -115,8 +161,7 @@ pub fn lookupUsers(text: []const u8) !Users {
     while (lines.next()) |line| {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, words.next() orelse "", "lookup")) continue;
-        const id = std.fmt.parseInt(u32, words.next() orelse "", 10) catch return error.BadPolicy;
-        try result.add(id);
+        try result.add(try .parse(words.next() orelse ""));
     }
     return result;
 }
@@ -232,7 +277,8 @@ pub fn plan(u: Users, r: *const Resolvers, buf: *[max_rules]route.Rule) []const 
                 .dst = ip,
                 .proto = proto,
                 .dport = 53,
-                .uid = id,
+                .uid = id.first,
+                .uid_last = id.last,
             };
             n += 1;
             buf[n] = buf[n - 1];
@@ -285,7 +331,7 @@ test "assigned system domain is canonical and bounded" {
 
 test "resolver and user input is bounded, deduplicated and fails closed" {
     const u = try users("connect 69 tcp 443\ndns 69\ndns 0\ndns 69\n");
-    try testing.expectEqualSlices(u32, &.{ 69, 0 }, u.ids[0..u.len]);
+    try testing.expectEqualSlices(Uids, &.{ .one(69), .one(0) }, u.ids[0..u.len]);
     for ([_][]const u8{ "dns", "dns all", "dns nobody", "dns 4294967295", "dns 0 extra" }) |bad|
         try testing.expectError(error.BadPolicy, users(bad));
     const r = try resolvers("# detected\nnameserver 192.168.5.3\nnameserver 192.168.5.3\n");
@@ -309,8 +355,8 @@ test "resolver and user input is bounded, deduplicated and fails closed" {
     const routes = plan(try users("dns 54\n"), &local, &local_rules);
     try testing.expectEqual(@as(u32, 255), routes[0].table);
     var full: Users = .{};
-    for (0..max_users) |i| try full.add(@intCast(i));
-    try testing.expectError(error.BadPolicy, full.add(100));
+    for (0..max_users) |i| try full.add(.one(@intCast(i)));
+    try testing.expectError(error.BadPolicy, full.add(.one(100)));
     const servers = try resolvers("nameserver 1.1.1.1\nnameserver 2.2.2.2\nnameserver 3.3.3.3\n");
     var buf: [max_rules]route.Rule = undefined;
     try testing.expectEqual(max_rules, plan(full, &servers, &buf).len);
@@ -319,7 +365,7 @@ test "resolver and user input is bounded, deduplicated and fails closed" {
 test "lookup users get labels in the order they first appear" {
     const u = try lookupUsers("dns 69\nlookup 1001 a.example A\nconnect 5 tcp 443\n" ++
         "lookup 7 * A unfiltered\nlookup 1001 b.example TXT\n");
-    try testing.expectEqualSlices(u32, &.{ 1001, 7 }, u.ids[0..u.len]);
+    try testing.expectEqualSlices(Uids, &.{ .one(1001), .one(7) }, u.ids[0..u.len]);
     try testing.expectEqualSlices(u8, &.{ 127, 53, 0, 2 }, &label(1));
     try testing.expectEqual(0x5302, labelTable(1));
     try testing.expectEqual(1, labelIndex(u, .{ 127, 53, 0, 2 }).?);
@@ -332,8 +378,39 @@ test "lookup users get labels in the order they first appear" {
         try testing.expectEqual(null, labelIndex(u, ip));
     try testing.expectError(error.BadPolicy, lookupUsers("lookup x a.example A\n"));
     var full: Users = .{};
-    for (0..max_users) |i| try full.add(@intCast(i));
+    for (0..max_users) |i| try full.add(.one(@intCast(i)));
     try testing.expectEqualSlices(u8, &.{ 127, 53, 0, max_users }, &label(max_users - 1));
+}
+
+test "a range of uids is one lookup user, which no other user overlaps" {
+    const u = try lookupUsers(
+        "lookup 0 * A\nlookup 500-60000 * A\nlookup 500-60000 a.example TXT\n",
+    );
+    try testing.expectEqualSlices(
+        Uids,
+        &.{ .one(0), .{ .first = 500, .last = 60000 } },
+        u.ids[0..u.len],
+    );
+    try testing.expect(u.has(500) and u.has(60000) and !u.has(499) and !u.has(60001));
+    for ([_][]const u8{
+        "lookup 500-60000 * A\nlookup 600 * A\n",
+        "lookup 500-600 * A\nlookup 600-700 * A\n",
+        "lookup 600-500 * A\n",
+        "lookup 500- * A\n",
+        "lookup -500 * A\n",
+        "lookup 1-4294967295 * A\n",
+    }) |bad| try testing.expectError(error.BadPolicy, lookupUsers(bad));
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("[0,\"500-60000\"]", try std.mem.print(&buf, "{f}", .{
+        std.json.fmt(u.ids[0..u.len], .{}),
+    }));
+    var rules: [max_rules]route.Rule = undefined;
+    const servers = try resolvers("nameserver 1.1.1.1\n");
+    var people: Users = .{};
+    try people.add(u.ids[1]);
+    const r = plan(people, &servers, &rules)[0];
+    try testing.expectEqual(500, r.uid.?);
+    try testing.expectEqual(60000, r.uid_last.?);
 }
 
 test "DHCP renewal revokes first, skips unchanged leases, and stops on errors" {

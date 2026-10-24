@@ -579,7 +579,7 @@ const Writer = struct {
         }) catch return w.settle(&x.domain, unknown);
         var namespace: [24]u8 = undefined;
         const uid = policy.uid(r.service);
-        const policy_namespace = std.mem.print(&namespace, "uid:{d}", .{uid}) catch
+        const policy_namespace = std.mem.print(&namespace, "uid:{f}", .{uid}) catch
             return w.settle(&x.domain, unknown);
         const row = w.db.beginCheck(.{
             .domain = x.domain.text(),
@@ -591,7 +591,8 @@ const Writer = struct {
             .qtype = @backingInt(r.qtype),
             .transport = r.transport,
             .source_label = source,
-            .service_uid = uid,
+            // A range's first uid: ranges never overlap (dns.Users).
+            .service_uid = uid.first,
             .policy_namespace = policy_namespace,
             .policy_generation = r.policy_generation,
         }) catch return w.settle(&x.domain, unknown);

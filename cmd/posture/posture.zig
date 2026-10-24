@@ -37,9 +37,12 @@ pub fn main(init: std.process.Init) !void {
     var extended = false;
     var attack = false;
     var verbose = false;
+    var cache = true;
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "--extended") and !extended) {
             extended = true;
+        } else if (std.mem.eql(u8, a, "--no-cache") and cache) {
+            cache = false;
         } else if (std.mem.eql(u8, a, "--attack") and !attack) {
             attack = true;
         } else if (std.mem.eql(u8, a, "--verbose") and !verbose) {
@@ -63,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
         .extended = extended,
         .attack = attack,
         .verbose = verbose,
+        .cache = cache,
     };
     try p.run();
     const report = try p.report();
@@ -88,7 +92,8 @@ const Format = enum { text, json, line, summary };
 
 fn usage() void {
     std.debug.print(
-        "usage: posture [--extended] [--attack] [--verbose] [--json | --line | --summary]\n",
+        "usage: posture [--extended] [--attack] [--no-cache] [--verbose] " ++
+            "[--json | --line | --summary]\n",
         .{},
     );
 }
@@ -124,7 +129,8 @@ fn serve(io: Io, gpa: Allocator) !void {
         io.sleep(.fromSeconds(1), .awake) catch {};
     }
 
-    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
+    // Boot's report is first-hand: it is the cache other runs read.
+    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0, .cache = false };
     try p.run();
     const report = try p.report();
     var json: Io.Writer.Allocating = .init(gpa);
@@ -292,8 +298,13 @@ pub const Report = struct {
     /// known compares failures with the image's weaknesses, on a werewolf
     /// image. slot-keep commits a slot only when unexpected is empty.
     known: ?Known = null,
+    /// tpm is the A/B pair's state as this run read it from the TPM: the
+    /// anchor and PCR 11, hex. ab-status reads boot's (test/ab-status.zig).
+    tpm: ?Tpm = null,
     checks: []const Check,
 };
+
+pub const Tpm = struct { anchor: []const u8, pcr11: []const u8 };
 
 pub const Check = struct {
     id: []const u8,
@@ -316,6 +327,9 @@ pub const Check = struct {
     detail: []const u8 = "",
     /// excuse says why the image fails the check by design, if it does.
     excuse: ?[]const u8 = null,
+    /// cached marks boot's result for a check this process could not make
+    /// (Posture.fromBoot); its name ends " (cached)".
+    cached: ?bool = null,
 };
 
 /// Known compares the failures with what the image expects.
@@ -367,6 +381,13 @@ pub const Posture = struct {
     walk_since: ?Io.Timestamp = null,
     walk_entries: usize = 0,
     checks: std.ArrayList(Check) = .empty,
+    /// cache lets a check this process cannot make take boot's result
+    /// (fromBoot); --no-cache leaves it skipped.
+    cache: bool = true,
+    /// boot is boot's report's checks, read at first need.
+    boot: ?[]const Check = null,
+    /// tpm is the A/B pair's state, if this run could read the TPM.
+    tpm: ?Tpm = null,
 
     pub fn add(p: *Posture, c: Check) !void {
         var measured = c;
@@ -510,6 +531,42 @@ pub const Posture = struct {
         return names.items;
     }
 
+    /// fromBoot adds boot's result for skipped's check, its name marked
+    /// " (cached)", when this process could not make the check itself, as a
+    /// root SSH session may not ask netlink or the TPM (forms/sshd). Without
+    /// boot's result, or with --no-cache, it adds skipped.
+    pub fn fromBoot(p: *Posture, skipped: Check) !void {
+        if (p.cache) for (p.bootChecks()) |c| if (std.mem.eql(u8, c.id, skipped.id))
+            return p.checks.append(p.gpa, try p.cached(c));
+        try p.add(skipped);
+    }
+
+    /// fromBootRest adds, as fromBoot does, each check of boot's report this
+    /// run has not made. attacks.run, the last phase, calls it when this
+    /// process may not take the attacks' lock.
+    pub fn fromBootRest(p: *Posture) !void {
+        if (!p.cache) return;
+        next: for (p.bootChecks()) |c| {
+            for (p.checks.items) |made| if (std.mem.eql(u8, made.id, c.id)) continue :next;
+            try p.checks.append(p.gpa, try p.cached(c));
+        }
+    }
+
+    fn cached(p: *Posture, c: Check) !Check {
+        var copy = c;
+        copy.name = try p.gpa.print("{s} (cached)", .{c.name});
+        copy.cached = true;
+        return copy;
+    }
+
+    /// bootChecks returns boot's report's checks (service_json), or none.
+    /// /run is a tmpfs, so the report is this boot's; only root writes
+    /// /run/werewolf, and no root session may, as slot-keep relies on too.
+    fn bootChecks(p: *Posture) []const Check {
+        if (p.boot == null) p.boot = parseBoot(p.gpa, p.read(service_json)) catch &.{};
+        return p.boot.?;
+    }
+
     pub fn report(p: *Posture) !Report {
         const uts = std.posix.uname();
         const os_release = p.read("/etc/os-release");
@@ -526,6 +583,7 @@ pub const Posture = struct {
             .dev = p.dev,
             .allow = try p.allowances(),
             .summary = .{},
+            .tpm = p.tpm,
             .checks = p.checks.items,
         };
         for (p.checks.items) |c| switch (c.result) {
@@ -886,6 +944,16 @@ pub const Posture = struct {
 };
 
 const max_evidence = 16 << 20;
+
+/// parseBoot returns the checks of a report posture wrote as JSON.
+fn parseBoot(gpa: Allocator, json: []const u8) ![]const Check {
+    const Saved = struct { checks: []const Check };
+    const saved = try std.json.parseFromSliceLeaky(Saved, gpa, json, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+    return saved.checks;
+}
 
 // Mutable evidence may have been replaced with a FIFO or device. Keep procfs
 // streaming reads, but never wait for a writer or consume a device as text.
@@ -2315,4 +2383,68 @@ test prettyName {
     try testing.expectEqualStrings("Wolfi", prettyName("ID=wolfi\nPRETTY_NAME=Wolfi\n"));
     try testing.expectEqualStrings("Linux", prettyName("PRETTY_NAME=\"\"\n"));
     try testing.expectEqualStrings("Linux", prettyName(""));
+}
+
+test "a check this process cannot make takes boot's result, marked cached" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const inbound: Check = .{
+        .id = "network-inbound",
+        .area = "network",
+        .name = "Unsolicited traffic dropped",
+        .why = "unsolicited packets are dropped",
+        .how = "the policy-routing rules",
+        .result = .pass,
+        .detail = "arriving: dropped unless declared",
+    };
+    const attack: Check = .{
+        .id = "processes-leash-attack",
+        .area = "processes",
+        .name = "A leashed service stays on its leash",
+        .why = "a service reaches only what it names",
+        .how = "a leashed probe",
+        .result = .fail,
+    };
+    // As serve writes it.
+    const json = try std.json.Stringify.valueAlloc(gpa, Report{
+        .time = "2026-10-24T00:00:00Z",
+        .os = "Werewolf",
+        .host = "werewolf",
+        .kernel = "7.2",
+        .root = true,
+        .summary = .{},
+        .tpm = .{ .anchor = "aa", .pcr11 = "bb" },
+        .checks = &.{ inbound, attack },
+    }, json_options);
+    var p: Posture = .{
+        .io = testing.io,
+        .gpa = gpa,
+        .root = true,
+        .boot = try parseBoot(gpa, json),
+    };
+    var skipped = inbound;
+    skipped.result = .skip;
+    skipped.detail = "this process may not open netlink";
+    try p.fromBoot(skipped);
+    try testing.expectEqual(Result.pass, p.checks.items[0].result);
+    try testing.expectEqualStrings("Unsolicited traffic dropped (cached)", p.checks.items[0].name);
+    try testing.expect(p.checks.items[0].cached.?);
+    // Boot's report lacks it, or --no-cache: the skip itself.
+    var ipv6 = skipped;
+    ipv6.id = "network-ipv6";
+    try p.fromBoot(ipv6);
+    try testing.expectEqual(Result.skip, p.checks.items[1].result);
+    try testing.expectEqual(null, p.checks.items[1].cached);
+    p.cache = false;
+    try p.fromBoot(skipped);
+    try testing.expectEqual(Result.skip, p.checks.items[2].result);
+    try p.fromBootRest();
+    try testing.expectEqual(3, p.checks.items.len);
+    // What boot made and this run has not: the attack, cached.
+    p.cache = true;
+    try p.fromBootRest();
+    try testing.expectEqual(4, p.checks.items.len);
+    try testing.expectEqualStrings("processes-leash-attack", p.checks.items[3].id);
+    try testing.expect(p.checks.items[3].cached.?);
 }

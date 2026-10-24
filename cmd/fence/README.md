@@ -11,10 +11,11 @@ init installs the seal, starts the mount broker, DHCP renewal and stage0's
 deadman outside fence's domain, then execs `fence runit`. DHCP keeps its
 CAP_NET_ADMIN and packet socket; services inherit fence's restrictions.
 fence reads `/usr/share/werewolf/net`, compiled from form.yaml's `net`, and
-the detected resolvers: one entry per line, numbers only, `all` for every user.
+the detected resolvers: one entry per line, numbers only, `all` for every user;
+a `connect` or `lookup` user may be a range, `FIRST-LAST` (`:people`).
     listen tcp 22
     listen tcp 5432 loopback
-    connect 207 tcp 443 public
+    connect 65536-1073741823 tcp 443 public
     connect 208 tcp 32402 loopback
     listen 207 udp 5353 lan
     connect 207 udp 5353 lan

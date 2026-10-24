@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Account access requires an explicit opt-in and must survive test failures."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
+import subprocess
+
+loader = importlib.machinery.SourceFileLoader('cloud_bootstrap_test', 'test/check-gcp-bootstrap')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as temporary:
+    for enabled, explicit, failure in [(False, False, None), (True, False, None),
+                                       (False, True, None), (False, True, 'body'),
+                                       (False, True, 'enable')]:
+        state = dict(enabled=enabled)
+        calls = []
+        def api(service, command):
+            assert service == 'ec2'
+            calls.append(command)
+            if command == 'enable-serial-console-access':
+                state['enabled'] = True
+                if failure == 'enable':
+                    raise RuntimeError('lost enable response')
+            elif command == 'disable-serial-console-access':
+                state['enabled'] = False
+            return json.dumps(dict(SerialConsoleAccessEnabled=state['enabled']))
+        failed = False
+        try:
+            with module.aws_serial_access(api, Path(temporary), explicit):
+                if failure == 'body':
+                    raise RuntimeError('launch or enrollment failed')
+        except RuntimeError:
+            failed = True
+        assert failed == (not enabled and not explicit or failure is not None)
+        assert state['enabled'] == enabled, (enabled, explicit, failure, calls)
+        assert ('enable-serial-console-access' in calls) == (explicit and not enabled)
+        assert ('disable-serial-console-access' in calls) == (explicit and not enabled)
+print('pass   AWS console: explicit opt-in, existing access retained, failures restore disabled access')
+
+for scan_succeeds in (False, True):
+    for matches in (False, True):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            discovered = b'gateway.example ssh-rsa public-fixture\n'
+            def command(args, **kwargs):
+                if args[0] == 'ssh-keyscan':
+                    return subprocess.CompletedProcess(args, 0 if scan_succeeds else 1,
+                                                       discovered if scan_succeeds else b'', b'')
+                if args[0] == 'ssh':
+                    assert not scan_succeeds and '-i' not in args
+                    for option in ('PreferredAuthentications=none', 'PubkeyAuthentication=no',
+                                   'PasswordAuthentication=no', 'KbdInteractiveAuthentication=no',
+                                   'IdentityAgent=none', 'UpdateHostKeys=no'):
+                        assert option in args, args
+                    (work / 'gateway-discovered').write_bytes(discovered)
+                    return subprocess.CompletedProcess(args, 255, b'', b'no authentication offered')
+                assert args[:2] == ['ssh-keygen', '-lf'], args
+                fingerprint = 'dXwn5ma/xadVMeBZGEru5l2gx+yI5LDiJaLUcz0FMmw' if matches else 'another-key'
+                return subprocess.CompletedProcess(args, 0, ('2048 SHA256:' + fingerprint + ' gateway (RSA)').encode(), b'')
+            failed = False
+            with patch.object(module.subprocess, 'run', side_effect=command):
+                try:
+                    module.aws_gateway_pin(work, 'gateway.example')
+                except RuntimeError:
+                    failed = True
+            assert failed != matches
+            assert (work / 'gateway-known-hosts').exists() == matches
+print('pass   AWS gateway: discovery offers no credentials; only the published fingerprint is admitted')

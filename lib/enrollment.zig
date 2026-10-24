@@ -81,12 +81,26 @@ pub fn exchange(
     if (mode == .recovery) {
         var target: tpm.Device = .{ .io = io, .file = file };
         defer std.crypto.secureZero(u8, &target.response);
+        // A provider can reopen the volatile platform hierarchy at every
+        // boot. Close that reset path before inspecting incomplete ownership;
+        // this changes neither credentials nor the retirement journal.
+        try target.disablePlatform();
         _ = try target.incomplete(key);
     } else try device.fresh();
     _ = try bootstrap.policy(try device.pcr11());
     try output.writeStreamingAll(io, ready_tag);
     var tag: [8]u8 = undefined;
-    try readExact(io, input, &tag);
+    // A console opened after boot may have missed readiness. A bounded,
+    // public knock can repeat it only before accepting the challenge; it
+    // never restarts attestation, capsule activation or an enrollment.
+    var knocks: u8 = 0;
+    while (true) {
+        try readExact(io, input, &tag);
+        if (!std.mem.eql(u8, &tag, "WWHELLO1")) break;
+        if (knocks == 8) return error.BadEnrollmentFrame;
+        knocks += 1;
+        try output.writeStreamingAll(io, ready_tag);
+    }
     if (!std.mem.eql(u8, &tag, challenge_tag)) return error.BadEnrollmentFrame;
     var raw: [128]u8 = undefined;
     try readExact(io, input, &raw);

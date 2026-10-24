@@ -69,6 +69,51 @@ const Publisher = struct {
 
 pub const Reuse = enum { miss, running, configure };
 
+fn requireImport(
+    definition: @import("boot-config.zig").Definition,
+    mode: import_disk.Mode,
+    why: *howl.Why,
+) !void {
+    for (definition.imports) |allowed| {
+        if (std.mem.eql(u8, allowed, @tagName(mode))) return;
+    }
+    return why.refuse("{s} does not support {s} imports", .{ definition.form, @tagName(mode) });
+}
+
+test "sync and retained retry require the signed form's explicit support" {
+    const t = std.testing;
+    const io = t.io;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nonce: [8]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const name = try a.print("ww-import-mode-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    const dir = try howl.machineDir(a, name);
+    defer Dir.cwd().deleteTree(io, dir) catch {};
+    try Dir.cwd().createDirPath(io, try a.print("{s}/authority", .{dir}));
+    const profile: Profile = .{
+        .spec = .{ .form = "database", .arch = .aarch64 },
+        .managed = false,
+        .configuration = .{ .form = "database", .interface = .{ .files = &.{}, .settings = &.{} }, .ports = &.{}, .dhcp = false, .ssh = .disabled, .lima_managed = false, .imports = &.{"init"} },
+    };
+    try Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/authority/profile.json", .{dir}), .data = try std.json.Stringify.valueAlloc(a, profile, .{}) });
+    var why: howl.Why = .{};
+    var closed = profile.configuration.?;
+    closed.imports = &.{};
+    try t.expectError(error.Refused, requireImport(closed, .init, &why));
+    try t.expectError(error.Refused, requireImport(closed, .sync, &why));
+    try t.expectError(error.Refused, importData(io, a, &.{ name, "nonexistent-source" }, .sync, &why));
+    const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const record: import_disk.Record = .{ .id = id, .digest = id, .mode = .sync, .sha256 = id, .bytes = 1 };
+    const history = try a.print("{s}/imports/{s}", .{ dir, id });
+    try Dir.cwd().createDirPath(io, history);
+    try Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/record.json", .{history}), .data = try std.json.Stringify.valueAlloc(a, record, .{}) });
+    try t.expectError(error.Refused, importData(io, a, &.{ name, "--retry", id }, .init, &why));
+    try t.expectError(error.Refused, importData(io, a, &.{ name, "--retry", "../../escape" }, .init, &why));
+    try t.expectError(error.FileNotFound, Dir.cwd().access(io, try a.print("{s}/import.json", .{dir}), .{}));
+}
+
 /// Stage immutable data for the next cold start. A running VM retains its
 /// already-open disk; no guest disk, enrollment, or live service is modified.
 pub fn importData(
@@ -117,14 +162,9 @@ pub fn importData(
     else
         null;
     if (retained) |record| if (!std.mem.eql(u8, record.id, args[2])) return error.ImportRecord;
-    const wanted = @tagName(if (retained) |record| record.mode else mode);
-    const supported = for (definition.imports) |allowed| {
-        if (std.mem.eql(u8, allowed, wanted)) break true;
-    } else false;
-    if (!supported) return why.refuse(
-        "{s} does not support {s} imports",
-        .{ profile.spec.form, wanted },
-    );
+    const operation = if (retained) |record| record.mode else mode;
+    try requireImport(definition, operation, why);
+    const wanted = @tagName(operation);
     if (profile.provider != .lima and profile.provider != .qemu)
         return why.refuse("imports currently support protected Lima and QEMU machines", .{});
     const record = retained orelse try import_disk.prepare(io, gpa, args[1], dir, mode, why);
@@ -1278,6 +1318,9 @@ pub fn create(
         Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
     }
     if (o.import_dir) |source| {
+        const request = o.boot_image orelse return error.MissingBootImage;
+        const manifest = try @import("boot-image.zig").admitHead(io, gpa, request, arch);
+        try requireImport(manifest.configuration orelse return error.MissingBootConfiguration, .init, why);
         // Validate and snapshot before enrolling a new guest. A repeat may
         // reuse the same input, but never replace an existing import implicitly.
         try import_disk.write(io, gpa, source, at, why);

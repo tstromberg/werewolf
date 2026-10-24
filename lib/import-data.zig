@@ -10,7 +10,7 @@ pub const Mode = enum { init, sync };
 pub const manifest = ".werewolf-import";
 const state_name = ".werewolf-import-state";
 const part_name = ".werewolf-import-part";
-pub const Header = struct { version: u8 = 1, mode: Mode, id: []const u8 };
+pub const Header = struct { version: u8 = 1, mode: Mode, id: []const u8, digest: []const u8 };
 pub const Totals = struct { files: u64 = 0, bytes: u64 = 0 };
 
 pub fn syncDir(io: Io, dir: Dir) !void {
@@ -46,7 +46,7 @@ pub fn readHeader(io: Io, a: Allocator, dir: Dir) !?Header {
         try reader.interface.allocRemaining(a, .limited(1024)),
         .{},
     );
-    if (h.version != 1 or !validId(h.id)) return error.ImportManifest;
+    if (h.version != 1 or !validId(h.id) or !validId(h.digest)) return error.ImportManifest;
     return h;
 }
 
@@ -305,7 +305,7 @@ pub fn apply(io: Io, a: Allocator, source: Dir, target: Dir) !void {
         return err;
     const header = (try readHeader(io, a, source)) orelse return error.ImportManifest;
     const actual = try identity(io, a, source, header.mode);
-    if (!mem.eql(u8, &actual, header.id)) return error.ImportChecksum;
+    if (!mem.eql(u8, &actual, header.digest)) return error.ImportChecksum;
     target.createDir(
         io,
         state_name,
@@ -377,8 +377,11 @@ const Fixture = struct {
         f.tmp.cleanup();
     }
     fn seal(f: Fixture, a: Allocator, mode: Mode) ![64]u8 {
-        const id = try identity(std.testing.io, a, f.source, mode);
-        try writeHeader(std.testing.io, a, f.source, manifest, .{ .mode = mode, .id = &id });
+        const digest = try identity(std.testing.io, a, f.source, mode);
+        var nonce: [32]u8 = undefined;
+        try std.testing.io.randomSecure(&nonce);
+        const id = std.fmt.bytesToHex(nonce, .lower);
+        try writeHeader(std.testing.io, a, f.source, manifest, .{ .mode = mode, .id = &id, .digest = &digest });
         return id;
     }
 };
@@ -399,9 +402,11 @@ test "init imports nested files and completed replay preserves user changes" {
     defer f.deinit();
     try f.source.createDir(io, "Movies", .default_dir);
     try f.source.writeFile(io, .{ .sub_path = "Movies/a.ts", .data = "original" });
+    try f.source.writeFile(io, .{ .sub_path = ".metadata", .data = "hidden input" });
     _ = try f.seal(a, .init);
     try apply(io, a, f.source, f.target);
     try expectText(a, f.target, "Movies/a.ts", "original");
+    try expectText(a, f.target, ".metadata", "hidden input");
     const st = try f.target.statFile(io, "Movies/a.ts", .{});
     try std.testing.expectEqual(@as(u32, 0o644), st.permissions.toMode() & 0o7777);
     try f.target.writeFile(io, .{ .sub_path = "Movies/a.ts", .data = "local edit" });
@@ -446,6 +451,23 @@ test "init refuses a nonempty target and never truncates an existing file" {
     _ = try f.seal(a, .init);
     try std.testing.expectError(error.ImportDestinationNotEmpty, apply(io, a, f.source, f.target));
     try expectText(a, f.target, "movie", "valuable original");
+}
+
+test "a new sync repairs destination drift even when the source checksum is unchanged" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.source.writeFile(io, .{ .sub_path = "movie", .data = "source" });
+    const first = try f.seal(a, .sync);
+    try apply(io, a, f.source, f.target);
+    try f.target.writeFile(io, .{ .sub_path = "movie", .data = "local drift" });
+    const second = try f.seal(a, .sync);
+    try std.testing.expect(!mem.eql(u8, &first, &second));
+    try apply(io, a, f.source, f.target);
+    try expectText(a, f.target, "movie", "source");
 }
 
 test "source links and destination directory links cannot escape their roots" {
@@ -582,8 +604,39 @@ test "mode changes require a new snapshot identity" {
     defer f.deinit();
     try f.source.writeFile(io, .{ .sub_path = "movie", .data = "new" });
     const id = try f.seal(a, .init);
-    try writeHeader(io, a, f.source, manifest, .{ .mode = .sync, .id = &id });
+    const digest = try identity(io, a, f.source, .init);
+    try writeHeader(io, a, f.source, manifest, .{ .mode = .sync, .id = &id, .digest = &digest });
     try std.testing.expectError(error.ImportChecksum, apply(io, a, f.source, f.target));
+}
+
+test "opening a FIFO as input refuses without blocking" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    if (linux.errno(linux.mknodat(f.source.handle, "fifo", linux.S.IFIFO | 0o600, 0)) != .SUCCESS) return error.MakeFifo;
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return error.Fork;
+    if (pid == 0) {
+        const file = openRegular(io, f.source, "fifo") catch |err| linux.exit_group(if (err == error.ImportFileType) 0 else 2);
+        file.close(io);
+        linux.exit_group(1);
+    }
+    var status: i32 = 0;
+    for (0..100) |_| {
+        const result = linux.waitpid(@intCast(pid), &status, linux.W.NOHANG);
+        if (result == pid) {
+            const termination: u32 = @bitCast(status);
+            if (!linux.W.IFEXITED(termination) or linux.W.EXITSTATUS(termination) != 0) return error.FifoAccepted;
+            return;
+        }
+        if (linux.errno(result) != .SUCCESS) return error.Wait;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    _ = linux.kill(@intCast(pid), linux.SIG.KILL);
+    _ = linux.waitpid(@intCast(pid), &status, 0);
+    return error.FifoBlocked;
 }
 
 test "process death during a limited write preserves the old file and resumes the same batch" {
@@ -611,8 +664,10 @@ test "process death during a limited write preserves the old file and resumes th
     var status: i32 = 0;
     if (linux.errno(linux.waitpid(@intCast(pid), &status, 0)) != .SUCCESS) return error.Wait;
     // Either EFBIG was returned or SIGXFSZ killed the writer before cleanup.
-    if (status == 0 or (linux.W.IFEXITED(@bitCast(status)) and
-        linux.W.EXITSTATUS(@bitCast(status)) != 42)) return error.WriteLimitNotExercised;
+    const termination: u32 = @bitCast(status);
+    const limited = (linux.W.IFEXITED(termination) and linux.W.EXITSTATUS(termination) == 42) or
+        (linux.W.IFSIGNALED(termination) and linux.W.TERMSIG(termination) == linux.SIG.XFSZ);
+    if (!limited) return error.WriteLimitNotExercised;
     try expectText(a, f.target, "movie", "old complete file");
     try expectText(a, f.target, state_name ++ "/pending", &id);
     try apply(io, a, f.source, f.target);

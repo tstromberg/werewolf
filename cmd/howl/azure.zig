@@ -24,11 +24,14 @@ pub const Place = struct { group: []const u8, location: []const u8 };
 /// place returns az's default resource group and its location. werewolf
 /// does not create the group; place refuses with how to set one.
 pub fn place(io: Io, gpa: Allocator, why: *howl.Why) !Place {
-    const group = call(
-        io,
-        gpa,
-        &.{ "az", "config", "get", "defaults.group", "--query", "value", "-o", "tsv" },
-    );
+    const group: Result = if (howl.environ.get("AZURE_DEFAULTS_GROUP")) |name|
+        .{ .ok = true, .out = name }
+    else
+        call(
+            io,
+            gpa,
+            &.{ "az", "config", "get", "defaults.group", "--query", "value", "-o", "tsv" },
+        );
     if (!group.ok or group.out.len == 0) return why.refuse(
         "--on azure: no default resource group: az group create -n werewolf -l LOCATION, then " ++
             "az configure --defaults group=werewolf",
@@ -231,14 +234,48 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
+}
+
+/// The machine's firmware owner is distinct from its code-signing authority.
+/// Bootstrap images contain no workload and are validated by their own layout.
+pub fn ensureImageWithAuthority(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    authority: ?[]const u8,
+    kind: @import("secureboot.zig").BootKind,
+    why: *howl.Why,
+) ![]const u8 {
+    if (kind == .bootstrap) {
+        if (authority == null) return error.MissingBootstrapAuthority;
+        _ = try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
+    } else _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     const der = try Dir.cwd().readFileAlloc(
         io,
         try gpa.print("{s}/boot.der", .{work}),
         gpa,
         .limited(8192),
     );
-    const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
+    var digest = try images.sha256(io, disk);
+    const owner = if (authority) |cert| blk: {
+        const path = try gpa.print("{s}/owner.der", .{work});
+        try howl.run(io, why, &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path });
+        const bytes = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
+        const owner_key = try @import("tpm").firmware.certificateKey(bytes);
+        const code_key = try @import("tpm").firmware.certificateKey(der);
+        if (std.mem.eql(u8, owner_key.modulus, code_key.modulus)) return error.SharedBootAuthority;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(&digest);
+        hash.update(bytes);
+        digest = std.fmt.bytesToHex(hash.finalResult(), .lower);
+        break :blk bytes;
+    } else der;
+    const name = try images.name(gpa, form, arch, &digest);
     const gallery = try std.mem.replaceOwned(u8, gpa, name, "-", "_");
     if (ask(io, gpa, p, &.{
         "sig",            "image-version",           "show",
@@ -247,7 +284,7 @@ pub fn ensureImage(
         "--query",        "id",                      "-o",
         "tsv",
     })) |id| {
-        try verifyGallery(io, gpa, id, der, why);
+        try verifyGallery(io, gpa, id, der, owner, why);
         howl.say(io, "image {s}: there already", .{name});
         return id;
     }
@@ -295,11 +332,12 @@ pub fn ensureImage(
     }, why);
     const version = try gpa.print("{s}/images/boot/versions/1.0.0", .{gallery_id});
     const body = try gpa.print("{s}/gallery-version.json", .{work});
-    try Dir.cwd().writeFile(io, .{ .sub_path = body, .data = try galleryVersion(
+    try Dir.cwd().writeFile(io, .{ .sub_path = body, .data = try galleryVersionWithAuthority(
         gpa,
         p.location,
         source_id,
         der,
+        owner,
     ) });
     defer Dir.cwd().deleteFile(io, body) catch {};
     try howl.run(io, why, try galleryRequest(gpa, version, body));
@@ -315,7 +353,7 @@ pub fn ensureImage(
             "tsv",
         }) orelse "";
         if (std.mem.eql(u8, state, "Succeeded")) {
-            try verifyGallery(io, gpa, version, der, why);
+            try verifyGallery(io, gpa, version, der, owner, why);
             return version;
         }
         if (std.mem.eql(u8, state, "Failed")) return why.refuse(
@@ -352,10 +390,11 @@ fn verifyGallery(
     gpa: Allocator,
     version: []const u8,
     der: []const u8,
+    owner: []const u8,
     why: *howl.Why,
 ) !void {
     const read = call(io, gpa, try galleryReadRequest(gpa, version));
-    if (!read.ok or !try galleryEnrolled(gpa, read.out, der)) return why.refuse(
+    if (!read.ok or !try galleryEnrolledWithAuthority(gpa, read.out, der, owner)) return why.refuse(
         "Azure did not retain the disk's exact PK/KEK/db enrollment; refusing to launch its VM",
         .{},
     );
@@ -373,6 +412,10 @@ fn galleryReadRequest(gpa: Allocator, version: []const u8) ![]const []const u8 {
 }
 
 fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
+    return galleryEnrolledWithAuthority(gpa, text, der, der);
+}
+
+fn galleryEnrolledWithAuthority(gpa: Allocator, text: []const u8, der: []const u8, owner: []const u8) !bool {
     const Key = struct { type: []const u8, value: []const []const u8 };
     const Record = struct {
         signatureTemplateNames: []const []const u8,
@@ -389,10 +432,14 @@ fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
     defer gpa.free(encoded);
     const certificate = std.base64.standard.Encoder.encode(encoded, der);
+    const owner_encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(owner.len));
+    defer gpa.free(owner_encoded);
+    const owner_certificate = std.base64.standard.Encoder.encode(owner_encoded, owner);
     for ([_]Key{
         r.additionalSignatures.pk, r.additionalSignatures.kek[0], r.additionalSignatures.db[0],
-    }) |key| if (!std.mem.eql(u8, key.type, "x509") or key.value.len != 1 or
-        !std.mem.eql(u8, key.value[0], certificate)) return false;
+    }, [_][]const u8{ owner_certificate, owner_certificate, certificate }) |key, expected|
+        if (!std.mem.eql(u8, key.type, "x509") or key.value.len != 1 or
+            !std.mem.eql(u8, key.value[0], expected)) return false;
     return true;
 }
 
@@ -402,9 +449,22 @@ fn galleryVersion(
     source: []const u8,
     der: []const u8,
 ) ![]const u8 {
+    return galleryVersionWithAuthority(gpa, location, source, der, der);
+}
+
+fn galleryVersionWithAuthority(
+    gpa: Allocator,
+    location: []const u8,
+    source: []const u8,
+    der: []const u8,
+    owner: []const u8,
+) ![]const u8 {
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
     const cert = std.base64.standard.Encoder.encode(encoded, der);
     const signature = .{ .type = "x509", .value = [_][]const u8{cert} };
+    const owner_encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(owner.len));
+    const owner_cert = std.base64.standard.Encoder.encode(owner_encoded, owner);
+    const owner_signature = .{ .type = "x509", .value = [_][]const u8{owner_cert} };
     return std.json.Stringify.valueAlloc(gpa, .{
         .location = location,
         .properties = .{
@@ -416,8 +476,8 @@ fn galleryVersion(
             .securityProfile = .{ .uefiSettings = .{
                 .signatureTemplateNames = .{"NoSignatureTemplate"},
                 .additionalSignatures = .{
-                    .pk = signature,
-                    .kek = .{signature},
+                    .pk = owner_signature,
+                    .kek = .{owner_signature},
                     .db = .{signature},
                 },
             } },
@@ -570,6 +630,9 @@ pub fn create(
     }
     if (!enabled)
         _ = try need(io, gpa, p, &.{ "vm", "boot-diagnostics", "enable", "-n", name }, why);
+    // The isolated enrollment agent intentionally never announces workload
+    // readiness. Its caller owns observation and any explicit diagnostic reboot.
+    if (std.mem.eql(u8, form, "tpm-bootstrap")) return;
     if (try awaitUpWithin(io, gpa, p, name, "", first_boot_seconds) != .late) return;
     howl.say(io, "{s}: its first boot was not watched from the start; restarting it once", .{name});
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
@@ -765,6 +828,23 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, vm: ?Vm, why: 
 }
 
 const testing = std.testing;
+test "gallery preserves separate firmware owner and code-signing trust" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const code = &[_]u8{ 1, 2, 3 };
+    const owner = &[_]u8{ 4, 5, 6 };
+    const body = try galleryVersionWithAuthority(gpa, "westus2", "/disks/bootstrap", code, owner);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer parsed.deinit();
+    const uefi = parsed.value.object.get("properties").?.object.get("securityProfile").?.object.get("uefiSettings").?;
+    const text = try std.json.Stringify.valueAlloc(gpa, uefi, .{});
+    try testing.expect(try galleryEnrolledWithAuthority(gpa, text, code, owner));
+    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, owner, code));
+    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, code, code));
+    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, &.{7}, owner));
+}
+
 test "gallery enrollment replaces default trust with the disk certificate" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

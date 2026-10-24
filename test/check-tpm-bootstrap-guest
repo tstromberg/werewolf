@@ -241,6 +241,9 @@ def exercise(args, private):
     def deliver(expected_pcr, filename='reset.credentials'):
         if recv(channel, 8) != b'WWREADY1':
             raise RuntimeError('recovery bootstrap did not become ready')
+        channel.sendall(b'WWHELLO1')
+        if recv(channel, 8) != b'WWREADY1':
+            raise RuntimeError('recovery readiness could not be repeated before attestation')
         raw = machine + hashlib.sha256(factory).digest() + expected_pcr + os.urandom(32)
         (root / 'context').write_bytes(raw)
         channel.sendall(b'WWCHAL01' + raw)
@@ -275,7 +278,7 @@ def exercise(args, private):
         stop(backend)
         if args.recovery_cuts:
             shutil.copytree(root / 'nv', root / 'pristine')
-        cases = ['wrong-machine', 'wrong-pcr', 'foreign-signer', 'bad-aead', 'unsigned', 'oversized']
+        cases = ['knock-overflow', 'wrong-machine', 'wrong-pcr', 'foreign-signer', 'bad-aead', 'unsigned', 'oversized']
         if args.unmeasured_stub:
             cases += ['unmeasured']
         cases += ['valid', 'replay', 'missing-tpm', 'tampered']
@@ -287,7 +290,16 @@ def exercise(args, private):
                 raw = bytes([raw[0] ^ 1]) + raw[1:]
             if kind == 'wrong-pcr':
                 raw = raw[:64] + bytes([pcr[0] ^ 1]) + raw[65:]
-            if kind in ['replay', 'missing-tpm', 'tampered', 'unmeasured']:
+            if kind == 'knock-overflow':
+                if recv(channel, 8) != b'WWREADY1':
+                    raise RuntimeError('bootstrap did not become ready')
+                for _ in range(8):
+                    channel.sendall(b'WWHELLO1')
+                    if recv(channel, 8) != b'WWREADY1':
+                        raise RuntimeError('bootstrap readiness retry failed')
+                channel.sendall(b'WWHELLO1')
+                refused(kind, b'BadEnrollmentFrame')
+            elif kind in ['replay', 'missing-tpm', 'tampered', 'unmeasured']:
                 reason = {'replay': b'TpmAlreadyProvisioned', 'missing-tpm': b'MissingBootstrapDevice',
                           'tampered': b'access denied', 'unmeasured': b'UnmeasuredBoot'}[kind]
                 refused(kind, reason)
@@ -295,6 +307,11 @@ def exercise(args, private):
                 (root / 'context').write_bytes(raw)
                 if recv(channel, 8) != b'WWREADY1':
                     raise RuntimeError('bootstrap did not become ready for a fresh challenge')
+                if kind == 'valid':
+                    for _ in range(8):
+                        channel.sendall(b'WWHELLO1')
+                        if recv(channel, 8) != b'WWREADY1':
+                            raise RuntimeError('bounded readiness retries failed before valid attestation')
                 channel.sendall(b'WWCHAL01' + raw)
                 if kind in ['wrong-machine', 'wrong-pcr']:
                     refused(kind, b'WrongFactoryBootState' if kind == 'wrong-machine' else b'WrongBootstrapMeasurement')

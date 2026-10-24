@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Live GCP rootless bootstrap: provider EK, measured proof, encrypted enrollment.
+"""Live provider enrollment and optional GCP factory boot with both SSH accounts.
 
-This is an enrollment test, not a qualification of protected workload deployment.
+This internal path does not qualify normal create, downloads or update transport.
 Only howl launches/removes the VM. No --disable option or plaintext guest credential.
 """
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
 import os
 from pathlib import Path
 import select
+import signal
 import shutil
 import struct
 import subprocess
@@ -39,19 +41,79 @@ def exact(process, count, timeout=90):
     return bytes(result)
 
 
+@contextlib.contextmanager
+def aws_serial_access(call, work, explicit_enable):
+    """Never enable account access by default; undo even an uncertain enable."""
+    restore = False
+    try:
+        before = json.loads(call('ec2', 'get-serial-console-access-status'))
+        (work / 'serial-access-before.json').write_text(json.dumps(before))
+        if before.get('SerialConsoleAccessEnabled') is not True:
+            if not explicit_enable:
+                raise RuntimeError('AWS Serial Console is disabled; enabling account access requires explicit --enable-aws-serial-console')
+            restore = True
+            call('ec2', 'enable-serial-console-access')
+        yield
+    finally:
+        if restore:
+            call('ec2', 'disable-serial-console-access')
+            after = json.loads(call('ec2', 'get-serial-console-access-status'))
+            (work / 'serial-access-after.json').write_text(json.dumps(after))
+            if after.get('SerialConsoleAccessEnabled') is not False:
+                raise RuntimeError('AWS Serial Console access did not return to disabled')
+            print('pass   AWS account Serial Console access restored to disabled', flush=True)
+
+
+def aws_gateway_pin(work, gateway):
+    keys = subprocess.run(['ssh-keyscan', '-T', '10', gateway], capture_output=True, timeout=30)
+    raw = keys.stdout
+    if keys.returncode or not raw:
+        # Some gateway/OpenSSH combinations refuse ssh-keyscan. Discover only
+        # public host material with every credential authentication disabled;
+        # no serial session is authorized until the independent pin matches.
+        discovery = work / 'gateway-discovered'
+        subprocess.run(['ssh', '-T', '-F', '/dev/null', '-o', 'ConnectTimeout=10',
+            '-o', 'BatchMode=yes', '-o', 'PreferredAuthentications=none',
+            '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=no',
+            '-o', 'KbdInteractiveAuthentication=no', '-o', 'IdentityAgent=none',
+            '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UpdateHostKeys=no',
+            '-o', 'GlobalKnownHostsFile=/dev/null', '-o', 'UserKnownHostsFile=' + str(discovery),
+            'host-key-probe@' + gateway], capture_output=True, timeout=20)
+        raw = discovery.read_bytes() if discovery.is_file() else b''
+    pinned = []
+    for line in raw.splitlines(keepends=True):
+        if not line.strip() or line.startswith(b'#'):
+            continue
+        (work / 'gateway-candidate').write_bytes(line)
+        fingerprint = run('ssh-keygen', '-lf', work / 'gateway-candidate').decode().split()[1]
+        if fingerprint == 'SHA256:dXwn5ma/xadVMeBZGEru5l2gx+yI5LDiJaLUcz0FMmw':
+            pinned.append(line)
+    if not pinned:
+        raise RuntimeError('AWS serial gateway host key does not match the published fingerprint')
+    (work / 'gateway-known-hosts').write_bytes(b''.join(pinned))
+
+
 def exercise(args):
     os.umask(0o077)
+    cloud = args.provider
+    amazon = cloud == 'aws'
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%y%m%d%H%M%S')
-    name = 'ww-gcp-enroll-' + stamp
-    work = Path('build/check/gcp-bootstrap-' + stamp).resolve()
+    name = 'ww-' + cloud + '-enroll-' + stamp
+    work = Path('build/check/' + cloud + '-bootstrap-' + stamp).resolve()
     work.mkdir(parents=True, mode=0o700)
-    print('GCP bootstrap evidence: ' + str(work), flush=True)
+    print(cloud.upper() + ' bootstrap evidence: ' + str(work), flush=True)
     howl, codec, policy = map(lambda p: str(Path(p).resolve()), (args.howl, args.codec, args.policy))
-    project = run('gcloud', 'config', 'get-value', 'project').decode().strip()
+    project = '' if amazon else run('gcloud', 'config', 'get-value', 'project').decode().strip()
     zone = os.environ.get('CLOUDSDK_COMPUTE_ZONE') or 'us-central1-a'
     os.environ['CLOUDSDK_COMPUTE_ZONE'] = zone
     def g(*words):
         return run('gcloud', '--quiet', '--project', project, *words)
+    region = run('aws', 'ec2', 'describe-availability-zones', '--query',
+                 'AvailabilityZones[0].RegionName', '--output', 'text').decode().strip() if amazon else ''
+    if amazon and region != 'us-east-1':
+        raise RuntimeError('AWS serial host key is pinned only for this test region: us-east-1')
+    def a(*words):
+        return run('aws', '--region', region, '--output', 'json', *words)
     run('openssl', 'genrsa', '-out', work / 'permit.key', '2048')
     run('openssl', 'pkey', '-in', work / 'permit.key', '-pubout', '-out', work / 'permit.pub')
     run('openssl', 'req', '-new', '-x509', '-key', work / 'permit.key', '-subj',
@@ -107,31 +169,83 @@ def exercise(args):
         '--publisher', work / 'permit.pub', '--factory', work / 'factory.permit',
         '--boot-key', Path(args.boot_key).resolve(), '--boot-cert', Path(args.boot_cert).resolve(),
         '--ipe-key', Path(args.ipe_key).resolve(), '--ipe-cert', Path(args.ipe_cert).resolve(),
-        '--output', image, '--codec', codec, '--channel', 'serial')
+        '--output', image, '--codec', codec, '--channel', 'serial-console' if amazon else 'serial',
+        *(['--loader', Path(args.loader).resolve()] if args.loader else []),
+        *(['--earlycon'] if args.earlycon else []),
+        *(['--aws-boot-trace'] if args.aws_boot_trace else []))
     shutil.copyfile(args.boot_cert, image / 'boot.crt')
     info = json.loads((image / 'manifest.json').read_text())
     process = None
+    prefix = None
     cloud_image = None
+    access = contextlib.ExitStack()
     try:
-        launch = run(howl, '_cloud-bootstrap', 'gcp', name, image, work / 'permit.crt', timeout=600)
+        if amazon:
+            gateway = 'serial-console.ec2-instance-connect.us-east-1.aws'
+            aws_gateway_pin(work, gateway)
+            access.enter_context(aws_serial_access(a, work, args.enable_aws_serial_console))
+        launch = run(howl, '_cloud-bootstrap', cloud, name, image, work / 'permit.crt',
+                     *([args.size] if args.size else []), timeout=900)
         (work / 'launch.log').write_bytes(launch)
         cloud_image = launch.decode().strip().split('\t')[1]
-        run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
-        identity = json.loads((work / 'identity.json').read_text())
-        (work / 'ek.pem').write_text(identity['endorsement_key'])
+        resource = launch.decode().strip().split('\t')[2] if amazon else name
+        if amazon:
+            until = time.monotonic() + 120
+            while time.monotonic() < until:
+                try:
+                    state = json.loads(a('ec2', 'describe-instances', '--instance-ids', resource))
+                except RuntimeError as failure:
+                    # A new run-instances ID can precede EC2's read index.
+                    # Retry only that documented transient, never a changed
+                    # identity or failed attestation, and keep the bound.
+                    if 'InvalidInstanceID.NotFound' not in str(failure):
+                        raise
+                    time.sleep(2)
+                    continue
+                if state['Reservations'][0]['Instances'][0]['State']['Name'] == 'running':
+                    break
+                time.sleep(2)
+            else:
+                raise RuntimeError('AWS bootstrap did not enter running state')
+        if not amazon:
+            run(howl, '_cloud-ek', cloud, resource, work / 'identity.json')
+            identity = json.loads((work / 'identity.json').read_text())
+            (work / 'ek.pem').write_text(identity['endorsement_key'])
         run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', work / 'serial.key')
         serial_log = (work / 'serial-client.log').open('wb')
-        process = subprocess.Popen(['gcloud', '--quiet', '--project', project, 'compute',
+        if amazon:
+            # Pin AWS's published us-east-1 serial gateway fingerprint before
+            # authentication. Never replace this check with TOFU or -o ...=no.
+            a('ec2-instance-connect', 'send-serial-console-ssh-public-key', '--instance-id', resource,
+              '--serial-port', '0', '--ssh-public-key', 'file://' + str(work / 'serial.key.pub'))
+            serial_args = ['ssh', '-v', '-T', '-i', str(work / 'serial.key'), '-o', 'IdentitiesOnly=yes',
+                           '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                           '-o', 'UserKnownHostsFile=' + str(work / 'gateway-known-hosts'),
+                           '-o', 'ConnectTimeout=15', '-o', 'EscapeChar=none', resource + '.port0@' + gateway]
+        else:
+            serial_args = ['gcloud', '--quiet', '--project', project, 'compute',
             'connect-to-serial-port', name, '--zone', zone,
             '--port', '2',
             '--extra-args', 'replay-from=0,on-dropped-output=disconnect,max-connections=1',
-            '--ssh-key-file', str(work / 'serial.key')],
+            '--ssh-key-file', str(work / 'serial.key')]
+        process = subprocess.Popen(serial_args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=serial_log, bufsize=0)
         # Discard bounded gateway/replay output only before readiness;
         # proof frames themselves must be exact.
         prefix = bytearray()
-        ready_until = time.monotonic() + 90
+        ready_until = time.monotonic() + args.ready_timeout
+        knocks = 0
+        last_knock = 0
         for _ in range(1 << 20):
+            if amazon and not select.select([process.stdout], [], [], 1)[0]:
+                if time.monotonic() >= ready_until:
+                    raise RuntimeError('AWS bootstrap readiness timed out')
+                if knocks < 8 and time.monotonic() - last_knock >= 10:
+                    process.stdin.write(b'WWHELLO1')
+                    process.stdin.flush()
+                    knocks += 1
+                    last_knock = time.monotonic()
+                continue
             prefix += exact(process, 1, timeout=max(0, ready_until - time.monotonic()))
             if prefix.endswith(b'WWREADY1'):
                 break
@@ -151,6 +265,21 @@ def exercise(args):
             if not 0 < size <= 1024:
                 raise RuntimeError('invalid GCP attestation field length')
             (work / field).write_bytes(exact(process, size))
+        if amazon:
+            # Nitro may publish its EK only after the bootstrap creates it.
+            # Challenge/proof bytes are public; independently authenticate
+            # the provider EK before verifying them or sending any capsule.
+            until = time.monotonic() + 90
+            while True:
+                try:
+                    run(howl, '_cloud-ek', cloud, resource, work / 'identity.json')
+                    break
+                except RuntimeError as failure:
+                    if 'InstanceTpmEkPub.NotFound' not in str(failure) or time.monotonic() >= until:
+                        raise
+                    time.sleep(2)
+            identity = json.loads((work / 'identity.json').read_text())
+            (work / 'ek.pem').write_text(identity['endorsement_key'])
         proof = [work / field for field in ('context', 'ek.pem', 'ek.pub', 'ak.pub', 'quote.msg', 'quote.sig')]
         run(codec, 'verify', *proof)
         for offset in (0, 32, 64, 96):
@@ -161,8 +290,9 @@ def exercise(args):
                                       *map(str, proof[1:])], capture_output=True, timeout=20)
             if refused.returncode == 0:
                 raise RuntimeError('GCP quote accepted a foreign machine, factory, PCR or challenge')
+        print('pass   ' + cloud.upper() + ' provider-pinned measured attestation; foreign contexts refused', flush=True)
         # Re-read the provider pin before delivering any reset authority.
-        run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
+        run(howl, '_cloud-ek', cloud, resource, work / 'identity.json')
         run(codec, 'wrap', *proof, work / 'reset.credentials', work / 'permit.key',
             work / 'permit.pub', work / 'capsule')
         capsule = (work / 'capsule').read_bytes()
@@ -172,15 +302,16 @@ def exercise(args):
             raise RuntimeError('GCP bootstrap protected readback failed')
         until = time.monotonic() + 90
         while time.monotonic() < until:
-            console = subprocess.run([howl, 'console', name, '--on', 'gcp'], capture_output=True, timeout=20)
+            console = subprocess.run([howl, 'console', name, '--on', cloud], capture_output=True, timeout=20)
             (work / 'console.log').write_bytes(console.stdout)
             if b'TpmAlreadyProvisioned' in console.stdout:
                 break
             time.sleep(2)
         else:
             raise RuntimeError('GCP bootstrap did not refuse enrollment replay after reboot')
+        print('pass   ' + cloud.upper() + ' protected enrollment and reboot replay refusal', flush=True)
         result = dict(
-            provider='gcp', instance=name, instance_id=identity['instance_id'],
+            provider=cloud, instance=name, instance_id=identity['instance_id'],
             bootstrap_pcr11=info['pcr11'], anchor=info['anchor'],
             attestation='verified against provider EK', reset_authority='host custody',
             workload_handover=False, replay='refused', foreign_context='refused', status='pass')
@@ -194,7 +325,7 @@ def exercise(args):
             (config / 'users').write_text('t admin ' + public)
             (config / 'authorized_keys').write_text(public)
             (config / 'hostname').write_text(name + '\n')
-            handover = run(howl, '_cloud-workload', 'gcp', name, work / 'request.json',
+            handover = run(howl, '_cloud-workload', cloud, name, work / 'request.json',
                            work / 'factory.permit', work / 'permit.crt', work / 'identity.json',
                            config, timeout=900)
             (work / 'handover.log').write_bytes(handover)
@@ -235,39 +366,69 @@ def exercise(args):
                 any(checks.get(check) != 'pass' for check in required) or
                 report.get('known') is None or report['known']['unexpected'] or report['known']['now_passing']):
                 raise RuntimeError('GCP runtime posture failed: ' + str(report.get('known')))
-            run(howl, '_cloud-ek', 'gcp', name, work / 'identity.json')
+            run(howl, '_cloud-ek', cloud, resource, work / 'identity.json')
             result.update(workload_handover=True, ssh=logins, posture='pass')
-            print('pass   GCP prod-ssh: same enrolled TPM, verified root, Secure Boot, IPE, seal, fence and both SSH accounts', flush=True)
-        (work / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-        print('pass   GCP bootstrap: provider-pinned TPM, measured quote, encrypted credentials and protected readback', flush=True)
+            print('pass   ' + cloud.upper() + ' prod-ssh: same enrolled TPM, verified root, Secure Boot, IPE, seal, fence and both SSH accounts', flush=True)
+        print('pass   ' + cloud.upper() + ' bootstrap: provider-pinned TPM, measured quote, encrypted credentials and protected readback', flush=True)
+    except BaseException as failure:
+        if prefix is not None:
+            (work / 'boot.log').write_bytes(prefix)
+        (work / 'failure.json').write_text(json.dumps(dict(
+            provider=cloud, instance=name, status='fail',
+            error=type(failure).__name__, reason=str(failure)), indent=2) + '\n')
+        raise
     finally:
-        machine_dir = Path('build/machines') / name
-        record = machine_dir / 'image'
-        if cloud_image is None and record.is_file():
-            cloud_image = record.read_text().strip()
-        extra_images = [(machine_dir / 'workload-image').read_text().strip()] if (machine_dir / 'workload-image').is_file() else []
-        extra_disks = [(machine_dir / entry).read_text().strip() for entry in ('bootstrap-disk', 'workload-disk')
-                       if (machine_dir / entry).is_file()]
-        if process:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
-            serial_log.close()
-        console = subprocess.run([howl, 'console', name, '--on', 'gcp'], capture_output=True)
-        (work / 'console.log').write_bytes(console.stdout)
-        subprocess.run([howl, 'delete', name, '--on', 'gcp'], check=True)
-        for disk in extra_disks:
-            deletion = subprocess.run(['gcloud', '--quiet', '--project', project, 'compute', 'disks',
-                                      'delete', disk, '--zone', zone], capture_output=True, text=True, timeout=90)
-            if deletion.returncode and 'was not found' not in deletion.stderr:
-                raise RuntimeError('GCP disk cleanup failed: ' + deletion.stderr)
-        if cloud_image:
-            g('compute', 'images', 'delete', cloud_image)
-        for image in extra_images:
-            g('compute', 'images', 'delete', image)
+        try:
+            machine_dir = Path('build/machines') / name
+            record = machine_dir / 'image'
+            if cloud_image is None and record.is_file():
+                cloud_image = record.read_text().strip()
+            extra_images = [(machine_dir / 'workload-image').read_text().strip()] if (machine_dir / 'workload-image').is_file() else []
+            extra_disks = [(machine_dir / entry).read_text().strip() for entry in ('bootstrap-disk', 'workload-disk')
+                           if (machine_dir / entry).is_file()]
+            if process:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                serial_log.close()
+            console = subprocess.run([howl, 'console', name, '--on', cloud], capture_output=True, timeout=30)
+            (work / 'console.log').write_bytes(console.stdout)
+            if amazon and (machine_dir / 'instance').is_file():
+                firmware = subprocess.run(['aws', '--region', region, 'ec2', 'get-instance-uefi-data',
+                    '--instance-id', (machine_dir / 'instance').read_text().strip(), '--output', 'json'],
+                    capture_output=True, timeout=30)
+                if firmware.returncode == 0:
+                    (work / 'firmware-state.json').write_bytes(firmware.stdout)
+            subprocess.run([howl, 'delete', name, '--on', cloud], check=True, timeout=300)
+            if amazon:
+                for volume in extra_disks:
+                    deletion = subprocess.run(['aws', '--region', region, 'ec2', 'delete-volume',
+                                              '--volume-id', volume], capture_output=True, text=True, timeout=90)
+                    if deletion.returncode and 'InvalidVolume.NotFound' not in deletion.stderr:
+                        raise RuntimeError('AWS volume cleanup failed: ' + deletion.stderr)
+                for ami in ([cloud_image] if cloud_image else []) + extra_images:
+                    description = json.loads(a('ec2', 'describe-images', '--image-ids', ami))
+                    snapshots = [disk['Ebs']['SnapshotId'] for disk in description['Images'][0]['BlockDeviceMappings'] if 'Ebs' in disk]
+                    a('ec2', 'deregister-image', '--image-id', ami)
+                    for snapshot in snapshots:
+                        a('ec2', 'delete-snapshot', '--snapshot-id', snapshot)
+            else:
+                for disk in extra_disks:
+                    deletion = subprocess.run(['gcloud', '--quiet', '--project', project, 'compute', 'disks',
+                                              'delete', disk, '--zone', zone], capture_output=True, text=True, timeout=90)
+                    if deletion.returncode and 'was not found' not in deletion.stderr:
+                        raise RuntimeError('GCP disk cleanup failed: ' + deletion.stderr)
+                if cloud_image:
+                    g('compute', 'images', 'delete', cloud_image)
+                for image in extra_images:
+                    g('compute', 'images', 'delete', image)
+        finally:
+            access.close()
+    result['cleanup'] = 'complete'
+    (work / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
 
 
 if __name__ == '__main__':
@@ -276,8 +437,23 @@ if __name__ == '__main__':
     parser.add_argument('--codec', default='build/host/tpm-bootstrap')
     parser.add_argument('--policy', default='build/host/tpm-policy')
     parser.add_argument('--arch', choices=['aarch64', 'x86_64'], default='aarch64')
+    parser.add_argument('--provider', choices=['gcp', 'aws'], default='gcp')
+    parser.add_argument('--loader', help='optional public EFI boot manager')
+    parser.add_argument('--size', help='explicit provider VM size for this test')
+    parser.add_argument('--earlycon', action='store_true', help='request signed early kernel console diagnostics')
+    parser.add_argument('--aws-boot-trace', action='store_true')
+    parser.add_argument('--ready-timeout', type=int, default=90)
+    parser.add_argument('--enable-aws-serial-console', action='store_true',
+                        help='explicitly enable account-wide console access for the test, then restore disabled access')
     parser.add_argument('--factory-slot')
     parser.add_argument('--workload', help='authenticated prod-ssh boot bundle to test on the same enrolled VM')
     for option in ('kernel', 'agent', 'stub', 'ipe-key', 'ipe-cert', 'boot-key', 'boot-cert'):
         parser.add_argument('--' + option, required=True)
-    exercise(parser.parse_args())
+    args = parser.parse_args()
+    if not 1 <= args.ready_timeout <= 900:
+        parser.error('--ready-timeout must be between 1 and 900 seconds')
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    exercise(args)

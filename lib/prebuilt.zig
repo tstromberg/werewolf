@@ -10,17 +10,19 @@ pub const metadata = "/usr/share/werewolf/image-update";
 pub const max_manifest = 1 << 20;
 pub const max_artifact: u64 = 8 << 30;
 /// Package is an installed package. origin is its source package, or
-/// ORIGIN:VERSION for a rebuild of Wolfi's source (rebuiltFrom), which
+/// ORIGIN:VERSION for the actual upstream source (rebuiltFrom), which
 /// stands for that source in CVE comparisons.
 pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
 /// rebuiltFrom returns ORIGIN:VERSION from provides, the value of an apk
-/// `p:` line, when it names the Wolfi source the package rebuilds, as
-/// glibc-neutered's `wolfi-origin:glibc-2.44:2.44-r8` does; otherwise null.
+/// `p:` line, when it names the source the package builds, as
+/// `upstream-origin:glibc-2.44:2.44-r0`. Accept the historical
+/// wolfi-origin spelling for existing packages too; otherwise return null.
 pub fn rebuiltFrom(provides: []const u8) ?[]const u8 {
     var it = mem.tokenizeScalar(u8, provides, ' ');
     while (it.next()) |p| {
-        const source = mem.cutPrefix(u8, p, "wolfi-origin:") orelse continue;
+        const source = mem.cutPrefix(u8, p, "upstream-origin:") orelse
+            mem.cutPrefix(u8, p, "wolfi-origin:") orelse continue;
         const i = mem.findScalarLast(u8, source, ':') orelse continue;
         if (i > 0 and i + 1 < source.len) return source;
     }
@@ -385,6 +387,7 @@ test rebuiltFrom {
         rebuiltFrom("glibc=2.44-r18 wolfi-origin:glibc-2.44:2.44-r8 so:libc.so.6=6").?,
     );
     try testing.expectEqual(null, rebuiltFrom("so:libc.so.6=6 cmd:ldconfig=2.44-r8"));
+    try testing.expectEqualStrings("python-3.15:3.15.1-r0", rebuiltFrom("upstream-origin:python-3.15:3.15.1-r0").?);
     try testing.expectEqual(null, rebuiltFrom("wolfi-origin:glibc-2.44 wolfi-origin::1"));
 }
 

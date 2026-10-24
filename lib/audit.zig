@@ -81,6 +81,9 @@ pub const Error = error{
     NoAudit,
     /// Refused means no CAP_AUDIT_CONTROL, or the configuration is locked.
     Refused,
+    /// Filtered means this process's seccomp filter refuses netlink, as an
+    /// SSH session's does (forms/sshd's pledge).
+    Filtered,
     /// Failed is any other answer from the kernel.
     Failed,
 };
@@ -186,6 +189,7 @@ fn open() Error!i32 {
     return switch (linux.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .PERM, .ACCES => error.Refused,
+        .NOSYS => error.Filtered,
         else => error.NoAudit,
     };
 }

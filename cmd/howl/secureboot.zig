@@ -7,6 +7,9 @@ const B = @import("build.zig").B;
 const Dir = std.Io.Dir;
 
 pub const Keys = struct { key: []const u8, cert: []const u8 };
+pub const BootKind = enum { workload, bootstrap };
+pub const bootstrap_loader_config = "timeout 0\neditor no\nauto-entries no\nauto-firmware no\n";
+pub const bootstrap_loader_entry = "title Werewolf TPM bootstrap\nuki /EFI/Linux/bootstrap.efi\n";
 
 pub fn signer(
     io: std.Io,
@@ -411,7 +414,26 @@ pub fn bootstrapCertificate(
         ),
         if (arch == .aarch64) "::/EFI/BOOT/BOOTAA64.EFI" else "::/EFI/BOOT/BOOTX64.EFI", binary,
     });
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, binary, gpa, .limited(256 << 20));
+    var bytes = try std.Io.Dir.cwd().readFileAlloc(io, binary, gpa, .limited(256 << 20));
+    if (try uki.section(bytes, ".cmdline") == null) {
+        // Old cloud firmware can require the normal signed boot-manager
+        // path. Admit only its fixed, editor-free bootstrap entry, and
+        // authenticate both executable files against the same code trust.
+        try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", cert, "-in", binary });
+        const esp = try gpa.print("{s}@@1048576", .{raw});
+        for ([_]struct { []const u8, []const u8 }{
+            .{ "::/loader/loader.conf", bootstrap_loader_config },
+            .{ "::/loader/entries/bootstrap.conf", bootstrap_loader_entry },
+        }) |item| {
+            const path = try gpa.print("{s}/verify-bootstrap.conf", .{work});
+            defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+            try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, item[0], path });
+            if (!std.mem.eql(u8, try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024)), item[1]))
+                return error.BadBootstrapImage;
+        }
+        try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, "::/EFI/Linux/bootstrap.efi", binary });
+        bytes = try std.Io.Dir.cwd().readFileAlloc(io, binary, gpa, .limited(256 << 20));
+    }
     const line = try @import("uki").section(
         bytes,
         ".cmdline",

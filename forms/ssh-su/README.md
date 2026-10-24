@@ -18,10 +18,17 @@ users:
 ```
 
 Use the complete public key from an enrolled authenticator. Admin keys are
-authorized for root as well as the named account. The form requires both
-presence and verification for all SSH logins; there is no software-key or
-password fallback. Generate a compatible credential with
+authorized for root as well as the named account. Every SSH login requires
+presence; ed25519 security keys also require verification (PIN or biometric),
+which `sshd: verify-required-keys` names and init writes before each such key.
+There is no software-key or password fallback. Generate a credential with
 `ssh-keygen -t ed25519-sk -O verify-required` on the client.
+
+Apple's Secure Enclave keys (Touch ID, `sc_auth create-ctk-identity -k p-256-ne
+-t bio`, loaded with `ssh-add -K -S /usr/lib/ssh-keychain.dylib`) are P-256
+security keys that cannot report verification, so P-256 keys are held to
+presence alone. macOS software, not the enclave, reports that presence: create
+these keys with `-t bio` so the enclave requires Touch ID for each signature.
 Inherited authentication requirements, including two distinct keys, remain in
 force. Load each required credential into the dedicated agent described below.
 
@@ -75,8 +82,8 @@ Playground includes ssh-su with these explicit local-VM exceptions:
 
 ```yaml
 sshd:
-  pubkey-accepted-algorithms: "-ssh-rsa*"
-  pubkey-auth-options: touch-required
+  pubkey-accepted-algorithms: sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,ssh-ed25519
+  verify-required-keys: none
 ```
 
 Lima must forward a host agent containing a key authorized for root. Lima's
@@ -95,3 +102,5 @@ Use a fresh direct root connection when the original guest session is suspect.
 Only 127.0.0.1 is exempt from SSH source penalties, so failed local attempts do
 not penalty-block other administrators. External penalties and connection
 limits remain enabled; the shared listener can still suffer resource exhaustion.
+All su callers share one source, so at most three can be authenticating at once
+(`PerSourceMaxStartups 3`).

@@ -227,7 +227,7 @@ class IterationInputs(unittest.TestCase):
                 plan['drivers'][0]['user'] = 'gatus'
                 self.assertNotEqual(original, fingerprint())
                 plan['drivers'][0]['user'] = 'root'
-                plan['packages'].append('postgresql-17-client')
+                plan['packages'].append('postgresql-client')
                 self.assertNotEqual(original, fingerprint())
 
     def test_fixture_bytes_refresh_vm_while_adjacent_driver_sources_stay_hot(self):
@@ -446,7 +446,7 @@ class Plans(unittest.TestCase):
 
     def test_greenbone_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
-        self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-17-client'])
+        self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-client'])
         self.assertEqual(next(d for d in plan['drivers'] if d['mode'] == 'manager')['user'], '_oci-gvmd')
 
     def test_config_cannot_replace_context_or_read_arbitrary_host_files(self):

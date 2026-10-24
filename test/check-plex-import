@@ -46,6 +46,7 @@ sshd:
   pubkey-accepted-algorithms: ssh-ed25519
 weaknesses:
   network-no-login: operator SSH in the disposable import fixture
+  network-ssh-security-keys: disposable file key for automated operator SSH
   programs-no-downloaders: SSH test shell tools
   programs-no-interpreters: SSH test shell tools
   programs-no-shell: SSH test shell
@@ -60,14 +61,16 @@ key = work / "ssh.key"
 
 def run(args, label, success=True, timeout=120):
     with (work / (label + ".log")).open("w") as log:
+        # Keep fixture secrets private, but build the image with the same
+        # public directory modes as the other protected VM fixtures.
         result = subprocess.run([str(x) for x in args], stdout=log, stderr=subprocess.STDOUT,
-                                timeout=timeout, check=False)
-    if (result.returncode == 0) != success:
+                                timeout=timeout, check=False, umask=0o022)
+    if success is not None and (result.returncode == 0) != success:
         raise RuntimeError(f"{label}: exit {result.returncode}; see {work / (label + '.log')}")
     return (work / (label + ".log")).read_text(errors="replace")
 
 
-def ssh(command, label, success=True):
+def ssh(command, label, success=True, timeout=120):
     result = subprocess.run(["limactl", "list", name, "--format", "{{.SSHLocalPort}}"],
                             check=True, capture_output=True, text=True)
     port = result.stdout.strip()
@@ -76,20 +79,34 @@ def ssh(command, label, success=True):
     return run(["ssh", "-F", "/dev/null", "-S", "none", "-p", port,
                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={work / 'known_hosts'}",
-                "-i", key, "root@127.0.0.1", command], label, success)
+                "-i", key, "root@127.0.0.1", command], label, success, timeout)
 
 
-def ready(label):
+def ready(label, release=None):
     until = time.monotonic() + 180
     while time.monotonic() < until:
         try:
-            status = json.loads(ssh("test -f /run/svc/plex-media/ready && /usr/bin/import-status", label))
-            if not all(status[k] for k in ("secure_boot", "ipe", "verified_root", "rollback_protected")):
-                raise RuntimeError("missing protected enforcement: " + str(status))
-            return status
+            status = json.loads(ssh("test -f /run/svc/plex-media/ready && /usr/bin/import-status", label, timeout=10))
         except (RuntimeError, ValueError, subprocess.SubprocessError):
             time.sleep(1)
+            continue
+        if not all(status[k] for k in ("secure_boot", "ipe", "verified_root", "rollback_protected")):
+            raise RuntimeError("missing protected enforcement: " + str(status))
+        if status["committed"] and (release is None or status["release"] == release):
+            return status
+        time.sleep(1)
     raise RuntimeError("protected Plex/import fixture did not become ready")
+
+
+def wait_ssh(label):
+    until = time.monotonic() + 60
+    while time.monotonic() < until:
+        try:
+            ssh("true", label, timeout=10)
+            return
+        except (RuntimeError, subprocess.SubprocessError):
+            time.sleep(1)
+    raise RuntimeError("operator SSH did not become ready")
 
 
 def report(label):
@@ -189,11 +206,21 @@ try:
     if initial["tpm_anchor"] != synced["tpm_anchor"]:
         raise RuntimeError("sync changed TPM authority")
     report("sync updates files, keeps destination-only data and retains enrollment")
+    ssh("printf 'destination drift' > /data/svc/plex-media/Movies/title.srt", "introduce-destination-drift")
+    run([howl, "sync", name, source], "stage-identical-source-again", timeout=600)
+    next_id = json.loads((machine / "import.json").read_bytes())["id"]
+    if next_id == sync_id:
+        raise RuntimeError("an explicit sync reused a completed batch ID")
+    sync_id = next_id
+    cold_start("resync")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle'", "resync-repairs-drift")
+    report("a new sync with identical source repairs destination drift")
     # A new init must refuse existing data. Probe the rejected batch directly
     # by restarting the VM, then verify old data and lack of media readiness.
     run([howl, "import", name, source], "stage-conflicting-init", timeout=600)
     run([howl, "stop", name], "conflict-stop")
     run(create, "conflict-create", timeout=1800)
+    wait_ssh("conflict-ssh-ready")
     ssh("test ! -e /run/svc/plex-media/ready && "
         "test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle' && "
         "test -f /data/svc/plex-media/keep.txt", "init-conflict-preserves-data")
@@ -203,7 +230,29 @@ try:
     if restored["tpm_anchor"] != initial["tpm_anchor"]:
         raise RuntimeError("import recovery changed TPM authority")
     report("reselecting the retained completed snapshot recovers normal startup")
+    credentials = machine / "authority/credentials/owner.auth"
+    owner_hash = hashlib.sha256(credentials.read_bytes()).hexdigest()
+    (overlay / "usr/share/werewolf/ab-release").write_text("B\n")
+    run(create, "publish-update", timeout=1800)
+    ssh("/usr/lib/werewolf/slot-update check", "update-check")
+    ssh("/usr/lib/werewolf/slot-update try", "update-try", success=None)
+    updated = ready("updated-ready", release="B")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle' && "
+        "test -f /data/svc/plex-media/keep.txt && test -f /data/svc/plex-media/new.txt", "updated-content")
+    if updated["boot_id"] == restored["boot_id"] or updated["root_hash"] == restored["root_hash"]:
+        raise RuntimeError("A/B update did not boot its new verified root")
+    if hashlib.sha256(credentials.read_bytes()).hexdigest() != owner_hash:
+        raise RuntimeError("image update replaced VM enrollment credentials")
+    report("imported and synced media survive a verified A/B image update")
 finally:
+    info = subprocess.run(["limactl", "list", name, "--json"], capture_output=True, text=True, check=False)
+    if info.returncode == 0 and info.stdout.strip():
+        try:
+            console = Path(json.loads(info.stdout)["dir"]) / "serial.log"
+            if console.exists():
+                shutil.copyfile(console, work / "console.log")
+        except (ValueError, KeyError, OSError):
+            pass
     with (work / "cleanup.log").open("w") as cleanup:
         result = subprocess.run([howl, "delete", name, "--on", "lima"], stdout=cleanup,
                                 stderr=subprocess.STDOUT, timeout=180, check=False)

@@ -657,9 +657,17 @@ test whyNotLeashed {
         "shows no umask",
         whyNotLeashed(ok ++ "Umask:\tx\n", bind, false).?,
     );
-    const sshd = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t4254404ff\nCapEff:\t4254404ff\n" ++
-        "CapBnd:\t4254404ff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    const sshd = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t4004404ed\nCapEff:\t4004404ed\n" ++
+        "CapBnd:\t4004404ed\nCapAmb:\t0\nNoNewPrivs:\t1\n";
     try testing.expectEqual(null, whyNotLeashed(sshd, service.cap.login_set, true));
+    // The set before DAC_OVERRIDE, FSETID, SYS_RESOURCE, SYS_TTY_CONFIG and
+    // AUDIT_WRITE went.
+    const wider = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t4254404ff\nCapEff:\t4254404ff\n" ++
+        "CapBnd:\t4254404ff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    try testing.expectEqualStrings(
+        "has capabilities",
+        whyNotLeashed(wider, service.cap.login_set, true).?,
+    );
     const developer = "Uid:\t0\t0\t0\t0\nCapInh:\t0\nCapPrm:\t100\nCapEff:\t100\n" ++
         "CapBnd:\t100\nCapAmb:\t0\nNoNewPrivs:\t1\n";
     try testing.expectEqual(null, whyNotLeashed(developer, service.cap.developer_login_set, true));

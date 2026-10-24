@@ -32,11 +32,11 @@ HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
 FORM_TOOL = build/host/form
-FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
+FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig lib/people.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
-compose_modules = --dep allow --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
+compose_modules = --dep allow --dep form --dep seal --dep service --dep package --dep people -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
-	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
+	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mpeople=lib/people.zig
 FORM_TOOL_MODULES = --dep form --dep compose -Mroot=tools/form.zig $(call compose_modules,compose)
 COMPOSE_MODULES = $(call compose_modules,root)
 HOWL = build/host/howl
@@ -79,11 +79,15 @@ IPE_KERNEL ?= build/ipe-kernel/$(ARCH)/rootfs.tar
 KERNEL_ROOTFS ?=
 WEREWOLF_IPE_CRT ?=
 WEREWOLF_IPE_KEY ?=
-# What a make-built image is made without, named as howl's --disable takes it
-# (docs/security.md): Secure Boot and the TPM, and IPE unless IPE=1. howl
-# refuses an image that lacks a protection this does not name.
+# Only the caller may opt out of protections. Missing build inputs are a
+# refusal, never consent to synthesize --disable for a legacy test image.
 comma := ,
-DISABLE = secureboot$(comma)tpm$(if $(IPE),,$(comma)ipe)
+DISABLE ?=
+ifneq ($(strip $(DISABLE)),)
+ifeq ($(origin DISABLE),environment)
+$(error DISABLE must be explicit on the make command line, not inherited from the environment)
+endif
+endif
 APP ?=
 DEV ?=
 OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
@@ -109,7 +113,7 @@ install-precommit hooks:
 	@echo "pre-commit installed: test, lint, and a local howl run"
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
-HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) --disable=$(DISABLE) \
+HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) $(if $(DISABLE),--disable=$(DISABLE)) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
@@ -187,7 +191,7 @@ LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
-	--dep service --dep package --dep allow -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
+	--dep service --dep package --dep allow --dep people -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
@@ -356,7 +360,9 @@ _test/local-prerequisites: $(HOWL)
 	python3 test/local-prerequisites
 	python3 test/lima-state $(HOWL)
 	python3 test/build-helper
-_test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
+_test/cloud-enrollment: $(HOWL)
+	python3 test/cloud-enrollment $(HOWL)
+	python3 test/aws-console-access
 _test/local-publisher: $(HOWL) build/host/tpm-policy build/host/form
 	python3 test/local-publisher $(HOWL)
 	python3 test/boot-images $(HOWL)
@@ -445,6 +451,7 @@ check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SY
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
 	@python3 test/howl-protections $(HOWL)
+	@python3 test/howl-make-protections
 	@python3 test/howl-test $(HOWL)
 	@python3 test/howl-ssh $(HOWL)
 	@python3 test/howl-current-user $(HOWL)
@@ -550,7 +557,7 @@ _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
 	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST) \
-		--disable=$(if $(WEREWOLF_BOOT_KEY),tpm,secureboot$(comma)tpm)
+		$(if $(DISABLE),--disable=$(DISABLE))
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
@@ -1006,7 +1013,7 @@ check-gcp check-aws check-azure: check-%:
 # Exercise both checkout builds and published downloads without downgrades.
 .PHONY: check-prod-ssh-clouds
 check-prod-ssh-clouds:
-	@failed=0; for mode in build download; do for cloud in aws azure gcp; do \
+	@failed=0; for cloud in gcp aws azure; do for mode in build download; do \
 		$(MAKE) --no-print-directory check-$$cloud CLOUD_MODE=$$mode || failed=1; \
 	done; done; exit $$failed
 

@@ -1373,6 +1373,12 @@ pub fn takesKeyFiles(gpa: Allocator, forms: []const Form) Error!bool {
     return sshd.takesKeyFiles(try chainSshd(gpa, forms));
 }
 
+/// verifyRequired returns the security key types the chain's sshd:
+/// verify-required-keys names, one a line, or "" (lib/sshd.zig).
+pub fn verifyRequired(gpa: Allocator, forms: []const Form) Error![]const u8 {
+    return sshd.verifyRequired(gpa, try chainSshd(gpa, forms));
+}
+
 /// sshdConfig returns the image's sshd_config.d/form.conf from the chain's
 /// sshd: keywords, a later form's value replacing an earlier one, or "" for
 /// none. It fails unless the chain has the sshd or bastion form to read it.
@@ -2669,7 +2675,13 @@ test "operator forms include ssh-su with production and local policies" {
         try testing.expectEqual(local, try takesKeyFiles(gpa, forms));
         const config = try sshdConfig(gpa, forms, &f);
         try testing.expect(mem.indexOf(u8, config, "AllowAgentForwarding yes\n") != null);
-        try testing.expectEqual(!local, mem.indexOf(u8, config, "verify-required") != null);
+        // Verification is per key, so Apple's P-256 keys still log in.
+        try testing.expect(mem.indexOf(u8, config, "PubkeyAuthOptions touch-required\n") != null);
+        try testing.expect(mem.indexOf(u8, config, "verify-required") == null);
+        try testing.expectEqualStrings(
+            if (local) "" else "sk-ssh-ed25519@openssh.com\n",
+            try verifyRequired(gpa, forms),
+        );
     }
 }
 
@@ -2693,7 +2705,7 @@ test "su preserves stronger authentication and requires an explicit software-key
         .{
             "local-su",
             "base: software\nwith: [ssh-su]\nsshd:\n" ++
-                "  pubkey-accepted-algorithms: -ssh-rsa*\n  pubkey-auth-options: touch-required\n",
+                "  pubkey-accepted-algorithms: -ssh-rsa*\n  verify-required-keys: none\n",
         },
     }) |entry| {
         const dir = try gpa.print("forms/{s}", .{entry[0]});
@@ -2715,16 +2727,17 @@ test "su preserves stronger authentication and requires an explicit software-key
         try testing.expect(!try takesKeyFiles(gpa, forms));
         const config = try sshdConfig(gpa, forms, &f);
         try testing.expect(mem.indexOf(u8, config, "AuthenticationMethods ") == null);
-        try testing.expect(mem.indexOf(
-            u8,
-            config,
-            "PubkeyAuthOptions touch-required verify-required\n",
-        ) != null);
+        try testing.expect(mem.indexOf(u8, config, "PubkeyAuthOptions touch-required\n") != null);
+        try testing.expectEqualStrings(
+            "sk-ssh-ed25519@openssh.com\n",
+            try verifyRequired(gpa, forms),
+        );
     }
     const local = try chain(io, gpa, tmp.dir, "local-su", &f);
     try testing.expect(try takesKeyFiles(gpa, local));
     const config = try sshdConfig(gpa, local, &f);
     try testing.expect(mem.indexOf(u8, config, "PubkeyAuthOptions touch-required\n") != null);
+    try testing.expectEqualStrings("", try verifyRequired(gpa, local));
 }
 
 test "sshd and bastion: what the image's sshd is given, along the chain" {

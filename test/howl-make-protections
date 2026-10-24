@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Legacy image recipes must never manufacture user consent to disable protection."""
+import os
+import shutil
+import subprocess
+
+make = shutil.which('gmake') or shutil.which('make')
+env = {key: value for key, value in os.environ.items()
+       if key not in ('DISABLE', 'MAKEFLAGS', 'MFLAGS', 'MAKEOVERRIDES')}
+for target in ('image', '_dist-form'):
+    for ipe in ('', '1'):
+        command = [make, '--no-print-directory', '-n', target, 'FORM=prod-ssh', 'IPE=' + ipe]
+        protected = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        assert protected.returncode == 0, protected.stderr
+        assert '--disable' not in protected.stdout, protected.stdout
+        explicit = subprocess.run(command + ['DISABLE=secureboot,tpm,ipe'], env=env,
+                                  capture_output=True, text=True, timeout=30)
+        assert explicit.returncode == 0, explicit.stderr
+        assert '--disable=secureboot,tpm,ipe' in explicit.stdout, explicit.stdout
+        inherited = subprocess.run(command, env=dict(env, DISABLE='secureboot,tpm,ipe'),
+                                   capture_output=True, text=True, timeout=30)
+        assert inherited.returncode != 0 and 'not inherited from the environment' in inherited.stderr
+print('pass   Make image defaults preserve protection; only explicit command-line opt-outs are passed to howl')

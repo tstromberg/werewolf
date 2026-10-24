@@ -68,7 +68,8 @@ It grants local resolver transport automatically; HTTP egress still needs `conne
 Unknown types/modifiers fail the build. No process-supplied namespace authorizes DNS.
 Allow service-scoped lookup grants for native/OCI services; reject shared service UIDs.
 Whole-service replacement replaces DNS grants too; do not merge inherited grants back.
-Non-service users use `net: lookup USER PATTERN [TYPE...|all] [unfiltered]`. Reject
+Non-service users use `net: lookup USER|:people PATTERN [TYPE...|all] [unfiltered]`;
+`:people` is one label for every person's uid range (lib/people.zig ids). Reject
 legacy bare `dns USER`/`connect: dns` at migration; never silently grant `*`.
 
 `dns-direct: true` is a service-local exception for a DNS server with its own

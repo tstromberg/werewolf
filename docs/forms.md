@@ -19,6 +19,12 @@ Native test authors can reuse that channel with [`howl test
 
 ## The runtime forms
 
+Forms declare supported data operations with `imports: [init]` (the default),
+`imports: [init, sync]`, or `imports: []`. The declaration is part of the signed
+deployment definition; the form supplies its confined importer. Plex supports
+initial media loading and non-deleting file sync. Database forms retain their
+initialization-specific behavior. See [data import and sync](design/data-import.md).
+
 `nginx`, `php`, `node`, `python`, `ruby` and `jre` are each `prod` plus one runtime from
 Wolfi, as Chainguard's images are, and no application. `nginx` and `php` serve the site
 laid in their html root; the others start nothing until a form on them brings a service.
@@ -132,12 +138,12 @@ installs the SSH client and keeps the existing listener. Production requires FID
 presence and verification. See [su](../forms/ssh-su/README.md) for client setup and the
 explicit software-key policy for local VMs. People are never in the image: howl packs
 them into the boot config, init makes each an account (uid mapped from its name into
-`[65536, 2^30)`, home on `/data`) and writes its keys where sshd looks. Names and IDs
-stay reserved in `/data/.werewolf/identities` after removal; cloud metadata locks absent
-people and reapplies active keys as they change. Services have distinct users;
-components of one application may share one with `shared-user: true` on each, which
-shares files, processes and network policy while Landlock, seccomp and limits stay per
-service.
+`[65536, 2^30)`, NoCloud's kept in 500-60000; home on `/data`) and writes its keys where
+sshd looks; `net` grants them all as `:people`. Names and IDs stay reserved in
+`/data/.werewolf/identities` after removal; cloud metadata locks absent people and
+reapplies active keys as they change. Services have distinct users; components of one
+application may share one with `shared-user: true` on each, which shares files,
+processes and network policy while Landlock, seccomp and limits stay per service.
 
 When `users` is absent, `howl run` and `howl create` default to adding the current
 local user with the public keys in `~/.ssh` accepted by the form's SSH policy.

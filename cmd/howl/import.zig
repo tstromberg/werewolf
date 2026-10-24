@@ -11,6 +11,7 @@ pub const label = "werewolf-import";
 pub const Record = struct {
     version: u8 = 1,
     id: []const u8,
+    digest: []const u8,
     mode: Mode,
     sha256: []const u8,
     bytes: u64,
@@ -18,7 +19,7 @@ pub const Record = struct {
 
 pub fn path(a: Allocator, dir: []const u8, record: Record) ![]const u8 {
     if (record.version != 1 or !data.validId(record.id) or
-        !data.validId(record.sha256)) return error.ImportRecord;
+        !data.validId(record.sha256) or !data.validId(record.digest)) return error.ImportRecord;
     return a.print("{s}/imports/{s}/disk.img", .{ dir, record.id });
 }
 
@@ -87,27 +88,24 @@ pub fn activate(io: Io, a: Allocator, dir: []const u8, record: Record, replace: 
 }
 
 pub fn write(io: Io, a: Allocator, src: []const u8, dir: []const u8, why: *Why) !void {
-    const record = try prepare(io, a, src, dir, .init, why);
-    if (try existing(io, a, dir) != null) {
-        const active = try recordAt(io, a, dir, "import.json");
-        if (std.mem.eql(u8, active.id, record.id)) return;
-        return why.refuse(
-            "a different import already exists; use howl import or howl sync for the next cold " ++
-                "start",
-            .{},
-        );
+    const active = recordAt(io, a, dir, "import.json") catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (active) |record| {
+        _ = try validate(io, a, dir, record);
     }
+    const record = try prepareWithReuse(io, a, src, dir, .init, active, why);
+    if (active != null) return;
+    if (try existing(io, a, dir) != null) return error.LegacyImportExists;
     try activate(io, a, dir, record, false);
 }
 
-pub fn prepare(
-    io: Io,
-    a: Allocator,
-    src: []const u8,
-    dir: []const u8,
-    mode: Mode,
-    why: *Why,
-) !Record {
+pub fn prepare(io: Io, a: Allocator, src: []const u8, dir: []const u8, mode: Mode, why: *Why) !Record {
+    return prepareWithReuse(io, a, src, dir, mode, null, why);
+}
+
+fn prepareWithReuse(io: Io, a: Allocator, src: []const u8, dir: []const u8, mode: Mode, retained: ?Record, why: *Why) !Record {
     const given = if (std.mem.trimEnd(u8, src, "/").len == 0)
         "/"
     else
@@ -128,7 +126,8 @@ pub fn prepare(
         const parent = try Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(dir) orelse ".", a);
         break :blk try a.print("{s}/{s}", .{ parent, std.fs.path.basename(dir) });
     };
-    if (source_info.kind == .directory and (std.mem.eql(u8, source_path, destination_path) or
+    if (source_info.kind == .directory and (std.mem.eql(u8, source_path, "/") or
+        std.mem.eql(u8, source_path, destination_path) or
         (std.mem.startsWith(u8, destination_path, source_path) and
             destination_path[source_path.len] == '/')))
         return why.refuse("import destination is inside its source", .{});
@@ -159,14 +158,16 @@ pub fn prepare(
         totals = try data.snapshotFile(io, from, stage, name);
     }
     if (totals.files == 0) return error.ImportEmpty;
-    const id = try data.identity(io, a, stage, mode);
+    const digest = try data.identity(io, a, stage, mode);
+    if (retained) |record| {
+        if (record.mode == mode and std.mem.eql(u8, record.digest, &digest)) return record;
+        return why.refuse("a different import is already selected; use howl import or howl sync explicitly", .{});
+    }
+    var batch_nonce: [32]u8 = undefined;
+    try io.randomSecure(&batch_nonce);
+    const id = std.fmt.bytesToHex(batch_nonce, .lower);
     const home = try a.print("{s}/imports/{s}", .{ dir, id });
-    if (recordAt(io, a, home, "record.json")) |cached| {
-        if (!std.mem.eql(u8, cached.id, &id) or cached.mode != mode) return error.ImportRecord;
-        _ = try validate(io, a, dir, cached);
-        return cached;
-    } else |err| if (err != error.FileNotFound) return err;
-    try data.writeHeader(io, a, stage, data.manifest, .{ .mode = mode, .id = &id });
+    try data.writeHeader(io, a, stage, data.manifest, .{ .mode = mode, .id = &id, .digest = &digest });
     try stage.setFilePermissions(
         io,
         data.manifest,
@@ -215,6 +216,7 @@ pub fn prepare(
     const hash = std.fmt.bytesToHex(try data.fileHash(io, f), .lower);
     const record: Record = .{
         .id = try a.dupe(u8, &id),
+        .digest = try a.dupe(u8, &digest),
         .mode = mode,
         .sha256 = try a.dupe(u8, &hash),
         .bytes = (try f.stat(io)).size,
@@ -292,10 +294,9 @@ test "snapshot staging is recursive, immutable, repeatable and private" {
         @as(u32, 0o600),
         (try Dir.cwd().statFile(io, image, .{})).permissions.toMode() & 0o7777,
     );
-    try testing.expectEqualStrings(
-        record.id,
-        (try prepare(io, a, f.source, f.machine, .init, &why)).id,
-    );
+    const repeated = try prepare(io, a, f.source, f.machine, .init, &why);
+    try testing.expectEqualStrings(record.digest, repeated.digest);
+    try testing.expect(!std.mem.eql(u8, record.id, repeated.id));
     try write(io, a, f.source, f.machine, &why); // Same create is idempotent.
     try tmp.dir.writeFile(io, .{ .sub_path = "source/movie.ts", .data = "changed" });
     try testing.expectError(error.Refused, write(io, a, f.source, f.machine, &why));
@@ -335,6 +336,7 @@ test "source aliases, recursion into output and reserved names are refused" {
     const f = try importFixture(io, a, &tmp);
     var why: Why = .{};
     try tmp.dir.symLink(io, "source", "alias", .{ .is_directory = true });
+    try testing.expectError(error.Refused, prepare(io, a, "/", f.machine, .init, &why));
     const alias = try a.print("{s}/alias/", .{std.fs.path.dirname(f.source).?});
     try testing.expectError(error.ImportFileType, prepare(io, a, alias, f.machine, .init, &why));
     try testing.expectError(

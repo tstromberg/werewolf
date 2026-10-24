@@ -90,11 +90,19 @@ the host key with an authentication-free SSH handshake. GCP opens TCP 22 to
 the current public IP when no Howl SSH firewall rule exists. See
 [su](../../forms/ssh-su/README.md).
 
-**Second create.** The machine keeps its disk and takes the new config; another form,
-`--app`, or `--import` is refused. `howl run` reuses matching protected inputs and
-resumes a stopped VM; changed inputs replace it. `--import DIR` is a read-only disk the
-form reads once, while its data is first made ([data.md](../../docs/data.md)); a cloud
-cannot attach it. Progress goes to stderr and the machine record to stdout.
+**Second create.** The machine keeps its disk and takes the new config. Protected
+machines admit a repeated `--import DIR` only when it matches the selected init
+snapshot; use `howl import NAME DIR` to select new initial data, or
+`howl sync NAME DIR` to add and replace files without deleting destination-only
+data. The form must support the requested mode. Both commands can stage while the
+VM runs; application waits for the next full stop/start through Howl. A guest
+reboot alone does not switch the disk. Initial import refuses a populated
+destination. These commands currently support protected local Lima and QEMU;
+cloud attachment is unavailable. See [data import](../../docs/design/data-import.md)
+for recovery and durability guarantees.
+
+`howl run` reuses matching protected inputs and resumes a stopped VM; changed
+inputs replace it. Progress goes to stderr and the machine record to stdout.
 
 ## Drawbacks
 

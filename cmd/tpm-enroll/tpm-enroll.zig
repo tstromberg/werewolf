@@ -99,11 +99,13 @@ fn openChannel(io: std.Io, gpa: std.mem.Allocator) !std.Io.File {
         error.FileNotFound => "virtio",
         else => return err,
     };
-    if (std.mem.eql(u8, choice, "serial")) {
+    if (std.mem.eql(u8, choice, "serial") or std.mem.eql(u8, choice, "serial-console")) {
         // Only an immutable, signed initramfs can select serial transport.
         // GCP exposes a second PL011 on Arm and a second UART on x86.
         // Keep kernel/audit output on the first port. Neither runs a getty.
-        const device = if (@import("builtin").cpu.arch == .aarch64)
+        const device = if (std.mem.eql(u8, choice, "serial-console"))
+            "/dev/ttyS0"
+        else if (@import("builtin").cpu.arch == .aarch64)
             "/dev/ttyAMA1"
         else
             "/dev/ttyS1";

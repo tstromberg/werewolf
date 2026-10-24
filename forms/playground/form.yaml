@@ -3,25 +3,31 @@
 # security keys, and bash, for Lima's readiness probes, so Lima manages it.
 base: prod
 
-# Root, who logs in, may look up any name, of any type unwound forwards;
-# every lookup is audited, and DNS past unwound stays closed.
+# Those who log in, root and people (:people, Lima's login among them),
+# may look up any name, of any type unwound forwards, and reach SSH and
+# the web's usual ports anywhere; every lookup is audited, and DNS past
+# unwound stays closed.
 net:
   - lookup root * all unfiltered
+  - lookup :people * all unfiltered
+  - connect root tcp/22 tcp/80 tcp/443 tcp/8000 tcp/8080
+  - connect :people tcp/22 tcp/80 tcp/443 tcp/8000 tcp/8080
 
 packages:
   - bash
 
-# SSH-backed su, taking key files too: Lima's own, and
-# whatever ~/.ssh holds (OpenSSH's defaults, less RSA over SHA-1).
+# SSH-backed su, taking ed25519 key files too: Lima's own, and ~/.ssh's.
+# Security keys are touched, never required to verify.
 with: [ssh-su]
 sshd:
-  pubkey-accepted-algorithms: "-ssh-rsa*"
-  pubkey-auth-options: touch-required
+  pubkey-accepted-algorithms: sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,ssh-ed25519
+  verify-required-keys: none
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers and HTTPS remain restricted
+  network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers remain restricted
+  network-root-https-arbitrary: root may reach SSH, HTTP and HTTPS anywhere (tcp/22, 80, 443, 8000, 8080), to try things out
   network-ssh-config: forwarded agents provide fresh authentication for su
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys

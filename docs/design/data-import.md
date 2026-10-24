@@ -10,7 +10,7 @@ at `/run/werewolf/import`. A confined application importer decides how to use it
 There are two operations:
 
 ```sh
-howl create movies --with plex --build --import ./media CONFIG...
+howl create movies --with plex --build --config ./config --import ./media
 howl import movies ./media
 howl sync movies ./media
 ```
@@ -56,19 +56,25 @@ point-in-time snapshot. Quiesce writers when consistency across files matters.
 Sources and outputs must not overlap: staging inside the source would otherwise
 recursively import its own scratch directory or VM disks.
 
-The snapshot identity hashes the mode, sorted relative names, entry types and
-file contents. A small `.werewolf-import` manifest contains version 1, mode and
-identity. Howl builds a new filesystem from these staged regular files. It does
-not accept an arbitrary filesystem image as a volume to mount: an input image
-file is itself copied as ordinary data.
+The content checksum hashes the mode, sorted relative names, entry types and
+file contents. Each explicit import or sync also gets a securely random batch
+ID. A small `.werewolf-import` manifest contains version 1, mode, batch ID and
+content checksum. A reboot replays the same batch; a new sync can repair a
+changed destination even when its source checksum is unchanged. Howl builds a
+new filesystem from these staged regular files. It does not accept an arbitrary
+filesystem image as a volume to mount: an input image file is itself copied as
+ordinary data.
 
-An installed snapshot lives at `imports/IDENTITY/disk.img`, with a private
-`record.json` recording its mode, byte length and SHA-256. The image and record
-are synced before their directory is installed with a non-replacing rename.
+An installed snapshot lives at `imports/BATCH-ID/disk.img`, with a private
+`record.json` recording its batch ID, content checksum, mode, byte length and
+image SHA-256. The image and record are synced before their directory is installed
+with a non-replacing rename.
 The private `import.json` selection is replaced atomically and its parent synced.
-A failed or repeated build never truncates an existing artifact. Identical input
-and mode reuse the recorded snapshot. An ordinary repeated `create --import`
-may reuse the same init snapshot but cannot implicitly select different input.
+A failed or repeated build never truncates an existing artifact. An ordinary
+repeated `create --import` reuses the selected init batch when its content
+checksum matches; it cannot implicitly select different input. Explicit
+import/sync commands create new batches. `--retry` reselects the original batch
+without rebuilding it.
 
 Previous snapshots are retained for recovery. Before attachment, Howl requires an
 ordinary image file with the recorded length and digest. Missing, truncated, substituted
@@ -104,12 +110,12 @@ untrusted input. A privileged malicious host remains outside this boundary.
 
 `plex-media` owns `/data/svc/plex-media` and alone writes imported media. Plex
 and the separate transcoder retain read access. The importer verifies the
-manifest and complete source identity before changing destination files.
+manifest and complete source checksum before changing destination files.
 
 A new init refuses any existing destination data. Before installing files, the
-importer durably records the snapshot identity under the private
+importer durably records the batch ID under the private
 `.werewolf-import-state` directory and holds an exclusive lock. An interrupted
-operation can resume only with that same identity. It cannot silently mix an
+operation can resume only with that same batch ID. It cannot silently mix an
 unfinished batch with a different snapshot. A completed snapshot is not reapplied
 on reboot, so replay cannot undo local changes.
 
@@ -151,8 +157,8 @@ The shared import tests cover init conflicts, recursive copying, completed
 replay, interrupted retries, pending-batch conflicts, checksum and mode changes,
 source links, destination links, hard links, stale temporaries, type conflicts,
 atomic file replacement, unchanged inodes and destination-only preservation.
-Host tests build real ext4 artifacts, check private permissions and deterministic
-identity, retain previous artifacts, reject overlap and reserved names, and
+Host tests build real ext4 artifacts, check private permissions and content
+checksums, retain previous artifacts, reject overlap and reserved names, and
 prove failed staging or corruption cannot silently replace usable input.
 
 `test/check-plex-import` builds a disposable protected Plex fixture with
@@ -161,6 +167,8 @@ verified root and TPM rollback protection; read-only import mount flags; media
 ownership; refusal to map imported native code; decoding imported media through
 the separate Plex worker; replay and sync across cold starts; staging while
 running; rejected source links; non-destructive init refusal; and recovery by
-reselecting a completed snapshot. Its extra SSH access belongs to the fixture.
+reselecting a completed snapshot; repeating a sync with identical source to repair
+destination drift; and retaining media through a verified A/B image update.
+Its extra SSH access belongs to the fixture.
 No Plex account is needed; account registration and client playback remain
 separate tests.

@@ -167,13 +167,22 @@ pub fn accounts(m: *Machine) void {
     writeAccount(m, "/run/werewolf/group", c.group, 0o644);
     writeAccount(m, "/run/werewolf/shadow", c.shadow, 0o600);
     writeAccount(m, "/run/werewolf/people", c.made, 0o600);
+    const policy = m.read(people.verify_path);
+    // Root owns each keys file, and its person reads it by group, as sshd
+    // does for them: a person must not add a key to it, nor an option such
+    // as no-touch-required.
     for (c.keys) |k| {
         const path = m.fmtZ("/run/werewolf/keys/{s}", .{k.name});
-        writeAccount(m, path, k.text, 0o600);
+        const text = people.verified(
+            m.gpa,
+            k.text,
+            policy,
+        ) catch return accountFailure("verify keys");
+        writeAccount(m, path, text, 0o640);
         if (linux.errno(linux.fchownat(
             linux.AT.FDCWD,
             path,
-            k.id,
+            0,
             k.id,
             linux.AT.SYMLINK_NOFOLLOW,
         )) != .SUCCESS)
@@ -181,7 +190,9 @@ pub fn accounts(m: *Machine) void {
     }
     if (c.root_keys.len > 0) {
         const had = m.read("/run/werewolf/keys/root");
-        writeAccount(m, "/run/werewolf/keys/root", m.fmt("{s}{s}", .{ had, c.root_keys }), 0o600);
+        const text = people.verified(m.gpa, m.fmt("{s}{s}", .{ had, c.root_keys }), policy) catch
+            return accountFailure("verify keys");
+        writeAccount(m, "/run/werewolf/keys/root", text, 0o600);
     }
     people.ensureHomes(home_dir, c.keys) catch return accountFailure("create homes");
     for (c.refused) |why| say("people: {s}", .{why});
@@ -296,7 +307,10 @@ fn limaConfig(m: *Machine) void {
 /// keys writes user's ssh keys where sshd looks (AuthorizedKeysFile).
 fn keys(m: *Machine, user: []const u8, text: []const u8) void {
     const path = m.fmtZ("/run/werewolf/keys/{s}", .{user});
-    m.write(path, text, 0o600);
+    const policy = m.read(people.verify_path);
+    const held = people.verified(m.gpa, text, policy) catch
+        return say("{s} SSH keys: out of memory; none written", .{user});
+    m.write(path, held, 0o600);
     const ids = lookupIds(m.read("/run/werewolf/passwd"), user) orelse return;
     _ = linux.fchownat(linux.AT.FDCWD, path, ids.uid, ids.gid, 0);
 }

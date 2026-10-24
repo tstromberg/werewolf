@@ -88,7 +88,7 @@ pub fn ensureImage(
     return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
 }
 
-pub const BootKind = enum { workload, bootstrap };
+pub const BootKind = @import("secureboot.zig").BootKind;
 
 /// A protected machine owns PK and KEK separately from its code-signing db.
 /// The authority also participates in the image identity, so an image enrolled

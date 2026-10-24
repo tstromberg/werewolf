@@ -771,11 +771,8 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
 
     if (!p.werewolf) return;
     p.work("network policy routing: netlink dump (1 s reply timeout)", "");
-    const rules: RuleSummary = if (ruleDump(p.gpa, linux.AF.INET)) |dump|
-        summarizeRules(dump)
-    else |_|
-        .{};
-    try p.add(.{
+    const rules = rulesOf(p.gpa, linux.AF.INET);
+    const inbound: posture.Check = .{
         .id = "network-inbound",
         .area = "network",
         .name = "Unsolicited traffic dropped",
@@ -784,20 +781,16 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .how = "the IPv4 policy-routing rules (RTM_GETRULE) blackhole arriving TCP and UDP " ++
             "(or everything) before any rule delivers it to the local table, and refuse " ++
             "locally sent traffic that no rule allows",
-        .result = if (rules.inbound_dropped and rules.outbound_refused) .pass else .fail,
-        .detail = try p.gpa.print("arriving: {s}; sent: {s}", .{
-            if (rules.inbound_dropped) "dropped unless declared" else "delivered",
-            if (rules.outbound_refused) "refused unless declared" else "routed",
-        }),
-    });
+        .result = if (rules) |r|
+            (if (r.inbound_dropped and r.outbound_refused) .pass else .fail)
+        else
+            .skip,
+        .detail = if (rules) |r| try ruleDetail(p.gpa, r) else unreadable,
+    };
+    if (rules == null) try p.fromBoot(inbound) else try p.add(inbound);
 
-    const rules6: RuleSummary = if (!v6_on)
-        .{}
-    else if (ruleDump(p.gpa, linux.AF.INET6)) |dump|
-        summarizeRules(dump)
-    else |_|
-        .{};
-    try p.add(.{
+    const rules6: ?RuleSummary = if (v6_on) rulesOf(p.gpa, linux.AF.INET6) else .{};
+    const ipv6: posture.Check = .{
         .id = "network-ipv6",
         .area = "network",
         .name = "IPv6 under the same policy",
@@ -806,17 +799,40 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its " ++
             "policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before " ++
             "delivering it and refuse locally sent traffic no rule allows",
-        .result = if (!v6_on or (rules6.inbound_dropped and rules6.outbound_refused))
+        .result = if (!v6_on)
             .pass
+        else if (rules6) |r|
+            (if (r.inbound_dropped and r.outbound_refused) .pass else .fail)
         else
-            .fail,
+            .skip,
         .detail = if (!v6_on)
             "IPv6 off"
+        else if (rules6) |r|
+            try ruleDetail(p.gpa, r)
         else
-            try p.gpa.print("arriving: {s}; sent: {s}", .{
-                if (rules6.inbound_dropped) "dropped unless declared" else "delivered",
-                if (rules6.outbound_refused) "refused unless declared" else "routed",
-            }),
+            unreadable,
+    };
+    if (rules6 == null) try p.fromBoot(ipv6) else try p.add(ipv6);
+}
+
+/// unreadable is a rule check's detail when this process may not open
+/// netlink, as a root SSH session may not (forms/sshd's pledge), and has
+/// no boot result to take (Posture.fromBoot).
+const unreadable = "this process may not open netlink, as an SSH session may not";
+
+/// rulesOf summarizes family's policy-routing rules, or returns null if this
+/// process's seccomp filter refuses netlink. Any other failure summarizes as
+/// no rules, which fails the check.
+fn rulesOf(gpa: Allocator, family: u8) ?RuleSummary {
+    const dump = ruleDump(gpa, family) catch |err|
+        return if (err == error.Filtered) null else .{};
+    return summarizeRules(dump);
+}
+
+fn ruleDetail(gpa: Allocator, r: RuleSummary) ![]const u8 {
+    return gpa.print("arriving: {s}; sent: {s}", .{
+        if (r.inbound_dropped) "dropped unless declared" else "delivered",
+        if (r.outbound_refused) "refused unless declared" else "routed",
     });
 }
 
@@ -1036,6 +1052,8 @@ fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
         linux.SOCK.RAW | linux.SOCK.CLOEXEC,
         linux.NETLINK.ROUTE,
     );
+    // ENOSYS is a seccomp filter's answer; the kernel's would be another.
+    if (linux.errno(rc) == .NOSYS) return error.Filtered;
     if (linux.errno(rc) != .SUCCESS) return error.NoNetlink;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);

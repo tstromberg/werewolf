@@ -1,6 +1,8 @@
-//! Run through an ordinary SSH login, never through root changing UID.
+//! Run through an ordinary SSH login, never through root changing UID;
+//! `privilege-probe root` through a root SSH login (forms/sshd's leash).
 const std = @import("std");
 const linux = std.os.linux;
+const service = @import("service");
 var failures: usize = 0;
 
 fn check(name: []const u8, okay: bool) void {
@@ -14,9 +16,19 @@ fn denied(name: []const u8, rc: usize, allowed: []const linux.E) void {
     std.debug.print("  errno={s}\n", .{@tagName(err)});
 }
 
-pub fn main() void {
+pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     const uid = linux.getuid();
-    if (uid == 0) {
+    if (args.len == 2 and std.mem.eql(u8, args[1], "root")) {
+        if (uid != 0) {
+            std.debug.print("REFUSE: probe root needs a root SSH session\n", .{});
+            linux.exit_group(2);
+        }
+        rootSession();
+        if (failures != 0) linux.exit_group(1);
+        return;
+    }
+    if (uid == 0 or args.len != 1) {
         std.debug.print("REFUSE: probe needs a real unprivileged SSH session\n", .{});
         linux.exit_group(2);
     }
@@ -76,10 +88,12 @@ pub fn main() void {
     caps = @splat(.{ .effective = 0, .permitted = 0, .inheritable = 0 });
     caps[0].effective = 1 << 7;
     caps[0].permitted = 1 << 7;
+    // sshd's pledge no longer promises caps, so the filter refuses capset
+    // itself; a kernel check refuses it under one that does.
     denied(
         "cannot-acquire-setuid-capability",
         linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&caps)),
-        &.{.PERM},
+        &.{ .NOSYS, .PERM },
     );
     for ([_][:0]const u8{
         "/run/werewolf/shadow",
@@ -112,7 +126,7 @@ pub fn main() void {
     denied(
         "packet-socket-refused",
         linux.socket(linux.AF.PACKET, linux.SOCK.RAW, 0),
-        &.{ .PERM, .ACCES, .AFNOSUPPORT },
+        &.{ .NOSYS, .PERM, .ACCES, .AFNOSUPPORT },
     );
     denied(
         "algorithm-socket-filtered",
@@ -144,4 +158,139 @@ pub fn main() void {
         _ = linux.munmap(bytes, 4096);
     }
     if (failures != 0) linux.exit_group(1);
+}
+
+/// rootSession checks what a root SSH login holds (docs/design/ssh-hardening.md):
+/// sshd's login capabilities and no others, a pledge without netlink, packet,
+/// caps, Landlock or seccomp, and writes only where forms/sshd's layer grants.
+fn rootSession() void {
+    const Header = extern struct { version: u32 = 0x20080522, pid: i32 = 0 };
+    const Caps = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+    var header: Header = .{};
+    var caps: [2]Caps = undefined;
+    const caprc = linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps));
+    const effective = @as(u64, caps[1].effective) << 32 | caps[0].effective;
+    const permitted = @as(u64, caps[1].permitted) << 32 | caps[0].permitted;
+    var bounding: u64 = 0;
+    for (0..64) |n| {
+        if (linux.prctl(@backingInt(linux.PR.CAPBSET_READ), n, 0, 0, 0) == 1)
+            bounding |= @as(u64, 1) << @intCast(n);
+    }
+    std.debug.print("  bounding={x} permitted={x}\n", .{ bounding, permitted });
+    check("root-bounding-set-is-login-set", bounding == service.cap.login_set);
+    check(
+        "root-capabilities-within-login-set",
+        linux.errno(caprc) == .SUCCESS and (effective | permitted) & ~service.cap.login_set == 0,
+    );
+    check("root-no-dac-override", bounding & 1 << linux.CAP.DAC_OVERRIDE == 0);
+    check(
+        "root-no-new-privileges",
+        linux.prctl(@backingInt(linux.PR.GET_NO_NEW_PRIVS), 0, 0, 0, 0) == 1,
+    );
+    check("root-seccomp-active", linux.prctl(@backingInt(linux.PR.GET_SECCOMP), 0, 0, 0, 0) == 2);
+    // Where the session layer grants no write: accounts and keys, every
+    // service's cgroup, the kernel log, the console and the TPM.
+    refusedCreate("root-cannot-create-in-run-werewolf", "/run/werewolf/privilege-probe");
+    refusedCreate("root-cannot-create-in-run", "/run/privilege-probe");
+    for ([_]struct { [:0]const u8, [:0]const u8 }{
+        .{ "root-cannot-write-root-keys", "/run/werewolf/keys/root" },
+        .{ "root-cannot-leave-sshd-cgroup", "/run/cgroup/cgroup.procs" },
+        .{ "root-cannot-write-kmsg", "/dev/kmsg" },
+        .{ "root-cannot-write-console", "/dev/console" },
+        .{ "root-cannot-use-tpm", "/dev/tpmrm0" },
+    }) |w| {
+        const fd = linux.open(
+            w[1],
+            .{ .ACCMODE = .WRONLY, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(fd) == .NOENT) {
+            std.debug.print("SKIP {s} (no {s})\n", .{ w[0], w[1] });
+            continue;
+        }
+        denied(w[0], fd, &.{.ACCES});
+        if (linux.errno(fd) == .SUCCESS) _ = linux.close(@intCast(fd));
+    }
+    if (serviceDirectory()) |dir| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.mem.printSentinel(&buf, "{s}/privilege-probe", .{dir}, 0) catch unreachable;
+        refusedCreate("root-cannot-change-service-data", path);
+    } else std.debug.print(
+        "SKIP root-cannot-change-service-data (no service-owned /data/svc)\n",
+        .{},
+    );
+    for ([_][:0]const u8{ "/tmp/privilege-probe-root", "/data/privilege-probe-root" }) |path| {
+        const fd = linux.open(
+            path,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+            0o600,
+        );
+        check(path, linux.errno(fd) == .SUCCESS);
+        if (linux.errno(fd) == .SUCCESS) {
+            _ = linux.close(@intCast(fd));
+            _ = linux.unlink(path);
+        }
+    }
+    // The pledge: refused calls answer ENOSYS, from the filter.
+    denied("root-netlink-refused", linux.socket(linux.AF.NETLINK, linux.SOCK.RAW, 0), &.{.NOSYS});
+    denied("root-packet-refused", linux.socket(linux.AF.PACKET, linux.SOCK.RAW, 0), &.{.NOSYS});
+    denied(
+        "root-capset-refused",
+        linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&caps)),
+        &.{.NOSYS},
+    );
+    denied("root-landlock-refused", linux.syscall3(.landlock_create_ruleset, 0, 0, 1), &.{.NOSYS});
+    denied("root-seccomp-refused", linux.syscall3(.seccomp, 0, 0, 0), &.{.NOSYS});
+    denied("root-user-namespace-refused", linux.syscall1(.unshare, 0x10000000), &.{.NOSYS});
+    denied("root-mount-refused", linux.syscall5(.mount, 0, 0, 0, 0, 0), &.{.NOSYS});
+}
+
+/// refusedCreate checks that path cannot be created, and removes it if it was.
+fn refusedCreate(name: []const u8, path: [:0]const u8) void {
+    const fd = linux.open(
+        path,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+        0o600,
+    );
+    denied(name, fd, &.{.ACCES});
+    if (linux.errno(fd) == .SUCCESS) {
+        _ = linux.close(@intCast(fd));
+        _ = linux.unlink(path);
+    }
+}
+
+/// serviceDirectory returns a /data/svc directory a service, not root, owns.
+fn serviceDirectory() ?[]const u8 {
+    const State = struct {
+        var name: [std.fs.max_path_bytes]u8 = undefined;
+    };
+    const dir = linux.open(
+        "/data/svc",
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(dir) != .SUCCESS) return null;
+    defer _ = linux.close(@intCast(dir));
+    var ents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = linux.getdents64(@intCast(dir), &ents, ents.len);
+        if (linux.errno(n) != .SUCCESS or n == 0) return null;
+        var off: usize = 0;
+        while (off < n) {
+            const ent: *align(1) const linux.dirent64 = @ptrCast(&ents[off]);
+            off += ent.reclen;
+            const entry = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
+            if (ent.type != linux.DT.DIR or entry[0] == '.') continue;
+            var st: linux.Statx = undefined;
+            const z = std.mem.printSentinel(&State.name, "/data/svc/{s}", .{entry}, 0) catch continue;
+            if (linux.errno(linux.statx(
+                linux.AT.FDCWD,
+                z,
+                0,
+                .{ .UID = true },
+                &st,
+            )) != .SUCCESS) continue;
+            if (st.uid != 0) return z;
+        }
+    }
 }

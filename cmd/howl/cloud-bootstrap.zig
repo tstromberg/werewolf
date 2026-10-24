@@ -2,6 +2,8 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const gcp = @import("gcp.zig");
+const aws = @import("aws.zig");
+const azure = @import("azure.zig");
 const gpt = @import("gpt");
 const uki = @import("uki");
 const cmdline = @import("cmdline");
@@ -17,13 +19,17 @@ const Manifest = struct {
     pcr11: []const u8,
     uki_sha256: []const u8,
     publisher_sha256: []const u8,
+    loader_sha256: ?[]const u8 = null,
 };
 
 /// The ordinary cloud gate remains closed. This entry point launches only
 /// an isolated signed enrollment image, whose PID 1 refuses workload handover.
 pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *howl.Why) !void {
-    if (args.len != 4 or !std.mem.eql(u8, args[0], "gcp"))
-        return why.refuse("_cloud-bootstrap gcp NAME IMAGE-DIRECTORY OWNER-CERT", .{});
+    if ((args.len != 4 and args.len != 5) or (!std.mem.eql(u8, args[0], "gcp") and !std.mem.eql(u8, args[0], "aws") and !std.mem.eql(u8, args[0], "azure")))
+        return why.refuse("_cloud-bootstrap gcp|aws|azure NAME IMAGE-DIRECTORY OWNER-CERT [SIZE]", .{});
+    const amazon = std.mem.eql(u8, args[0], "aws");
+    const microsoft = std.mem.eql(u8, args[0], "azure");
+    const size: ?[]const u8 = if (args.len == 5) args[4] else null;
     const name = args[1];
     if (!howl.isMachineName(name)) return error.BadCloudResource;
     const source = args[2];
@@ -35,7 +41,8 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     ), .{ .ignore_unknown_fields = true });
     const arch = howl.archName(manifest.arch) orelse return error.UnsupportedHostArch;
     if (!std.mem.eql(u8, manifest.kind, "tpm-bootstrap") or manifest.protocol != 1 or
-        !std.mem.eql(u8, manifest.mode, "fresh") or !std.mem.eql(u8, manifest.channel, "serial"))
+        !std.mem.eql(u8, manifest.mode, "fresh") or
+        !std.mem.eql(u8, manifest.channel, if (amazon or microsoft) "serial-console" else "serial"))
         return error.BadBootstrapImage;
     const binary = try gpa.print("{s}/bootstrap.efi", .{source});
     const bytes = try read(io, gpa, binary, 256 << 20);
@@ -60,9 +67,22 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
         return error.BadBootstrapAuthority;
     const certificate = try gpa.print("{s}/boot.crt", .{source});
     try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", certificate, "-in", binary });
+    const manager = if (manifest.loader_sha256) |expected| blk: {
+        const path = try gpa.print("{s}/loader.efi", .{source});
+        const content = try read(io, gpa, path, 16 << 20);
+        std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &try @import("enrollment.zig").hex(expected))) return error.BadBootstrapImage;
+        try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", certificate, "-in", path });
+        break :blk path;
+    } else null;
 
-    const place = try gcp.place(io, gpa, why);
-    if (try gcp.formOf(io, gpa, place, name, why) != null)
+    if (amazon) {
+        if (try aws.find(io, gpa, try aws.place(io, gpa, why), name, why) != null)
+            return why.refuse("{s}: an existing instance cannot be re-enrolled", .{name});
+    } else if (microsoft) {
+        if (try azure.find(io, gpa, try azure.place(io, gpa, why), name, why) != null)
+            return why.refuse("{s}: an existing instance cannot be re-enrolled", .{name});
+    } else if (try gcp.formOf(io, gpa, try gcp.place(io, gpa, why), name, why) != null)
         return why.refuse("{s}: an existing instance cannot be re-enrolled", .{name});
     const directory = try howl.machineDir(gpa, name);
     // Never overwrite the evidence or credentials of a previous attempt.
@@ -82,7 +102,17 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     });
     try howl.run(io, why, &.{ "mmd", "-i", esp, "::/EFI", "::/EFI/BOOT" });
     const loader = if (arch == .aarch64) "::/EFI/BOOT/BOOTAA64.EFI" else "::/EFI/BOOT/BOOTX64.EFI";
-    try howl.run(io, why, &.{ "mcopy", "-i", esp, binary, loader });
+    try howl.run(io, why, &.{ "mcopy", "-i", esp, manager orelse binary, loader });
+    if (manager != null) {
+        try howl.run(io, why, &.{ "mmd", "-i", esp, "::/EFI/Linux", "::/loader", "::/loader/entries" });
+        try howl.run(io, why, &.{ "mcopy", "-i", esp, binary, "::/EFI/Linux/bootstrap.efi" });
+        const config = try gpa.print("{s}/bootstrap-loader.conf", .{directory});
+        const entry = try gpa.print("{s}/bootstrap-entry.conf", .{directory});
+        try howl.writePrivate(io, gpa, config, @import("secureboot.zig").bootstrap_loader_config, why);
+        try howl.writePrivate(io, gpa, entry, @import("secureboot.zig").bootstrap_loader_entry, why);
+        try howl.run(io, why, &.{ "mcopy", "-i", esp, config, "::/loader/loader.conf" });
+        try howl.run(io, why, &.{ "mcopy", "-i", esp, entry, "::/loader/entries/bootstrap.conf" });
+    }
     try Io.Dir.cwd().copyFile(
         certificate,
         Io.Dir.cwd(),
@@ -92,6 +122,30 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     );
     const qcow = try gpa.print("{s}/disk.qcow2", .{directory});
     try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "raw", "-O", "qcow2", disk, qcow });
+    if (microsoft) {
+        const place = try azure.place(io, gpa, why);
+        const image = try azure.ensureImageWithAuthority(io, gpa, place, "tpm-bootstrap", arch, qcow, directory, args[3], .bootstrap, why);
+        try howl.writePrivate(io, gpa, try gpa.print("{s}/image", .{directory}), image, why);
+        try howl.writePrivate(io, gpa, try gpa.print("{s}/engine", .{directory}), "azure", why);
+        const config = try gpa.print("{s}/config.tar", .{directory});
+        try howl.writePrivate(io, gpa, config, try howl.writeTar(gpa, &.{}), why);
+        try azure.create(io, gpa, place, name, "tpm-bootstrap", arch, size, image, config, why);
+        try Io.File.stdout().writeStreamingAll(io, try gpa.print("{s}\t{s}\n", .{ name, image }));
+        return;
+    }
+    if (amazon) {
+        const place = try aws.place(io, gpa, why);
+        const image = try aws.ensureImageWithAuthority(io, gpa, place, "tpm-bootstrap", arch, qcow, directory, args[3], .bootstrap, why);
+        try howl.writePrivate(io, gpa, try gpa.print("{s}/image", .{directory}), image, why);
+        try howl.writePrivate(io, gpa, try gpa.print("{s}/engine", .{directory}), "aws", why);
+        const config = try gpa.print("{s}/config.b64", .{directory});
+        try howl.writePrivate(io, gpa, config, "", why);
+        const id = try aws.create(io, gpa, place, name, "tpm-bootstrap", arch, size, image, config, why);
+        try howl.writePrivate(io, gpa, try gpa.print("{s}/instance", .{directory}), id, why);
+        try Io.File.stdout().writeStreamingAll(io, try gpa.print("{s}\t{s}\t{s}\n", .{ name, image, id }));
+        return;
+    }
+    const place = try gcp.place(io, gpa, why);
     const image = try gcp.ensureImageWithAuthority(
         io,
         gpa,
@@ -108,7 +162,7 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     try howl.writePrivate(io, gpa, try gpa.print("{s}/engine", .{directory}), "gcp", why);
     const config = try gpa.print("{s}/config.b64", .{directory});
     try howl.writePrivate(io, gpa, config, "", why);
-    try gcp.create(io, gpa, place, name, "tpm-bootstrap", arch, null, image, config, why);
+    try gcp.create(io, gpa, place, name, "tpm-bootstrap", arch, size, image, config, why);
     try howl.run(io, why, &.{
         "gcloud",
         "--quiet",
@@ -136,6 +190,8 @@ fn read(io: Io, gpa: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
 /// remains gated. Preserve the instance and its TPM; replace only the stopped
 /// bootstrap disk with the authenticated factory disk for its enrolled pair.
 pub fn workload(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *howl.Why) !void {
+    if (args.len == 7 and std.mem.eql(u8, args[0], "aws"))
+        return @import("cloud-workload-aws.zig").command(io, gpa, args, why);
     if (args.len != 7 or !std.mem.eql(u8, args[0], "gcp") or !howl.isMachineName(args[1]))
         return why.refuse(
             "_cloud-workload gcp NAME REQUEST.json FACTORY OWNER-CERT IDENTITY-PIN CONFIG-DIR",

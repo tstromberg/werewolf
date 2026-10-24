@@ -1,1 +1,3 @@
 ok  sshd-no-package-su   [ ! -e /usr/bin/su ] && [ ! -L /usr/bin/su ]
+ok  sshd-busybox-by-name env true && timeout 5 true && nohup true >/dev/null 2>&1 && nice true && setsid true && time true 2>/dev/null && chroot / true && echo x | xargs true && flock /tmp/busybox-by-name true && rm -f /tmp/busybox-by-name
+ok  sshd-names-need-paths ! env sshd -V >/dev/null 2>&1 && env /usr/bin/sshd -V >/dev/null 2>&1

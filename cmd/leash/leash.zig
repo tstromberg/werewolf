@@ -265,9 +265,12 @@ pub fn main(init: std.process.Init) !void {
         _ = linux.fchown(fd, user.uid, user.gid);
     };
 
-    const rules = sandbox.Ruleset.init(
-        if (login) .{ .only_bind = true } else .{ .sockets = true },
-    ) catch |err| l.fail(
+    // Production sshd's layer also handles writes, which login_writes grant;
+    // developer SSH's handles only binds.
+    const rules = sandbox.Ruleset.init(if (login)
+        .{ .only_bind = true, .writes = !std.mem.eql(u8, name, "sshd-dev") }
+    else
+        .{ .sockets = true }) catch |err| l.fail(
         .park,
         "Landlock: {s}; this kernel cannot leash a service",
         .{sandbox.whyNot(gpa, err)},
@@ -372,7 +375,8 @@ pub fn main(init: std.process.Init) !void {
 
     // --- leashed --------------------------------------------------------------
 
-    rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
+    if (!login) rules.restrict() catch |err|
+        l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     for (s.configs, configs) |cfg, value| {
         copyConfig(own_run, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
             l.fail(.park, "config {s}: {s}", .{ cfg.name, @errorName(err) });
@@ -408,6 +412,16 @@ pub fn main(init: std.process.Init) !void {
         const term = child.wait(io) catch |err|
             l.fail(.park, "before {s}: {s}", .{ argv[0], @errorName(err) });
         if (term != .exited or term.exited != 0) l.fail(.park, "before {s} failed", .{argv[0]});
+    }
+    // A login's layer goes on after its setup, which may publish its host
+    // key's pin to /run/werewolf (forms/ssh-su), where no session writes.
+    if (login) {
+        if (rules.fs & sandbox.write_file != 0) for (login_writes) |w|
+            allow(rules, w.path, w.access, .optional) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => l.fail(.park, "{s}: {s}", .{ w.path, sandbox.whyNot(gpa, err) }),
+            };
+        rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     }
     if (!login and (s.render != null or s.before.len > 0 or
         (!s.pledge.contains(.exec) and (s.run.len > 0 or s.narrow.len > 0))))
@@ -1034,6 +1048,26 @@ const floor = blk: {
         };
     }
     break :blk f;
+};
+
+/// login_writes are where production sshd, and every session it starts, may
+/// write, make and remove files (docs/design/ssh-hardening.md): never
+/// /run/werewolf, with the accounts and keys, nor /run/cgroup, with every
+/// service's limits. /run/runit holds runsv's controls and the reboot flag;
+/// /run/ssh-agent, ssh-su's forwarded agents; /dev/pts and /dev/ptmx, ptys.
+/// Not /dev/tpmrm0: a session could extend PCR 11 or exhaust the TPM's
+/// lockout; posture and ab-status read what posture recorded at boot.
+const login_writes = [_]Floor{
+    .{ .path = "/data", .access = sandbox.writes },
+    .{ .path = "/tmp", .access = sandbox.writes },
+    .{ .path = "/var/tmp", .access = sandbox.writes },
+    .{ .path = "/dev/shm", .access = sandbox.writes },
+    .{ .path = "/dev/pts", .access = sandbox.writes },
+    .{ .path = "/run/runit", .access = sandbox.writes },
+    .{ .path = "/run/ssh-agent", .access = sandbox.writes },
+    .{ .path = "/dev/ptmx", .access = sandbox.write_file },
+    .{ .path = "/dev/tty", .access = sandbox.write_file },
+    .{ .path = "/dev/null", .access = sandbox.write_file },
 };
 
 /// narrow_floor is a narrowed program's floor: its service's, but neither
