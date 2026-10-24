@@ -167,7 +167,10 @@ pub fn applyReserved(
             (try idInUseNumber(gpa, passwd.items, id)) or
             (try idInUseNumber(gpa, group.items, id)))
         {
-            try refused.append(gpa, try gpa.print("'{s}': name or UID is already reserved", .{p.name}));
+            try refused.append(
+                gpa,
+                try gpa.print("'{s}': name or UID is already reserved", .{p.name}),
+            );
             continue;
         }
         try ensureRecord(gpa, &records, .people, p.name, id);
@@ -227,8 +230,15 @@ fn conflicts(records: []const Identity, source: Source, name: []const u8, id: u3
     return false;
 }
 
-fn ensureRecord(gpa: Allocator, records: *std.ArrayList(Identity), source: Source, name: []const u8, id: u32) Allocator.Error!void {
-    for (records.items) |r| if (r.source == source and mem.eql(u8, r.name, name) and r.id == id) return;
+fn ensureRecord(
+    gpa: Allocator,
+    records: *std.ArrayList(Identity),
+    source: Source,
+    name: []const u8,
+    id: u32,
+) Allocator.Error!void {
+    for (records.items) |r| if (r.source == source and mem.eql(u8, r.name, name) and
+        r.id == id) return;
     try records.append(gpa, .{ .source = source, .name = name, .id = id });
 }
 
@@ -236,7 +246,16 @@ fn idInUseNumber(gpa: Allocator, file: []const u8, id: u32) Allocator.Error!bool
     return idInUse(file, try gpa.print("{d}", .{id}));
 }
 
-fn appendAccount(gpa: Allocator, passwd: *std.ArrayList(u8), group: *std.ArrayList(u8), shadow: *std.ArrayList(u8), name: []const u8, id: u32, shell: []const u8, locked: bool) Allocator.Error!void {
+fn appendAccount(
+    gpa: Allocator,
+    passwd: *std.ArrayList(u8),
+    group: *std.ArrayList(u8),
+    shadow: *std.ArrayList(u8),
+    name: []const u8,
+    id: u32,
+    shell: []const u8,
+    locked: bool,
+) Allocator.Error!void {
     try passwd.print(gpa, "{s}:x:{d}:{d}::/data/home/{s}:{s}\n", .{ name, id, id, name, shell });
     try group.print(gpa, "{s}:x:{d}:\n", .{ name, id });
     try shadow.print(gpa, "{s}:{s}:0:0:99999:7:::\n", .{ name, if (locked) "!" else "*" });
@@ -387,8 +406,15 @@ pub fn freshData(data_fd: i32) !bool {
             const end = mem.indexOfScalar(u8, raw, 0) orelse return error.ReadDirectory;
             const name = raw[0..end];
             if (!mem.eql(u8, name, ".") and !mem.eql(u8, name, "..")) {
-                if (mem.eql(u8, name, "lost+found") or mem.eql(u8, name, ".werewolf") or mem.eql(u8, name, "home")) {
-                    const z: [*:0]const u8 = if (mem.eql(u8, name, "lost+found")) "lost+found" else if (mem.eql(u8, name, "home")) "home" else ".werewolf";
+                if (mem.eql(u8, name, "lost+found") or mem.eql(u8, name, ".werewolf") or
+                    mem.eql(u8, name, "home"))
+                {
+                    const z: [*:0]const u8 = if (mem.eql(u8, name, "lost+found"))
+                        "lost+found"
+                    else if (mem.eql(u8, name, "home"))
+                        "home"
+                    else
+                        ".werewolf";
                     const sub = linux.openat(data_fd, z, .{
                         .ACCMODE = .RDONLY,
                         .DIRECTORY = true,
@@ -477,7 +503,12 @@ pub fn parseLedger(gpa: Allocator, data: []const u8) ![]const Identity {
         const uid_text = fields.next() orelse return error.BadLedger;
         const gid_text = fields.next() orelse return error.BadLedger;
         if (fields.next() != null) return error.BadLedger;
-        const source: Source = if (mem.eql(u8, tag, "p")) .people else if (mem.eql(u8, tag, "n")) .nocloud else return error.BadLedger;
+        const source: Source = if (mem.eql(u8, tag, "p"))
+            .people
+        else if (mem.eql(u8, tag, "n"))
+            .nocloud
+        else
+            return error.BadLedger;
         const uid = std.fmt.parseInt(u32, uid_text, 10) catch return error.BadLedger;
         const gid = std.fmt.parseInt(u32, gid_text, 10) catch return error.BadLedger;
         if (mem.eql(u8, name, "root") or uid != gid or
@@ -664,9 +695,11 @@ test "reserved accounts keep admin keys and lock absent people" {
     const k1 = "sk-ssh-ed25519@openssh.com AAAA1 tom@yubikey";
     const k2 = "sk-ssh-ed25519@openssh.com AAAA2 tom@spare";
     const k3 = "sk-ssh-ed25519@openssh.com AAAA3 ann";
-    const c = try applyReserved(gpa, base, &.{}, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++ k3 ++
+    const c = try applyReserved(gpa, base, &.{}, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++
+        k3 ++
         "\nroot " ++ k3 ++ "\nBad x\nnginx " ++ k3 ++
-        "\ntom command=\"/bin/sh\" ssh-ed25519 AAAA1\ntom ssh-ed25519 not-base64!\n\n", "/bin/ash", null, true);
+        "\ntom command=\"/bin/sh\" ssh-ed25519 AAAA1\ntom ssh-ed25519 " ++
+        "not-base64!\n\n", "/bin/ash", null, true);
     const tom = userId("tom");
     try testing.expect(tom >= 1 << 16 and tom < 1 << 30);
     try testing.expectEqualStrings(try gpa.print(
@@ -712,7 +745,15 @@ test "retired people keep their names and IDs through removal, collision, and re
     };
     try testing.expectEqual(userId("u2guv05clv"), userId("udm5vojgxd"));
     try testing.expect(userId("alice") != userId("audit-2ola31"));
-    const first = try applyReserved(gpa, base, &.{}, "u2guv05clv ssh-ed25519 AAAA admin-key\n", "/bin/ash", null, true);
+    const first = try applyReserved(
+        gpa,
+        base,
+        &.{},
+        "u2guv05clv ssh-ed25519 AAAA admin-key\n",
+        "/bin/ash",
+        null,
+        true,
+    );
     try testing.expectEqual(1, first.identities.len);
     try testing.expect(mem.find(u8, first.shadow, "u2guv05clv:*:") != null);
     const retired = try applyReserved(gpa, .{
@@ -763,14 +804,38 @@ test "NoCloud cannot change a reserved name's UID or take a people name" {
         .group = "root:x:0:\n",
         .shadow = "root:!:::::::\n",
     };
-    const first = try applyReserved(gpa, base, &.{}, "", "/bin/ash", .{ .name = "lima", .id = 1000, .keys = "" }, true);
+    const first = try applyReserved(
+        gpa,
+        base,
+        &.{},
+        "",
+        "/bin/ash",
+        .{ .name = "lima", .id = 1000, .keys = "" },
+        true,
+    );
     try testing.expectEqualStrings("lima", first.nocloud_name);
-    const changed = try applyReserved(gpa, base, first.identities, "", "/bin/ash", .{ .name = "lima", .id = 1001, .keys = "" }, true);
+    const changed = try applyReserved(
+        gpa,
+        base,
+        first.identities,
+        "",
+        "/bin/ash",
+        .{ .name = "lima", .id = 1001, .keys = "" },
+        true,
+    );
     try testing.expectEqual(1, changed.refused.len);
     try testing.expectEqualStrings("", changed.nocloud_name);
     try testing.expect(mem.find(u8, changed.shadow, "lima:!:") != null);
     try testing.expect(mem.find(u8, changed.passwd, "lima:x:1000:1000:") != null);
-    const returned = try applyReserved(gpa, base, first.identities, "", "/bin/ash", .{ .name = "lima", .id = 1000, .keys = "" }, true);
+    const returned = try applyReserved(
+        gpa,
+        base,
+        first.identities,
+        "",
+        "/bin/ash",
+        .{ .name = "lima", .id = 1000, .keys = "" },
+        true,
+    );
     try testing.expectEqualStrings("lima", returned.nocloud_name);
     try testing.expectEqual(0, returned.refused.len);
     const reused = try applyReserved(gpa, base, first.identities, "lima\n", "/bin/ash", null, true);
@@ -785,13 +850,31 @@ test "identity table rejects duplicate names, IDs, and damaged rows" {
     const alice = try gpa.print("p alice {d} {d}\n", .{ userId("alice"), userId("alice") });
     const good = try std.mem.concat(gpa, u8, &.{ "werewolf-identities 1\n", alice });
     try testing.expectEqual(1, (try parseLedger(gpa, good)).len);
-    try testing.expectError(error.BadLedger, parseLedger(gpa, try std.mem.concat(gpa, u8, &.{ good, alice })));
-    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1001\n"));
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, try std.mem.concat(gpa, u8, &.{ good, alice })),
+    );
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1001\n"),
+    );
     try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 2\n"));
-    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\np alice 1 1\n"));
-    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn root 1000 1000\n"));
-    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1000"));
-    try testing.expectError(error.BadLedger, parseLedger(gpa, "werewolf-identities 1\n\nn lima 1000 1000\n"));
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, "werewolf-identities 1\np alice 1 1\n"),
+    );
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, "werewolf-identities 1\nn root 1000 1000\n"),
+    );
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, "werewolf-identities 1\nn lima 1000 1000"),
+    );
+    try testing.expectError(
+        error.BadLedger,
+        parseLedger(gpa, "werewolf-identities 1\n\nn lima 1000 1000\n"),
+    );
 }
 
 test "boot refuses a reserved identity that collides with an image account" {
@@ -801,9 +884,15 @@ test "boot refuses a reserved identity that collides with an image account" {
     const id = userId("alice");
     const records = [_]Identity{.{ .source = .people, .name = "alice", .id = id }};
     const base: Files = .{
-        .passwd = try gpa.print("root:x:0:0::/root:/bin/sh\nservice:x:{d}:{d}::/:/sbin/nologin\n", .{ id, id }),
+        .passwd = try gpa.print(
+            "root:x:0:0::/root:/bin/sh\nservice:x:{d}:{d}::/:/sbin/nologin\n",
+            .{ id, id },
+        ),
         .group = try gpa.print("root:x:0:\nservice:x:{d}:\n", .{id}),
         .shadow = "root:!:::::::\nservice:!:::::::\n",
     };
-    try testing.expectError(error.AccountConflict, applyReserved(gpa, base, &records, "", "/bin/ash", null, true));
+    try testing.expectError(
+        error.AccountConflict,
+        applyReserved(gpa, base, &records, "", "/bin/ash", null, true),
+    );
 }

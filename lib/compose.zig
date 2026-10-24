@@ -1421,7 +1421,12 @@ fn netLine(
             const p = port(t, if (proto[0] == 'u') "udp/" else "tcp/") orelse return false;
             try out.append(gpa, try gpa.print(
                 "connect {s} {s} {d}{s}",
-                .{ who, proto, p, if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "" },
+                .{
+                    who,
+                    proto,
+                    p,
+                    if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "",
+                },
             ));
         }
         return true;
@@ -1757,7 +1762,11 @@ test "prune: relative and clean paths only" {
     var f: Failure = .{};
     const got = try prune(gpa, &.{try testForm(gpa, "valkey", "prune:\n  - usr/bin/bash\n")}, &f);
     try testing.expectEqualStrings("usr/bin/bash", got[0]);
-    const spaced = try prune(gpa, &.{try testForm(gpa, "plex", "prune:\n  - usr/lib/plexmediaserver/Plex Script Host\n")}, &f);
+    const spaced = try prune(
+        gpa,
+        &.{try testForm(gpa, "plex", "prune:\n  - usr/lib/plexmediaserver/Plex Script Host\n")},
+        &f,
+    );
     try testing.expectEqual(1, spaced.len);
     try testing.expectEqualStrings("usr/lib/plexmediaserver/Plex Script Host", spaced[0]);
     for ([_][]const u8{ "/usr/bin/bash", "./usr", "../etc", "usr/", "usr/..", "usr/." }) |p| {
