@@ -88,7 +88,7 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 |---|---|---|
 | QEMU | Verified, x86_64 and arm64 | Linux default includes host custody and persistent TPM; x86 needs SMM |
 | AWS EC2 | Firmware verified, arm64 | Protected default blocked pending TPM custody; NitroTPM alone is insufficient |
-| Google Compute Engine | Firmware verified, arm64 | Protected default blocked pending TPM custody; vTPM alone is insufficient |
+| Google Compute Engine | Protected factory boot and both SSH accounts verified, arm64 | Internal bootstrap/handover passed; normal create, downloads and cloud update transport remain gated |
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
 | Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |

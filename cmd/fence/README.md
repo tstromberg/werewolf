@@ -7,14 +7,14 @@ process descends from it; root cannot loosen the policy before a reboot.
 
 ## Background
 
-init installs the seal, starts the mount broker, DHCP renewal and stage0's
-deadman outside fence's domain, then execs `fence runit`. DHCP keeps its
-CAP_NET_ADMIN and packet socket; services inherit fence's restrictions.
-fence reads `/usr/share/werewolf/net`, compiled from form.yaml's `net`, and
-the detected resolvers: one entry per line, numbers only, `all` for every user.
+init installs the seal, starts the mount broker, DHCP renewal and stage0's deadman
+outside fence's domain, then execs `fence runit`. DHCP keeps its CAP_NET_ADMIN and
+packet socket; services inherit fence's restrictions. fence reads
+`/usr/share/werewolf/net`, compiled from form.yaml's `net`, and the detected resolvers:
+one entry per line, numbers only; a user may be `all` or a range (`:people`).
     listen tcp 22
     listen tcp 5432 loopback
-    connect 207 tcp 443 public
+    connect 65536-1073741823 tcp 443 public
     connect 208 tcp 32402 loopback
     listen 207 udp 5353 lan
     connect 207 udp 5353 lan
@@ -45,16 +45,16 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    metadata server from URL fetchers. Azure's wire server is closed to all. Arrivals
    pass to served ports, from connected ports, or as ICMP. Denied TCP, UDP, other
    transports, tunnels and IPsec get no reply; other protocols get "unreachable". Local
-   and loopback traffic normally pass. A TCP `loopback` connect permits its port
-   only on 127.0.0.1 and ::1, refusing other destinations before the local table;
-   it grants no Internet egress or reply allowance. Private TCP ports drop arrivals
-   before reply allowances, even if a daemon binds all interfaces; local traffic
-   reaches them first.
-   Allowed traffic with no route fails as "network unreachable", not EACCES, so clients
-   try the next address. UDP `lan` restricts unicast to connected subnets detected at
-   boot, plus mDNS's group on UDP 5353. Other ports add no multicast. Off-subnet unicast
-   drops before reply allowances. Changing the address plan needs a reboot; no subnet
-   means no incoming unicast grant. See [fence.md](../../docs/design/fence.md).
+   and loopback traffic normally pass. A TCP `loopback` connect permits its port only on
+   127.0.0.1 and ::1, refusing other destinations before the local table; it grants no
+   Internet egress or reply allowance; compose drops one its users' broader grant holds.
+   Private TCP ports drop arrivals before reply allowances, even if a daemon binds all
+   interfaces; local traffic reaches them first. Allowed traffic with no route fails as
+   "network unreachable", not EACCES, so clients try the next address. UDP `lan`
+   restricts unicast to connected subnets detected at boot, plus mDNS's group on UDP
+   5353. Other ports add no multicast. Off-subnet unicast drops before reply allowances.
+   Changing the address plan needs a reboot; no subnet means no incoming unicast grant.
+   See [fence.md](../../docs/design/fence.md).
 2. **Landlock**, for every process: TCP binds only to the policy's ports
    or 0, and connects only to declared, served, loopback and metadata
    ports. Files are readable anywhere but `/dev`; programs run only from

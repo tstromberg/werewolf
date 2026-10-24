@@ -42,13 +42,13 @@ pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
         const record = std.mem.print(
             &line,
             "unwound: {{\"event\":\"age_observe\",\"request\":{d},\"dns_id\":{d}," ++
-                "\"uid\":{d},\"source\":\"{d}.{d}.{d}.{d}\",\"qname\":{f}," ++
+                "\"uid\":{f},\"source\":\"{d}.{d}.{d}.{d}\",\"qname\":{f}," ++
                 "\"qtype\":{d},\"transport\":\"{s}\",\"rule\":{d}," ++
                 "\"generation\":\"{x:0>8}\",\"boundary\":\"{s}\",\"domain\":{f}}}\n",
             .{
                 request.request_id,
                 request.dns_id,
-                uid,
+                std.json.fmt(uid, .{}),
                 label[0],
                 label[1],
                 label[2],

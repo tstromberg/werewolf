@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Exercise real protected Plex import and sync; uses a disposable Lima VM.
+
+The fixture adds operator SSH and two immutable probes to Plex's normal form.
+No Plex account is required. Keep host logs, remove only this test's VM.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+
+root = Path.cwd()
+howl = str(Path(sys.argv[1] if len(sys.argv) > 1 else "build/host/howl").resolve())
+name = "ww-plex-import-" + secrets.token_hex(5)
+work = root / "build/import-tests" / name
+work.mkdir(parents=True, mode=0o700)
+os.umask(0o077)
+arch = "aarch64" if os.uname().machine in ("arm64", "aarch64") else "x86_64"
+if arch != "aarch64" or sys.platform != "darwin":
+    raise SystemExit("check-plex-import currently uses protected Lima on macOS arm64")
+source = work / "source"
+(source / "Movies").mkdir(parents=True)
+(source / "Movies/title.srt").write_text("original subtitle\n")
+(source / "keep.txt").write_text("keep when absent from sync\n")
+sample = root / "build/plex-inspect/usr/lib/plexmediaserver/Resources/black-h264.ts"
+if not sample.exists():
+    candidates = list((root / "build").glob("**/melange/usr/lib/plexmediaserver/Resources/black-h264.ts"))
+    if not candidates:
+        raise SystemExit("build the Plex form first; its pinned sample TS is the media fixture")
+    sample = candidates[0]
+shutil.copyfile(sample, source / "Movies/sample.ts")
+form = work / "plex-import-fixture"
+overlay = form / "rootfs"
+(overlay / "usr/bin").mkdir(parents=True)
+(overlay / "usr/share/werewolf").mkdir(parents=True)
+(overlay / "usr/share/werewolf/ab-release").write_text("A\n")
+# Ordinary file keys are explicit in this disposable operator-access fixture.
+(form / "form.yaml").write_text("""base: plex
+with: [sshd]
+sshd:
+  pubkey-accepted-algorithms: ssh-ed25519
+weaknesses:
+  network-no-login: operator SSH in the disposable import fixture
+  network-ssh-security-keys: disposable file key for automated operator SSH
+  programs-no-downloaders: SSH test shell tools
+  programs-no-interpreters: SSH test shell tools
+  programs-no-shell: SSH test shell
+""")
+config = work / "config"
+for service in ("plex", "caddy"):
+    (config / service).mkdir(parents=True)
+    (config / service / "settings.json").write_text('{"domain":"localhost"}\n')
+(config / "plex/token").write_text("werewolf-test-owner-token-invalid\n")
+key = work / "ssh.key"
+
+
+def run(args, label, success=True, timeout=120):
+    with (work / (label + ".log")).open("w") as log:
+        # Keep fixture secrets private, but build the image with the same
+        # public directory modes as the other protected VM fixtures.
+        result = subprocess.run([str(x) for x in args], stdout=log, stderr=subprocess.STDOUT,
+                                timeout=timeout, check=False, umask=0o022)
+    if success is not None and (result.returncode == 0) != success:
+        raise RuntimeError(f"{label}: exit {result.returncode}; see {work / (label + '.log')}")
+    return (work / (label + ".log")).read_text(errors="replace")
+
+
+def ssh(command, label, success=True, timeout=120):
+    result = subprocess.run(["limactl", "list", name, "--format", "{{.SSHLocalPort}}"],
+                            check=True, capture_output=True, text=True)
+    port = result.stdout.strip()
+    if not port.isdigit():
+        raise RuntimeError("no test VM SSH port")
+    return run(["ssh", "-F", "/dev/null", "-S", "none", "-p", port,
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes",
+                "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={work / 'known_hosts'}",
+                "-i", key, "root@127.0.0.1", command], label, success, timeout)
+
+
+def ready(label, release=None):
+    until = time.monotonic() + 180
+    while time.monotonic() < until:
+        try:
+            status = json.loads(ssh("test -f /run/svc/plex-media/ready && /usr/bin/import-status", label, timeout=10))
+        except (RuntimeError, ValueError, subprocess.SubprocessError):
+            time.sleep(1)
+            continue
+        if not all(status[k] for k in ("secure_boot", "ipe", "verified_root", "rollback_protected")):
+            raise RuntimeError("missing protected enforcement: " + str(status))
+        if status["committed"] and (release is None or status["release"] == release):
+            return status
+        time.sleep(1)
+    raise RuntimeError("protected Plex/import fixture did not become ready")
+
+
+def wait_ssh(label):
+    until = time.monotonic() + 60
+    while time.monotonic() < until:
+        try:
+            ssh("true", label, timeout=10)
+            return
+        except (RuntimeError, subprocess.SubprocessError):
+            time.sleep(1)
+    raise RuntimeError("operator SSH did not become ready")
+
+
+def report(label):
+    print("pass   plex-import: " + label, flush=True)
+
+
+def cold_start(label):
+    run([howl, "stop", name], label + "-stop")
+    run(create, label + "-create", timeout=1800)
+    return ready(label + "-ready")
+
+
+try:
+    run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key], "key")
+    run(["zig", "build-exe", "-O", "ReleaseSafe", "-fstrip", "-fPIE", "-target", arch + "-linux-musl",
+         "--dep", "cmdline", "--dep", "ipe", "--dep", "tpm", "-Mroot=test/ab-status.zig",
+         "--dep", "network", "-Mcmdline=lib/cmdline.zig", "-Mnetwork=lib/network.zig", "-Mipe=lib/ipe.zig",
+         "--dep", "apk", "-Mtpm=lib/tpm.zig", "--dep", "package", "-Mapk=lib/apk.zig",
+         "-Mpackage=lib/package.zig", "-femit-bin=" + str(overlay / "usr/bin/import-status")], "status-build")
+    run(["zig", "build-exe", "-O", "ReleaseSafe", "-fstrip", "-fPIE", "-target", arch + "-linux-musl",
+         "test/plex-import-probe.zig", "-femit-bin=" + str(overlay / "usr/bin/import-probe")], "probe-build")
+    shutil.copyfile(overlay / "usr/bin/import-probe", source / "untrusted-elf")
+    for p in overlay.rglob("*"):
+        p.chmod(0o755 if p.is_dir() or p.parent == overlay / "usr/bin" else 0o644)
+    create = [howl, "create", name, "--on", "lima", "--with", form, "--build", "--yes",
+              "--config", config, "--root-keys", str(key) + ".pub"]
+    print(f"Building protected Plex fixture; logs: {work}", flush=True)
+    # The private musl runtime is not yet in the public feed. This repository
+    # is local to the fixture, signed with a disposable key, and never published.
+    repo = work / "runtime-repository"
+    repo.mkdir()
+    signing = repo / "import-test.rsa"
+    public = repo / "import-test.rsa.pub"
+    run(["openssl", "genrsa", "-out", signing, "2048"], "repo-key")
+    run(["openssl", "rsa", "-in", signing, "-pubout", "-out", public], "repo-public")
+    recipes = [root.parent / "packages/devel/musl/musl.yaml", root.parent / "packages/multimedia/plex/plex.yaml"]
+    pins = []
+    for recipe in recipes:
+        pins.append(subprocess.check_output(["melange", "query", str(recipe),
+            "{{.Package.Name}}={{.Package.Version}}-r{{.Package.Epoch}}"], text=True).strip())
+    for target in ("aarch64", "x86_64"):
+        folder = repo / target
+        folder.mkdir()
+        packages = []
+        for recipe in recipes:
+            filename = subprocess.check_output(["melange", "query", str(recipe),
+                "{{.Package.Name}}-{{.Package.Version}}-r{{.Package.Epoch}}"], text=True).strip() + ".apk"
+            candidates = [root / "build/vendor/packages" / target / filename,
+                          root / "build/plex-x86-src/build/vendor/packages" / target / filename]
+            runtime = next((path for path in candidates if path.exists()), None)
+            if runtime is None:
+                raise RuntimeError("build " + filename + " for " + target + " before running this fixture")
+            package = folder / filename
+            shutil.copyfile(runtime, package)
+            packages.append(package)
+            run(["melange", "sign", "--signing-key", signing, package], "repo-sign-" + target + "-" + recipe.parent.name)
+        run(["melange", "index", "--signing-key", signing, "-o", folder / "APKINDEX.tar.gz", *packages], "repo-index-" + target)
+    with (form / "form.yaml").open("a") as description:
+        description.write("repositories:\n  - " + json.dumps(str(repo)) + "\nkeyring:\n  - " + json.dumps(str(public)) + "\n")
+        description.write("packages:\n" + "".join("  - " + json.dumps(pin) + "\n" for pin in pins))
+    run(create + ["--import", source], "initial-create", timeout=1800)
+    initial = ready("initial-ready")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'original subtitle' && "
+        "test \"$(stat -c %u /data/svc/plex-media/Movies/sample.ts)\" = \"$(id -u plex-media)\" && "
+        "test \"$(stat -c %a /data/svc/plex-media/Movies/sample.ts)\" = 644", "initial-content")
+    mounts = ssh("cat /proc/mounts", "mounts")
+    imported = [x.split() for x in mounts.splitlines() if len(x.split()) > 3 and x.split()[1] == "/run/werewolf/import"]
+    if len(imported) != 1 or not {"ro", "nosuid", "nodev", "noexec", "nosymfollow"} <= set(imported[0][3].split(",")):
+        raise RuntimeError("import mount lost protections")
+    ssh("/usr/bin/import-probe map /run/werewolf/import/untrusted-elf", "mapping-denied")
+    decoded = ssh("/usr/bin/import-probe decode /data/svc/plex-media/Movies/sample.ts", "decode-imported-media")
+    if "#format: frame checksums" not in decoded:
+        raise RuntimeError("imported media did not decode through the Plex worker")
+    report("protected init, ownership, mount flags, code refusal and real Plex decode")
+    again = cold_start("replay")
+    if initial["tpm_anchor"] != again["tpm_anchor"]:
+        raise RuntimeError("import replay changed TPM authority")
+    report("completed import survives cold restart without reenrollment")
+    (source / "Movies/title.srt").write_text("updated subtitle\n")
+    (source / "new.txt").write_text("new file\n")
+    (source / "keep.txt").unlink()
+    run([howl, "sync", name, source], "stage-live-sync", timeout=600)
+    machine = root / "build/machines" / name
+    selected = (machine / "import.json").read_bytes()
+    sync_id = json.loads(selected)["id"]
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'original subtitle'", "live-media-unchanged")
+    report("staging while running leaves live media unchanged")
+    (source / "escape").symlink_to("/etc/passwd")
+    run([howl, "sync", name, source], "reject-source-link", success=False, timeout=600)
+    if (machine / "import.json").read_bytes() != selected:
+        raise RuntimeError("failed staging replaced the selected import")
+    (source / "escape").unlink()
+    synced = cold_start("sync")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle' && "
+        "test \"$(cat /data/svc/plex-media/new.txt)\" = 'new file' && "
+        "test \"$(cat /data/svc/plex-media/keep.txt)\" = 'keep when absent from sync'", "synced-content")
+    if initial["tpm_anchor"] != synced["tpm_anchor"]:
+        raise RuntimeError("sync changed TPM authority")
+    report("sync updates files, keeps destination-only data and retains enrollment")
+    ssh("printf 'destination drift' > /data/svc/plex-media/Movies/title.srt", "introduce-destination-drift")
+    run([howl, "sync", name, source], "stage-identical-source-again", timeout=600)
+    next_id = json.loads((machine / "import.json").read_bytes())["id"]
+    if next_id == sync_id:
+        raise RuntimeError("an explicit sync reused a completed batch ID")
+    sync_id = next_id
+    cold_start("resync")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle'", "resync-repairs-drift")
+    report("a new sync with identical source repairs destination drift")
+    # A new init must refuse existing data. Probe the rejected batch directly
+    # by restarting the VM, then verify old data and lack of media readiness.
+    run([howl, "import", name, source], "stage-conflicting-init", timeout=600)
+    run([howl, "stop", name], "conflict-stop")
+    run(create, "conflict-create", timeout=1800)
+    wait_ssh("conflict-ssh-ready")
+    ssh("test ! -e /run/svc/plex-media/ready && "
+        "test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle' && "
+        "test -f /data/svc/plex-media/keep.txt", "init-conflict-preserves-data")
+    report("init refuses a populated destination without destroying data")
+    run([howl, "import", name, "--retry", sync_id], "restore-completed-sync", timeout=600)
+    restored = cold_start("restore")
+    if restored["tpm_anchor"] != initial["tpm_anchor"]:
+        raise RuntimeError("import recovery changed TPM authority")
+    report("reselecting the retained completed snapshot recovers normal startup")
+    credentials = machine / "authority/credentials/owner.auth"
+    owner_hash = hashlib.sha256(credentials.read_bytes()).hexdigest()
+    (overlay / "usr/share/werewolf/ab-release").write_text("B\n")
+    run(create, "publish-update", timeout=1800)
+    ssh("/usr/lib/werewolf/slot-update check", "update-check")
+    ssh("/usr/lib/werewolf/slot-update try", "update-try", success=None)
+    updated = ready("updated-ready", release="B")
+    ssh("test \"$(cat /data/svc/plex-media/Movies/title.srt)\" = 'updated subtitle' && "
+        "test -f /data/svc/plex-media/keep.txt && test -f /data/svc/plex-media/new.txt", "updated-content")
+    if updated["boot_id"] == restored["boot_id"] or updated["root_hash"] == restored["root_hash"]:
+        raise RuntimeError("A/B update did not boot its new verified root")
+    if hashlib.sha256(credentials.read_bytes()).hexdigest() != owner_hash:
+        raise RuntimeError("image update replaced VM enrollment credentials")
+    report("imported and synced media survive a verified A/B image update")
+finally:
+    info = subprocess.run(["limactl", "list", name, "--json"], capture_output=True, text=True, check=False)
+    if info.returncode == 0 and info.stdout.strip():
+        try:
+            console = Path(json.loads(info.stdout)["dir"]) / "serial.log"
+            if console.exists():
+                shutil.copyfile(console, work / "console.log")
+        except (ValueError, KeyError, OSError):
+            pass
+    with (work / "cleanup.log").open("w") as cleanup:
+        result = subprocess.run([howl, "delete", name, "--on", "lima"], stdout=cleanup,
+                                stderr=subprocess.STDOUT, timeout=180, check=False)
+    if result.returncode and sys.exc_info()[0] is None:
+        raise RuntimeError("test VM cleanup failed; see " + str(work / "cleanup.log"))

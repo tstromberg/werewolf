@@ -68,8 +68,10 @@ def newc(entries):
     return bytes(result)
 
 
-def initrd(agent, public, factory, policy):
-    return newc([
+def initrd(agent, public, factory, policy, channel='virtio'):
+    if channel not in ('virtio', 'serial', 'serial-console'):
+        raise ValueError('unsupported bootstrap channel')
+    entries = [
         ('dev', stat.S_IFDIR | 0o755, b'', 0, 0),
         ('dev/console', stat.S_IFCHR | 0o620, b'', 5, 1),
         ('init', stat.S_IFREG | 0o500, agent, 0, 0),
@@ -77,7 +79,10 @@ def initrd(agent, public, factory, policy):
         ('enrollment/publisher.pub', stat.S_IFREG | 0o400, public, 0, 0),
         ('enrollment/factory.permit', stat.S_IFREG | 0o400, factory, 0, 0),
         ('enrollment/ipe-boot.p7b', stat.S_IFREG | 0o400, policy, 0, 0),
-    ])
+    ]
+    if channel != 'virtio':
+        entries.append(('enrollment/channel', stat.S_IFREG | 0o400, channel.encode(), 0, 0))
+    return newc(entries)
 
 
 def build(args):
@@ -94,10 +99,12 @@ def build(args):
     out.mkdir(mode=0o700, parents=False)  # Refuse overwriting existing enrollment evidence.
     try:
         policy = signed_policy(args.ipe_key, args.ipe_cert, out)
-        archive = initrd(agent, public, factory, policy)
+        archive = initrd(agent, public, factory, policy, args.channel)
         (out / 'bootstrap.initrd').write_bytes(archive)
-        console = 'ttyAMA0' if args.arch == 'aarch64' else 'ttyS0'
-        line = CMDLINE + (b' werewolf.recovery=1' if args.recovery else b'') + (' console=' + console).encode() + b'\0'
+        console = 'ttyAMA0' if args.arch == 'aarch64' and args.channel != 'serial-console' else 'ttyS0,115200'
+        diagnostics = (b' earlycon=uart8250,mmio,0x80000000,115200n8 efi=debug loglevel=8 keep_bootcon'
+                       if args.aws_boot_trace else b' earlycon' if args.earlycon else b'')
+        line = CMDLINE + (b' werewolf.recovery=1' if args.recovery else b'') + (' console=' + console).encode() + diagnostics + b'\0'
         (out / 'cmdline').write_bytes(line)
         unsigned, signed = out / 'unsigned.efi', out / 'bootstrap.efi'
         subprocess.run([args.uki, args.stub, str(unsigned), '.linux=' + args.kernel,
@@ -113,7 +120,7 @@ def build(args):
         pcr = (out / 'pcr11').read_bytes()
         if len(pcr) != 32 or pcr == bytes(32):
             raise ValueError('bootstrap must have a nonzero measured identity')
-        manifest = dict(kind='tpm-bootstrap', protocol=1, arch=args.arch,
+        manifest = dict(kind='tpm-bootstrap', protocol=1, arch=args.arch, channel=args.channel,
                         mode='recovery' if args.recovery else 'fresh',
                         machine=identity[:32].hex(), factory=identity[32:64].hex(),
                         anchor=identity[64:].hex(), pcr11=pcr.hex(),
@@ -121,6 +128,17 @@ def build(args):
                         ipe_policy_sha256=hashlib.sha256(policy).hexdigest(),
                         initrd_sha256=hashlib.sha256(archive).hexdigest(),
                         uki_sha256=hashlib.sha256(signed.read_bytes()).hexdigest())
+        if args.loader:
+            plain_loader = out / 'unsigned-loader.efi'
+            plain_loader.write_bytes(bounded(args.loader, 16 << 20))
+            loader = out / 'loader.efi'
+            subprocess.run(['osslsigncode', 'sign', '-certs', args.boot_cert, '-key', args.boot_key,
+                            '-in', str(plain_loader), '-out', str(loader)],
+                           check=True, capture_output=True, timeout=60)
+            subprocess.run(['osslsigncode', 'verify', '-CAfile', args.boot_cert, '-in', str(loader)],
+                           check=True, capture_output=True, timeout=60)
+            manifest['loader_sha256'] = hashlib.sha256(loader.read_bytes()).hexdigest()
+            plain_loader.unlink()
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         unsigned.unlink()
     except BaseException:
@@ -136,7 +154,11 @@ def main():
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--uki', default='build/host/uki')
     parser.add_argument('--codec', default='build/host/tpm-bootstrap')
+    parser.add_argument('--loader', help='optional public EFI boot manager, signed on this host')
+    parser.add_argument('--earlycon', action='store_true', help='request early kernel console diagnostics')
+    parser.add_argument('--aws-boot-trace', action='store_true', help='trace EFI and the diagnosed Graviton MMIO UART')
     parser.add_argument('--recovery', action='store_true')
+    parser.add_argument('--channel', choices=['virtio', 'serial', 'serial-console'], default='virtio')
     build(parser.parse_args())
 
 

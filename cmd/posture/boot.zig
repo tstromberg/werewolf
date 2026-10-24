@@ -180,8 +180,7 @@ fn imagePolicy(p: *Posture) !void {
 
 fn rollback(p: *Posture) !void {
     const has_tpm = exists(p.io, "/dev/tpmrm0");
-    const checked_rollback = exists(p.io, rollback_marker);
-    try p.add(.{
+    var rb: posture.Check = .{
         .id = "boot-rollback-protected",
         .area = "boot",
         .name = "Rollback protected",
@@ -189,15 +188,48 @@ fn rollback(p: *Posture) !void {
             "bootable.",
         .how = "the running release belongs to the protected TPM pair, checked before handover, " ++
             "marked in " ++ rollback_marker,
-        .result = if (rollbackProtected(has_tpm, checked_rollback) and pairProtected(p))
-            .pass
-        else
-            .fail,
-        .detail = if (!has_tpm)
-            "no TPM device: no protected release authorization"
-        else
-            "protected A/B authorization must match this boot",
-    });
+        .result = .skip,
+    };
+    // A root SSH session may not open the TPM (forms/sshd's Landlock layer).
+    if (has_tpm and !tpmOpens()) {
+        rb.detail = "this process may not use the TPM, as an SSH session may not";
+        return p.fromBoot(rb);
+    }
+    if (has_tpm) p.tpm = tpmState(p);
+    const checked_rollback = exists(p.io, rollback_marker);
+    rb.result = if (rollbackProtected(has_tpm, checked_rollback) and pairProtected(p))
+        .pass
+    else
+        .fail;
+    rb.detail = if (!has_tpm)
+        "no TPM device: no protected release authorization"
+    else
+        "protected A/B authorization must match this boot";
+    try p.add(rb);
+}
+
+/// tpmOpens reports whether this process may open the TPM for commands.
+fn tpmOpens() bool {
+    const fd = linux.open("/dev/tpmrm0", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+    switch (linux.errno(fd)) {
+        .ACCES, .PERM => return false,
+        .SUCCESS => _ = linux.close(@intCast(fd)),
+        else => {},
+    }
+    return true;
+}
+
+/// tpmState reads the A/B pair's anchor and PCR 11, or returns null.
+fn tpmState(p: *Posture) ?posture.Tpm {
+    const key = tpm.keyAt(p.io, p.gpa, "") catch return null;
+    var device = tpm.Device.open(p.io) catch return null;
+    defer device.close();
+    const anchor = device.anchor(key) catch return null;
+    const pcr = device.pcr11() catch return null;
+    return .{
+        .anchor = p.gpa.dupe(u8, &std.fmt.bytesToHex(anchor, .lower)) catch return null,
+        .pcr11 = p.gpa.dupe(u8, &std.fmt.bytesToHex(pcr, .lower)) catch return null,
+    };
 }
 
 fn pairProtected(p: *Posture) bool {

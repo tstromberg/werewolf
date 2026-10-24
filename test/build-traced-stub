@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Build the pinned measured EFI stub with progress messages only, on a public-input helper."""
+import argparse
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+def run(*args):
+    result = subprocess.run(list(map(str, args)), capture_output=True)
+    with (output.parent / 'build.log').open('ab') as log:
+        log.write(result.stdout)
+        log.write(result.stderr)
+    if result.returncode:
+        print(result.stderr.decode(errors='replace')[-2000:], flush=True)
+        result.check_returncode()
+    return result
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--helper', default='werewolf-build-26.04')
+parser.add_argument('--output', required=True)
+parser.add_argument('--sync-arm-cache', action='store_true')
+parser.add_argument('--firmware-kernel-loader', action='store_true')
+args = parser.parse_args()
+output = Path(args.output).resolve()
+if output.exists():
+    parser.error('refusing to overwrite an existing stub')
+output.parent.mkdir(parents=True, exist_ok=True)
+tracer = r'''from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+entry = 'static EFI_STATUS run(EFI_HANDLE image) {'
+assert s.count(entry) == 1
+s = s.replace(entry, 'static void ww_trace(const char16_t *s) {\n'
+    '        if (ST->ConOut) (void) ST->ConOut->OutputString(ST->ConOut, (char16_t *) s);\n}\n\n'
+    + entry + '\n        ww_trace(u"ww-stub-trace: entry\\r\\n");')
+points = [
+    ('        process_arguments(image, loaded_image, &profile, &cmdline);', 'arguments'),
+    ('        measure_profile(profile, &parameters_measured);', 'profile'),
+    ('        measure_sections(loaded_image, sections, &sections_measured);', 'sections'),
+    ('        refresh_random_seed(loaded_image);', 'random-seed'),
+    ('        (void) prepare_boot_secret(loaded_image, sections + UNIFIED_SECTION_OSREL, boot_secret);', 'boot-secret'),
+    ('        settle_command_line(loaded_image, sections, &cmdline, &parameters_measured);', 'command-line'),
+    ('        load_all_addons(image, loaded_image, uname, &cmdline_addons, &dt_addons, &n_dt_addons, &initrd_addons, &n_initrd_addons, &ucode_addons, &n_ucode_addons);', 'addons'),
+    ('        cmdline_append_console(&cmdline);', 'console'),
+    ('        measure_smbios();', 'smbios'),
+    ('        generate_sidecar_initrds(loaded_image, initrds, &parameters_measured, &sysext_measured, &confext_measured);', 'sidecars'),
+    ('        generate_embedded_initrds(loaded_image, sections, initrds);', 'embedded-initrd'),
+    ('        export_pcr_variables(sections_measured, parameters_measured, sysext_measured, confext_measured);', 'pcr-variables'),
+    ('        err = linux_exec(image, cmdline, &kernel, &final_initrd);', 'kernel-entry'),
+]
+for statement, name in points:
+    assert s.count(statement) == 1, name
+    before = '        ww_trace(u"ww-stub-trace: before-' + name + '\\r\\n");'
+    after = '        ww_trace(u"ww-stub-trace: after-' + name + '\\r\\n");'
+    s = s.replace(statement, before + '\n' + statement + '\n' + after)
+p.write_text(s)
+p = p.with_name('linux.c')
+s = p.read_text()
+anchor = 'static EFI_STATUS load_via_boot_services('
+assert s.count(anchor) == 1
+s = s.replace(anchor, 'static void ww_linux_trace(const char16_t *s) {\n'
+    '        if (ST->ConOut) (void) ST->ConOut->OutputString(ST->ConOut, (char16_t *) s);\n}\n\n' + anchor)
+points = [
+    ('        assert(parent_image);', 'linux-exec-entry', 1),
+    ('        /* When running with shim < v16', 'firmware-loader-entry', 1),
+    ('        err = pe_kernel_info(kernel->iov_base, kernel->iov_len, &entry_point, &compat_entry_point, &kernel_size_in_memory, &section_alignment);', 'kernel-info', 1),
+    ('        err = pe_kernel_check_no_relocation(kernel->iov_base);', 'manual-loader-entry', 1),
+    ('        uint8_t* loaded_kernel = PHYSICAL_ADDRESS_TO_POINTER(loaded_kernel_pages.addr);', 'kernel-allocated', 1),
+    ('        /* Patch the parent_image(_handle)', 'kernel-copy-complete', 1),
+    ('        err = initrd_register(initrd, &initrd_handle);', 'register-initrd', 2),
+    ('        log_wait();', 'log-wait', 2),
+    ('        err = BS->StartImage(kernel_image, NULL, NULL);', 'firmware-start-kernel', 1),
+    ('                err = entry(parent_image, ST);', 'manual-call-kernel', 1),
+]
+for statement, name, count in points:
+    assert s.count(statement) == count, name
+    before = '        ww_linux_trace(u"ww-linux-trace: before-' + name + '\\r\\n");'
+    after = '        ww_linux_trace(u"ww-linux-trace: after-' + name + '\\r\\n");'
+    if statement.lstrip().startswith('/*'):
+        s = s.replace(statement, before + '\n' + statement)
+    else:
+        s = s.replace(statement, before + '\n' + statement + '\n' + after)
+p.write_text(s)
+'''
+if args.sync_arm_cache:
+    tracer += r'''
+p = p.with_name('linux.c')
+s = p.read_text()
+entry = 'EFI_STATUS linux_exec('
+assert s.count(entry) == 1
+cache = r"""
+#if defined(__aarch64__)
+static void ww_sync_kernel_code(void *base, size_t size) {
+        uint64_t ctr;
+        __asm__ __volatile__("mrs %0, ctr_el0" : "=r" (ctr));
+        uintptr_t first = (uintptr_t) base, last = first + size;
+        uintptr_t dline = 4UL << ((ctr >> 16) & 15);
+        uintptr_t iline = 4UL << (ctr & 15);
+        for (uintptr_t p = first & ~(dline - 1); p < last; p += dline)
+                __asm__ __volatile__("dc cvau, %0" :: "r" (p) : "memory");
+        __asm__ __volatile__("dsb ish" ::: "memory");
+        for (uintptr_t p = first & ~(iline - 1); p < last; p += iline)
+                __asm__ __volatile__("ic ivau, %0" :: "r" (p) : "memory");
+        __asm__ __volatile__("dsb ish\nisb" ::: "memory");
+}
+#endif
+
+"""
+s = s.replace(entry, cache + entry)
+point = '        if (entry_point > 0) {'
+assert s.count(point) == 1
+s = s.replace(point, '#if defined(__aarch64__)\n'
+    '        ww_sync_kernel_code(loaded_kernel, kernel_size_in_memory);\n'
+    '        if (ST->ConOut) (void) ST->ConOut->OutputString(ST->ConOut, (char16_t *) u"ww-stub-trace: cache-sync-complete\\r\\n");\n'
+    '#endif\n' + point)
+p.write_text(s)
+'''
+if args.firmware_kernel_loader:
+    tracer += r'''
+p = p.with_name('linux.c')
+s = p.read_text()
+old = 'if (secure_boot_enabled() && (shim_loader_available() || (shim_loaded() && security_override_available())))'
+new = 'if (secure_boot_enabled() && (shim_loader_available() || security_override_available()))'
+assert s.count(old) == 1
+s = s.replace(old, new)
+p.write_text(s)
+'''
+with tempfile.TemporaryDirectory(prefix='ww-traced-stub-') as temporary:
+    local = Path(temporary)
+    script = Path('tools/build-tpm-stub').read_text()
+    marker = 'phase stub-compile "Compiling systemd $version EFI stub (meson compile systemd-boot)"'
+    assert script.count(marker) == 1
+    script = script.replace(marker, 'python3 "$root/tools/trace-stub" "$out/systemd-$version/src/boot/stub.c"\n' + marker)
+    (local / 'build-tpm-stub').write_text(script)
+    (local / 'trace-stub').write_text(tracer)
+    remote = subprocess.check_output(['limactl', 'shell', args.helper, '--', 'mktemp', '-d',
+                                     '/var/tmp/ww-traced-stub.XXXXXXXX'], text=True).strip()
+    if not remote.startswith('/var/tmp/ww-traced-stub.') or '/' in remote[len('/var/tmp/ww-traced-stub.'):]:
+        raise RuntimeError('unexpected helper directory')
+    try:
+        run('limactl', 'shell', args.helper, '--', 'mkdir', '-p', remote + '/boot', remote + '/tools')
+        for source, destination in [(Path('boot/stub-source'), 'boot/stub-source'),
+                                    (local / 'build-tpm-stub', 'tools/build-tpm-stub'),
+                                    (local / 'trace-stub', 'tools/trace-stub')]:
+            run('limactl', 'copy', source, args.helper + ':' + remote + '/' + destination)
+        print('Building pinned measured stub with trace messages; log: ' + str(output.parent / 'build.log'), flush=True)
+        run('limactl', 'shell', args.helper, '--', 'sh', remote + '/tools/build-tpm-stub', remote + '/stub')
+        run('limactl', 'copy', args.helper + ':' + remote + '/stub/linux.efi.stub', output)
+    finally:
+        run('limactl', 'shell', args.helper, '--', 'rm', '-rf', '--', remote)
+print('traced measured stub: ' + str(output))

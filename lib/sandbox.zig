@@ -244,6 +244,11 @@ pub const own_files: u64 = read_file | write_file | remove_file | make_reg | tru
 /// own_dir adds reading, making and removing directories to own_files. It
 /// grants no devices, sockets, FIFOs, links or ioctls.
 pub const own_dir: u64 = own_files | read_dir | remove_dir | make_dir;
+/// writes are the rights to change what is beneath a directory: write and
+/// truncate files, and make and remove them, directories, sockets, FIFOs
+/// and links. Device nodes are not among them.
+pub const writes: u64 = write_file | truncate | remove_dir | remove_file | make_dir | make_reg |
+    make_sock | make_fifo | make_sym;
 
 /// bind_tcp and connect_tcp are Landlock's TCP port rights; they need ABI 4.
 pub const bind_tcp: u64 = 0x1;
@@ -275,11 +280,14 @@ pub const Ruleset = struct {
     /// reached but beneath a rule that grants it. only_exec handles only
     /// execute, to drop setup helpers before the service starts. only_bind
     /// handles only TCP bind and abstract UNIX sockets, leaving files,
-    /// connects and signals to fence's machine domain.
+    /// connects and signals to fence's machine domain; with writes, it also
+    /// handles changing files, so only what rules grant writes is written,
+    /// and no device node is made.
     pub const Options = struct {
         sockets: bool = false,
         only_exec: bool = false,
         only_bind: bool = false,
+        writes: bool = false,
     };
 
     pub fn init(o: Options) !Ruleset {
@@ -291,6 +299,8 @@ pub const Ruleset = struct {
         const passthrough = (o.only_exec or o.only_bind) and abi >= 2;
         const fs = (if (o.only_exec)
             execute
+        else if (o.only_bind and o.writes)
+            (writes | make_char | make_block) & fsAll(abi)
         else if (o.only_bind)
             @as(u64, if (abi >= 4) 0 else execute)
         else
@@ -662,6 +672,59 @@ test "supplemental exec and bind layers preserve confined renames" {
         }
         try std.testing.expectEqual(@as(i32, 0), status);
     }
+}
+
+test "a writes layer changes files only beneath its rules" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const probe = Ruleset.init(.{}) catch |err| {
+        if (failed_errno == .NOSYS or failed_errno == .OPNOTSUPP) return error.SkipZigTest;
+        return err;
+    };
+    _ = linux.close(probe.fd);
+    if (probe.abi < 4) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "own/left");
+    try tmp.dir.createDirPath(io, "own/right");
+    try tmp.dir.createDirPath(io, "other");
+    try tmp.dir.writeFile(io, .{ .sub_path = "own/left/file", .data = "kept" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "other/file", .data = "kept" });
+    const own = try tmp.dir.openDir(io, "own", .{});
+    defer own.close(io);
+    const pid = try sys(linux.fork(), "fork Landlock test");
+    if (pid == 0) {
+        confinedWrites(tmp.dir.handle, own.handle) catch linux.exit_group(1);
+        linux.exit_group(0);
+    }
+    var status: i32 = 0;
+    while (true) {
+        const waited = linux.wait4(@intCast(pid), &status, 0, null);
+        if (linux.errno(waited) == .INTR) continue;
+        _ = try sys(waited, "wait for Landlock test");
+        break;
+    }
+    try std.testing.expectEqual(@as(i32, 0), status);
+}
+
+fn confinedWrites(dir: i32, own: i32) !void {
+    const layer = try Ruleset.init(.{ .only_bind = true, .writes = true });
+    try layer.add(own, writes);
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+    try layer.restrict();
+    _ = try sys(linux.renameat(dir, "own/left/file", dir, "own/right/file"), "rename beneath");
+    const create: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true };
+    _ = linux.close(@intCast(try sys(linux.openat(dir, "own/new", create, 0o600), "make beneath")));
+    const write: linux.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
+    const refused = [_]linux.E{
+        linux.errno(linux.openat(dir, "other/file", write, 0)),
+        linux.errno(linux.openat(dir, "other/new", create, 0o600)),
+        linux.errno(linux.renameat(dir, "own/new", dir, "other/new")),
+    };
+    for (refused) |e| if (e != .ACCES and e != .XDEV) return error.WroteOutside;
+    // Reading is fence's to judge, not this layer's.
+    const read: linux.O = .{ .CLOEXEC = true };
+    _ = linux.close(@intCast(try sys(linux.openat(dir, "other/file", read, 0), "read outside")));
 }
 
 fn confinedRename(dir: i32, own: i32, options: Ruleset.Options) !void {

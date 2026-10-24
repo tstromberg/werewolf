@@ -6,12 +6,17 @@ sshd:
   pubkey-accepted-algorithms: sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com
   allow-agent-forwarding: "yes"
   agent-socket-path: shared:/run/ssh-agent
-  pubkey-auth-options: touch-required verify-required
+  # Every key touched; ed25519 security keys verified too (a PIN or
+  # biometric). P-256 keys, which Apple's Secure Enclave makes, cannot
+  # report verification, so they are held to touch.
+  pubkey-auth-options: touch-required
+  verify-required-keys: sk-ssh-ed25519@openssh.com
   # Every su caller shares this source address. Keep external penalties.
   per-source-penalty-exempt-list: 127.0.0.1/32
 
+# People, who alone call su, reach the listener on loopback.
 net:
-  - connect all tcp/22 loopback
+  - connect :people tcp/22 loopback
 
 # Services replace whole declarations. This is sshd's service with a public
 # localhost host-key pin published before the same daemon starts.
@@ -25,7 +30,8 @@ services:
     caps: login
     listen: [tcp/22]
     nofile: 1024
-    pledge: stdio rpath wpath inet unix netlink packet connect listen proc exec setuid setgid setgroups caps chroot seccomp landlock reboot syslog sendfile
+    memory: 512
+    pledge: stdio rpath wpath inet unix connect listen proc exec setuid setgid setgroups chroot reboot syslog sendfile
 
 weaknesses:
   network-no-login: SSH provides operator shells and fresh authentication for su

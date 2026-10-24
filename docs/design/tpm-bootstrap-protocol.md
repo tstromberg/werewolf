@@ -27,6 +27,12 @@ of workload images, with no Secure Boot, cloud endpoint or recovery of its own.
 
 ### Challenge and attestation
 
+Before the challenge, the host may send the public eight-byte `WWHELLO1` frame to
+repeat `WWREADY1` if a serial console opened after boot missed it. The bootstrap accepts
+at most eight such knocks, only before the challenge. They never restart attestation,
+capsule activation or enrollment; replay and incomplete-state admission still precede
+readiness.
+
 The challenge is four 32-byte values, all nonzero: machine nonce, signed factory digest,
 PCR 11 and a fresh nonce; its quote qualification is SHA-256 of `werewolf.enroll/1\0`
 and those values, and the guest checks machine and factory against the signed factory

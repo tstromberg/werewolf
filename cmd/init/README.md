@@ -2,15 +2,15 @@
 
 ## Summary
 
-init is PID 1 from stage0's handover until runit. It mounts filesystems,
-sets protections, loads config, starts networking and `/data`, then execs fence.
+init is PID 1 from stage0's handover until runit. It mounts filesystems, sets the
+kernel's protections, reads the config, brings up the network and `/data`, seals the
+machine, and execs fence, which becomes runit.
 
 ## Background
 
-stage0 mounts the verified, read-only root. Changes live in `/run`, `/tmp`,
-`/var/tmp` and `/data`. init serves every form, using the image's tools
-(DHCP client, mke2fs, cryptsetup), `werewolf.*` command-line words
-(`lib/cmdline.zig`) and one config tar. It runs no shell or seed scripts.
+Changes to stage0's verified, read-only root live in `/run`, `/tmp`, `/var/tmp` and
+`/data`. init uses the image's tools, `werewolf.*` words (`lib/cmdline.zig`) and one
+config tar to select its behavior. It runs no shell.
 
 ## Goals
 
@@ -18,6 +18,10 @@ stage0 mounts the verified, read-only root. Changes live in `/run`, `/tmp`,
 - Set every protection (lockdown, sysctls, MDWE, seal, fence) first.
 - Fail closed on what protects the machine; log and boot on for the rest.
 - Never destroy data: format a disk only while it is blank.
+
+## Non-Goals
+
+- Services (runit's job) or cloud-init scripts.
 
 ## Detailed design
 
@@ -31,10 +35,10 @@ stage0 mounts the verified, read-only root. Changes live in `/run`, `/tmp`,
    sysctl or MDWE ends the boot, except in a container, where they are the
    host's. The sysctls of what the kernel leaves out (BPF, io_uring, the
    module loader, SysRq) do not exist, and are skipped.
-3. **Config** (`config.zig`): one tar, from the first block device holding
-   one; others are logged and ignored. A confined child (no capabilities,
-   Landlock, seccomp) extracts it to `/run/config`. A NoCloud volume labelled
-   `cidata` stages users, keys and Lima's data files without replacing the tar's.
+3. **Config** (`config.zig`): one tar, from the first block device holding one; others
+   are logged and ignored. A confined child (no capabilities, Landlock, seccomp)
+   extracts it to `/run/config`. A NoCloud volume labelled `cidata` stages a user and
+   keys and adds Lima's data files, never replacing the tar's.
 4. **Network** (`network.zig`): `iface-up` with the command line's or the
    tar's address (`lib/network.zig`), else `dhcp-client up`. Router
    advertisements count on that NIC only. Without a disk config,
@@ -93,6 +97,4 @@ costs 85 ms on GCP. Reading each disk's volume descriptor finds the seed.
 
 - **Fails closed** on the command line, sysctls, MDWE, seal and fence: PID 1
   exits, the kernel panics (`panic=10`), and systemd-boot falls back.
-- **Never formats twice**: a labelled disk is checked (`e2fsck -p`) and
-  mounted, or left alone; stdin is `/dev/null`.
-- **Tested**: every `make check` boot runs it across network, disk and cloud modes.
+- **Never formats twice**: labelled disks are checked (`e2fsck -p`) before mounting.

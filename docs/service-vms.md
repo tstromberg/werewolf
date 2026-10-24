@@ -67,6 +67,8 @@ cloud a new machine lets nothing in: `create` ends by printing the lines
 that open the form's TCP ports to your address alone (a GCP firewall rule,
 an AWS security-group rule, an Azure NSG rule), and `delete` removes what
 they make. `--allow-from me` runs them; `0.0.0.0/0` or a CIDR opens wider.
+For GCP, `howl ssh` creates the same per-machine firewall rule for TCP 22
+to the current public IP if it does not already exist.
 
 The steps below do it by hand, for a VPC and subnet of your own. Complete
 the [GCP project setup](../examples/README.md#prepare-gcp-once), make a

@@ -98,6 +98,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
             .dev = b.spec.dev,
             .dev_shell = b.spec.dev_shell,
             .ipe = b.spec.ipe_kernel != null,
+            .tpm = b.spec.tpm_firmware or b.spec.tpm_pub != null,
             .posture_known = embedded.posture_known,
         };
         var f: forms.Failure = .{};

@@ -8,22 +8,22 @@ nor `/boot` is lent as a mount: fixed operations use detached mounts and close t
 
 ## Background
 
-fence forbids `mount`, `umount` and `pivot_root` for every process, including root.
-Three callers still need write access: slot-keep for the EFI entry, slot-update
-for a new slot and TPM boot state, and stage 3 to shut down `/data` and `/boot`.
-init starts the broker before fence, outside that domain. Callers use
-`lib/broker.zig`.
+fence puts every process in a Landlock domain that refuses `mount`, `umount` and
+`pivot_root`, root's included. Three callers must still touch filesystems the machine
+does not keep mounted writable: slot-keep (the EFI entry, at commit), slot-update (a new
+slot and TPM boot state), and stage 3 (shutting `/data` and `/boot` down). init starts
+the broker outside fence; programs ask through `lib/broker.zig`.
 
 ## Goals
 
 - No program but the broker can mount after boot.
 - The broker fixes devices, paths and mount options; callers request named operations.
-- Authority is an inherited socketpair descriptor per role, never a path in `/run`.
+- Authority to ask is an inherited socketpair descriptor per role, never a `/run` path.
 
 ## Non-Goals
 
-- Serving any process that did not inherit a role descriptor.
-- Choosing paths: UUIDs and FAT serials come only from `lib/cmdline.zig`, as in stage0.
+Serving processes without a role descriptor or choosing filesystems by path. UUID or
+FAT serial comes only from the kernel command line, parsed through `lib/cmdline.zig`.
 
 ## Detailed design
 
@@ -91,8 +91,9 @@ init starts the broker before fence, outside that domain. Callers use
 
 - **Never exits** once listening: without it no slot can be kept, and the machine falls
   back to the slot that last worked. A failing `poll` pauses 100 ms before retrying.
-- **Stalled clients** cannot block other roles. Sends, including descriptor
-  replies, are nonblocking. Failed sends, empty packets and EOF close the role's
-  channel. `make check-mount-broker` tests reply-queue saturation in a private
-  Linux mount namespace.
-- **Tested**: `check-slot`, `check-updater`, protected A/B lifecycles and shutdown.
+- **Stalled clients** cannot block replies to other roles. Sends, including owner
+  descriptor replies, are nonblocking. A failed send closes that role's channel;
+  an empty packet or EOF also closes it. Replies are never silently dropped while
+  retaining a channel. `make check-mount-broker` exercises the real confined broker
+  in a private Linux mount namespace, including reply-queue saturation.
+- **Tested**: `check-slot`, `check-updater`, protected A/B tests and every shutdown.

@@ -5,7 +5,7 @@
 # user data. `make check-gcp`, `make check-aws` and `make check-azure` use it;
 # see docs/testing.md.
 #
-#   cloud CLOUD FORM ARCH     CLOUD is gcp, aws or azure
+#   cloud CLOUD FORM ARCH     CLOUD is gcp, aws or azure; CLOUD_MODE=build|download
 #
 # It judges the machine by the cloud's record of its serial port: stage0
 # verified the root through dm-verity, cloud-metadata took the config from
@@ -13,9 +13,9 @@
 # fails exactly what POSTURE_KNOWN says the form fails. The machine is made
 # with --allow-from me, so werewolf opens the form's ports to this host only.
 # If sshd listens, the test reaches it over the Internet with the key the
-# config carried: root must log in, or, where sshd accepts only security
-# keys, the key must be refused. Then a second create of the same name, with
-# a new hostname, must restart the machine on its new config, and delete
+# config carried: both t and root must log in using a security key, and a
+# file key must be refused where the form requires security keys. Then a
+# second create with a new hostname must restart it on its new config, and delete
 # must leave nothing of the machine behind. However the run ends, it deletes
 # everything it made, including the image create made, unless CLOUD_KEEP=1.
 #
@@ -34,7 +34,13 @@ cloud=${1:-cloud}
 [ $# -eq 3 ] || die "usage: cloud gcp|aws|azure FORM ARCH"
 form=$2 arch=$3
 set --
-[ -z "${CLOUD_SIZE:-}" ] || set -- --size "$CLOUD_SIZE"
+mode=${CLOUD_MODE:-build}
+case $mode in
+build) set -- --build ;;
+download) ;;
+*) die "CLOUD_MODE must be build or download" ;;
+esac
+[ -z "${CLOUD_SIZE:-}" ] || set -- "$@" --size "$CLOUD_SIZE"
 howl=${HOWL:-build/host/howl}
 [ -x "$howl" ] || die "no $howl; make howl"
 
@@ -106,8 +112,10 @@ leftovers() {
 	azure) az resource list -g "$group" --query "[?contains(name, '$name')].name" -o tsv ;;
 	esac | sed '/^$/d'
 }
-name=${CLOUD_NAME:-werewolf-check-$(date -u +%Y%m%d%H%M%S)}
+name=${CLOUD_NAME:-ww-$cloud-$mode-$(date -u +%y%m%d%H%M%S)}
 work=$(mktemp -d)
+keep=build/$arch/$form/check/$cloud-$mode-serial.log
+mkdir -p "$(dirname "$keep")"
 
 cleanup() {
 	rc=$?
@@ -160,18 +168,21 @@ await_posture() {
 mkdir "$work/config"
 echo "$name" >"$work/config/hostname"
 ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
-cp "$work/key.pub" "$work/config/authorized_keys"
-say "creating $name, $form on $arch, in $where"
+provider=${SSH_SK_PROVIDER:-$(pwd)/build/host/test-sk.so}
+[ -f "$provider" ] || die "no $provider; make build/host/test-sk.so"
+ssh-keygen -q -t ed25519-sk -O verify-required -w "$provider" -N '' -C "$name" -f "$work/sk"
+cp "$work/sk.pub" "$work/config/authorized_keys"
+printf 't admin %s\n' "$(cat "$work/sk.pub")" >"$work/config/users"
+say "creating $name, $form on $arch, in $where ($mode)"
 # Show create's output as it comes, and save its stderr in a file too, since
 # it names the image cleanup deletes. The address comes back on fd 3.
 # create's status goes to a file, because a pipeline's status is tee's.
 # `|| rc=` lets a failed create get past set -e to the line that records it.
-made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --build --config "$work/config" \
+made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
+cp "$work/create.err" "${keep%-serial.log}-create.log"
 if [ "$(cat "$work/create.rc")" != 0 ]; then
 	serial
-	keep=build/$arch/$form/check/$cloud-serial.log
-	mkdir -p "$(dirname "$keep")"
 	cp "$log" "$keep"
 	cp "$raw" "${keep%.log}.raw.log"
 	die "howl create failed; console saved in $keep"
@@ -180,14 +191,19 @@ addr=$(echo "$made" | cut -f2)
 
 say "waiting for the posture line on the serial port"
 await_posture "$name"
-keep=build/$arch/$form/check/$cloud-serial.log
-mkdir -p "$(dirname "$keep")"
 cp "$log" "$keep"
 cp "$raw" "${keep%.log}.raw.log"
 
 seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
 seen 'stage0: Secure Boot enforced outside setup mode' && ok secure-boot ||
 	fail "secure-boot: stage0 did not verify firmware enforcement outside setup mode"
+seen 'stage0: TPM release authorization checked; reset authority protected' && ok tpm-authorization ||
+	fail "tpm-authorization: stage0 did not verify release authorization and protected reset authority"
+seen 'stage0: IPE: only this root image may execute; policy administration removed' && ok ipe-enforced ||
+	fail "ipe-enforced: stage0 did not enforce the root policy and remove policy administration"
+if seen 'werewolf.disable=|posture: .*disabled='; then
+	fail "protections-disabled: the VM reports disabled protections"
+fi
 seen "cloud-metadata: \\{.*\"event\":\"config\",\"provider\":\"$cloud\"" && ok metadata-config ||
 	fail "metadata-config: no config taken from the cloud's metadata server"
 seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
@@ -243,10 +259,8 @@ else
 	fi
 fi
 
-# Test ssh over the Internet, as an operator would, through the port werewolf
-# opened to this host only. sshd accepts only keys. Where it accepts only
-# security keys (POSTURE_KNOWN does not list network-ssh-security-keys), this
-# run's key, a file, must be refused.
+# Test ssh over the Internet through the port opened to this host. Where
+# the form accepts only security keys, the disposable file key is refused.
 if seen 'Server listening on 0.0.0.0 port 22' &&
 	! echo " ${POSTURE_KNOWN:-} " | tr ' ' '\n' | grep -qx -e network-ssh-security-keys -e '?network-ssh-security-keys'; then
 	i=0
@@ -259,23 +273,49 @@ if seen 'Server listening on 0.0.0.0 port 22' &&
 	done
 	[ $i -le 40 ] && ok ssh-security-keys-only ||
 		fail "ssh-security-keys-only: a key file was not refused at $addr, or something but a key was offered"
-elif seen 'Server listening on 0.0.0.0 port 22'; then
+fi
+
+# Successful security-key authentication is mandatory, even when refusal of
+# a plain key passed. A refused key alone cannot prove operator access works.
+if seen 'Server listening on 0.0.0.0 port 22'; then
+	for user in t root; do
 	i=0
-	until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	until identity=$(ssh -i "$work/sk" -o "SecurityKeyProvider=$provider" \
+		-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$work/known_hosts" \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
-		"root@$addr" id -u 2>/dev/null)" = 0 ]; do
+		"$user@$addr" 'id -un; id -u' 2>"$work/ssh.err"); do
 		i=$((i + 1))
 		[ $i -le 40 ] || break
 		sleep 3
 	done
-	[ $i -le 40 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
+	if [ $i -gt 40 ]; then
+		fail "ssh-login-$user: security key did not log in at $addr: $(cat "$work/ssh.err")"
+	elif [ "$user" = root ] && [ "$identity" = "$(printf 'root\n0')" ]; then
+		ok ssh-login-root
+	elif [ "$user" = t ] && printf '%s\n' "$identity" | awk 'NR == 1 {name = $0} NR == 2 {uid = $0} END {exit !(NR == 2 && name == "t" && uid ~ /^[0-9]+$/ && uid > 0)}'; then
+		ok ssh-login-t
+	else
+		fail "ssh-login-$user: unexpected account identity: $identity"
+	fi
+	done
+	if ssh -i "$work/sk" -o "SecurityKeyProvider=$provider" \
+		-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$work/known_hosts" \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
+		"root@$addr" 'cat /run/werewolf/posture.json' >"${keep%-serial.log}-posture.json" &&
+		python3 test/cloud-posture "$name" <"${keep%-serial.log}-posture.json"; then
+		ok runtime-protections
+	else
+		fail "runtime-protections: root's runtime posture is missing or a required protection did not pass"
+	fi
+else
+	fail "ssh-listener: no production SSH listener started"
 fi
 
 # Replace the config as an operator would: the same name, another hostname.
 # create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
-if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --build --config "$work/config" >/dev/null; then
+if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --config "$work/config" >/dev/null; then
 	await_posture "$name-b"
 	cat "$log" >>"$keep"
 	cat "$raw" >>"${keep%.log}.raw.log"

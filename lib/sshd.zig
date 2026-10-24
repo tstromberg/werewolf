@@ -53,6 +53,14 @@ const keywords = [_]Keyword{
     .{ "host-key-algorithms", "HostKeyAlgorithms" },
 };
 
+/// verify_keyword is werewolf's own, not sshd_config's: none, or the
+/// security key types whose people's keys must be verified, by PIN or
+/// biometric, as well as touched. sshd's PubkeyAuthOptions verify-required
+/// would refuse every key that cannot verify, as Apple's Secure Enclave
+/// keys cannot; the build writes these types to the image, and init puts
+/// verify-required before each such key (lib/people.zig verified).
+pub const verify_keyword = "verify-required-keys";
+
 /// Pair is one `sshd:` keyword and its value, from form.yaml's
 /// KEYWORD: VALUE or howl's --sshd.KEYWORD=VALUE.
 pub const Pair = struct { flag: []const u8, value: []const u8 };
@@ -68,7 +76,8 @@ pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment
     var text: std.ArrayList(u8) = .empty;
     try text.appendSlice(gpa, header);
     for (pairs, 0..) |p, i| {
-        const name = for (keywords) |k| {
+        const own = std.mem.eql(u8, p.flag, verify_keyword);
+        const name = if (own) p.flag else for (keywords) |k| {
             if (std.mem.eql(u8, k[0], p.flag)) break k[1];
         } else return fail(gpa, why, "sshd {s}: sshd takes {s}", .{ p.flag, flagList() });
         for (pairs[0..i]) |seen| if (std.mem.eql(u8, seen.flag, p.flag))
@@ -83,6 +92,16 @@ pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment
             "sshd {s}: a value is letters, digits, spaces and @ . _ , : + * ^ ! ? / [ ] -",
             .{p.flag},
         );
+        if (own) {
+            if (!verifyTypes(value)) return fail(
+                gpa,
+                why,
+                "sshd {s}: none, or security key types joined by commas, as " ++
+                    "sk-ssh-ed25519@openssh.com",
+                .{p.flag},
+            );
+            continue;
+        }
         try text.print(gpa, "{s} {s}\n", .{ name, value });
     }
     return .{ .text = text.items };
@@ -110,8 +129,30 @@ fn valueByte(c: u8) bool {
 
 fn flagList() []const u8 {
     comptime var s: []const u8 = "";
-    inline for (keywords, 0..) |k, i| s = s ++ (if (i > 0) " " else "") ++ k[0];
-    return s;
+    inline for (keywords) |k| s = s ++ k[0] ++ " ";
+    return s ++ verify_keyword;
+}
+
+/// verifyRequired returns the security key types the verify-required-keys
+/// pair names, one a line, or "" for none or no such pair. Use it on pairs
+/// fragment accepted.
+pub fn verifyRequired(gpa: Allocator, pairs: []const Pair) ![]const u8 {
+    for (pairs) |p| if (std.mem.eql(u8, p.flag, verify_keyword)) {
+        var out: std.ArrayList(u8) = .empty;
+        var types = std.mem.tokenizeScalar(u8, std.mem.trim(u8, p.value, " "), ',');
+        while (types.next()) |t| if (!std.mem.eql(u8, t, "none")) try out.print(gpa, "{s}\n", .{t});
+        return out.items;
+    };
+    return "";
+}
+
+/// verifyTypes reports whether value is none or security key types joined
+/// by commas.
+fn verifyTypes(value: []const u8) bool {
+    if (std.mem.eql(u8, value, "none")) return true;
+    var types = std.mem.splitScalar(u8, value, ',');
+    while (types.next()) |t| if (!isSecurityKey(t)) return false;
+    return true;
 }
 
 /// User is a bastion user from form.yaml.
@@ -369,6 +410,43 @@ test "fragment refuses what is not one keyword's value" {
         error.Invalid,
         fragment(a, &.{.{ .flag = "allow-users", .value = long }}, &why),
     );
+}
+
+test "verify-required-keys is werewolf's, checked, and never written to sshd_config" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: []const u8 = "";
+    const pairs = [_]Pair{
+        .{ .flag = "pubkey-auth-options", .value = "touch-required" },
+        .{
+            .flag = verify_keyword,
+            .value = "sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com",
+        },
+    };
+    const f = try fragment(a, &pairs, &why);
+    try testing.expectEqualStrings(header ++ "PubkeyAuthOptions touch-required\n", f.text);
+    try testing.expectEqualStrings(
+        "sk-ssh-ed25519@openssh.com\nsk-ecdsa-sha2-nistp256@openssh.com\n",
+        try verifyRequired(a, &pairs),
+    );
+    const none = [_]Pair{.{ .flag = verify_keyword, .value = "none" }};
+    _ = try fragment(a, &none, &why);
+    try testing.expectEqualStrings("", try verifyRequired(a, &none));
+    try testing.expectEqualStrings("", try verifyRequired(a, pairs[0..1]));
+    // A key file cannot verify, and a list is of types alone.
+    for ([_][]const u8{
+        "ssh-ed25519",
+        "sk-ssh-ed25519@openssh.com,",
+        "sk-ssh-ed25519@openssh.com,none",
+        "sk-ssh-ed25519@openssh.com sk-ecdsa-sha2-nistp256@openssh.com",
+    }) |bad| {
+        try testing.expectError(
+            error.Invalid,
+            fragment(a, &.{.{ .flag = verify_keyword, .value = bad }}, &why),
+        );
+        try testing.expect(std.mem.indexOf(u8, why, "security key types") != null);
+    }
 }
 
 test takesKeyFiles {

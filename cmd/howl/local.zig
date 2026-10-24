@@ -444,8 +444,9 @@ pub fn createLima(
             lima_step,
         );
         if (o.import_dir) |src| {
-            const image = try gpa.print("{s}/{s}/import.img", .{ cwd, dir });
-            try import_disk.write(io, gpa, src, std.fs.path.dirname(image).?, why);
+            const import_home = try gpa.print("{s}/{s}", .{ cwd, dir });
+            try import_disk.write(io, gpa, src, import_home, why);
+            const image = (try import_disk.existing(io, gpa, import_home)).?;
             const disk_name = try gpa.print("{s}-import", .{name});
             _ = std.process.run(gpa, io, .{
                 .argv = &.{ "limactl", "disk", "delete", disk_name },

@@ -16,7 +16,7 @@ packages:
   # migrations make: cube and earthdistance for places, pg_trgm and
   # unaccent for names, uuid-ossp for ids.
   - pgvector-17
-  - postgresql-17-contrib
+  - postgresql-contrib
 
 # BusyBox wget truncates binary POST bodies at NUL; the upload check uses curl.
 dev: [curl]

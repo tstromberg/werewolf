@@ -1,6 +1,6 @@
 version: 1
 packages:
-  - postgresql-17-client
+  - postgresql-client
 suites:
   - name: paperless-ca
     readiness: true

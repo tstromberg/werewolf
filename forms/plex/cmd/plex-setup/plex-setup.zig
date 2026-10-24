@@ -14,6 +14,14 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn setup(io: Io, a: mem.Allocator, environ: std.process.Environ) !void {
+    // Importing may take longer than server setup. Never advertise a partly
+    // initialized library or hide an import failure behind a healthy server.
+    for (0..120) |_| {
+        if (Dir.cwd().access(io, "/run/svc/plex-media/ready", .{})) break else |err| {
+            if (err != error.FileNotFound) return err;
+            try io.sleep(.fromSeconds(1), .awake);
+        }
+    } else return error.MediaImportNotReady;
     const root = "/data/svc/plex";
     const token_text = try Dir.cwd().readFileAlloc(
         io,

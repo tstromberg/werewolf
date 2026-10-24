@@ -833,6 +833,14 @@ fn composeInto(u: *Update, r: Root) !void {
             else => @compileError("werewolf runs on aarch64 and x86_64"),
         },
         .dev = dev != null,
+        .ipe = if (u.read(meta_dir ++ "/ipe")) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        },
+        .tpm = if (u.read(meta_dir ++ "/tpm/protocol")) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        },
         .dev_shell = if (dev) |mode|
             !std.mem.eql(u8, std.mem.trim(u8, mode, "\n"), "ssh")
         else

@@ -12,6 +12,7 @@ const form = @import("form");
 const seal = @import("seal");
 const service = @import("service");
 const package = @import("package");
+const people = @import("people");
 pub const baselayout = package.baselayout;
 
 const Form = form.Form;
@@ -29,6 +30,8 @@ pub const Build = struct {
     dev_shell: bool = true,
     /// ipe makes the image require IPE: stage0 activates its signed release policy.
     ipe: bool = false,
+    /// tpm requires the measured release pair and rollback journal at boot.
+    tpm: bool = false,
     /// posture_known is test/posture-known: the posture checks every form
     /// of a kind fails.
     posture_known: []const u8 = "",
@@ -215,6 +218,13 @@ pub fn compose(
         try ro.createDirPath(io, "etc/ssh/sshd_config.d");
         const text = try gpa.print("{s}\n", .{mem.trimEnd(u8, sshd_config, "\n")});
         try put(io, ro, "etc/ssh/sshd_config.d/form.conf", text);
+    }
+    // The key types init and cloud-metadata hold to verify-required
+    // (lib/people.zig verify_path).
+    const verify = try form.verifyRequired(gpa, forms);
+    if (verify.len > 0) {
+        try ro.createDirPath(io, "usr/share/werewolf");
+        try put(io, ro, "usr/share/werewolf/sshd-verify-required", verify);
     }
     if (hasForm(forms, "bastion")) {
         const files = try form.bastionFiles(gpa, forms, f);
@@ -961,6 +971,7 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
         if (!mem.eql(u8, first, kind) and !mem.eql(u8, first, @tagName(b.arch))) continue;
         while (it.next()) |id| {
             if (b.ipe and mem.eql(u8, id, "boot-ipe-enforced")) continue;
+            if (b.tpm and mem.eql(u8, id, "boot-rollback-protected")) continue;
             try out.print(gpa, "{s} {s}\n", .{ id, unbuilt(id, excuse) });
         }
     }
@@ -1266,9 +1277,10 @@ fn unique(gpa: Allocator, file: []const u8, text: []const u8, f: *Failure) Error
 
 /// net compiles the chain's network policy for fence and unwound: one rule
 /// per line, sorted and unique, with users as uids from passwd. It reads
-/// `listen tcp/PORT... [loopback]`, `connect USER|all PROTO/PORT|icmp...
-/// [public]`, `metadata USER...` and `lookup USER PATTERN TYPE...
-/// [unfiltered]` (forms/README.md).
+/// `listen tcp/PORT... [loopback]`, `connect USER|:all|:people
+/// PROTO/PORT|icmp... [public]`, `metadata USER...` and `lookup USER|:people
+/// PATTERN TYPE... [unfiltered]` (forms/README.md). A colon begins no
+/// account's name: `:all` is every user, `:people` every person's uid range.
 pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure) Error![]const u8 {
     var uids: std.array_hash_map.String([]const u8) = .empty;
     var pw = fileLines(passwd);
@@ -1282,9 +1294,27 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
     var lookups = false;
     const source_lines = try form.netLines(gpa, forms, f);
     var direct: std.array_hash_map.String(void) = .empty;
+    var everyone: [people.ids.len][]const u8 = undefined;
+    for (&everyone, people.ids) |*text, range| text.* = try gpa.print(
+        "{d}-{d}",
+        .{ range[0], range[1] },
+    );
     for (source_lines) |item| {
         const w = try words(gpa, uncommented(item));
         if (w.len == 2 and mem.eql(u8, w[0], "dns-direct")) try direct.put(gpa, w[1], {});
+        // People's ranges hold people alone, or another account would
+        // share their grants.
+        if (w.len > 1 and
+            mem.eql(u8, w[1], ":people")) for (uids.keys(), uids.values()) |name, text|
+        {
+            const id = std.fmt.parseInt(u32, text, 10) catch continue;
+            for (people.ids) |range| if (id >= range[0] and id <= range[1]) return f.fail(
+                gpa,
+                "form {s}: net: {s}: account {s} has uid {d}, among people's " ++
+                    "{d}-{d} (lib/people.zig ids): give it another",
+                .{ forms[forms.len - 1].name, uncommented(item), name, id, range[0], range[1] },
+            );
+        };
     }
     for (source_lines) |item| {
         const line = uncommented(item);
@@ -1300,10 +1330,17 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
                 .{ forms[forms.len - 1].name, line },
             );
         };
-        if (!try netLine(gpa, w, &uids, &out)) return f.fail(
+        if (!try netLine(gpa, w, &uids, &everyone, &out)) return f.fail(
             gpa,
-            "form {s}: a net line cannot compile: {s}",
-            .{ forms[forms.len - 1].name, line },
+            "form {s}: a net line cannot compile: {s}{s}",
+            .{
+                forms[forms.len - 1].name, line,
+                if (w.len > 1 and uids.get(w[1]) == null and
+                    (mem.eql(u8, w[1], "all") or mem.eql(u8, w[1], "people")))
+                    " (every user is :all, every person :people)"
+                else
+                    "",
+            },
         );
     }
     // unwound answers every lookup at 127.0.0.53:53 and asks the resolvers
@@ -1316,16 +1353,50 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
         "form {s}: lookup needs unwound, and its {s} account (forms/minimal)",
         .{ forms[forms.len - 1].name, unwound_upstream },
     );
-    sortStrings(out.items);
+    const kept = try loopbackOnly(gpa, out.items, forms[forms.len - 1].name, f);
+    sortStrings(kept);
     var text: std.ArrayList(u8) = .empty;
-    for (out.items, 0..) |line, i| {
-        if (i > 0 and mem.eql(u8, line, out.items[i - 1])) continue;
+    for (kept, 0..) |line, i| {
+        if (i > 0 and mem.eql(u8, line, kept[i - 1])) continue;
         try text.print(gpa, "{s}\n", .{line});
     }
     return text.items;
 }
 
 const unwound_upstream = "_unwoundnet";
+
+/// loopbackOnly returns grants without the loopback-only TCP grants another
+/// line holds: fence refuses a loopback line's users its port everywhere else,
+/// so beside a broader grant to the same users, or every user's, it would take
+/// that grant away. `all`'s loopback line beside another user's broader grant
+/// would take theirs, and fails.
+fn loopbackOnly(
+    gpa: Allocator,
+    grants: [][]const u8,
+    name: []const u8,
+    f: *Failure,
+) Error![][]const u8 {
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (grants) |line| {
+        const w = try words(gpa, line);
+        const held = w.len == 5 and mem.eql(u8, w[0], "connect") and mem.eql(u8, w[2], "tcp") and
+            mem.eql(u8, w[4], "loopback") and for (grants) |other|
+        {
+            const o = try words(gpa, other);
+            if (o.len != 4 or !mem.eql(u8, o[0], "connect") or !mem.eql(u8, o[2], "tcp") or
+                (!mem.eql(u8, o[3], w[3]) and !mem.eql(u8, o[3], "any"))) continue;
+            if (mem.eql(u8, o[1], w[1]) or mem.eql(u8, o[1], "all")) break true;
+            if (mem.eql(u8, w[1], "all")) return f.fail(
+                gpa,
+                "form {s}: net: {s} would refuse tcp/{s} beyond loopback to everyone, " ++
+                    "though {s} grants it: give the loopback grant to fewer users",
+                .{ name, line, w[3], other },
+            );
+        } else false;
+        if (!held) try kept.append(gpa, line);
+    }
+    return kept.items;
+}
 
 fn isDnsPort(word: []const u8) bool {
     for ([_][]const u8{
@@ -1341,6 +1412,7 @@ fn netLine(
     gpa: Allocator,
     w: []const []const u8,
     uids: *const std.array_hash_map.String([]const u8),
+    everyone: []const []const u8,
     out: *std.ArrayList([]const u8),
 ) Allocator.Error!bool {
     if (w.len == 0) return true;
@@ -1380,9 +1452,13 @@ fn netLine(
     }
     // form.netLines checked the rest of a lookup line; unwound checks it again.
     if (mem.eql(u8, w[0], "lookup") and w.len > 3) {
-        try out.append(gpa, try gpa.print("lookup {s} {s}", .{
-            uids.get(w[1]) orelse return false, try mem.join(gpa, " ", w[2..]),
-        }));
+        var one: [1][]const u8 = undefined;
+        const who: []const []const u8 = if (mem.eql(u8, w[1], ":people")) everyone else blk: {
+            one[0] = uids.get(w[1]) orelse return false;
+            break :blk &one;
+        };
+        const rest = try mem.join(gpa, " ", w[2..]);
+        for (who) |u| try out.append(gpa, try gpa.print("lookup {s} {s}", .{ u, rest }));
         return true;
     }
     if (mem.eql(u8, w[0], "dns-direct") and w.len == 2) {
@@ -1395,23 +1471,30 @@ fn netLine(
         return true;
     }
     if (mem.eql(u8, w[0], "connect") and w.len > 2) {
-        const who = if (mem.eql(u8, w[1], "all")) "all" else uids.get(w[1]) orelse return false;
+        // :all and :people are many users: no lan, which is a user's, and
+        // no any, every port.
+        const many = mem.eql(u8, w[1], ":all") or mem.eql(u8, w[1], ":people");
+        var one: [1][]const u8 = undefined;
+        const whos: []const []const u8 = if (mem.eql(u8, w[1], ":people")) everyone else blk: {
+            one[0] = if (mem.eql(u8, w[1], ":all")) "all" else uids.get(w[1]) orelse return false;
+            break :blk &one;
+        };
         const public = mem.eql(u8, w[w.len - 1], "public");
         const lan = mem.eql(u8, w[w.len - 1], "lan");
-        if (lan and mem.eql(u8, who, "all")) return false;
+        if (lan and many) return false;
         const lo = mem.eql(u8, w[w.len - 1], "loopback");
         const targets = w[2 .. w.len - @intFromBool(public or lan or lo)];
         if (targets.len == 0) return false;
-        for (targets) |t| {
+        for (whos) |who| for (targets) |t| {
             if (mem.eql(u8, t, "icmp")) {
                 if (public or lan or lo) return false;
                 try out.append(gpa, try gpa.print("connect {s} icmp", .{who}));
                 continue;
             }
             // any is every TCP port, for one user. public would refuse the
-            // private networks a scan is for, and `all` would be every user.
+            // private networks a scan is for.
             if (mem.eql(u8, t, "any")) {
-                if (public or lan or lo or mem.eql(u8, who, "all")) return false;
+                if (public or lan or lo or many) return false;
                 try out.append(gpa, try gpa.print("connect {s} tcp any", .{who}));
                 continue;
             }
@@ -1428,7 +1511,7 @@ fn netLine(
                     if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "",
                 },
             ));
-        }
+        };
         return true;
     }
     return false;
@@ -1599,7 +1682,7 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
             "net:\n  - connect _update tcp/443\n  - lookup _update Packages.Wolfi.dev.\n",
         ),
         try testForm(gpa, "web", "net:\n  - listen tcp/08080 # leading zeros\n" ++
-            "  - listen tcp/5432 loopback\n  - connect web tcp/443 public\n  - connect all " ++
+            "  - listen tcp/5432 loopback\n  - connect web tcp/443 public\n  - connect :all " ++
             "icmp\n" ++
             "  - metadata web\n  - connect _update tcp/443\n  - listen root udp/51820\n" ++
             "  - lookup root *.example.com TXT\n"),
@@ -1723,15 +1806,71 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         "listen nobody udp/53",            "listen root udp/0",
         "listen root tcp/53",              "listen root udp/53 loopback",
         "connect web udp/53",              "connect web tcp/53",
-        "connect web tcp/853",             "connect all udp/853",
+        "connect web tcp/853",             "connect :all udp/853",
         "listen root lan",                 "connect web tcp/80 lan",
-        "connect all udp/5353 lan",        "connect web icmp lan",
-        "connect web udp/5353 public lan",
+        "connect :all udp/5353 lan",       "connect web icmp lan",
+        "connect web udp/5353 public lan", "connect :all any",
+        "connect :people any",             "connect :people udp/5353 lan",
+        "lookup :all a.example A AAAA",    "metadata :people",
+        "listen :people udp/53",           "connect :nobody tcp/443",
     }) |line| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("net:\n  - {s}\n", .{line}))};
-        try testing.expectError(error.Form, net(gpa, &forms, passwd, &f));
+        try testing.expectError(error.Form, net(gpa, &forms, with_unwound, &f));
         try testing.expect(mem.endsWith(u8, f.text, line));
     }
+    // :people is every person's uid range, NoCloud's and named people's.
+    const play = try testForm(
+        gpa,
+        "play",
+        "net:\n  - connect :people tcp/443\n  - lookup :people *\n",
+    );
+    try testing.expectEqualStrings(
+        "connect 500-60000 tcp 443\nconnect 65536-1073741823 tcp 443\ndns 54\n" ++
+            "listen tcp 53 loopback\nlookup 500-60000 * A AAAA\nlookup 65536-1073741823 * A AAAA\n",
+        try net(gpa, &.{play}, with_unwound, &f),
+    );
+    // An account among those ranges would share people's grants.
+    try testing.expectError(error.Form, net(
+        gpa,
+        &.{play},
+        with_unwound ++ "demo:x:590:590::/var/empty:/sbin/nologin\n",
+        &f,
+    ));
+    try testing.expect(mem.find(u8, f.text, "account demo has uid 590") != null);
+    // A loopback-only grant goes beside a broader one to the same users or
+    // to all; all's beside another user's broader grant would take it.
+    for ([_]struct { []const u8, []const u8 }{
+        .{
+            "  - connect :people tcp/22 loopback\n  - connect :people tcp/22\n",
+            "connect 500-60000 tcp 22\nconnect 65536-1073741823 tcp 22\n",
+        },
+        .{ "  - connect web tcp/22 loopback\n  - connect :all tcp/22\n", "connect all tcp 22\n" },
+        .{
+            "  - connect web tcp/22 loopback\n  - connect root tcp/22\n",
+            "connect 0 tcp 22\nconnect 300 tcp 22 loopback\n",
+        },
+        .{
+            "  - connect web tcp/22 loopback\n  - connect web tcp/443\n",
+            "connect 300 tcp 22 loopback\nconnect 300 tcp 443\n",
+        },
+    }) |c| try testing.expectEqualStrings(
+        c[1],
+        try net(gpa, &.{try testForm(gpa, "su", try gpa.print("net:\n{s}", .{c[0]}))}, passwd, &f),
+    );
+    try testing.expectError(error.Form, net(gpa, &.{try testForm(
+        gpa,
+        "su",
+        "net:\n  - connect :all tcp/22 loopback\n  - connect root tcp/22\n",
+    )}, passwd, &f));
+    try testing.expect(mem.find(u8, f.text, "though connect 0 tcp 22 grants it") != null);
+    // Bare all and people are accounts' names, as any other word is.
+    const named = try testForm(gpa, "named", "net:\n  - connect all tcp/443\n");
+    try testing.expectEqualStrings(
+        "connect 400 tcp 443\n",
+        try net(gpa, &.{named}, passwd ++ "all:x:400:400::/var/empty:/sbin/nologin\n", &f),
+    );
+    try testing.expectError(error.Form, net(gpa, &.{named}, passwd, &f));
+    try testing.expect(mem.endsWith(u8, f.text, "(every user is :all, every person :people)"));
 }
 
 test "accounts: no account but root in group 0; a name or id twice refused" {
@@ -1889,6 +2028,15 @@ test "IPE builds retain unrelated weaknesses and remove closed kernel gaps" {
     try testing.expect(mem.find(u8, got, "boot-ipe-enforced") == null);
     try testing.expect(mem.find(u8, got, "boot-rollback-protected") != null);
     try testing.expect(mem.find(u8, got, "programs-no-shell deliberate") != null);
+    const protected = try weaknesses(gpa, top, .{
+        .arch = .aarch64,
+        .ipe = true,
+        .tpm = true,
+        .posture_known = "* boot-ipe-enforced boot-rollback-protected\n",
+    });
+    try testing.expect(mem.find(u8, protected, "boot-ipe-enforced") == null);
+    try testing.expect(mem.find(u8, protected, "boot-rollback-protected") == null);
+    try testing.expect(mem.find(u8, protected, "programs-no-shell deliberate") != null);
 }
 
 test "pledge: a path inside a strict service's directory fails the build" {

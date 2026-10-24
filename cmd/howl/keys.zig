@@ -11,6 +11,114 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
+pub fn currentUserName(io: Io, gpa: Allocator, why: *howl.Why) ![]const u8 {
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ "id", "-un" } });
+    const name = mem.trim(u8, result.stdout, " \r\n");
+    if (result.term != .exited or result.term.exited != 0 or name.len == 0)
+        return why.refuse("cannot determine local user", .{});
+    return name;
+}
+
+/// Provision a normal login from the caller's public keys. Explicit accounts
+/// remain authoritative; Lima already provisions its login through NoCloud.
+pub fn addCurrentUser(
+    io: Io,
+    gpa: Allocator,
+    iface: howl.Interface,
+    o: howl.Options,
+    entries: []const howl.Entry,
+    why: *howl.Why,
+) ![]const howl.Entry {
+    if (o.add_current_user == .no or o.on == .lima or
+        (o.on == null and o.add_current_user == .auto)) return entries;
+    if (o.dev) {
+        if (o.add_current_user == .yes)
+            return why.refuse(
+                "--add-current-user=yes requires normal SSH; developer SSH only accepts root",
+                .{},
+            );
+        return entries;
+    }
+    const users_index: ?usize = for (entries, 0..) |entry, n| {
+        if (mem.eql(u8, entry.path, "users")) break n;
+    } else null;
+    if (o.add_current_user == .auto and
+        (iface.people_defined or iface.people.len > 0 or users_index != null)) return entries;
+
+    const key_files = if (@import("boot-config.zig").forForm(o.form)) |definition| blk: {
+        if (definition.ssh == .disabled) {
+            if (o.add_current_user == .yes) return why.refuse("{s} does not run SSH", .{o.form});
+            return entries;
+        }
+        break :blk definition.ssh == .files;
+    } else blk: {
+        const chain = try howl.chain(io, gpa, o.form, why);
+        if (!forms.runsSshd(chain)) {
+            if (o.add_current_user == .yes) return why.refuse("{s} does not run SSH", .{o.form});
+            return entries;
+        }
+        break :blk try forms.takesKeyFiles(gpa, chain);
+    };
+    const name = try currentUserName(io, gpa, why);
+    if (mem.eql(u8, name, "root")) {
+        if (o.add_current_user == .yes)
+            return why.refuse("root is not a standard user; declare a named account in users", .{});
+        return entries;
+    }
+    if (!@import("people").isName(name))
+        return why.refuse(
+            "{s}: local username is not a supported guest account; declare users or use " ++
+                "--add-current-user=no",
+            .{name},
+        );
+    const existing = if (users_index) |n| entries[n].data else "";
+    var lines = mem.splitScalar(u8, existing, '\n');
+    while (lines.next()) |line| {
+        var words = mem.tokenizeAny(u8, line, " \t\r");
+        if (mem.eql(u8, words.next() orelse continue, name)) return entries;
+    }
+    const home = howl.environ.get("HOME") orelse return why.refuse(
+        "HOME is unset; cannot find local SSH keys",
+        .{},
+    );
+    const found = try usable(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" }), key_files);
+    if (found.lines.len == 0) {
+        if (o.add_current_user == .yes)
+            return why.refuse("{s}: no local public SSH keys accepted by {s}", .{ name, o.form });
+        return entries;
+    }
+    const public = try gpa.alloc([]const u8, found.lines.len);
+    for (found.lines, public) |line, *key| key.* = mem.trimEnd(u8, line, "\n");
+    var reason: []const u8 = "";
+    sshd.peopleKeys(
+        gpa,
+        &.{.{ .name = name, .keys = public, .destinations = &.{} }},
+        key_files,
+        &reason,
+    ) catch |err| switch (err) {
+        error.Invalid => return why.refuse("{s}", .{reason}),
+        else => return err,
+    };
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(gpa, existing);
+    if (existing.len > 0 and existing[existing.len - 1] != '\n') try text.append(gpa, '\n');
+    for (public) |key| try text.print(gpa, "{s} {s}\n", .{ name, key });
+    var result: std.ArrayList(howl.Entry) = .empty;
+    try result.appendSlice(gpa, entries);
+    const entry: howl.Entry = .{
+        .path = "users",
+        .data = text.items,
+        .from = "--add-current-user",
+    };
+    if (users_index) |n| result.items[n] = entry else try result.append(gpa, entry);
+    mem.sortUnstable(howl.Entry, result.items, {}, struct {
+        fn less(_: void, a: howl.Entry, b: howl.Entry) bool {
+            return mem.lessThan(u8, a.path, b.path);
+        }
+    }.less);
+    return result.items;
+}
+
 /// devPrivatePath is the private key Howl uses for local developer VMs.
 pub fn devPrivatePath(io: Io, gpa: Allocator) ![]const u8 {
     const dir = try howl.keysDir(io, gpa, "dev", "build/keys/dev");

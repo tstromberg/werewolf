@@ -58,6 +58,56 @@ const Read = struct {
     }
 };
 
+/// GCP omits the platform hierarchy from AUTH_POLICIES. Accept that only
+/// after its reset path is closed (TPM_PT_STARTUP_CLEAR.phEnable is false).
+/// Owner, lockout and endorsement must always be present; an enabled platform
+/// must also be reported.
+/// A missing entry can never stand in for an enabled hierarchy's policy.
+pub fn checkHierarchyPolicies(raw: []const u8, platform_enabled: bool) !void {
+    var r: Read = .{ .data = raw };
+    if (try r.int(u8) != 0 or try r.int(u32) != 9) return error.UnprotectedTpmHierarchy;
+    const count = try r.int(u32);
+    if (count != 4 and !(count == 3 and !platform_enabled)) return error.UnprotectedTpmHierarchy;
+    for ([3]u32{ owner, 0x4000000a, 0x4000000b }) |handle| {
+        if (try r.int(u32) != handle or try r.int(u16) != 0x10)
+            return error.UnprotectedTpmHierarchy;
+    }
+    if (count == 4 and (try r.int(u32) != platform or try r.int(u16) != 0x10))
+        return error.UnprotectedTpmHierarchy;
+    if (r.at != r.data.len) return error.BadTpmResponse;
+}
+
+test "GCP may omit only its disabled platform hierarchy; other omissions and policies refuse" {
+    const t = std.testing;
+    // Actual GCP AUTH_POLICIES response, excluding the TPM response header.
+    const google = [_]u8{
+        0,    0, 0,    0,    9, 0,    0,    0, 3,
+        0x40, 0, 0,    1,    0, 0x10, 0x40, 0, 0,
+        0xa,  0, 0x10, 0x40, 0, 0,    0xb,  0, 0x10,
+    };
+    try checkHierarchyPolicies(&google, false);
+    try t.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(&google, true));
+    var all = google ++ [_]u8{ 0x40, 0, 0, 0xc, 0, 0x10 };
+    all[8] = 4;
+    try checkHierarchyPolicies(&all, false);
+    try checkHierarchyPolicies(&all, true);
+    for (0..google.len) |length| {
+        if (checkHierarchyPolicies(google[0..length], false)) |_|
+            return error.TruncatedPoliciesAccepted
+        else |_| {}
+    }
+    for ([_]usize{ 0, 4, 8, 12, 14, 18, 20, 24, 26 }) |at| {
+        var changed = google;
+        changed[at] ^= 1;
+        if (checkHierarchyPolicies(&changed, false)) |_|
+            return error.ForeignHierarchyPolicyAccepted
+        else |_| {}
+    }
+    try t.expectError(error.BadTpmResponse, checkHierarchyPolicies(&(google ++ [_]u8{0}), false));
+    all[all.len - 1] = 0xb; // An alternate platform policy remains forbidden.
+    try t.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(&all, false));
+}
+
 fn command(code: u32, handles: []const u32, auth: ?u32) Bytes {
     var b: Bytes = .{};
     b.int(u16, if (auth != null) 0x8002 else 0x8001);
@@ -496,18 +546,13 @@ pub const Device = struct {
     }
 
     fn noHierarchyPolicies(d: *Device) !void {
+        const platform_enabled = try d.property(0x201) & 1 != 0;
         var b = command(0x17a, &.{}, null);
         b.int(u32, 9); // AUTH_POLICIES
         b.int(u32, owner);
         b.int(u32, 4);
-        var r = try d.call(&b);
-        if (try r.int(u8) != 0 or try r.int(u32) != 9 or try r.int(u32) != 4)
-            return error.UnprotectedTpmHierarchy;
-        for ([4]u32{ owner, 0x4000000a, 0x4000000b, platform }) |handle| {
-            if (try r.int(u32) != handle or try r.int(u16) != 0x10)
-                return error.UnprotectedTpmHierarchy;
-        }
-        if (r.at != r.data.len) return error.BadTpmResponse;
+        const r = try d.call(&b);
+        try checkHierarchyPolicies(r.data, platform_enabled);
     }
 
     fn hierarchyProtected(d: *Device) !void {

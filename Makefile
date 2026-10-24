@@ -32,11 +32,11 @@ HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
 FORM_TOOL = build/host/form
-FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
+FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig lib/people.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
-compose_modules = --dep allow --dep form --dep seal --dep service --dep package -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
+compose_modules = --dep allow --dep form --dep seal --dep service --dep package --dep people -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
-	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
+	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mpeople=lib/people.zig
 FORM_TOOL_MODULES = --dep form --dep compose -Mroot=tools/form.zig $(call compose_modules,compose)
 COMPOSE_MODULES = $(call compose_modules,root)
 HOWL = build/host/howl
@@ -79,11 +79,15 @@ IPE_KERNEL ?= build/ipe-kernel/$(ARCH)/rootfs.tar
 KERNEL_ROOTFS ?=
 WEREWOLF_IPE_CRT ?=
 WEREWOLF_IPE_KEY ?=
-# What a make-built image is made without, named as howl's --disable takes it
-# (docs/security.md): Secure Boot and the TPM, and IPE unless IPE=1. howl
-# refuses an image that lacks a protection this does not name.
+# Only the caller may opt out of protections. Missing build inputs are a
+# refusal, never consent to synthesize --disable for a legacy test image.
 comma := ,
-DISABLE = secureboot$(comma)tpm$(if $(IPE),,$(comma)ipe)
+DISABLE ?=
+ifneq ($(strip $(DISABLE)),)
+ifeq ($(origin DISABLE),environment)
+$(error DISABLE must be explicit on the make command line, not inherited from the environment)
+endif
+endif
 APP ?=
 DEV ?=
 OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
@@ -109,7 +113,7 @@ install-precommit hooks:
 	@echo "pre-commit installed: test, lint, and a local howl run"
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
-HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) --disable=$(DISABLE) \
+HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) $(if $(DISABLE),--disable=$(DISABLE)) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
@@ -180,18 +184,18 @@ mkdir -p $(dir $@)
 endef
 
 # A program may import any library; a library, only what its --dep flags name.
-LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
+LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
 	-Mverity=lib/verity.zig -Mipe=lib/ipe.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig \
 	--dep sandbox -Mnet-rule=lib/net-rule.zig --dep network --dep net-rule --dep sandbox -Mdns=lib/dns.zig -Mhostkey=lib/hostkey.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
-	--dep service --dep package --dep allow -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
+	--dep service --dep package --dep allow --dep people -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
+ZIG_MODULES = --dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -288,7 +292,7 @@ $(TEST_SK): tools/test-sk.zig
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
@@ -297,6 +301,8 @@ test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test
 _test/ci-forms: ; python3 test/ci-forms-test
 	python3 test/check-dispatch
 _test/cloud-console: ; python3 test/cloud-console --test
+	python3 test/cloud-checks
+	python3 test/cloud-posture --test
 	python3 test/consumer-trust
 	python3 test/check-host-keys
 _test/probes:
@@ -354,7 +360,9 @@ _test/local-prerequisites: $(HOWL)
 	python3 test/local-prerequisites
 	python3 test/lima-state $(HOWL)
 	python3 test/build-helper
-_test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
+_test/cloud-enrollment: $(HOWL)
+	python3 test/cloud-enrollment $(HOWL)
+	python3 test/aws-console-access
 _test/local-publisher: $(HOWL) build/host/tpm-policy build/host/form
 	python3 test/local-publisher $(HOWL)
 	python3 test/boot-images $(HOWL)
@@ -442,8 +450,11 @@ check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SY
 
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
+	@python3 test/howl-protections $(HOWL)
+	@python3 test/howl-make-protections
 	@python3 test/howl-test $(HOWL)
 	@python3 test/howl-ssh $(HOWL)
+	@python3 test/howl-current-user $(HOWL)
 	@python3 test/howl-forms $(HOWL)
 	@python3 test/native-tests-regression
 	@zig test test/native/driver.zig
@@ -546,7 +557,7 @@ _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
 	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST) \
-		--disable=$(if $(WEREWOLF_BOOT_KEY),tpm,secureboot$(comma)tpm)
+		$(if $(DISABLE),--disable=$(DISABLE))
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
@@ -687,6 +698,9 @@ _check-legacy-%: | _check-shared
 # Native clients are a separate generated form, never DEV and never a member
 # of /etc/sv. Compare their baseline before booting, then reuse one data disk.
 .PHONY: check-native-tests _check-native-tests
+.PHONY: check-plex-import
+check-plex-import: $(HOWL)
+	test/check-plex-import $(HOWL)
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
 	@python3 test/native-tests describe $* $(ARCH) >/dev/null
@@ -996,6 +1010,13 @@ check-gcp-metadata: $(HOWL) $(TEST_SK)
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
 
+# Exercise both checkout builds and published downloads without downgrades.
+.PHONY: check-prod-ssh-clouds
+check-prod-ssh-clouds:
+	@failed=0; for cloud in gcp aws azure; do for mode in build download; do \
+		$(MAKE) --no-print-directory check-$$cloud CLOUD_MODE=$$mode || failed=1; \
+	done; done; exit $$failed
+
 # Explicit live lifecycle tests; cloud credentials are never required by PR CI.
 .PHONY: check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox check-bhyve-secureboot _check-provider-ab
 check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox: check-ab-%:
@@ -1023,11 +1044,13 @@ examples:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example local $$f || status=1; done; exit $$status
 examples-gcp:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example gcp $$f || status=1; done; exit $$status
-_check-cloud: $(HOWL)
+_check-cloud: $(HOWL) $(TEST_SK)
 	@mkdir -p $(CHECK)
 	@runner=$$(mktemp '$(CHECK)/cloud-$(CLOUD).XXXXXXXX') && \
 		trap 'rm -f "$$runner"' EXIT && cp test/cloud "$$runner" && chmod 700 "$$runner" && \
-		HOWL=$(HOWL) "$$runner" $(CLOUD) $(FORM) $(ARCH)
+		HOWL=$(HOWL) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) CLOUD_MODE=$(or $(CLOUD_MODE),build) \
+		POSTURE_KNOWN='$(filter-out ?boot-secure-boot boot-rollback-protected boot-ipe-enforced,$(POSTURE_KNOWN))' \
+		"$$runner" $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot
 	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) \
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
