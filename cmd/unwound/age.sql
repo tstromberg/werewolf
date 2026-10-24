@@ -115,8 +115,8 @@ END;
 
 -- Check history is bounded independently of the indefinitely retained LRU
 -- evidence rows. Prune a batch only when the table grows past 120,000 checks;
--- never remove a cached domain's latest check. The single writer also caps
--- database bytes and checkpoints WAL during maintenance.
+-- never remove a cached domain's latest check. These row limits are what
+-- bound the database's size; SQLite's automatic checkpoint bounds its WAL.
 CREATE TRIGGER IF NOT EXISTS age_check_limit AFTER INSERT ON age_check
 WHEN (SELECT count(*) FROM age_check) > 120000
 BEGIN

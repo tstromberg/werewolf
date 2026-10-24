@@ -51,6 +51,11 @@ dns-direct 2005
 connect 2005 udp 53
 connect 2005 tcp 53
 connect 2005 tcp 853
+lookup 2004 httpbin.org A
+lookup 2004 *.ngrok.app A
+lookup 2004 alias-to-allowed.example.test A
+lookup 2002 * CNAME
+lookup 2002 token.oastify.com CNAME
 '''
 
 
@@ -128,17 +133,24 @@ def answer(query, tcp):
         txt = bytes([255]) + b'x' * 255
         return [reply([record(qname, 16, txt)] * 3)]
     aliases = {
+        'callback-alias.example.test': 'token.oastify.com',
+        'prefix-alias.example.test': '192-0-2-1.attacker.example',
+        'alias-to-allowed.example.test': 'httpbin.org',
         'assigned-alias.assigned.test': 'young.com',
         'explicit-alias.example.test': 'young.com',
         'revoked-alias.example.test': 'edge.assigned.test',
         'local-alias.example.com': 'edge.example.com',
         'cross-alias.example.com': 'young.com',
     }
-    if name in aliases and qtype == 1:
+    if name in aliases and qtype in (1, 5):
         target = aliases[name]
-        return [reply([record(qname, 5, encode(target)),
-                       record(target, 1, a('192.0.2.50'))])]
+        records = [record(qname, 5, encode(target))]
+        if qtype == 1:
+            records.append(record(target, 1, a('192.0.2.50')))
+        return [reply(records)]
     table = {
+        ('httpbin.org', 1): [record(qname, 1, a('192.0.2.70'))],
+        ('allowed.ngrok.app', 1): [record(qname, 1, a('192.0.2.71'))],
         ('api.example.test', 1): [record(qname, 1, a('192.0.2.10'))],
         ('api.example.test', 28): [record(qname, 28, socket.inet_pton(socket.AF_INET6, '2001:db8::10'))],
         ('x.cdn.example.test', 1): [record(qname, 1, a('192.0.2.11'))],
@@ -695,9 +707,11 @@ def age_live_checks(client, work, age_dir):
         assert select.select([client.stdout], [], [], timeout + 3)[0], name
         return json.loads(client.stdout.readline())
 
-    for domain in ('expires.com', 'ctexpires.com'):
-        assert ask(domain)['answers'] == ['192.0.2.60']
-        assert ask(domain, tcp=True)['answers'] == ['192.0.2.60']
+    assert ask('expires.com')['answers'] == ['192.0.2.60']
+    assert ask('expires.com', tcp=True)['answers'] == ['192.0.2.60']
+    # CT history alone never makes a domain mature, however old it is.
+    assert ask('ctexpires.com')['rcode'] == 5
+    assert ask('ctexpires.com', tcp=True)['rcode'] == 5
     for domain, tcp in (('handoff.com', False), ('handofftcp.com', True)):
         assert ask(domain, uid=2001, tcp=tcp)['rcode'] == 5
         result = ask(domain, uid=2001, socket_uid=2002, tcp=tcp)
@@ -705,7 +719,7 @@ def age_live_checks(client, work, age_dir):
     assert ask('a.mature.com')['rcode'] == 3
     assert ask('b.mature.com')['rcode'] == 3
     assert ask('young.com')['rcode'] == 5
-    assert ask('outage.com')['rcode'] == 3
+    assert ask('outage.com')['rcode'] == 5
     assert ask('invalid.com')['rcode'] == 5
     assert ask('redirect.com')['rcode'] == 5
     assert ask('invalidtls.org')['rcode'] == 5
@@ -752,19 +766,20 @@ def age_live_checks(client, work, age_dir):
                           ('ctexpires.com',)).fetchone() == ('error', 'history')
     upstream = [json.loads(line)['name'].lower()
                 for line in (work / 'upstream.log').read_text().splitlines()]
-    assert upstream.count('expires.com') == upstream.count('ctexpires.com') == 1, upstream
-    timed = ask('timeout.com', timeout=13)
-    assert 'error' in timed, timed
+    assert upstream.count('expires.com') == 1 and upstream.count('ctexpires.com') == 0, upstream
+    # A stalled registry is refused at the fetch deadline, before unwound's
+    # own, and unwound keeps running: nothing restarts or forgets budgets.
+    assert ask('timeout.com', timeout=13)['rcode'] == 5
     client.stdin.write(json.dumps({'restart_unwound': True}) + '\n')
     client.stdin.flush()
     assert select.select([client.stdout], [], [], 6)[0], 'restart timeout'
-    assert json.loads(client.stdout.readline())['exit'] == 1
+    assert json.loads(client.stdout.readline())['exit'] is None
     assert ask('c.mature.com')['rcode'] == 3
     with contextlib.closing(sqlite3.connect(f'file:{age_dir}/age.db?mode=ro', uri=True)) as db:
-        assert db.execute('SELECT finished_at FROM age_check WHERE domain=?',
-                          ('timeout.com',)).fetchone() == (None,)
-        assert db.execute('SELECT count(*) FROM domain_age WHERE domain=?',
-                          ('timeout.com',)).fetchone() == (0,)
+        assert db.execute('SELECT rdap_result FROM age_check WHERE domain=?',
+                          ('timeout.com',)).fetchone() == ('error',)
+        assert db.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                          ('timeout.com',)).fetchone() == ('none', 'error')
         assert db.execute('''SELECT count(*) FROM age_check
             WHERE provenance != 'uid_only' OR process_pid IS NOT NULL
                OR process_start_ticks IS NOT NULL OR process_exe IS NOT NULL
@@ -837,6 +852,38 @@ def checks(client, work):
     expect(ask(2002, 'screened.example.test'), 0, ['192.0.2.20', '192.0.2.21', '192.0.2.22', '192.0.2.23'],
            'four public addresses, no alias')
     expect(ask(2002, 'rebind.example.test'), 0, [], 'private and loopback addresses dropped')
+    # Shared callbacks and IP prefixes are refused locally, for either
+    # address family and transport, before any upstream or age request.
+    denied_endpoints = [
+        'httpbin.org', 'token.oastify.com', 'token.interactsh.com',
+        'token.canarytokens.com', 'webhook.site', 'capture.requestbin.com',
+        'app.ngrok-free.app', 'app.trycloudflare.com', 'jsonkeeper.com',
+        '127.0.0.1.203-0-113-1.sslip.io', '192-0-2-1.attacker.example',
+        '8.8.8.8.attacker.example', '2001-db8--1.attacker.example',
+        '7f000001.attacker.example',
+    ]
+    for name in denied_endpoints:
+        for kind in (1, 28):
+            for tcp in (False, True):
+                expect(ask(2002, name, kind, tcp=tcp), 5, [], 'endpoint denied locally')
+    expect(ask(2002, 'ToKeN.OaStIfY.CoM.', tcp=True), 5, [], 'canonical endpoint')
+    expect(ask(2002, 'callback-alias.example.test'), 5, [], 'callback alias refused')
+    expect(ask(2002, 'prefix-alias.example.test', tcp=True), 5, [], 'IP prefix alias refused')
+    expect(ask(2003, 'callback-alias.example.test', 5, tcp=True), 5, [], 'direct CNAME endpoint refused')
+    expect(ask(2002, 'callback-alias.example.test', 5), 0, [5], 'named CNAME target allowed')
+    expect(ask(2002, 'callback-alias.example.test', 5, tcp=True), 0, [5], 'named cached CNAME allowed')
+    # DHCP cannot exempt a callback domain. Explicit grants can, and their
+    # results cannot populate another service's screened cache.
+    assert send(dict(system_domain='oastify.com')) == {}
+    expect(ask(2001, 'assigned.oastify.com'), 5, [], 'assigned endpoint refused')
+    assert send(dict(system_domain='')) == {}
+    expect(ask(2004, 'httpbin.org'), 0, ['192.0.2.70'], 'explicit endpoint grant')
+    expect(ask(2004, 'allowed.ngrok.app'), 0, ['192.0.2.71'], 'explicit subtree grant')
+    expect(ask(2004, 'alias-to-allowed.example.test'), 0, [5, '192.0.2.50'], 'named alias target allowed')
+    expect(ask(2004, 'alias-to-allowed.example.test', tcp=True), 0, [5, '192.0.2.50'], 'named cached alias allowed')
+    expect(ask(2002, 'httpbin.org'), 5, [], 'another service still denied')
+    expect(ask(2002, 'allowed.ngrok.app'), 5, [], 'another service subtree still denied')
+    expect(ask(2003, 'httpbin.org'), 5, [], 'unfiltered wildcard still requires named endpoint grant')
     # A poller learns nothing new while an answer stands; unfiltered, it does.
     first = ask(2002, 'poll.example.test')
     assert first['rcode'] == 0 and len(first['answers']) == 1, first
@@ -907,7 +954,7 @@ def checks(client, work):
     assert 'timed out' in send(dict(uid=2001, raw=response.hex(), timeout=1))['error'], 'a response answered'
     expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'still answering after bad input')
     # Only granted users reach unwound, each from its own label.
-    for uid in (2004, 0):
+    for uid in (2006, 0):
         assert send(dict(uid=uid, name='api.example.test', type=1))['error'] == 'Permission denied', uid
     assert ask(2002, 'api.example.test', bind='127.53.0.1')['error'] == 'Permission denied', 'forged label'
     assert ask(2001, 'api.example.test', bind='127.0.0.1')['error'] == 'Permission denied', 'unlabeled source'
@@ -933,6 +980,11 @@ def checks(client, work):
     for denied in ['denied.example.test', 'cdn.example.test', 'n32.tunnel.test', 'a.b.c.d.e.tunnel.test',
                    '9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test']:
         assert denied not in names, denied
+    for denied in denied_endpoints + ['assigned.oastify.com']:
+        if denied != 'httpbin.org':
+            assert denied not in names, ('endpoint reached upstream', denied)
+    assert asked('httpbin.org') == 1, 'only the explicit grant may forward'
+    assert asked('allowed.ngrok.app') == 1, 'only explicit subtree may forward'
     # A standing answer was asked for once; unfiltered, once more.
     assert asked('poll.example.test') == 2, asked('poll.example.test')
     assert 'evil.example.net' not in names
@@ -974,6 +1026,12 @@ def checks(client, work):
     assert data and data[0]['bits'] >= 3.5, data
     assert find(uid=2002, name='screened.example.test', why='screened', dropped_nonpublic=2, dropped_room=1)
     assert find(uid=2002, name='rebind.example.test', why='screened', answers=0, dropped_nonpublic=2)
+    assert find(uid=2002, name='httpbin.org', decision='deny', why='endpoint', detail='callback_domain')
+    assert find(uid=2002, name='192-0-2-1.attacker.example', decision='deny', why='endpoint', detail='ip_prefix')
+    assert find(uid=2002, name='callback-alias.example.test', decision='deny', why='alias',
+                alias='token.oastify.com')
+    assert find(uid=2002, name='prefix-alias.example.test', decision='deny', why='alias',
+                alias='192-0-2-1.attacker.example')
     assert find(uid=2002, name='slow.example.test', decision='allow', why='unanswered', detail='timeout',
                 rcode='servfail')
     assert find(uid=2001, name='y.cdn.example.test', why='unanswered', detail='no_resolvers')

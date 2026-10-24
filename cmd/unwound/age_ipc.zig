@@ -2,6 +2,7 @@
 //! The worker derives UID and source label from the service index and the
 //! compiled policy it inherited at fork. PID is never inferred from DNS.
 const std = @import("std");
+const age = @import("age.zig");
 const wire = @import("wire.zig");
 
 pub const header_len = 23;
@@ -9,8 +10,8 @@ pub const max_len = header_len + 253;
 pub const response_header_len = 12;
 pub const response_max = response_header_len + 253;
 pub const Transport = enum(u8) { udp = 0, tcp = 1 };
-pub const Verdict = enum(u8) { unknown = 0, young = 1, mature = 2 };
-pub const Source = enum(u8) { none = 0, rdap = 1, crtsh = 2 };
+pub const Verdict = age.Verdict;
+pub const Source = age.Source;
 
 pub const Response = struct {
     request_id: u64,
@@ -49,11 +50,7 @@ pub fn decode(packet: []const u8) ?Request {
     if (packet.len < header_len or packet.len > max_len or packet[0] != 1 or
         packet[3] != 0 or packet[22] == 0 or
         packet.len != header_len + @as(usize, packet[22])) return null;
-    const transport: Transport = switch (packet[1]) {
-        0 => .udp,
-        1 => .tcp,
-        else => return null,
-    };
+    const transport = std.enums.fromInt(Transport, packet[1]) orelse return null;
     const qtype = wire.Type.from(std.mem.readInt(u16, packet[14..16], .big)) orelse return null;
     const name = wire.Name.fromText(packet[header_len..]) catch return null;
     return .{
@@ -83,8 +80,8 @@ pub fn decodeResponse(packet: []const u8) ?Response {
     if (packet.len < response_header_len or packet.len > response_max or
         packet[0] != 1 or packet.len != response_header_len + @as(usize, packet[3]))
         return null;
-    const verdict: Verdict = std.enums.fromInt(Verdict, packet[1]) orelse return null;
-    const source: Source = std.enums.fromInt(Source, packet[2]) orelse return null;
+    const verdict = std.enums.fromInt(Verdict, packet[1]) orelse return null;
+    const source = std.enums.fromInt(Source, packet[2]) orelse return null;
     const domain: ?wire.Name = if (packet[3] == 0)
         null
     else

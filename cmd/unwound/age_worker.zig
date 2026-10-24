@@ -12,7 +12,6 @@ pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
     unwound.log_fd = log;
     unwound.side = "age";
     setup(channel, log) catch @panic("age worker setup");
-    const psl = @embedFile("data/public_suffix_list.ascii.dat");
     var packet: [ipc.max_len + 1]u8 = undefined;
     while (true) {
         var ready: [1]linux.pollfd = .{.{ .fd = channel, .events = linux.POLL.IN, .revents = 0 }};
@@ -28,7 +27,7 @@ pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
         if (request.policy_generation != policy.generation or request.service >= policy.users.len)
             continue;
         const uid = policy.uid(request.service);
-        const boundary = age.boundary(request.name.text(), psl);
+        const boundary = age.boundary(request.name.text(), age.psl);
         const kind: []const u8 = switch (boundary) {
             .unknown => "unknown",
             .tenant => "tenant",
@@ -69,7 +68,7 @@ pub fn run(channel: i32, log: i32, policy: *const Policy) noreturn {
 
 fn setup(channel: i32, log: i32) !void {
     try sandbox.limit(.NOFILE, 16);
-    try sandbox.dropTo(55, "/var/empty");
+    try sandbox.dropTo(dns.age_id, "/var/empty");
     _ = try sandbox.sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
     var filter: sandbox.Filter = .{};

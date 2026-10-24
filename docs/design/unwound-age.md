@@ -39,10 +39,10 @@ history. Use the earliest matching log-entry timestamp, never certificate
 `notBefore`. An old certificate does not prove continuous registration: a
 domain can expire and be registered again. An RDAP answer saying young or
 giving ambiguous dates is not a transport failure and must never be
-overridden by CT. During an RDAP outage, old CT history may give a
-*provisional* mature decision for at most 24 hours, marked `crtsh` in the
-audit, while RDAP retries continue. No CT result, a young CT result or an
-invalid/oversized response leaves age unknown.
+overridden by CT. Anyone on the path can make RDAP unavailable, so CT may
+only make a decision stricter: a first entry under 90 days old marks the
+domain young for 24 hours, and anything else leaves age unknown. CT never
+makes a domain mature; an outage is retried within the hour.
 
 ## Data path
 
@@ -50,13 +50,14 @@ invalid/oversized response leaves age unknown.
    over one bounded channel, then waits without blocking other DNS queries.
    The authority derives the registered domain. Repeated misses coalesce;
    the first request is stored with the check.
-2. The `_unwoundage` authority owns SQLite in `/data/svc/unwound-age` and
-   fetches HTTPS evidence for only that registered domain. Its network grant
-   is public TCP 443; DNS goes through unwound. The pinned IANA bootstrap
+2. The `_unwoundage` writer owns SQLite in `/data/svc/unwound-age` and
+   connects nowhere; a fetch child checks only the registered domain, over
+   public TCP 443 with DNS through unwound. The pinned IANA bootstrap
    chooses a label-wise longest HTTPS endpoint. Redirects are refused.
-3. The authority bounds each response, validates TLS, JSON identity and
-   dates, and uses crt.sh only when RDAP is unavailable. It writes evidence
-   and an `age_check` row, then returns a dated verdict.
+3. The child bounds each response, validates TLS, JSON identity and dates,
+   uses crt.sh only when RDAP is unavailable, and returns a record of dates.
+   The writer checks it, stores evidence and an `age_check` row, and answers
+   every question waiting on that domain.
    Missing, partial, rolled-back or expired evidence never authorizes a name.
 
 Keep the most recently used 20,000 registered domains. A domain row has no
@@ -72,8 +73,8 @@ row limits.
 
 RDAP evidence can authorize for seven days after fetch. Data fetched before
 the 90-day boundary cannot become mature merely because time passes; it needs
-a new RDAP check at the boundary. crt.sh fallback can authorize for only 24
-hours after an RDAP availability failure. Its result remains marked `crtsh`.
+a new RDAP check at the boundary. crt.sh history never authorizes; it is
+kept, marked `crtsh`, for the audit and to refuse a recently seen domain.
 A clock behind fetch makes evidence unknown. The current name/site budgets
 still apply.
 

@@ -31,10 +31,17 @@ pub const config_domain_path = network_dir ++ "/" ++ config_domain_name;
 /// on 127.0.0.1. DHCP cannot substitute a remote server for it.
 pub const local_validator_path = "/usr/share/werewolf/dnssec-local";
 pub const local_validator_text = "nameserver 127.0.0.1\n";
+/// age_id is _unwoundage, the user the age authority and observer run as.
+pub const age_id: u32 = 55;
 /// The age authority binds this before init makes its directory read-only
 /// to root's main mount namespace.
 pub const age_socket_dir = "/run/werewolf-age";
 pub const age_socket_path = age_socket_dir ++ "/age.sock";
+/// An image that ships this marker enforces domain age; without it, unwound
+/// only observes. Evidence lives on /data, or under /run when there is none.
+pub const age_marker_path = "/usr/share/werewolf/age-enforce";
+pub const age_durable_dir = "/data/svc/unwound-age";
+pub const age_temporary_dir = "/run/werewolf-age-cache";
 
 /// normalizeSystemDomain accepts one assigned DNS suffix for the automatic
 /// age exemption. A single label or a malformed value cannot widen policy.
@@ -215,11 +222,12 @@ pub fn plan(u: Users, r: *const Resolvers, buf: *[max_rules]route.Rule) []const 
     var n: usize = 0;
     if (u.len == 0) return buf[0..0];
     for (r.ips[0..r.len]) |*ip| for ([_]route.Proto{ .udp, .tcp }) |proto| {
+        const local = std.mem.eql(u8, ip, &[_]u8{ 127, 0, 0, 1 });
         for (u.ids[0..u.len]) |id| {
             buf[n] = .{
-                .priority = if (std.mem.eql(u8, ip, &[_]u8{ 127, 0, 0, 1 })) 6 else 99,
+                .priority = if (local) 6 else 99,
                 .action = 1,
-                .table = if (std.mem.eql(u8, ip, &[_]u8{ 127, 0, 0, 1 })) 255 else 254,
+                .table = if (local) 255 else 254,
                 .from_here = true,
                 .dst = ip,
                 .proto = proto,
@@ -233,7 +241,11 @@ pub fn plan(u: Users, r: *const Resolvers, buf: *[max_rules]route.Rule) []const 
             n += 1;
         }
         buf[n] = .{
-            .priority = 300,
+            // Keep dynamic, source-specific replies separate from fence's
+            // broad reply rules (300). Netlink's EEXIST lookup treats an
+            // omitted source selector as a wildcard, which can hide those
+            // broader rules when these were installed first.
+            .priority = 301,
             .action = 1,
             .table = 255,
             .src = ip,

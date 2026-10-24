@@ -47,8 +47,19 @@ from dated evidence. Its host test uses the pinned SQLite code; run
 `make check-unwound-age-store`. The observe-only child logs `age_observe` with
 DNS ID, QNAME, qtype, transport, source label, UID and policy generation.
 A full channel increments `age_lost`; assigned system domains and explicit
-grants bypass it. The separate authority handles the SQLite cache and bounded
-HTTPS checks in one writer process.
+grants bypass it.
+
+The separate authority splits its work so no process holds more than it
+needs. The supervisor never opens the database. It restarts the writer, and
+for each check the writer asks for it forks a fetch child, kills it after 10
+seconds whatever it is doing, and relays its fixed 26-byte record. The writer
+holds SQLite and unwound's channel; Landlock leaves it no TCP connect, and its
+seccomp filter no socket, fork or signal. A fetch child keeps one pipe, reads
+only `/etc` and the resolver state, connects only to TCP 53 and 443, and its
+filter allows DNS, HTTPS and that pipe. A crashed or stalled fetch is recorded
+as an RDAP outage and refused; unwound keeps running. At most four checks run
+at once, one per service, taking each service's oldest question in turn, and
+questions for a domain already being checked wait on that check.
 
 The frontend independently derives the PSL boundary and refuses a mature
 reply naming another registered domain. An immutable image marker,

@@ -228,7 +228,8 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
         Path('/var/run').symlink_to('/run')
         policy = Path('/usr/share/werewolf/net')
         policy.parent.mkdir()
-        policy.write_text('dns 69\nconnect 69 tcp 443\n')
+        policy.write_text('dns 69\nconnect 69 tcp 443\n'
+                          'dns-direct 207\nconnect 207 tcp 53\nconnect 207 udp 53\n')
         # fence and DHCP keep a dns user's grants on the upstream file's
         # resolvers: on a machine, unwound's upstream user. The probes here
         # read that file as their resolv.conf, to reach them directly.
@@ -346,6 +347,12 @@ def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
                 check(69, mode, FIRST, True)
                 check(0, mode, FIRST, False)
                 check(69, mode, SECOND, False)
+            # A recursive resolver reaches authorities beyond the assigned
+            # resolver. Installing its broad TCP reply rule after the narrow
+            # assigned-resolver rule must not silently discard it as EEXIST.
+            for mode in ['udp', 'tcp']:
+                check(207, mode, SECOND, True)
+            check(207, 'http', FIRST, False)
             check(69, 'https', '', True)
             check(69, 'http', FIRST, False)
             # Renewal closes the old DNS server, keeps the UID grant, and still resolves HTTPS.

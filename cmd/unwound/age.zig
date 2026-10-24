@@ -4,6 +4,9 @@
 const std = @import("std");
 const mem = std.mem;
 
+/// psl is the image-pinned Public Suffix List, normalized to A-labels.
+pub const psl = @embedFile("data/public_suffix_list.ascii.dat");
+
 pub const Boundary = union(enum) {
     unknown,
     tenant,
@@ -13,61 +16,96 @@ pub const Boundary = union(enum) {
 const Section = enum { none, icann, private };
 const Rule = enum { exact, wildcard, exception };
 
+/// Rules reads a PSL's ICANN and PRIVATE rules, skipping malformed ones.
+const Rules = struct {
+    lines: mem.SplitIterator(u8, .scalar),
+    section: Section = .none,
+
+    const Entry = struct { section: Section, rule: Rule, value: []const u8 };
+
+    fn init(list: []const u8) Rules {
+        return .{ .lines = mem.splitScalar(u8, list, '\n') };
+    }
+
+    fn next(r: *Rules) ?Entry {
+        while (r.lines.next()) |raw| {
+            const line = mem.trim(u8, raw, " \t\r");
+            if (mem.eql(u8, line, "// ===BEGIN ICANN DOMAINS===")) {
+                r.section = .icann;
+                continue;
+            }
+            if (mem.eql(u8, line, "// ===END ICANN DOMAINS===")) {
+                r.section = .none;
+                continue;
+            }
+            if (mem.eql(u8, line, "// ===BEGIN PRIVATE DOMAINS===")) {
+                r.section = .private;
+                continue;
+            }
+            if (mem.eql(u8, line, "// ===END PRIVATE DOMAINS===")) {
+                r.section = .none;
+                continue;
+            }
+            if (r.section == .none or line.len == 0 or mem.startsWith(u8, line, "//")) continue;
+            const rule: Rule = if (mem.startsWith(u8, line, "!"))
+                .exception
+            else if (mem.startsWith(u8, line, "*."))
+                .wildcard
+            else
+                .exact;
+            const value = switch (rule) {
+                .exact => line,
+                .wildcard => line[2..],
+                .exception => line[1..],
+            };
+            if (!dnsName(value, false)) continue;
+            return .{ .section = r.section, .rule = rule, .value = value };
+        }
+        return null;
+    }
+};
+
 /// boundary applies the PSL's longest-rule algorithm to an ASCII DNS name.
 /// A PRIVATE tenant cannot inherit its provider's RDAP age. The PSL must be
 /// normalized to A-labels by the updater before calling this function.
-pub fn boundary(name: []const u8, psl: []const u8) Boundary {
+pub fn boundary(name: []const u8, list: []const u8) Boundary {
     if (!dnsName(name, true)) return .unknown;
-    var section: Section = .none;
     var best_len: usize = 0;
     var best_rule: Rule = .exact;
     var best_section: Section = .none;
-    var lines = mem.splitScalar(u8, psl, '\n');
-    while (lines.next()) |raw| {
-        const line = mem.trim(u8, raw, " \t\r");
-        if (mem.eql(u8, line, "// ===BEGIN ICANN DOMAINS===")) {
-            section = .icann;
-            continue;
-        }
-        if (mem.eql(u8, line, "// ===END ICANN DOMAINS===")) {
-            section = .none;
-            continue;
-        }
-        if (mem.eql(u8, line, "// ===BEGIN PRIVATE DOMAINS===")) {
-            section = .private;
-            continue;
-        }
-        if (mem.eql(u8, line, "// ===END PRIVATE DOMAINS===")) {
-            section = .none;
-            continue;
-        }
-        if (section == .none or line.len == 0 or mem.startsWith(u8, line, "//")) continue;
-        const rule: Rule = if (mem.startsWith(u8, line, "!"))
-            .exception
-        else if (mem.startsWith(u8, line, "*."))
-            .wildcard
-        else
-            .exact;
-        const value = line[if (rule == .exact)
-            @as(usize, 0)
-        else if (rule == .wildcard)
-            @as(usize, 2)
-        else
-            @as(usize, 1)..];
-        if (!dnsName(value, false) or !suffixMatch(name, value)) continue;
-        if (section == .private and mem.eql(u8, name, value)) continue;
-        const n = labels(value) + @intFromBool(rule == .wildcard);
+    var rules: Rules = .init(list);
+    while (rules.next()) |r| {
+        if (!suffixMatch(name, r.value)) continue;
+        if (r.section == .private and mem.eql(u8, name, r.value)) continue;
+        const n = labels(r.value) + @intFromBool(r.rule == .wildcard);
         if (labels(name) < n) continue;
-        if (n < best_len or (n == best_len and rule != .exception)) continue;
+        if (n < best_len or (n == best_len and r.rule != .exception)) continue;
         best_len = n;
-        best_rule = rule;
-        best_section = section;
+        best_rule = r.rule;
+        best_section = r.section;
     }
     if (best_len == 0) return .unknown;
     const suffix_labels = best_len - @intFromBool(best_rule == .exception);
     if (labels(name) <= suffix_labels) return .unknown;
     if (best_section == .private) return .tenant;
     return .{ .registered = suffix(name, suffix_labels + 1) };
+}
+
+/// exemptable reports whether an assigned system domain may open the names
+/// below it to every DNS-enabled service without an age check. No public
+/// suffix may lie at or below it, since anyone may register or claim names
+/// there: it must sit inside one registered domain, or under a TLD the list
+/// does not name at all, such as .internal or .test.
+pub fn exemptable(domain: []const u8, list: []const u8) bool {
+    if (!dnsName(domain, false)) return false;
+    const tld = domain[(mem.findScalarLast(u8, domain, '.') orelse return false) + 1 ..];
+    var listed = false;
+    var rules: Rules = .init(list);
+    while (rules.next()) |r| {
+        if (r.rule != .exception and suffixMatch(r.value, domain)) return false;
+        if (suffixMatch(r.value, tld)) listed = true;
+    }
+    return !listed or boundary(domain, list) == .registered;
 }
 
 fn dnsName(name: []const u8, allow_service: bool) bool {
@@ -82,12 +120,13 @@ fn dnsName(name: []const u8, allow_service: bool) bool {
     return true;
 }
 
-fn suffixMatch(name: []const u8, part: []const u8) bool {
+/// suffixMatch reports whether name is part or a name below it.
+pub fn suffixMatch(name: []const u8, part: []const u8) bool {
     return mem.eql(u8, name, part) or (name.len > part.len and
         mem.endsWith(u8, name, part) and name[name.len - part.len - 1] == '.');
 }
 
-fn labels(name: []const u8) usize {
+pub fn labels(name: []const u8) usize {
     var count: usize = 1;
     for (name) |c| if (c == '.') {
         count += 1;
@@ -112,7 +151,10 @@ pub const Evidence = struct {
     effective: i64,
 };
 
-pub const Verdict = enum { unknown, young, mature };
+/// Verdict and Source values are also their age IPC wire encoding.
+pub const Verdict = enum(u8) { unknown = 0, young = 1, mature = 2 };
+pub const Source = enum(u8) { none = 0, rdap = 1, crtsh = 2 };
+pub const Status = enum { valid, history, unknown, @"error" };
 pub const threshold_s: i64 = 90 * 86400;
 pub const rdap_cache_s: i64 = 7 * 86400;
 pub const ct_fresh_s: i64 = 86400;
@@ -172,8 +214,8 @@ pub fn rdap(gpa: mem.Allocator, name: []const u8, body: []const u8, fetched: i64
 }
 
 /// CT history proves a matching certificate was logged, not that the domain
-/// has remained registered. Only an RDAP availability failure may use this
-/// weaker evidence as a provisional result.
+/// has remained registered, and anyone on the path can make RDAP unavailable.
+/// Only an RDAP availability failure consults it, and only to refuse.
 pub const CtHistory = struct {
     registered: []const u8,
     first_seen: i64,
@@ -202,12 +244,10 @@ pub fn crtsh(gpa: mem.Allocator, name: []const u8, body: []const u8, fetched: i6
         while (names.next()) |raw| {
             const n = mem.trim(u8, raw, " \t\r");
             const host = if (mem.startsWith(u8, n, "*.")) n[2..] else n;
-            var lower: [253]u8 = undefined;
-            if (host.len == 0 or host.len > lower.len) continue;
-            for (host, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-            if (dnsName(lower[0..host.len], false) and (std.ascii.eqlIgnoreCase(host, name) or
-                (host.len > name.len and host[host.len - name.len - 1] == '.' and
-                    std.ascii.eqlIgnoreCase(host[host.len - name.len ..], name)))) matches = true;
+            var buf: [253]u8 = undefined;
+            if (host.len == 0 or host.len > buf.len) continue;
+            const lower = std.ascii.lowerString(&buf, host);
+            if (dnsName(lower, false) and suffixMatch(lower, name)) matches = true;
         }
         if (!matches) continue;
         const when = ctTimestamp(entry.min_entry_timestamp) orelse return null;
@@ -217,11 +257,13 @@ pub fn crtsh(gpa: mem.Allocator, name: []const u8, body: []const u8, fetched: i6
     return .{ .registered = name, .first_seen = earliest orelse return null };
 }
 
+/// classifyCt lets CT history make a decision stricter, never looser: a
+/// recent first certificate is young, and anything else stays unknown.
 pub fn classifyCt(history: CtHistory, fetched: i64, now: i64) Verdict {
     if (now < fetched or fetched < history.first_seen or now - fetched > ct_fresh_s)
         return .unknown;
     if (fetched - history.first_seen < threshold_s) return .young;
-    return .mature;
+    return .unknown;
 }
 
 pub const Lookup = union(enum) {
@@ -232,7 +274,7 @@ pub const Lookup = union(enum) {
 };
 
 pub const Decision = struct {
-    source: enum { rdap, crtsh, none },
+    source: Source,
     verdict: Verdict,
 };
 
@@ -266,8 +308,8 @@ pub fn decide(
 /// SQLite row into this shape before using it; no persisted verdict is trusted.
 pub const Cached = struct {
     domain: []const u8,
-    source: enum { rdap, crtsh, none },
-    status: enum { valid, history, unknown, @"error" },
+    source: Source,
+    status: Status,
     registered_at: ?i64 = null,
     effective_at: ?i64 = null,
     ct_first_seen_at: ?i64 = null,
@@ -276,7 +318,7 @@ pub const Cached = struct {
 
 /// cachedVerdict recomputes a verdict from dated evidence at every use. A
 /// previous mature result is never durable authority by itself. RDAP is
-/// usable for seven days; CT fallback is usable for one day after fetch.
+/// usable for seven days; CT history can mark a domain young for one day.
 pub fn cachedVerdict(
     row: Cached,
     domain: []const u8,
@@ -408,7 +450,6 @@ test "PSL boundaries keep private tenants separate from registered owners" {
 
 test "pinned PSL handles ICANN, PRIVATE, wildcard and Unicode A-label rules" {
     const t = std.testing;
-    const psl = @embedFile("data/public_suffix_list.ascii.dat");
     try t.expectEqualStrings("example.co.uk", boundary("a.example.co.uk", psl).registered);
     try t.expectEqualStrings("github.io", boundary("github.io", psl).registered);
     try t.expect(boundary("alice.github.io", psl) == .tenant);
@@ -417,6 +458,29 @@ test "pinned PSL handles ICANN, PRIVATE, wildcard and Unicode A-label rules" {
         "x.xn--aroport-bya.ci",
         boundary("x.xn--aroport-bya.ci", psl).registered,
     );
+}
+
+test "a system domain may not exempt a public suffix or its tenants" {
+    const t = std.testing;
+    for ([_][]const u8{
+        "corp.example.com",
+        "example.co.uk",
+        "c.project.internal",
+        "assigned.test",
+        "corp.example.test",
+    }) |good| try t.expect(exemptable(good, psl));
+    for ([_][]const u8{
+        "com",
+        "co.uk",
+        "uk",
+        "github.io",
+        "alice.github.io",
+        "blogspot.com",
+        "foo.ck",
+        "amazonaws.com",
+        "",
+        "Example.COM",
+    }) |bad| try t.expect(!exemptable(bad, psl));
 }
 
 test "RDAP age takes registration resets and refuses ambiguous evidence" {
@@ -462,7 +526,7 @@ test "age at the threshold needs a fresh fetch; RDAP expires after seven days" {
     try t.expectEqual(Verdict.unknown, classify(e, fetched, fetched - 1));
 }
 
-test "crt.sh fallback uses matching log-entry time and expires in one day" {
+test "crt.sh history uses matching log-entry time and can only refuse" {
     const t = std.testing;
     const fetched = timestamp("2026-10-23T00:00:00Z").?;
     const body =
@@ -471,18 +535,16 @@ test "crt.sh fallback uses matching log-entry time and expires in one day" {
         "{\"name_value\":\"*.EXAMPLE.COM\",\"min_entry_timestamp\":\"2026-01-01T00:00:00.123\"}]";
     const found = crtsh(t.allocator, "example.com", body, fetched).?;
     try t.expectEqual(timestamp("2026-01-01T00:00:00Z").?, found.first_seen);
-    try t.expectEqual(Verdict.mature, classifyCt(found, fetched, fetched + ct_fresh_s));
-    try t.expectEqual(Verdict.unknown, classifyCt(found, fetched, fetched + ct_fresh_s + 1));
+    try t.expectEqual(Verdict.unknown, classifyCt(found, fetched, fetched));
     try t.expect(crtsh(t.allocator, "other.com", body, fetched) == null);
     const future =
         "[{\"name_value\":\"example.com\",\"min_entry_timestamp\":\"2026-10-24T00:00:00\"}]";
     try t.expect(crtsh(t.allocator, "example.com", future, fetched) == null);
     const young =
         "[{\"name_value\":\"example.com\",\"min_entry_timestamp\":\"2026-10-01T00:00:00\"}]";
-    try t.expectEqual(
-        Verdict.young,
-        classifyCt(crtsh(t.allocator, "example.com", young, fetched).?, fetched, fetched),
-    );
+    const recent = crtsh(t.allocator, "example.com", young, fetched).?;
+    try t.expectEqual(Verdict.young, classifyCt(recent, fetched, fetched + ct_fresh_s));
+    try t.expectEqual(Verdict.unknown, classifyCt(recent, fetched, fetched + ct_fresh_s + 1));
 }
 
 test "CT never overrides a young or malformed RDAP response" {
@@ -526,7 +588,7 @@ test "CT never overrides a young or malformed RDAP response" {
         fetched,
     );
     try t.expectEqual(.crtsh, fallback.source);
-    try t.expectEqual(Verdict.mature, fallback.verdict);
+    try t.expectEqual(Verdict.unknown, fallback.verdict);
 }
 
 test "cached evidence uses one RDAP lifetime and one CT lifetime" {
@@ -556,10 +618,10 @@ test "cached evidence uses one RDAP lifetime and one CT lifetime" {
     row.registered_at = null;
     row.effective_at = null;
     row.ct_first_seen_at = created;
-    try t.expectEqual(Verdict.mature, check(row, fetched + ct_fresh_s));
-    try t.expectEqual(Verdict.unknown, check(row, fetched + ct_fresh_s + 1));
+    try t.expectEqual(Verdict.unknown, check(row, fetched));
     row.ct_first_seen_at = fetched - threshold_s + 1;
-    try t.expectEqual(Verdict.young, check(row, fetched));
+    try t.expectEqual(Verdict.young, check(row, fetched + ct_fresh_s));
+    try t.expectEqual(Verdict.unknown, check(row, fetched + ct_fresh_s + 1));
     row.status = .unknown;
     try t.expectEqual(Verdict.unknown, check(row, fetched));
 }
