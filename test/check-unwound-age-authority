@@ -4,6 +4,7 @@
 Usage: sudo python3 test/check-unwound-age-authority AGE_BINARY
 """
 import errno
+from contextlib import closing
 import os
 from pathlib import Path
 import socket
@@ -28,36 +29,40 @@ def blocked(path, action):
         raise AssertionError(f'root modified {path}')
 
 
-def inside(binary):
+def inside(binary, seeded):
     live = os.environ.get('AGE_LIVE') == '1'
     ca = Path('/etc/ssl/certs/ca-certificates.crt').read_bytes() if live else None
     run('mount', '--make-rprivate', '/')
     Path('/data').mkdir(exist_ok=True)
-    for path in ('/run', '/usr/share', '/data') + (('/etc',) if live else ()):
+    for path in ('/run', '/usr/share', '/data', '/etc'):
         run('mount', '-t', 'tmpfs', 'tmpfs', path)
     if live:
         Path('/etc/ssl/certs').mkdir(parents=True)
         Path('/etc/ssl/certs/ca-certificates.crt').write_bytes(ca)
         Path('/etc/resolv.conf').write_text('nameserver 127.0.0.53\n')
+    else:
+        # No provider traffic: the private network has no route here.
+        Path('/etc/resolv.conf').write_text(
+            'nameserver 192.0.2.1\noptions attempts:1 timeout:1\n')
     Path('/usr/share/werewolf').mkdir()
     policy = 'lookup 2002 * A AAAA\n'
     Path('/usr/share/werewolf/net').write_text(policy)
     db_dir = Path('/data/svc/unwound-age')
     db_dir.mkdir(parents=True)
     now = int(time.time())
-    db = sqlite3.connect(db_dir / 'age.db')
-    schema = Path(__file__).resolve().parents[1] / 'cmd/unwound/age.sql'
-    db.executescript(schema.read_text())
-    db.execute('PRAGMA journal_mode=WAL')
-    if not live:
+    if seeded:
+        db = sqlite3.connect(db_dir / 'age.db')
+        schema = Path(__file__).resolve().parents[1] / 'cmd/unwound/age.sql'
+        db.executescript(schema.read_text())
+        db.execute('PRAGMA journal_mode=WAL')
         db.execute('''INSERT INTO domain_age
             (domain,source,status,registered_at,effective_at,fetched_at,
              retry_after,last_used_at,psl_generation,bootstrap_generation)
             VALUES (?,?,?,?,?,?,?,?,?,?)''',
             ('example.com', 'rdap', 'valid', 946684800, 946684800,
-             now, now + 7 * 86400, now, 'fixture', 'fixture'))
-    db.commit()
-    db.close()
+             now, now + 7 * 86400, now - 7200, 'fixture', 'fixture'))
+        db.commit()
+        db.close()
     os.chown(db_dir, 55, 55)
     os.chmod(db_dir, 0o700)
     for entry in db_dir.iterdir():
@@ -92,37 +97,51 @@ def inside(binary):
             client.connect('/run/werewolf-age/age.sock')
             client.sendall(request)
             response = client.recv(300)
-        assert response[:4] == bytes([1, 2, 1, 11]), response
+        assert response[:4] == bytes([1, 2 if seeded or live else 0,
+                                      1 if seeded or live else 0, 11]), response
         assert struct.unpack('!Q', response[4:12])[0] == 42, response
         assert response[12:] == b'example.com', response
-        if live:
-            evidence = sqlite3.connect(f'file:{db_dir}/age.db?mode=ro', uri=True)
-            assert evidence.execute('SELECT source,status FROM domain_age WHERE domain=?',
-                                    ('example.com',)).fetchone() == ('rdap', 'valid')
-            trigger = evidence.execute('SELECT request_id,dns_id,qname,qtype,transport,'
-                                       'source_label,service_uid,policy_namespace '
-                                       'FROM age_check WHERE domain=?',
-                                       ('example.com',)).fetchone()
-            assert trigger == (42, 7, 'a.example.com', 1, 'udp', '127.53.0.1', 2002,
-                               'uid:2002'), trigger
-            evidence.close()
-        print('age authority: mature evidence, exact trigger and root read-only views pass')
+        # A cold start must create the database, schema and WAL under the
+        # actual writer filter; a seeded start must reopen and update it.
+        with closing(sqlite3.connect(f'file:{db_dir}/age.db?mode=ro', uri=True)) as evidence:
+            assert evidence.execute('PRAGMA journal_mode').fetchone() == ('wal',)
+            assert evidence.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+            if seeded:
+                touched = evidence.execute('SELECT last_used_at FROM domain_age').fetchone()[0]
+                assert touched >= now, touched
+            else:
+                result = evidence.execute('SELECT source,status FROM domain_age WHERE domain=?',
+                                          ('example.com',)).fetchone()
+                assert result == (('rdap', 'valid') if live else ('none', 'error')), result
+                trigger = evidence.execute('SELECT request_id,dns_id,qname,qtype,transport,'
+                                           'source_label,service_uid,policy_namespace '
+                                           'FROM age_check WHERE domain=?',
+                                           ('example.com',)).fetchone()
+                assert trigger == (42, 7, 'a.example.com', 1, 'udp', '127.53.0.1', 2002,
+                                   'uid:2002'), trigger
+        print(f'age authority: {"seeded" if seeded else "cold"} database, WAL, '
+              'request and root read-only views pass')
     finally:
         worker.kill()
-        worker.wait(timeout=5)
+        _, errors = worker.communicate(timeout=5)
         parent.close()
         for path in reversed(mounted):
             run('umount', path)
+        assert not errors, errors.decode()
 
 
 if __name__ == '__main__':
     if os.geteuid() != 0 or sys.platform != 'linux':
         sys.exit('check-unwound-age-authority requires root on Linux')
-    if len(sys.argv) == 3 and sys.argv[1] == '--inside':
-        inside(sys.argv[2])
+    if len(sys.argv) == 4 and sys.argv[1] == '--inside':
+        inside(sys.argv[2], sys.argv[3] == 'seeded')
     elif len(sys.argv) == 2:
         binary = str(Path(sys.argv[1]).resolve())
-        subprocess.run(['unshare', '--mount', '--fork', sys.executable,
-                        str(Path(__file__).resolve()), '--inside', binary], check=True)
+        live = os.environ.get('AGE_LIVE') == '1'
+        for case in ('cold',) if live else ('cold', 'seeded'):
+            subprocess.run(['unshare', '--mount', '--fork',
+                            *([] if live else ['--net']), sys.executable,
+                            str(Path(__file__).resolve()), '--inside', binary, case],
+                           check=True)
     else:
         sys.exit(__doc__)

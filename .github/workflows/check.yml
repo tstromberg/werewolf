@@ -55,6 +55,8 @@ jobs:
         run: make check-dns DNS_TEST_RUNNER=sudo
       - name: unwound behind fence, against a misbehaving resolver
         run: make check-unwound DNS_TEST_RUNNER=sudo
+      - name: Age authority SQLite sandbox and root read-only views
+        run: make check-unwound-age-authority DNS_TEST_RUNNER=sudo
 
   check:
     strategy:

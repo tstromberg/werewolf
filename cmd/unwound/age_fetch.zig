@@ -79,6 +79,8 @@ pub fn allowBasics(f: *sandbox.Filter) void {
 pub fn allowFetch(f: *sandbox.Filter) void {
     f.allowArg("socket", 0, linux.AF.INET);
     f.allowArg("socket", 0, linux.AF.INET6);
+    // Zig's DNS resolver makes its IPv6 UDP socket dual-stack.
+    f.allowTwo("setsockopt", 1, linux.IPPROTO.IPV6, 2, linux.IPV6.V6ONLY);
     inline for (.{
         "bind",
         "connect",
