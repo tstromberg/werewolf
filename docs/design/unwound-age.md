@@ -7,7 +7,7 @@ Status: enforcement is selected by the image marker. See the
 
 Only a screened `lookup: "*"` uses age. Exact and `*.NAME` grants remain the
 operator's explicit trust. Age is one more screen after local name shape and
-endpoint checks. The default cutoff is 90 days after effective registration.
+endpoint checks. The default cutoff is 30 days after effective registration.
 The currently assigned system domain and its descendants are automatically
 available to DNS-enabled services and bypass this age gate. They still pass
 the existing tunnel screen. Boot metadata's FQDN suffix takes precedence over
@@ -40,7 +40,7 @@ history. Use the earliest matching log-entry timestamp, never certificate
 domain can expire and be registered again. An RDAP answer saying young or
 giving ambiguous dates is not a transport failure and must never be
 overridden by CT. Anyone on the path can make RDAP unavailable, so CT may
-only make a decision stricter: a first entry under 90 days old marks the
+only make a decision stricter: a first entry under 30 days old marks the
 domain young for 24 hours, and anything else leaves age unknown. CT never
 makes a domain mature; an outage is retried within the hour.
 
@@ -72,7 +72,7 @@ pruning older audit rows. SQL triggers enforce 20,000 domain and 120,000 check
 row limits.
 
 RDAP evidence can authorize for seven days after fetch. Data fetched before
-the 90-day boundary cannot become mature merely because time passes; it needs
+the 30-day boundary cannot become mature merely because time passes; it needs
 a new RDAP check at the boundary. crt.sh history never authorizes; it is
 kept, marked `crtsh`, for the audit and to refuse a recently seen domain.
 A clock behind fetch makes evidence unknown. The current name/site budgets
@@ -93,7 +93,7 @@ wildcard requests and cannot change DNS answers.
 The offline classifier in `cmd/unwound/age.zig` covers PSL exact, wildcard,
 exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, expiry and clock boundaries with the
-90-day default. Cached evidence is reclassified by its fetch date and domain.
+30-day default. Cached evidence is reclassified by its fetch date and domain.
 PSL and IANA versions are retained for audit, not cache invalidation. It
 accepts only normalized ASCII PSL input. `tools/update-unwound-age-data`
 converts the official PSL to A-labels with `idna==3.20` and pins it alongside

@@ -20,8 +20,8 @@ kernel-log reads; application syslog uses a UNIX socket instead.
 
 ## Non-Goals
 
-Remote logging, stdout capture, hooks and selector rules.
-Local retention is not an authenticated or tamper-proof audit trail.
+Remote logging, stdout capture, hooks, selectors and authenticated audit storage.
+Delivery, including DNS decision logging, is best effort without acknowledgements.
 
 ## Detailed design
 
@@ -34,9 +34,15 @@ The receiver runs as `_syslog`, chrooted to `/var/empty`, with no capabilities.
 It receives credentials with `SO_PASSCRED`, rejects truncated datagrams and
 closes any received descriptors. Each bounded record has receive time, kernel
 UID/GID/PID, priority and escaped message text. Sender tags are untrusted text.
-Rate limits apply by UID. The console uses its own nonblocking descriptor.
+Allow 1,000 messages per kernel PID per monotonic second, with no UID quota.
+Track 1,024 PIDs; reuse idle slots after 60 seconds once pending drops are reported.
+Forked processes have separate allowances. The console is nonblocking.
 Escape controls, quotes, backslashes and non-ASCII bytes inside message text.
 Datagrams always get `source: syslog`; remap claimed LOG_KERN to LOG_USER.
+Receiver-generated `flood` notices name UID/PID and suppressed counts. Emit an
+initial notice, then at most one summary per PID per minute, even after it stops.
+These bypass sender limits, with four notices/second globally and round-robin
+reporting. A full sender table refuses new PIDs and reports aggregate overflow.
 
 Open `/dev/kmsg` read-only before dropping privileges. Facility zero gets
 `source: kernel`; userspace-injected records get `source: kmsg`. Keep sequence

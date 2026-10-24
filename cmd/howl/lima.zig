@@ -90,6 +90,19 @@ pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
     return if (n == 0) null else p;
 }
 
+/// sshIdentity is the key Lima puts in its NoCloud user's authorized_keys.
+pub fn sshIdentity(io: Io, gpa: Allocator, name: []const u8, user: []const u8) !?[]const u8 {
+    const r = try std.process.run(gpa, io, .{
+        .argv = &.{ "limactl", "list", name, "--format", "{{.Config.User.Name}}|{{.IdentityFile}}" },
+    });
+    if (r.term != .exited or r.term.exited != 0) return null;
+    const text = std.mem.trim(u8, r.stdout, " \r\n");
+    const separator = std.mem.findScalar(u8, text, '|') orelse return null;
+    if (!std.mem.eql(u8, text[0..separator], user)) return null;
+    const path = text[separator + 1 ..];
+    return if (std.fs.path.isAbsolute(path)) path else null;
+}
+
 pub const Forward = struct { guest: u16, host: u16 };
 
 /// Forward declared TCP services in QEMU itself. Plain Lima has neither a

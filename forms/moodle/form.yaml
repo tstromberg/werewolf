@@ -3,7 +3,7 @@
 # serves it over HTTPS at the machine's base URL, with a certificate from
 # Let's Encrypt, and hands its PHP to php-fpm; Moodle's cron runs every
 # minute. Wolfi does not ship Moodle: werewolf's application feed lays
-# the release in /usr/share/moodle (../packages/moodle/moodle.yaml),
+# the release in /usr/share/moodle (../packages/www/moodle/moodle.yaml),
 # which no one on the machine can change, with the form's config.php
 # beside it. Course files, sessions and caches are in /data/svc/moodle,
 # its tables in the schema moodle. It is installed, with its
@@ -29,7 +29,6 @@ packages:
   - php-8.5-openssl
   - php-8.5-pgsql         # the database
   - php-8.5-simplexml
-  - php-8.5-soap
   - php-8.5-sodium
   - php-8.5-xml
   - php-8.5-xmlreader

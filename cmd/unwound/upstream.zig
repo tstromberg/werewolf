@@ -53,6 +53,8 @@ const Pending = struct {
     attempt: u8 = 0,
     /// silence is why the last attempt ended without an answer.
     silence: Silence = .no_resolvers,
+    /// The resolver chosen for this attempt stays fixed across lease updates.
+    server: [4]u8 = .{ 0, 0, 0, 0 },
     fd: i32 = -1,
     phase: Phase = .udp,
     tcp: u8 = 0,
@@ -329,6 +331,7 @@ fn start(i: u8) void {
     while (p.attempt < tries_per_server * u.servers.len) {
         const server = u.servers.ips[p.attempt % u.servers.len];
         p.attempt += 1;
+        p.server = server;
         var id: u16 = undefined;
         var mix: [32]u8 = undefined;
         u.rng.fill(std.mem.asBytes(&id));
@@ -388,7 +391,7 @@ fn ready(i: u8) void {
             var frame: [2 + wire.query_max]u8 = undefined;
             std.mem.writeInt(u16, frame[0..2], @intCast(p.sent_len), .big);
             @memcpy(frame[2..][0..p.sent_len], p.sent[0..p.sent_len]);
-            const rc = linux.write(p.fd, &frame, 2 + p.sent_len);
+            const rc = linux.sendto(p.fd, &frame, 2 + p.sent_len, linux.MSG.NOSIGNAL, null, 0);
             if (err != 0 or linux.errno(rc) != .SUCCESS or rc != 2 + p.sent_len)
                 return next(i, .tcp_failed);
             p.phase = .reading;
@@ -409,15 +412,18 @@ fn datagrams(i: u8) void {
         var a: wire.Answer = undefined;
         wire.parseResponse(u.in[0..rc], p.sent[0..p.sent_len], &a) catch continue;
         if (!a.truncated) return done(i, &a);
+        // A lease change may have revoked this attempt's resolver. Do not
+        // open its TCP connection after revocation.
+        const still_allowed = for (u.servers.ips[0..u.servers.len]) |server| {
+            if (std.mem.eql(u8, &server, &p.server)) break true;
+        } else false;
+        if (!still_allowed) return next(i, .tcp_failed);
         // Ask the same resolver the same question over TCP.
         const tcp = for (&u.tcp, 0..) |*b, k| {
             if (!b.used) break k;
         } else return next(i, .busy);
         closeFd(p);
-        p.fd = open(
-            linux.SOCK.STREAM,
-            u.servers.ips[(p.attempt - 1) % u.servers.len],
-        ) orelse return next(i, .tcp_failed);
+        p.fd = open(linux.SOCK.STREAM, p.server) orelse return next(i, .tcp_failed);
         u.tcp[tcp] = .{ .used = true };
         p.tcp = @intCast(tcp);
         p.phase = .connecting;

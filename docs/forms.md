@@ -15,7 +15,7 @@ way: stage0 opens its `root.erofs` read-only through dm-verity and hands over
 to init ([design/verified-boot.md](design/verified-boot.md)). `DEV=1` adds
 busybox and a console shell to any form. Howl's `--dev` also layers in root
 SSH using a local Ed25519 key managed under `$XDG_DATA_HOME/howl/keys/dev/`;
-`howl ssh` selects that key for the VM. These are local debugging conveniences,
+`howl ssh root@NAME` selects that key for the VM. These are local debugging conveniences,
 and what ships is built without them. Native test authors can reuse that channel
 with [`howl test --iterate`](design/local-test-iteration.md).
 
@@ -88,9 +88,9 @@ path. Two users or groups with the same name or id fail the build.
 
 Third-party software comes from a signed feed by package name: `../packages` builds
 what Wolfi lacks or ships unfit, rarely what it ships (named `-werewolf`), and
-`../hardened-packages` the runtimes werewolf patches. `minimal` lists both feeds; a
+`../packages/lang` also holds the runtimes Werewolf patches. `minimal` lists both feeds; a
 name either covers comes from it or the build fails. A recipe is for werewolf's own
-software or a package in development: `recipes: [../../../packages/zot/zot.yaml]`,
+software or a package in development: `recipes: [../../../packages/net/zot/zot.yaml]`,
 or `melange/*.yaml` beside its source, as in `forms/vuln-demo`. Melange builds in
 QEMU or bubblewrap, overlays the packages and checks shared-library dependencies.
 See [package source setup](../CONTRIBUTING.md#package-sources) for checkout and CI pins.
@@ -129,9 +129,15 @@ users:
 ```
 
 `users: {alice: {}}` is an account without keys; an admin must have keys.
+prod-ssh and playground include `ssh-su` for root reauthentication using a forwarded
+agent. It installs the SSH client and keeps the existing listener. Production requires
+FIDO presence and verification. See [su](../forms/ssh-su/README.md) for client setup and
+the explicit software-key policy for local VMs.
 People are never in the image: howl packs them into the boot config, init
-makes each an account (uid its name's hash, home on `/data`) and writes its
-keys where sshd looks; cloud metadata reapplies them as they change. Services
+makes each an account (uid mapped from its name into `[65536, 2^30)`, home on
+`/data`) and writes its keys where sshd looks. Names and IDs stay reserved in
+`/data/.werewolf/identities` after removal; cloud metadata locks absent people
+and reapplies active keys as they change. Services
 have distinct users; components of one application may share one with
 `shared-user: true` on each, which shares files, processes and network policy
 while Landlock, seccomp and limits stay per service.

@@ -116,6 +116,21 @@ pub fn offerFor(
 /// Usable is the public keys found: each one's line, and its file's name.
 const Usable = struct { lines: []const []const u8, files: []const []const u8 };
 
+/// Only local FIDO credentials enter the automatically forwarded agent.
+/// Public keys without their private credential stub cannot be loaded.
+pub fn securityIdentities(io: Io, gpa: Allocator) ![]const []const u8 {
+    const home = howl.environ.get("HOME") orelse return &.{};
+    const dir = try std.fs.path.join(gpa, &.{ home, ".ssh" });
+    const found = try usable(io, gpa, dir, false);
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (found.files) |public| {
+        const private = try std.fs.path.join(gpa, &.{ dir, public[0 .. public.len - 4] });
+        const path = Dir.cwd().realPathFileAlloc(io, private, gpa) catch continue;
+        try paths.append(gpa, path);
+    }
+    return paths.items;
+}
+
 /// usable returns the keys in dir's *.pub files that sshd takes: security
 /// keys, and key files when key_files.
 fn usable(io: Io, gpa: Allocator, dir: []const u8, key_files: bool) !Usable {

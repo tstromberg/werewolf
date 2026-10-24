@@ -1,6 +1,6 @@
 # paperless: Paperless-ngx 3.3, documents with OCR, behind Caddy, with
 # Valkey as its queue. The application is built from the release
-# (../packages/paperless/paperless.yaml). Tesseract, Ghostscript,
+# (../packages/www/paperless/paperless.yaml). Tesseract, Ghostscript,
 # ImageMagick, poppler and qpdf are Wolfi's packages, not copies frozen
 # in Paperless's container image. Valkey is the valkey form, on its
 # socket. Sign-up is closed. The administrator comes from the config.
@@ -22,7 +22,7 @@ packages:
   - tesseract
   - tesseract-eng
   - ghostscript
-  - imagemagick-7
+  - imagemagick-7>=7.1.2.34-r1000
   - poppler-utils
   - qpdf
   - pngquant

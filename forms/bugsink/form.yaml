@@ -11,12 +11,12 @@ base: prod
 with: [caddy]
 
 packages:
-  - bugsink
+  # This revision removes Brotli and the disabled native minidump parser.
+  - bugsink>=2.6.2-r1
   # Revision 2 introduced the capability-group policy used by these forms.
   - python-3.15>=3.15.0_git20261010-r2000
   - tzdata
   - libgcc
-  - libstdc++
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.

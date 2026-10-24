@@ -6,7 +6,7 @@ model providers and local CPU ONNX inference on hardened Python 3.15. See
 
 ## Security Posture
 
-- Python comes from the signed hardened-packages repository.
+- Python comes from the signed hardened feed.
 - No shell or interpreter fetched from an upstream container.
 - One service user, private persistent data, bounded memory and no child execution.
 - Auto-login is deliberately enabled for the vulnerable API demonstration.

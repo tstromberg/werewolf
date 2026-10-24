@@ -6,12 +6,12 @@
 # request's Host says. Its first administrator comes from the config
 # before it serves. Wolfi's Keycloak is old and brings bash: werewolf's
 # application feed builds upstream's release
-# (../packages/keycloak/keycloak.yaml), and
+# (../packages/www/keycloak/keycloak.yaml), and
 # java starts it, without kc.sh. See forms/keycloak/README.md.
 base: jre
 
 packages:
-  - keycloak-werewolf
+  - keycloak
 
 with: [postgresql, caddy]
 

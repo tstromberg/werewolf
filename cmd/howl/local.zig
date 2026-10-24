@@ -203,7 +203,7 @@ pub fn createQemu(
             "",
         late,
     }), built, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
-        if (ssh) try sshCommand(gpa, name) else "",
+        if (ssh) try sshCommand(gpa, name, tell.dev) else "",
         if (ssh) " · " else "",
         try reach(gpa, ports, web_port, tell.dev),
         try consoleCommand(gpa, name),
@@ -213,7 +213,8 @@ pub fn createQemu(
 
 /// sshCommand returns the command a summary gives to reach name. The run
 /// machine's commands need no name.
-fn sshCommand(gpa: Allocator, name: []const u8) ![]const u8 {
+fn sshCommand(gpa: Allocator, name: []const u8, dev: bool) ![]const u8 {
+    if (dev) return gpa.print("howl ssh root@{s}", .{name});
     return if (std.mem.eql(u8, name, run_name))
         "howl ssh"
     else
@@ -292,7 +293,7 @@ pub fn protectedReady(
         if (mapping.guest == 22) {
             try next.print(
                 "     SSH      {s}  (127.0.0.1:{d})\n",
-                .{ try sshCommand(gpa, name), mapping.host },
+                .{ try sshCommand(gpa, name, false), mapping.host },
             );
         } else if (mapping.guest == 80 or mapping.guest == 443) {
             try next.print("     Open     {s}://127.0.0.1:{d}\n", .{
@@ -493,7 +494,7 @@ pub fn createLima(
             .power_ns = @as(i96, started.seconds) * std.time.ns_per_s,
         }, try gpa.print(
             "{s} · {s}",
-            .{ try sshCommand(gpa, name), try stopCommand(gpa, name) },
+            .{ try sshCommand(gpa, name, false), try stopCommand(gpa, name) },
         ), tell.note);
         return;
     }
@@ -655,7 +656,7 @@ fn reachAt(
     } else {
         web = p;
     };
-    if (ssh) try out.print(gpa, "{s} · ", .{try sshCommand(gpa, name)});
+    if (ssh) try out.print(gpa, "{s} · ", .{try sshCommand(gpa, name, dev)});
     if (web) |p| switch (p) {
         80 => try out.print(gpa, "http://{s} · ", .{addr}),
         443 => try out.print(gpa, "https://{s} · ", .{addr}),

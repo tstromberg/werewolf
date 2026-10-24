@@ -70,6 +70,18 @@ class Sources(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual('package: original\n', self.recipe.read_text())
 
+    def test_category_moves_preserve_source_identity_and_duplicates_fail(self):
+        (self.context / 'metadata.json').write_text('{}\n')
+        original = sources.digest(self.root, ['solr'])
+        (self.root / 'databases').mkdir()
+        self.context.rename(self.root / 'databases/solr')
+        self.assertEqual(original, sources.digest(self.root, ['solr']))
+        self.assertEqual(self.root / 'databases/solr', sources.context_dir(self.root, 'solr'))
+        (self.root / 'www/solr').mkdir(parents=True)
+        (self.root / 'www/solr/metadata.json').write_text('{}\n')
+        with self.assertRaisesRegex(ValueError, 'ambiguous package context'):
+            sources.digest(self.root, ['solr'])
+
     def test_immutable_commit_checkout_stays_pinned_when_the_branch_advances(self):
         repository = self.root / 'upstream'
         repository.mkdir()
@@ -93,14 +105,15 @@ class Sources(unittest.TestCase):
 
     def test_pinning_records_the_committed_source_and_refuses_uncommitted_contexts(self):
         repository = self.root / 'packages'
-        context = repository / 'solr'
+        context = repository / 'databases/solr'
         context.mkdir(parents=True)
+        (context / 'metadata.json').write_text('{}\n')
         recipe = context / 'recipe.yaml'
         recipe.write_text('reviewed')
         subprocess.run(['git', 'init', '--quiet', repository], check=True)
         subprocess.run(['git', '-C', repository, 'config', 'user.name', 'Test'], check=True)
         subprocess.run(['git', '-C', repository, 'config', 'user.email', 'test@example.invalid'], check=True)
-        subprocess.run(['git', '-C', repository, 'add', 'solr'], check=True)
+        subprocess.run(['git', '-C', repository, 'add', 'databases/solr'], check=True)
         subprocess.run(['git', '-C', repository, 'commit', '--quiet', '-m', 'reviewed'], check=True)
         head = subprocess.check_output(['git', '-C', repository, 'rev-parse', 'HEAD'], text=True).strip()
         lock = self.root / 'lock.json'

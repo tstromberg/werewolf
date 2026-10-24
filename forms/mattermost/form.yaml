@@ -6,7 +6,7 @@
 # Mattermost keeps its tables and its configuration in a schema of its
 # own, and its files in /data/svc/mattermost. werewolf's application feed
 # packages upstream's release
-# (../packages/mattermost/mattermost-team.yaml). See
+# (../packages/net-im/mattermost/mattermost-team.yaml). See
 # forms/mattermost/README.md.
 base: prod
 

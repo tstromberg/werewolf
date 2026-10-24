@@ -155,11 +155,11 @@ pub const Evidence = struct {
 pub const Verdict = enum(u8) { unknown = 0, young = 1, mature = 2 };
 pub const Source = enum(u8) { none = 0, rdap = 1, crtsh = 2 };
 pub const Status = enum { valid, history, unknown, @"error" };
-pub const threshold_s: i64 = 90 * 86400;
+pub const threshold_s: i64 = 30 * 86400;
 pub const rdap_cache_s: i64 = 7 * 86400;
 pub const ct_fresh_s: i64 = 86400;
 
-/// classify never lets evidence fetched before its 90-day boundary mature
+/// classify never lets evidence fetched before its 30-day boundary mature
 /// merely because the clock advanced. That boundary needs a fresh RDAP read.
 pub fn classify(e: Evidence, fetched: i64, now: i64) Verdict {
     if (now < fetched or fetched < e.effective or e.effective < e.created) return .unknown;
@@ -515,7 +515,7 @@ test "RDAP age takes registration resets and refuses ambiguous evidence" {
 
 test "age at the threshold needs a fresh fetch; RDAP expires after seven days" {
     const t = std.testing;
-    try t.expectEqual(@as(i64, 90 * 86400), threshold_s);
+    try t.expectEqual(@as(i64, 30 * 86400), threshold_s);
     const e: Evidence = .{ .registered = "example.com", .created = 1, .effective = 1000 };
     try t.expectEqual(Verdict.young, classify(e, 1000, 1000 + rdap_cache_s));
     try t.expectEqual(Verdict.unknown, classify(e, 1000, 1000 + rdap_cache_s + 1));

@@ -5,7 +5,7 @@
 # groups, their operator and the others' password come from the config,
 # hashed by galene-setup before it serves; no group is listed or open to
 # strangers. Wolfi does not ship Galène: werewolf's application feed
-# builds it from a pinned release (../packages/galene/galene.yaml). See
+# builds it from a pinned release (../packages/multimedia/galene/galene.yaml). See
 # forms/galene/README.md.
 base: prod
 

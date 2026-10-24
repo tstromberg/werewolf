@@ -168,6 +168,12 @@ fn run() !void {
     try sandbox.dropTo(frontend_id, "/var/empty");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     try sandbox.landlock(&.{}, &.{});
+    const no_pipe: linux.Sigaction = .{
+        .handler = .{ .handler = linux.SIG.IGN },
+        .mask = std.mem.zeroes(linux.sigset_t),
+        .flags = 0,
+    };
+    _ = try sys(linux.sigaction(.PIPE, &no_pipe, null), "ignore SIGPIPE");
     try confine(udp, tcp, pair[0], domain_pair[0], age_pair[0], log, enforce_age);
     var f: Frontend = .{
         .udp = udp,
@@ -279,8 +285,7 @@ fn listener(kind: u32) !i32 {
 }
 
 /// openLog connects to syslogd, waiting up to five seconds for it to start
-/// with the other services. Without it, audit records go to stderr: runit
-/// sends that to the console.
+/// with the other services. Without it, stderr goes to runit's console.
 fn openLog() !i32 {
     const fd: i32 = @intCast(try sys(
         linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0),
@@ -1171,7 +1176,8 @@ const Frontend = struct {
 
     fn send(f: *Frontend, line: []const u8) void {
         const rc = linux.write(f.log, line.ptr, line.len);
-        if (linux.errno(rc) != .SUCCESS or rc != line.len) f.stats.lost += 1;
+        // Logging is best effort and never changes a DNS decision or answer.
+        if (linux.errno(rc) != .SUCCESS or rc != line.len) f.stats.lost +|= 1;
     }
 };
 

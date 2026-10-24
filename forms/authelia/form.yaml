@@ -5,14 +5,14 @@
 # secrets come from the config before it serves; nobody signs up, and
 # nothing is reachable without a rule. Wolfi does not ship Authelia:
 # werewolf's application feed builds it from a pinned release
-# (../packages/authelia/authelia.yaml). See forms/authelia/README.md.
+# (../packages/security/authelia/authelia.yaml). See forms/authelia/README.md.
 base: prod
 
 with: [caddy]
 
 packages:
   - authelia
-  # What ../packages/authelia/authelia.yaml's build links, from Wolfi.
+  # What ../packages/security/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 
 # curl helps inspect the portal in development mode.

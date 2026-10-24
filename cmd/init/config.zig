@@ -116,7 +116,98 @@ pub fn metadata(m: *Machine) void {
     _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
     if (exists("/run/config/authorized_keys"))
         keys(m, "root", m.read("/run/config/authorized_keys"));
-    if (exists("/run/config/users")) users(m, m.read("/run/config/users"));
+}
+
+/// accounts waits for /data so the reservation table is available before any
+/// non-system account or home is published.
+pub fn accounts(m: *Machine) void {
+    if (exists("/run/werewolf/nodata")) {
+        say("people: /data unavailable; no accounts published", .{});
+        unlockRoot(m);
+        return;
+    }
+    const data_rc = linux.open("/data", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    if (linux.errno(data_rc) != .SUCCESS) return accountFailure("open /data");
+    const data_fd: i32 = @intCast(data_rc);
+    defer _ = linux.close(data_fd);
+    const ledger_dir = people.openLedgerDir(data_fd) catch return accountFailure("open identities");
+    defer _ = linux.close(ledger_dir);
+    const loaded = people.loadLedger(m.gpa, ledger_dir) catch |err| switch (err) {
+        error.NoLedger => blk: {
+            if (!(people.freshData(data_fd) catch false)) return accountFailure("unregistered data");
+            break :blk @as([]const people.Identity, &.{});
+        },
+        else => return accountFailure("read identities"),
+    };
+    const home_dir = people.openHomeDir(data_fd) catch return accountFailure("open homes");
+    defer _ = linux.close(home_dir);
+    const shell: []const u8 = if (exists("/bin/ash")) "/bin/ash" else "/sbin/nologin";
+    const desired_nocloud: ?people.NoCloud = if (m.nocloud_user.len > 0)
+        .{ .name = m.nocloud_user, .id = m.nocloud_uid, .keys = m.nocloud_keys }
+    else
+        null;
+    const c = people.applyReserved(m.gpa, .{
+        .passwd = m.read("/run/werewolf/passwd"),
+        .group = m.read("/run/werewolf/group"),
+        .shadow = m.read("/run/werewolf/shadow"),
+    }, loaded, m.read("/run/config/users"), shell, desired_nocloud, true) catch
+        return accountFailure("derive accounts");
+    people.checkHomes(home_dir, c.keys) catch return accountFailure("home owner");
+    people.commitLedger(m.gpa, ledger_dir, c.identities) catch
+        return accountFailure("save identities");
+    if (linux.errno(linux.fsync(data_fd)) != .SUCCESS) return accountFailure("sync data");
+    writeAccount(m, "/run/werewolf/passwd", c.passwd, 0o644);
+    writeAccount(m, "/run/werewolf/group", c.group, 0o644);
+    writeAccount(m, "/run/werewolf/shadow", c.shadow, 0o600);
+    writeAccount(m, "/run/werewolf/people", c.made, 0o600);
+    for (c.keys) |k| {
+        const path = m.fmtZ("/run/werewolf/keys/{s}", .{k.name});
+        writeAccount(m, path, k.text, 0o600);
+        if (linux.errno(linux.fchownat(linux.AT.FDCWD, path, k.id, k.id, linux.AT.SYMLINK_NOFOLLOW)) != .SUCCESS)
+            return accountFailure("own key");
+    }
+    if (c.root_keys.len > 0) {
+        const had = m.read("/run/werewolf/keys/root");
+        writeAccount(m, "/run/werewolf/keys/root", m.fmt("{s}{s}", .{ had, c.root_keys }), 0o600);
+    }
+    people.ensureHomes(home_dir, c.keys) catch return accountFailure("create homes");
+    for (c.refused) |why| say("people: {s}", .{why});
+    unlockRoot(m);
+    say("people: {d} active, {d} reserved", .{ c.keys.len, c.identities.len });
+}
+
+fn accountFailure(step_name: []const u8) noreturn {
+    say("people: {s} failed; not handing over", .{step_name});
+    std.process.exit(1);
+}
+
+fn writeAccount(m: *Machine, path: []const u8, value: []const u8, mode: u32) void {
+    const rc = linux.open(m.z(path), .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, mode);
+    if (linux.errno(rc) != .SUCCESS) accountFailure("open account file");
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < value.len) {
+        const n = linux.write(fd, value[off..].ptr, value.len - off);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) accountFailure("write account file");
+        off += n;
+    }
+    if (linux.errno(linux.fchmod(fd, mode)) != .SUCCESS) accountFailure("mode account file");
+}
+
+fn unlockRoot(m: *Machine) void {
     // OpenSSH rejects '!' even for public-key authentication. An explicitly
     // provisioned root key enables key-only login; '*' is no usable password.
     if ((exists("/etc/sv/sshd/service") or exists("/etc/sv/sshd-dev/service")) and
@@ -137,64 +228,17 @@ fn rootKeyShadow(gpa: Allocator, shadow: []const u8) ![]const u8 {
     return try std.mem.concat(gpa, u8, &.{ shadow[0..start], "root:*", shadow[start + 6 ..] });
 }
 
-/// users makes the config's people their accounts (lib/people.zig): the
-/// account files as apply returns them, each person's keys file, an
-/// admin's keys in root's, and /run/werewolf/people, the names made, which
-/// cloud-metadata reads to apply the next config. Homes are data's.
-fn users(m: *Machine, text: []const u8) void {
-    const shell: []const u8 = if (exists("/bin/ash")) "/bin/ash" else "/sbin/nologin";
-    const c = people.apply(m.gpa, .{
-        .passwd = m.read("/run/werewolf/passwd"),
-        .group = m.read("/run/werewolf/group"),
-        .shadow = m.read("/run/werewolf/shadow"),
-    }, text, shell) catch return say("users: out of memory", .{});
-    for (c.refused) |why| say("users: {s}", .{why});
-    m.write("/run/werewolf/passwd", c.passwd, 0o644);
-    m.write("/run/werewolf/group", c.group, 0o644);
-    m.write("/run/werewolf/shadow", c.shadow, 0o600);
-    m.write("/run/werewolf/people", c.made, 0o600);
-    for (c.keys) |k| keys(m, k.name, k.text);
-    if (c.root_keys.len > 0) {
-        const had = if (exists("/run/werewolf/keys/root"))
-            m.read("/run/werewolf/keys/root")
-        else
-            "";
-        keys(m, "root", m.fmt("{s}{s}", .{ had, c.root_keys }));
-    }
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeScalar(u8, c.made, '\n');
-    while (it.next()) |n| names.append(m.gpa, n) catch return;
-    m.users = names.items;
-    say("users: {d} accounts made", .{names.items.len});
-}
-
-/// nocloud adds the first user in a NoCloud cloud-config, with its ssh keys,
-/// as Lima provides them. Name and uid come from outside, so only plain ones
-/// are taken. The password is "*", not the lock "!", which sshd treats as
-/// refusing even a key. Home is on /data.
+/// nocloud stages the first user in a NoCloud cloud-config until /data and
+/// the reservation table are available. Name and uid come from outside, so
+/// only plain ones are taken.
 fn nocloud(m: *Machine) void {
     limaConfig(m);
     const nc = parseNoCloud(m.gpa, m.readRegular("/mnt/user-data")) catch return;
     if (nc.user.len > 0) {
-        const passwd = m.read("/run/werewolf/passwd");
-        const group = m.read("/run/werewolf/group");
-        // The name must be new to the group file too: the image has groups
-        // with no account (wheel, disk, shadow), and a duplicate name would
-        // mean two groups.
-        if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(passwd, nc.user) and
-            !hasEntry(group, nc.user) and !idInUse(passwd, nc.uid) and !idInUse(group, nc.uid))
-        {
-            m.append(
-                "/run/werewolf/passwd",
-                m.fmt(
-                    "{s}:x:{s}:{s}::/data/home/{s}:/bin/ash\n",
-                    .{ nc.user, nc.uid, nc.uid, nc.user },
-                ),
-            );
-            m.append("/run/werewolf/group", m.fmt("{s}:x:{s}:\n", .{ nc.user, nc.uid }));
-            m.append("/run/werewolf/shadow", m.fmt("{s}:*:0:0:99999:7:::\n", .{nc.user}));
-            keys(m, nc.user, nc.keys);
+        if (isPlainUser(nc.user) and isPlainUid(nc.uid)) {
             m.nocloud_user = nc.user;
+            m.nocloud_uid = std.fmt.parseInt(u32, nc.uid, 10) catch 0;
+            m.nocloud_keys = nc.keys;
         } else {
             var user_buf: [64]u8 = undefined;
             var uid_buf: [16]u8 = undefined;

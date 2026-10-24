@@ -151,8 +151,8 @@ test "writer preserves RDAP dates, including a reset that makes a domain young" 
     const body =
         "{\"objectClassName\":\"domain\",\"ldhName\":\"example.com\",\"events\":[" ++
         "{\"eventAction\":\"registration\",\"eventDate\":\"2020-01-01T00:00:00Z\"}," ++
-        "{\"eventAction\":\"reregistration\",\"eventDate\":\"2026-07-30T00:00:00Z\"}]}";
-    const now: i64 = 1_792_716_800; // 2026-10-23, after the reset but under 90 days.
+        "{\"eventAction\":\"reregistration\",\"eventDate\":\"2026-09-28T00:00:00Z\"}]}";
+    const now: i64 = 1_792_716_800; // 2026-10-23, after the reset but under 30 days.
     const r = record(
         "example.com",
         found(t.allocator, "example.com", .{ .body = body }, null, now),

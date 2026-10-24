@@ -69,7 +69,7 @@ def status(previous=None):
     until = time.monotonic() + 180
     while time.monotonic() < until:
         try:
-            reply, _ = run([howl, 'ssh', '--', '/usr/bin/ab-status'], 'status', 10)
+            reply, _ = run([howl, 'ssh', 'root@werewolf-run', '--', '/usr/bin/ab-status'], 'status', 10)
             value = json.loads(reply)
             if value['committed'] and value['boot_id'] != previous:
                 if not all(value[field] for field in ('secure_boot', 'ipe', 'verified_root', 'rollback_protected')):

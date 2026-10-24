@@ -5,11 +5,15 @@
 # Hyper-V that is not Azure, never asked. arm64 guests have SMBIOS only
 # under UEFI, so FIRMWARE, edk2, is needed there. QEMU... is the machine,
 # without a network; make passes CHECK_ENV (Makefile), ARCH and FIRMWARE.
+# METADATA_CASE selects one checks name, such as metadata-retired.
 set -u
 [ "$ARCH" != aarch64 ] || [ -n "$FIRMWARE" ] ||
 	{ echo "FAIL   metadata           no UEFI firmware for arm64 (edk2-aarch64-code.fd)"; exit 1; }
 failed=0
+selected=0
 meta() { # meta PROVIDER PAYLOAD CHECKS QEMU...
+	[ -z "${METADATA_CASE:-}" ] || [ "$3" = "$METADATA_CASE" ] || return 0
+	selected=$((selected + 1))
 	name=meta-$1-$(echo "$2" | tr '>@' '--') provider=$1 payload=$2 checks=test/checks-$3
 	shift 3
 	test/cloud-boot "$name" "$provider" "$payload" "$checks" "$CHECK/$name.log" "$FIRMWARE" "$@" \
@@ -21,6 +25,9 @@ meta hetzner good metadata "$@"
 meta azure good metadata "$@"
 meta gcp hostile metadata-refused "$@"
 meta gcp "good>people@1" metadata-poll "$@"
+meta gcp "people>people2@1" metadata-reapply "$@"
+meta gcp "people>good@1" metadata-retired "$@"
 meta none good metadata-refused "$@"
 meta hyperv good metadata-refused "$@"
+[ "$selected" -gt 0 ] || { echo "check-metadata: no case matches $METADATA_CASE" >&2; exit 2; }
 exit $failed

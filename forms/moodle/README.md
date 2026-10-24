@@ -66,6 +66,8 @@ service after it is up.
   until a form of your own adds one.
 - There is no LDAP or SAML package in the image. Use Keycloak in front, or add
   `php-8.5-ldap` in a form of your own.
+- SOAP is omitted; the usual web UI and REST services remain available.
+  A custom form can add `php-8.5-soap` for SOAP integrations.
 - Wolfi does not ship Moodle, so a new release is this form's recipe to bump.
 
 ### Network Exposure

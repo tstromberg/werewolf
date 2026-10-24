@@ -12,8 +12,13 @@ instructions](https://dist.werewolf-linux.org/boot/v1/pi-hole/index.html).
 - The service runs as its own user, held to the files and ports its manifest names. The
   root is read-only. `/data` is what survives.
 
-- Refreshing the lists runs bash, curl and coreutils from the image, as the Pi-hole
-  user. pihole-FTL itself is one program. The host image has no shell.
+- Refreshing the lists runs bash and coreutils from the image, as the Pi-hole
+  user, with a private HTTP(S)-only curl. That curl retains TLS verification,
+  redirects, ETags and gzip/deflate; it omits Brotli, Zstd, HTTP/2, proxies and
+  other protocols. The image's original curl, Git update helpers and their
+  unused Brotli, c-ares and PSL libraries are pruned. DNS tools retain their
+  own HTTP/2 dependency. pihole-FTL itself is one program. The host image has
+  no shell.
 
 ## Getting Started
 

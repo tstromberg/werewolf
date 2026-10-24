@@ -1,0 +1,20 @@
+{
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	storage file_system /data/svc/caddy
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	header -Server
+	reverse_proxy 127.0.0.1:32400
+}

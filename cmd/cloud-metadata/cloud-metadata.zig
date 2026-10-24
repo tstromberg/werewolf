@@ -141,7 +141,15 @@ fn pollStart(log: *Log) !void {
     }, 0), "open cloud directory"));
     const run_dir = try openDir("/run/werewolf");
     const keys_dir = try openDir("/run/werewolf/keys");
-    const home_dir = try openDir("/data/home");
+    const data_dir: i32 = @intCast(try sys(linux.open("/data", .{
+        .ACCMODE = .RDONLY,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), "open data directory"));
+    const ledger_dir = try people.openLedgerDir(data_dir);
+    const home_dir = try people.openHomeDir(data_dir);
+    _ = linux.close(data_dir);
     const shell: []const u8 = if (linux.faccessat(linux.AT.FDCWD, "/bin/ash", linux.X_OK, 0) == 0)
         "/bin/ash"
     else
@@ -174,6 +182,7 @@ fn pollStart(log: *Log) !void {
             run_dir,
             keys_dir,
             home_dir,
+            ledger_dir,
             publish[0],
             publish[1],
             lifetime[1],
@@ -186,7 +195,7 @@ fn pollStart(log: *Log) !void {
     _ = linux.close(network[1]);
     const parser_pid = try sys(linux.fork(), "fork parser");
     if (parser_pid == 0) {
-        closeWorkerFiles(&.{ run_dir, keys_dir, home_dir, publish[0], lifetime[1] });
+        closeWorkerFiles(&.{ run_dir, keys_dir, home_dir, ledger_dir, publish[0], lifetime[1] });
         lifetime_fd = lifetime[0];
         sandbox.tieTo(parent);
         parserLoop(log, provider, cloud, network[0], publish[1], last) catch linux.exit_group(1);
@@ -198,13 +207,14 @@ fn pollStart(log: *Log) !void {
         .{ .fd = run_dir, .access = sandbox.own_files },
         .{ .fd = keys_dir, .access = sandbox.own_files },
         .{ .fd = home_dir, .access = sandbox.make_dir | sandbox.read_dir },
+        .{ .fd = ledger_dir, .access = sandbox.own_files },
     }, &.{});
     var f: sandbox.Filter = .{};
     inline for (.{
-        "write",      "openat", "close",  "renameat", "unlinkat",        "mkdirat",
-        "fchown",     "fchmod", "statx",  "poll",     "ppoll",           "clock_gettime",
-        "mmap",       "munmap", "mremap", "madvise",  "restart_syscall", "exit",
-        "exit_group",
+        "write",  "openat",     "close",  "renameat", "unlinkat", "mkdirat",
+        "fchown", "fchmod",     "statx",  "poll",     "ppoll",    "clock_gettime",
+        "mmap",   "munmap",     "mremap", "madvise",  "fsync",    "restart_syscall",
+        "exit",   "exit_group",
     }) |call| f.allow(call);
     f.allowTwo("fchownat", 0, @intCast(keys_dir), 4, linux.AT.SYMLINK_NOFOLLOW);
     // readFrom uses read on account files opened after confinement.
@@ -225,6 +235,7 @@ fn pollStart(log: *Log) !void {
             run_dir,
             keys_dir,
             home_dir,
+            ledger_dir,
             shell,
         ) catch |err| {
             arena.deinit();
@@ -393,9 +404,11 @@ fn applyUsers(
     run_dir: i32,
     keys_dir: i32,
     home_dir: i32,
+    ledger_dir: i32,
     shell: []const u8,
 ) !void {
-    const c = try people.apply(gpa, .{
+    const identities = try people.loadLedger(gpa, ledger_dir);
+    const c = try people.applyReserved(gpa, .{
         .passwd = try readFrom(gpa, run_dir, "passwd"),
         .group = try readFrom(gpa, run_dir, "group"),
         .shadow = try readFrom(gpa, run_dir, "shadow"),
@@ -403,7 +416,15 @@ fn applyUsers(
             error.FileNotFound => "",
             else => return err,
         },
-    }, text, shell);
+    }, identities, text, shell, null, false);
+    try people.checkHomes(home_dir, c.keys);
+    if (c.identities.len != identities.len) {
+        try people.commitLedger(gpa, ledger_dir, c.identities);
+    } else {
+        // A prior rename may have succeeded while its directory sync failed.
+        // Repeat that barrier without needing space for another table file.
+        try people.syncLedger(ledger_dir);
+    }
     try putFile(
         run_dir,
         "passwd",
@@ -423,37 +444,25 @@ fn applyUsers(
         c.made,
         0o600,
     );
-    for (c.removed) |name| _ = linux.unlinkat(keys_dir, nameZ(name), 0);
+    const root_keys = try std.mem.concat(gpa, u8, &.{ base, c.root_keys });
+    try putFile(keys_dir, "root", root_keys, 0o600);
+    for (c.removed) |name| {
+        const rc = linux.unlinkat(keys_dir, nameZ(name), 0);
+        if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .NOENT)
+            return error.KeyRemovalFailed;
+    }
     for (c.keys) |k| {
         const name = nameZ(k.name);
         try putFile(keys_dir, name, k.text, 0o600);
-        const id = people.userId(k.name);
+        const id = k.id;
         if (linux.errno(
             linux.fchownat(keys_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
         ) != .SUCCESS) {
             _ = linux.unlinkat(keys_dir, name, 0);
             return error.KeyOwnershipFailed;
         }
-        _ = linux.mkdirat(home_dir, name, 0o700);
-        const hrc = linux.openat(
-            home_dir,
-            name,
-            .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
-            0,
-        );
-        if (linux.errno(hrc) != .SUCCESS) continue;
-        const hfd: linux.fd_t = @intCast(hrc);
-        defer _ = linux.close(hfd);
-        if (linux.errno(linux.fchown(hfd, id, id)) != .SUCCESS) continue;
-        _ = linux.fchmod(hfd, 0o700);
     }
-    const root_keys = try std.mem.concat(gpa, u8, &.{ base, c.root_keys });
-    try putFile(
-        keys_dir,
-        "root",
-        root_keys,
-        0o600,
-    );
+    try people.ensureHomes(home_dir, c.keys);
     log.event("people", .{
         .made = countLines(c.made),
         .removed = c.removed.len,

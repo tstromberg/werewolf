@@ -2,7 +2,7 @@
 
 ## Summary
 
-Rebuild Wolfi's Java, Python, PHP and Node.js beside glibc in hardened-packages. Each
+Rebuild Wolfi's Java, Python, PHP and Node.js beside glibc in packages. Each
 has one build, with root-held allowances for loading code outside the verified root.
 
 ## Background
@@ -30,7 +30,7 @@ belongs in the runtime, as [glibc-neutered](glibc-neutered.md) puts libc's in li
 
 ## Detailed design
 
-**Repository.** werewolf-linux/hardened-packages builds glibc and runtimes together.
+**Repository.** werewolf-linux/packages builds glibc and runtimes together.
 `refresh` captures Wolfi's unchanged recipe for the newest stable stream (OpenJDK 27,
 Python 3.15, PHP 8.5, Node.js 26). `derive` keeps names, uses epoch 1000 × revision +
 Wolfi's, adds `wolfi-origin:` for CVE matching (lib/prebuilt.zig), and stops on drift.

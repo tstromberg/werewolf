@@ -7,7 +7,7 @@ base: app
 
 packages:
   # Only our build provides this; follow its latest stream and refuse Wolfi fallback.
-  - nodejs-hardened
+  - nodejs-hardened>=26.12.1-r5002
 
 # Taken back of werewolf's defaults (lib/allow.zig): V8 compiles the
 # application to machine code as it runs.

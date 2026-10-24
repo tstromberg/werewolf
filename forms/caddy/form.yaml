@@ -9,9 +9,9 @@
 base: prod
 
 # Wolfi's Caddy loads at a fixed address; werewolf's application feed
-# builds it as a PIE, which ASLR moves (../packages/caddy).
+# builds it as a PIE, which ASLR moves (../packages/www/caddy).
 packages:
-  - caddy-werewolf
+  - caddy
 
 services:
   # Caddy, as its own user: it may bind :80 and :443 and no other port,

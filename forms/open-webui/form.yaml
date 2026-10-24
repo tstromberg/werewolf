@@ -5,7 +5,7 @@
 # and, by pgvector, the documents it searches. Wolfi's Open WebUI is the
 # full build and lags: werewolf's application feed builds upstream's slim
 # one, which needs no torch, from a pinned release
-# (../packages/open-webui/open-webui.yaml). Its administrator comes from
+# (../packages/www/open-webui/open-webui.yaml). Its administrator comes from
 # the config and is made before it serves; nobody signs up. See
 # forms/open-webui/README.md.
 base: prod
@@ -15,9 +15,9 @@ base: prod
 with: [postgresql, caddy]
 
 packages:
-  - open-webui
+  - open-webui>=0.12.3-r2
   - ollama
-  # What ../packages/open-webui/open-webui.yaml's environment runs on
+  # What ../packages/www/open-webui/open-webui.yaml's environment runs on
   # and links, from Wolfi; the build fails if one is missing.
   - python-3.12  # Open WebUI 0.12.3 requires Python <3.13; port before migrating.
   - libstdc++

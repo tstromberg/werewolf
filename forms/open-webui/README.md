@@ -61,6 +61,9 @@ service after it is up.
 
 ### Known Quirks
 
+- Brotli, LDAP, Azure SDKs and OpenTelemetry are omitted. Gzip, local/S3 storage
+  and external model APIs remain supported.
+
 - Ollama listens on loopback only. It is not a second service on the network.
 - Models are downloaded to `/data/svc/ollama` and stay there.
 - Tools and functions are Python that the server runs. Only an administrator can add

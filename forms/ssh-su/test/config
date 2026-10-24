@@ -1,0 +1,22 @@
+#!/bin/sh
+# Host-only credentials for the forwarded-agent integration tests.
+set -eu
+prefix=${1%-config}
+provider=${SSH_SK_PROVIDER:?test security-key provider required}
+for kind in sk-key no-verify no-touch stranger; do
+	rm -f "$prefix-$kind" "$prefix-$kind.pub"
+	set -- -O verify-required
+	case $kind in
+		no-verify) set -- ;;
+		no-touch) set -- -O verify-required -O no-touch-required ;;
+	esac
+	ssh-keygen -q -t ed25519-sk -w "$provider" -N '' "$@" -f "$prefix-$kind"
+done
+cat "$prefix-key.pub" "$prefix-sk-key.pub" "$prefix-no-verify.pub" \
+	"$prefix-no-touch.pub" >"$prefix-config/authorized_keys"
+{
+	printf 'operator '
+	cat "$prefix-sk-key.pub"
+	printf 'second '
+	cat "$prefix-sk-key.pub"
+} >"$prefix-config/users"

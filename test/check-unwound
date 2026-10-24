@@ -110,6 +110,8 @@ def answer(query, tcp):
         return [reply([record(qname, 1, a('192.0.2.60'))])]
     if name == 'slow.example.test':
         return []
+    if name == 'race.example.test':
+        return [reply([record(qname, 1, a('192.0.2.44'))])] if tcp else [reply([], flags=0x8380)]
     if name == 'spoof.example.test':
         wrong_id = bytes([query[0] ^ 0xff, query[1]])
         lowered = encode(name) + query[end:end + 4]
@@ -200,6 +202,7 @@ def server(log_path):
 
     threading.Thread(target=streams, daemon=True).start()
     print('ready', flush=True)
+    race_packets = 0
     def later(query, addr):
         for out in answer(query, False):
             udp.sendto(out, addr)
@@ -207,6 +210,11 @@ def server(log_path):
     while True:
         query, addr = udp.recvfrom(2048)
         note(query, 'udp')
+        if read_name(query, 12)[0].lower() == 'race.example.test':
+            race_packets += 1
+            if race_packets > 1:
+                threading.Timer(0.5, later, (query, addr)).start()
+            continue
         # delayed.example.test is answered half a second later, so the same
         # question asked meanwhile finds it out.
         if read_name(query, 12)[0].lower() == 'delayed.example.test':
@@ -274,8 +282,14 @@ audit = open(sys.argv[2], 'a', buffering=1)
 os.makedirs('/run/syslog', exist_ok=True)
 sink = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 sink.bind('/run/syslog/dev-log')
+log_drain = threading.Event()
+log_drain.set()
+log_paused = threading.Event()
 def drain():
     while True:
+        if not log_drain.is_set():
+            log_paused.set()
+        log_drain.wait()
         audit.write(sink.recv(4096).decode().rstrip('\n') + '\n')
 threading.Thread(target=drain, daemon=True).start()
 daemon = subprocess.Popen([sys.argv[1]], stderr=open(sys.argv[3], 'w'))
@@ -338,6 +352,19 @@ def pipeline(r):
         answers.append(parse(exact(size)))
     s.close()
     return {'results': answers}
+
+def abandon(r):
+    """Close pipelined TCP queries before unwound can write their replies."""
+    msg = struct.pack('!HHHHHH', 0x4242, 0x0100, 1, 0, 0, 0) + encode(r['name']) + b'\0\1\0\1'
+    frame = struct.pack('!H', len(msg)) + msg
+    for _ in range(16):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(('127.0.0.53', 53))
+            s.sendall(frame * 10)
+            s.shutdown(socket.SHUT_RDWR)
+        time.sleep(0.02)
+    return {'closed': 16}
 
 def many(r):
     """many asks the same question from r['parallel'] sockets at once."""
@@ -402,7 +429,8 @@ def probe(r):
                 os.setgid(r['uid'])
                 os.setuid(r['uid'])
             start = time.monotonic()
-            result = (pipeline(r) if r.get('pipeline') else
+            result = (abandon(r) if r.get('abandon') else
+                      pipeline(r) if r.get('pipeline') else
                       many(r) if r.get('parallel') else ask(r, passed))
             result['ms'] = int((time.monotonic() - start) * 1000)
             if passed is not None:
@@ -428,7 +456,57 @@ for _ in range(100):
 print('ready', flush=True)
 for line in sys.stdin:
     r = json.loads(line)
-    if r.get('upstream') is not None:
+    if r.get('resolver_race'):
+        result = []
+        worker = threading.Thread(target=lambda: result.append(probe(
+            dict(uid=2003, name='race.example.test', type=1))))
+        worker.start()
+        log_path = os.path.join(os.path.dirname(sys.argv[2]), 'upstream.log')
+        for _ in range(100):
+            if 'race.example.test' in open(log_path).read().lower():
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError('race question did not reach the resolver')
+        time.sleep(1.1)
+        with open('/run/werewolf/network/upstream.new', 'w') as f:
+            f.write('')
+        os.rename('/run/werewolf/network/upstream.new', '/run/werewolf/network/upstream')
+        refresh = probe(dict(uid=2003, name='refresh.example.test', type=1))
+        worker.join(timeout=5)
+        print(json.dumps({'pending': result[0] if result else None,
+                          'refresh': refresh, 'exit': daemon.poll()}), flush=True)
+    elif r.get('pause_log'):
+        log_drain.clear()
+        probe(dict(uid=2001, name='denied.example.test', type=1))
+        assert log_paused.wait(timeout=1), 'audit reader did not pause'
+        print('{}', flush=True)
+    elif r.get('audit_full'):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as filler:
+            filler.setblocking(False)
+            filler.connect('/run/syslog/dev-log')
+            while True:
+                try:
+                    filler.send(b'full')
+                except BlockingIOError:
+                    break
+        result = probe(dict(uid=2003, name='audit-proof.example.test', type=1))
+        print(json.dumps({'answer': result, 'exit': daemon.poll()}), flush=True)
+    elif r.get('remove_log'):
+        sink.close()
+        os.unlink('/run/syslog/dev-log')
+        print('{}', flush=True)
+    elif r.get('start_without_log'):
+        daemon.kill()
+        daemon.wait()
+        daemon = subprocess.Popen([sys.argv[1]], stderr=open(sys.argv[3], 'w'))
+        for _ in range(100):
+            if ':0035 ' in open('/proc/net/udp').read():
+                break
+            time.sleep(0.05)
+        result = probe(dict(uid=2003, name='audit-startup.example.test', type=1))
+        print(json.dumps({'answer': result, 'exit': daemon.poll()}), flush=True)
+    elif r.get('upstream') is not None:
         with open('/run/werewolf/network/upstream.new', 'w') as f:
             f.write(r['upstream'])
         os.rename('/run/werewolf/network/upstream.new', '/run/werewolf/network/upstream')
@@ -466,7 +544,8 @@ for line in sys.stdin:
             time.sleep(0.05)
         print(json.dumps({'exit': previous}), flush=True)
     else:
-        print(json.dumps(probe(r)), flush=True)
+        got = probe(r)
+        print(json.dumps(got), flush=True)
 '''
 
 
@@ -812,6 +891,9 @@ def checks(client, work):
     piped = ask(2001, 'api.example.test', pipeline=True, second='x.cdn.example.test')['results']
     assert [r['id'] for r in piped] == [0x4242, 0x4243], piped
     assert [r['answers'] for r in piped] == [['192.0.2.10'], ['192.0.2.11']], piped
+    abandoned = ask(2001, 'api.example.test', abandon=True)
+    assert abandoned.get('closed') == 16, abandoned
+    expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'still answering after TCP closes')
     expect(ask(2001, 'api.example.test', 28), 0, [28], 'granted AAAA')
     expect(ask(2001, 'api.example.test', 16), 5, [], 'TXT not granted')
     expect(ask(2001, 'denied.example.test'), 5, [], 'name not granted')
@@ -972,6 +1054,14 @@ def checks(client, work):
     expect(ask(2001, 'y.cdn.example.test'), 2, [], 'no upstream fails closed')
     assert send(dict(upstream='nameserver ' + UPSTREAM + '\n')) == {}
     expect(ask(2001, 'y.cdn.example.test'), 3, [], 'upstream restored')
+    race = send(dict(resolver_race=True))
+    expect(race['pending'], 2, [], 'revoked resolver is not used for TCP fallback')
+    expect(race['refresh'], 2, [], 'a new request sees no resolvers')
+    assert race['exit'] is None, 'resolver removal killed unwound'
+    assert not any(json.loads(line)['name'].lower() == 'race.example.test' and
+                   json.loads(line)['proto'] == 'tcp'
+                   for line in (work / 'upstream.log').read_text().splitlines())
+    assert send(dict(upstream='nameserver ' + UPSTREAM + '\n')) == {}
 
     # Upstream saw only what was allowed: canonical questions, no EDNS, in
     # mixed case, and never a denied name.
@@ -1011,6 +1101,8 @@ def checks(client, work):
     def find(**want):
         return [a for a in queries if all(a.get(k) == v for k, v in want.items())]
     assert find(uid=2001, name='denied.example.test', decision='deny', why='no_grant'), queries
+    assert find(uid=2003, name='race.example.test', why='unanswered', detail='tcp_failed'), \
+        'the revoked resolver did not reach TCP fallback'
     assert find(uid=2001, name='api.example.test', type='A', decision='allow', rcode='noerror', rule=3)
     assert find(uid=2001, name='host.corp.lan.test', decision='allow', why='system_domain')
     assert find(uid=2001, name='alias-bad.example.test', decision='deny', why='alias', alias='evil.example.net')
@@ -1042,6 +1134,19 @@ def checks(client, work):
 
     # If the upstream side dies, the frontend goes too, for runit to restart.
     assert send(dict(kill_upstream=True))['exit'] == 1
+    assert send(dict(restart_unwound=True))['exit'] == 1
+    expect(ask(2001, 'api.example.test'), 0, ['192.0.2.10'], 'restarted after upstream exit')
+    assert send(dict(pause_log=True)) == {}
+    full = send(dict(audit_full=True))
+    expect(full['answer'], 3, [], 'a full log socket does not stop DNS')
+    assert full['exit'] is None, 'a full log socket killed unwound'
+    assert asked('audit-proof.example.test'), 'logging pressure prevented forwarding'
+    assert send(dict(remove_log=True)) == {}
+    expect(ask(2003, 'audit-disconnected.example.test'), 3, [], 'a disconnected logger does not stop DNS')
+    missing = send(dict(start_without_log=True))
+    expect(missing['answer'], 3, [], 'DNS starts with stderr logging when syslog is unavailable')
+    assert missing['exit'] is None, 'DNS startup required syslog'
+    assert 'audit-startup.example.test' in (work / 'stderr').read_text(), 'stderr fallback lost the record'
 
 
 if __name__ == '__main__':

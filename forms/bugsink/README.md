@@ -1,7 +1,7 @@
 # Bugsink - Hardened VM
 
 Error tracking that takes the events Sentry's SDKs send:
-[Bugsink](https://www.bugsink.com) 2.6.1, packaged with its hashed application
+[Bugsink](https://www.bugsink.com) 2.6.2, packaged with its hashed application
 dependencies and using the system's hardened Python, with Caddy in front. The
 form's manifest is [form.yaml](form.yaml).
 
@@ -16,6 +16,9 @@ instructions](https://dist.werewolf-linux.org/boot/v1/bugsink/index.html).
   workers inherit that identity; the service cannot change UIDs or groups.
 - Snappea watches its queue through compiled inotify bindings. No JIT or Python
   runtime allowance is needed.
+- Brotli requests are rejected before reading their bodies; gzip/deflate remain
+  supported. Native minidumps and Brotli file event storage are omitted. This form
+  uses database event storage; migrate any existing Brotli files before switching.
 
 ### Weaknesses
 

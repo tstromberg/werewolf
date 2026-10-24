@@ -2,12 +2,13 @@
 # publishes it; see docs/releases.md.
 base: prod
 
-# sshd, its service and its policy, for operators by security key.
-with: [sshd]
+# SSH-backed su through the existing listener, with touch and verification.
+with: [ssh-su]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
+  network-ssh-config: forwarded agents provide fresh authentication for su
   network-no-login: sshd, by security key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
   programs-no-interpreters: busybox-full, the tools of those who log in, has awk

@@ -1,0 +1,112 @@
+# Unmodified Plex; isolation lives here. No shell, JIT, discovery, DLNA,
+# UPnP, relay, downloaded plugins or runtime codec installation.
+base: prod
+
+programs: [plex-loopback.so]
+
+# Build locally until the vendor package is published in the application feed.
+recipes:
+  - ../../../packages/devel/musl/musl.yaml
+  - ../../../packages/multimedia/plex/plex.yaml
+  - ../../../packages/www/caddy/caddy.yaml
+
+prune:
+  - usr/lib/plexmediaserver/Plex Script Host
+  - usr/lib/plexmediaserver/Plex DLNA Server
+  - usr/lib/plexmediaserver/Plex Commercial Skipper
+  - usr/lib/plexmediaserver/Plex Tuner Service
+  - usr/lib/plexmediaserver/Plex Tuner Setup
+
+services:
+  plex-media:
+    exec: /usr/lib/werewolf/plex-import
+    user: plex-media
+    pledge: stdio rpath wpath
+    read: /run/werewolf/import
+    share: browseable
+    memory: 64
+    nofile: 64
+
+  plex-transcode:
+    exec: /usr/lib/werewolf/plex-transcode worker
+    user: plex-transcode
+    pledge: stdio rpath wpath inet unix connect listen proc exec
+    connect: [tcp/32402 loopback]
+    run: '"/usr/lib/plexmediaserver/isolated/Plex Transcoder"'
+    read: /data/svc/plex-media
+    # Default group ACLs let Plex read completed output despite its umask.
+    share: group
+    memory: 2048
+    nofile: 1024
+
+  plex-callbacks:
+    exec: /usr/bin/caddy run --config /etc/plex-callbacks/Caddyfile --adapter caddyfile
+    user: plex-callbacks
+    pledge: stdio rpath wpath inet unix connect listen proc exec
+    listen: [tcp/32402 loopback]
+    connect: [tcp/32400 loopback]
+    read: /etc/plex-callbacks
+    secret: PLEX_TOKEN /run/config/plex/token
+    memory: 128
+    nofile: 256
+    env:
+      - HOME=/run/svc/plex-callbacks
+      - XDG_DATA_HOME=/run/svc/plex-callbacks
+      - XDG_CONFIG_HOME=/run/svc/plex-callbacks
+      - GOMEMLIMIT=96MiB
+
+  plex:
+    exec: '"/usr/lib/plexmediaserver/Plex Media Server"'
+    before: /usr/lib/werewolf/plex-setup
+    user: plex
+    group: plex-transcode
+    pledge: stdio rpath wpath watch inet unix netlink listen connect proc exec
+    listen: [tcp/32400 tcp/32401 loopback]
+    connect: [tcp/443 public, /run/svc/plex-transcode/control.sock]
+    lookup:
+      - plex.tv
+      - '*.plex.tv'
+      # api.plex.tv's observed CNAME, checked by unwound independently.
+      - k8s-envoygat-envoyenv-0e1ad1a3b3-e5ee1e027b12c43a.elb.us-east-1.amazonaws.com
+    run:
+      - /usr/lib/werewolf/plex-transcode
+      - '"/usr/lib/plexmediaserver/Plex Media Scanner"'
+    read: /data/svc/plex-media
+    write: /run/svc/plex-transcode/jobs
+    config:
+      - plex-token /run/config/plex/token
+      - settings /run/config/plex/settings.json
+    setting: domain hostname required as PLEX_DOMAIN
+    render: env site
+    memory: 2048
+    nofile: 16384
+    env:
+      - HOME=/data/svc/plex
+      - PLEX_MEDIA_SERVER_HOME=/usr/lib/plexmediaserver
+      - PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR=/data/svc/plex
+      - PLEX_MEDIA_SERVER_CODEC_DIR=/usr/lib/plexmediaserver/Codecs
+      - PLEX_MEDIA_SERVER_DISABLE_AUTOUPDATES=1
+      - PLEX_MEDIA_SERVER_USE_SYSLOG=true
+      - PLEX_MEDIA_SERVER_LOG_DIR=/run/svc/plex
+      - TMPDIR=/run/svc/plex
+      - LD_PRELOAD=/usr/lib/werewolf/plex-loopback.so
+
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 public, tcp/32400]
+    lookup: "*"
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 256
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=192MiB

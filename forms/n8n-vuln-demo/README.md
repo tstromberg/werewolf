@@ -5,7 +5,7 @@ JavaScript Code runner, on hardened Node.js 26. See [form.yaml](form.yaml).
 
 ## Security Posture
 
-- The signed hardened-packages runtime is required; no Wolfi runtime fallback.
+- The signed hardened runtime is required; no Wolfi runtime fallback.
 - No shell or package-manager executable in the runtime image.
 - The main server and external Code runner have separate users and data directories.
 - The main server cannot spawn programs; the runner launcher may start only Node.

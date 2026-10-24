@@ -211,7 +211,7 @@ def config_for(form, work, fresh):
 
 def ssh(howl, name, command, *, capture=False, check=True, timeout=60):
     return subprocess.run(
-        [howl, 'ssh', name, '--', command],
+        [howl, 'ssh', 'root@' + name, '--', command],
         check=check,
         capture_output=capture,
         text=True,

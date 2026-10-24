@@ -2,17 +2,17 @@
 # listens on loopback. Caddy serves it at the server's name over HTTPS.
 # Nobody registers: the administrator is created from the config the first
 # time the database is made, and registration stays closed. Federation is
-# on, so other servers can reach this one at port 443. URL previews are
-# compiled in and allowlisted to nothing. Wolfi does not ship it:
+# on, so other servers can reach this one at port 443. URL previews and
+# Brotli/Zstd HTTP compression are omitted. Wolfi does not ship it:
 # werewolf's application feed builds a pinned release
-# (../packages/continuwuity/continuwuity.yaml). The database is
+# (../packages/net-im/continuwuity/continuwuity.yaml). The database is
 # RocksDB in /data/svc/continuwuity. See forms/continuwuity/README.md.
 base: prod
 
 with: [caddy]
 
 packages:
-  - continuwuity
+  - continuwuity>=26.9.1-r2
   # What it links, from Wolfi. libc and libm come with the base.
   - libgcc
   - libstdc++

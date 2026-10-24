@@ -6,6 +6,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
+/// Remove package-provided account switching before form overlays. ssh-su
+/// may then install its unprivileged replacement at the same path.
+pub const package_prune = [_][]const u8{ "usr/bin/su", "bin/su" };
+
 /// max_gunzip bounds what gunzip inflates: the kernel's Image is 40 MB.
 pub const max_gunzip = 256 << 20;
 

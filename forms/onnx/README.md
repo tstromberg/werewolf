@@ -5,7 +5,7 @@
 
 ## Security Posture
 
-- Python comes from the signed hardened-packages feed.
+- Python comes from the signed hardened feed.
 - The image contains no shell, package installer, GPU driver, or model downloader.
 - The form opens no listener and grants no outbound network or execution allowance.
 - Applications declare their own user, model storage, resources, and network access.

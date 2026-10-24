@@ -1,15 +1,18 @@
 # n8n
 
-[n8n](https://n8n.io/) 2.43.7, including the editor, API, bundled nodes and
+[n8n](https://n8n.io/) 2.44.6, including the editor, API, bundled nodes and
 JavaScript Code runner, on hardened Node.js 26. See [form.yaml](form.yaml).
 
 ## Security Posture
 
-- The signed hardened-packages runtime is required; no Wolfi runtime fallback.
+- The signed hardened runtime is required; no Wolfi runtime fallback.
 - No shell or package-manager executable in the runtime image.
 - The main server and external Code runner have separate users and data directories.
 - The main server cannot spawn programs; the runner launcher may start only Node.
 - Administrator access is on loopback until exposed through a protected proxy.
+- Native Sentry profiling and the development file watcher are omitted. Workflow
+  backends, SQLite and expression isolates remain. Hardened Node omits Brotli
+  and Zstd; native addons may retain their own codec implementations.
 
 V8 needs JIT permission. SQLite and expression isolates use a native addon allowance
 scoped to the main service. Inline entrypoints, writable-source scripts and Node

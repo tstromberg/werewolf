@@ -1,6 +1,14 @@
 # Mastodon - Hardened VM
 
 [Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and Caddy.
+
+The application package omits optional OpenTelemetry exporters. libvips retains
+Mastodon's JPEG, PNG, GIF and WebP formats, EXIF orientation and colour conversion;
+other image loaders are omitted. FFmpeg retains media codecs but accepts only
+local files and pipes, without network, device, display or font integrations.
+The streaming server uses hardened Node without Brotli or Zstd. Other libraries
+may retain their own codecs; this is not a claim that every native dependency is
+Brotli-free.
 The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download

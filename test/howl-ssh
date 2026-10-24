@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Check SSH identity selection and command forwarding without a VM."""
+import json
+import os
+from pathlib import Path
+import pwd
+import subprocess
+import sys
+import tempfile
+import time
+
+howl = str(Path(sys.argv[1]).resolve())
+with tempfile.TemporaryDirectory(prefix='howl-ssh-', dir='/tmp') as temporary:
+    root = Path(temporary).resolve()
+    machine = root / 'build/machines/werewolf-run'
+    machine.mkdir(parents=True)
+    (machine / 'engine').write_text('lima')
+    (machine / 'lima.yaml').write_text('# werewolf lima: managed\n')
+    binaries = root / 'bin'
+    binaries.mkdir()
+    home = root / 'home'
+    (home / '.ssh').mkdir(parents=True)
+    record = root / 'ssh.json'
+    agent_record = root / 'agent.json'
+    add_record = root / 'add.json'
+    (binaries / 'limactl').write_text(f'''#!{sys.executable}
+import sys
+field = sys.argv[-1]
+print({{'{{{{.Name}}}}': 'werewolf-run', '{{{{.SSHLocalPort}}}}': '60022',
+       '{{{{.Config.User.Name}}}}|{{{{.IdentityFile}}}}': {pwd.getpwuid(os.getuid()).pw_name!r} + '|/test/lima-key'}}[field])
+''')
+    (binaries / 'ssh').write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+pathlib.Path(os.environ['SSH_RECORD']).write_text(json.dumps(sys.argv[1:]))
+pathlib.Path(os.environ['SSH_RECORD'] + '.socket').write_text(os.environ.get('SSH_AUTH_SOCK', ''))
+sys.exit(int(os.environ.get('SSH_STATUS', '0')))
+''')
+    (binaries / 'ssh-agent').write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+pathlib.Path({str(agent_record)!r}).write_text(json.dumps(sys.argv[1:]))
+os.environ['SSH_AUTH_SOCK'] = '/test/dedicated-agent'
+os.execv(sys.argv[1], sys.argv[1:])
+''')
+    (binaries / 'ssh-add').write_text(f'''#!{sys.executable}
+import json, os, pathlib, sys
+pathlib.Path({str(add_record)!r}).write_text(json.dumps([sys.argv[1:], os.environ['SSH_AUTH_SOCK']]))
+sys.exit(int(os.environ.get('ADD_STATUS', '0')))
+''')
+    (binaries / 'ssh-keygen').write_text(f'''#!{sys.executable}
+import os, sys
+sys.exit(int(os.environ.get('PIN_STATUS', '0')))
+''')
+    for binary in binaries.iterdir():
+        binary.chmod(0o755)
+    env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'],
+               SSH_RECORD=str(record), USER='not-the-local-user',
+               SSH_AUTH_SOCK='/test/everyday-agent', HOME=str(home))
+
+    def run(*args, status=0, **changes):
+        record.unlink(missing_ok=True)
+        agent_record.unlink(missing_ok=True)
+        add_record.unlink(missing_ok=True)
+        result = subprocess.run([howl, 'ssh', *args], cwd=root,
+                                env=dict(env, **changes), capture_output=True, text=True)
+        assert result.returncode == status, (args, result.stderr)
+        return json.loads(record.read_text()) if record.exists() else None
+
+    local = pwd.getpwuid(os.getuid()).pw_name
+    for args in [(), ('werewolf-run',), ('--on', 'lima', 'werewolf-run')]:
+        argv = run(*args)
+        assert argv[-1] == local + '@127.0.0.1', argv
+        assert argv[argv.index('-i') + 1] == '/test/lima-key', argv
+        assert 'StrictHostKeyChecking=accept-new' in argv
+        assert 'HostKeyAlias=werewolf-run' in argv
+    argv = run('root@werewolf-run', '--', 'id', '-u')
+    assert argv[-3:] == ['root@127.0.0.1', 'id', '-u'], argv
+    if local != 'root':
+        assert '-i' not in argv, argv
+    argv = run('--on=lima', 'alice@werewolf-run', '--', 'echo', 'root@other')
+    assert argv[-3:] == ['alice@127.0.0.1', 'echo', 'root@other'], argv
+    argv = run('missing@werewolf-run', status=255, SSH_STATUS='255')
+    assert argv[-1] == 'missing@127.0.0.1', argv
+    for bad in ['@werewolf-run', 'root@', 'root@@werewolf-run', 'root@../werewolf-run']:
+        assert run(bad, status=1) is None
+    (machine / 'dev').write_text('custom\n')
+    (machine / 'dev-address').write_text('192.168.64.40')
+    argv = run()
+    assert argv[-1] == local + '@192.168.64.40', argv
+    assert argv[argv.index('-p') + 1] == '2222', argv
+    assert 'HostKeyAlias=werewolf-run-dev' in argv
+    assert '/test/lima-key' not in argv
+    assert run('root@werewolf-run')[-1] == 'root@192.168.64.40'
+    (machine / 'dev').unlink()
+    argv = run('--on', 'firecracker')
+    assert argv[-1].startswith(local + '@172.16.'), argv
+    argv = run('root@werewolf-run', '--on', 'firecracker')
+    assert argv[-1].startswith('root@172.16.'), argv
+
+    keys = [root / 'admin key', root / 'second;key']
+    for key in keys:
+        key.write_text('test identity')
+    flags = ['--identity', str(keys[0]), '--identity=' + str(keys[1])]
+    argv = run('alice@werewolf-run', *flags, '--', 'printf', 'literal;command')
+    assert argv[-3:] == ['alice@127.0.0.1', 'printf', 'literal;command'], argv
+    assert '-i' not in argv and 'IdentityFile=none' in argv
+    assert 'StrictHostKeyChecking=yes' in argv and 'GlobalKnownHostsFile=/dev/null' in argv
+    assert 'IdentityAgent=SSH_AUTH_SOCK' in argv and '-A' in argv
+    assert argv[argv.index('-S') + 1] == 'none'
+    assert argv[argv.index('-F') + 1] == '/dev/null'
+    assert Path(str(record) + '.socket').read_text() == '/test/dedicated-agent'
+    added, socket = json.loads(add_record.read_text())
+    assert socket == '/test/dedicated-agent'
+    assert added[:4] == ['-c', '-t', '20h', '-H'], added
+    assert added[-2:] == list(map(str, keys)), added
+    assert 'alice@werewolf-run' in added and 'werewolf-run>root@werewolf-run' in added
+    assert added[4].endswith('/known_hosts'), added
+    assert run(*flags, status=1, ADD_STATUS='1') is None
+    assert agent_record.exists() and add_record.exists()
+    assert run(*flags, status=1, PIN_STATUS='1') is None
+    assert not agent_record.exists() and not add_record.exists()
+    assert run('--identity', '/missing/key', status=1) is None
+    assert run('--identity', status=1) is None
+    assert run('--no-agent', *flags, status=1) is None
+    run(*flags, status=42, SSH_STATUS='42')
+
+    for name, kind in [('fido', 'sk-ssh-ed25519@openssh.com'),
+                       ('software', 'ssh-ed25519'),
+                       ('orphan', 'sk-ecdsa-sha2-nistp256@openssh.com')]:
+        (home / '.ssh' / (name + '.pub')).write_text(kind + ' AAAA test\n')
+        if name != 'orphan':
+            (home / '.ssh' / name).write_text('test private stub')
+    argv = run()
+    added, socket = json.loads(add_record.read_text())
+    assert added[-1] == str(home / '.ssh/fido'), added
+    assert 'software' not in ' '.join(added) and 'orphan' not in ' '.join(added)
+    assert argv[argv.index('-i') + 1] == '/test/lima-key', argv
+    argv = run('--no-agent')
+    assert not agent_record.exists() and '-a' in argv and '-A' not in argv
+
+    # Use the real agent to check cleanup after SSH exits and after loading fails.
+    (binaries / 'ssh-agent').rename(root / 'agent-stub')
+    for changes, status in [({'SSH_STATUS': '42'}, 42), ({'ADD_STATUS': '1'}, 1)]:
+        run(*flags, status=status, **changes)
+        _, socket = json.loads(add_record.read_text())
+        assert socket != '/test/everyday-agent'
+        for _ in range(300):
+            if not Path(socket).exists():
+                break
+            time.sleep(.05)
+        assert not Path(socket).exists(), 'dedicated agent outlived its command'
+print('howl-ssh: local identity, explicit users, developer SSH, and failures passed')

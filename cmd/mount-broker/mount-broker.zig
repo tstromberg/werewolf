@@ -133,7 +133,10 @@ fn serve(log: *Log) noreturn {
         for (&fds, roles) |*p, role| {
             if (p.fd < 0 or p.revents == 0) continue;
             if (p.revents & linux.POLL.IN != 0) {
-                heard(log, p.fd, role);
+                if (!heard(log, p.fd, role)) {
+                    _ = linux.close(p.fd);
+                    p.fd = -1;
+                }
             } else if (p.revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0) {
                 _ = linux.close(p.fd);
                 p.fd = -1;
@@ -142,15 +145,15 @@ fn serve(log: *Log) noreturn {
     }
 }
 
-/// heard reads one packet from role's socketpair and replies.
-fn heard(log: *Log, fd: i32, role: broker.Role) void {
+/// A stalled reader loses its channel, not service for the other roles.
+/// Never discard a reply and continue: that would misalign later requests.
+fn heard(log: *Log, fd: i32, role: broker.Role) bool {
     var in_buf: [1024]u8 = undefined;
-    const rc = linux.recvfrom(fd, &in_buf, in_buf.len, linux.MSG.TRUNC, null, null);
-    if (linux.errno(rc) == .INTR) return;
-    if (linux.errno(rc) != .SUCCESS or rc == 0) return;
+    const rc = linux.recvfrom(fd, &in_buf, in_buf.len, linux.MSG.TRUNC | linux.MSG.DONTWAIT, null, null);
+    if (linux.errno(rc) == .INTR or linux.errno(rc) == .AGAIN) return true;
+    if (linux.errno(rc) != .SUCCESS or rc == 0) return false;
     if (rc > in_buf.len) {
-        reply(fd, "no BadRequest\n");
-        return;
+        return reply(fd, "no BadRequest\n");
     }
     const request = std.mem.trimEnd(u8, in_buf[0..rc], "\n");
     var out_buf: [1024]u8 = undefined;
@@ -166,12 +169,13 @@ fn heard(log: *Log, fd: i32, role: broker.Role) void {
     if (role == .updater and std.mem.eql(u8, request, "owner-channel") and
         std.mem.eql(u8, text, "ok\n"))
     {
-        broker.sendOwnerChannel(fd, owner_device) catch reply(fd, "no OwnerChannelSend\n");
-    } else reply(fd, text);
+        broker.sendOwnerChannel(fd, owner_device) catch return false;
+        return true;
+    } else return reply(fd, text);
 }
 
-fn reply(fd: i32, text: []const u8) void {
-    _ = linux.sendto(fd, text.ptr, text.len, linux.MSG.NOSIGNAL, null, 0);
+fn reply(fd: i32, text: []const u8) bool {
+    return linux.sendto(fd, text.ptr, text.len, linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT, null, 0) == text.len;
 }
 
 // --- mounting ------------------------------------------------------------------
@@ -1460,6 +1464,73 @@ test "staged inputs require trusted ownership, safe modes and one link" {
     try testing.expect(!validStagedFile(file));
     file.mode = linux.S.IFIFO | 0o600;
     try testing.expect(!validStagedFile(file));
+}
+
+test "staged filesystem rejects links and foreign files and preserves live bytes on failure" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (linux.geteuid() != 0) return error.SkipZigTest;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "data/svc/autoupdate/work/slot");
+    try tmp.dir.createDirPath(io, "dest");
+    try tmp.dir.writeFile(io, .{ .sub_path = "data/svc/autoupdate/work/slot/source", .data = "new" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "dest/live", .data = "old" });
+    const base = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(base);
+    const root = try testing.allocator.dupeSentinel(u8, base, 0);
+    defer testing.allocator.free(root);
+    var output: [2]i32 = undefined;
+    _ = try sandbox.sys(linux.pipe2(&output, .{ .CLOEXEC = true }), "staged probe pipe");
+    defer _ = linux.close(output[0]);
+    const pid = try sandbox.sys(linux.fork(), "staged probe fork");
+    if (pid == 0) {
+        stagedFilesystemProbe(root) catch |err| {
+            std.debug.print("staged probe: {s}\n", .{@errorName(err)});
+            linux.exit_group(1);
+        };
+        linux.exit_group(0);
+    }
+    _ = linux.close(output[1]);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const result = try sandbox.collect(arena.allocator(), @intCast(pid), output[0], 1024, 10);
+    try testing.expectEqual(@as(u8, 0), result.code);
+}
+
+fn stagedFilesystemProbe(root: [:0]const u8) !void {
+    _ = try sandbox.sys(linux.chroot(root), "staged probe chroot");
+    _ = try sandbox.sys(linux.chdir("/"), "staged probe cwd");
+    const dest = try fdOf(linux.open("/dest", .{ .DIRECTORY = true }, 0), "staged probe dest");
+    defer _ = linux.close(dest);
+    const source = "/data/svc/autoupdate/work/slot/source";
+    var digest: [32]u8 = undefined;
+    Sha256.hash("new", &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const want: broker.EspArtifact = .{ .size = 3, .sha256 = &hex };
+    try testing.expectError(error.DigestMismatch, copyChecked(dest, "slot/source", "live", .{ .size = 2, .sha256 = &hex }, 100));
+    const old = try fdOf(linux.open("/dest/live", .{}, 0), "staged probe live");
+    var bytes: [16]u8 = undefined;
+    const n = linux.read(old, &bytes, bytes.len);
+    _ = linux.close(old);
+    try testing.expectEqualStrings("old", bytes[0..n]);
+    try testing.expectEqual(linux.E.NOENT, linux.errno(linux.open("/dest/live.tmp", .{}, 0)));
+    _ = try sandbox.sys(linux.symlinkat("slot", linux.AT.FDCWD, "/data/svc/autoupdate/work/link"), "staged probe symlink");
+    try testing.expectError(error.SystemCall, openStagedFile("link/source"));
+    try testing.expectError(error.SystemCall, openStagedFile("../outside"));
+    _ = try sandbox.sys(linux.linkat(linux.AT.FDCWD, source, linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0), "staged probe hardlink");
+    try testing.expectError(error.NotRegularFile, openStagedFile("slot/source"));
+    _ = try sandbox.sys(linux.unlinkat(linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0), "staged probe unlink");
+    _ = try sandbox.sys(linux.mknodat(linux.AT.FDCWD, "/data/svc/autoupdate/work/fifo", linux.S.IFIFO | 0o600, 0), "staged probe fifo");
+    try testing.expectError(error.NotRegularFile, openStagedFile("fifo"));
+    _ = try sandbox.sys(linux.fchownat(linux.AT.FDCWD, source, 69, 69, 0), "staged probe owner");
+    try testing.expectError(error.NotRegularFile, openStagedFile("slot/source"));
+    _ = try sandbox.sys(linux.fchownat(linux.AT.FDCWD, source, 0, 0, 0), "restore staged owner");
+    try copyChecked(dest, "slot/source", "live", want, 100);
+    const fresh = try fdOf(linux.open("/dest/live", .{}, 0), "staged probe installed");
+    defer _ = linux.close(fresh);
+    const got = linux.read(fresh, &bytes, bytes.len);
+    try testing.expectEqualStrings("new", bytes[0..got]);
 }
 
 test "reboot requires the updater role and an exact request" {

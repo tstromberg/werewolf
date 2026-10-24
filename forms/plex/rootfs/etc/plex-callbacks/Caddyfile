@@ -1,0 +1,30 @@
+{
+	admin off
+	auto_https off
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		protocols h1
+	}
+}
+
+http://127.0.0.1:32402 {
+	bind 127.0.0.1
+	@callback {
+		method PUT
+		path_regexp callback ^/video/:/transcode/session/([A-Za-z0-9_-]{1,128})/([A-Za-z0-9-]{1,64})/(progress(/(stream|streamDetail))?|manifest)$
+	}
+	handle @callback {
+		# Construct the path from matched components before forwarding.
+		rewrite * /video/:/transcode/session/{re.callback.1}/{re.callback.2}/{re.callback.3}
+		reverse_proxy 127.0.0.1:32400 {
+			header_up X-Plex-Token {$PLEX_TOKEN}
+			header_up -Authorization
+		}
+	}
+	handle {
+		respond 403
+	}
+}

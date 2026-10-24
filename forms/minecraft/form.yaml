@@ -1,5 +1,5 @@
 # minecraft: Minecraft Java Edition 26.3, the release pinned in
-# ../packages/minecraft/minecraft.yaml. Nothing here notices when
+# ../packages/games/minecraft/minecraft.yaml. Nothing here notices when
 # Mojang publishes a newer server. It is the jre form, so it runs that
 # form's Java. The whitelist is the config's account names, resolved
 # with Mojang before each start. Online mode is on, and there is no

@@ -8,7 +8,7 @@ for defining a form.
 Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
 holds its service policy and configuration: a new form is a new directory.
 Third-party package recipes, patches and build sources live in the sibling
-`../packages` checkout; explicitly hardened packages live in `../hardened-packages`.
+`../packages` checkout, organized under `CATEGORY/NAME/`, including hardened runtimes.
 
 ```text
 forms/NAME/
@@ -37,7 +37,7 @@ These are APK packages, not bootable qcow2 images; disk publication has separate
 | `base` | the form it is built on, a name in forms/ | |
 | `with` | forms it takes beside its base, as a Mastodon takes `[postgresql, valkey, nginx]`: their dependencies are included recursively, once each, before its own parts; cycles are refused | added to |
 | `packages` | the Wolfi packages apko installs, by name | added to |
-| `recipes` | Melange recipe paths relative to this form, usually `../../../packages/NAME/NAME.yaml`; their directories supply the complete build context. Without this key, `melange/*.yaml` beside the form is discovered for distro-specific packages | added to, base first, once per resolved path |
+| `recipes` | Melange recipe paths relative to this form, usually `../../../packages/CATEGORY/NAME/NAME.yaml`; their directories supply the complete build context. Without this key, `melange/*.yaml` beside the form is discovered for distro-specific packages | added to, base first, once per resolved path |
 | `accounts`, `paths` | what apko installs beyond packages: `accounts` its `groups` and `users`, with ids optional, for an account something depends on by number or shell (a login account, a program's fixed uid); a service's user needs none, its id being its name's hash. `paths` its permissions. `repositories`, `keyring` and `archs` are minimal's alone | added to; `archs` the last form's |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `sh-shim` | added to |
 | `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim); and `PACKAGE:NAME`, what a hardened package gives back (`php:exec`, `java:deserialize`; docs/design/hardened-interpreters.md). General grants live in `/etc/werewolf/allow`; package grants in `/etc/runtime-hardening/allow/all/PACKAGE/NAME` | added to |

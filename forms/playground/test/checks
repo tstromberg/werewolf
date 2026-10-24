@@ -1,0 +1,6 @@
+ok  su-unprivileged       [ "$(readlink /usr/bin/su)" = /usr/lib/werewolf/su ] && [ ! -u /usr/lib/werewolf/su ] && [ ! -g /usr/lib/werewolf/su ] && [ ! -u /usr/bin/busybox ] && [ ! -g /usr/bin/busybox ] && command -v ssh
+ok  su-no-session         out=$(unset SSH_CONNECTION SSH_TTY SSH_AUTH_SOCK; su 2>&1); [ $? != 0 ] && [ "$out" = 'su: unauthenticated session' ]
+ok  su-no-options         out=$(su -oProxyCommand=evil 2>&1); [ $? != 0 ] && echo "$out" | grep -q 'usage:'
+ok  su-public-pin         [ "$(stat -c '%u:%g:%a' /run/werewolf/ssh_known_hosts)" = 0:0:644 ] && [ "$(cut -d' ' -f2,3 /run/werewolf/ssh_known_hosts)" = "$(cut -d' ' -f1,2 /run/svc/sshd/host-key.pub)" ] && grep -q '^werewolf-local ssh-ed25519 ' /run/werewolf/ssh_known_hosts
+ok  su-server-policy      sshd -T >/tmp/su-policy && grep -i '^pubkeyauthoptions ' /tmp/su-policy | grep -q touch-required && ! grep -i '^pubkeyauthoptions ' /tmp/su-policy | grep -q verify-required && grep -iq '^authenticationmethods publickey$' /tmp/su-policy && grep -iq '^allowagentforwarding yes$' /tmp/su-policy
+ok  su-local-penalties    sshd -T >/tmp/su-policy && grep -iq '^persourcepenaltyexemptlist 127.0.0.1/32$' /tmp/su-policy && grep -i '^persourcepenalties ' /tmp/su-policy | grep -q 'authfail:' && grep -iq '^maxstartups 10:30:30$' /tmp/su-policy

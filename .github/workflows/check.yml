@@ -33,8 +33,6 @@ jobs:
         env:
           WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
           WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
-          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
-          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
         run: tools/checkout-packages
       - name: Install tools
         run: sudo test/ci-setup
@@ -50,11 +48,13 @@ jobs:
       - name: Updater construction and coordinator isolation
         run: |
           make FORM=minimal DEV=1 image
-          make FORM=minimal DEV=1 check-updater-installer LINUX_TEST_RUNNER=sudo
+          make FORM=minimal DEV=1 check-updater-installer check-mount-broker LINUX_TEST_RUNNER=sudo
       - name: DNS permissions, DHCP renewal, HTTPS and LAN discovery
         run: make check-dns DNS_TEST_RUNNER=sudo
       - name: unwound behind fence, against a misbehaving resolver
         run: make check-unwound DNS_TEST_RUNNER=sudo
+      - name: Age authority SQLite sandbox and root read-only views
+        run: make check-unwound-age-authority DNS_TEST_RUNNER=sudo
 
   check:
     strategy:
@@ -69,7 +69,7 @@ jobs:
         # shellfree split over runners (SHARD=K/N). arm64 runs every group
         # under KVM on the self-hosted runner (vm-arm64), so these 11 jobs
         # leave room in the account's 20 hosted at once for kernel-build's
-        # and glibc-build's publishes.
+        # and the package publishers.
         group: [integrity, cloud, persist, syslog]
         include:
           - { group: forms, shard: 1, shards: 4 }
@@ -91,8 +91,6 @@ jobs:
         env:
           WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
           WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
-          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
-          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
         run: tools/checkout-packages
       - name: Make room for VM images
         # Drop unused hosted SDKs; ci-compilers installs pinned .NET privately.
@@ -260,8 +258,6 @@ jobs:
         env:
           WEREWOLF_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_PACKAGES_REPOSITORY }}
           WEREWOLF_PACKAGES_REF: ${{ vars.WEREWOLF_PACKAGES_REF }}
-          WEREWOLF_HARDENED_PACKAGES_REPOSITORY: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REPOSITORY }}
-          WEREWOLF_HARDENED_PACKAGES_REF: ${{ vars.WEREWOLF_HARDENED_PACKAGES_REF }}
         run: tools/checkout-packages
       - name: Restore public EFI stubs and check tools
         # checkout cleans out/, so these public build inputs must be restored

@@ -41,6 +41,8 @@ const keywords = [_]Keyword{
     .{ "allow-tcp-forwarding", "AllowTcpForwarding" },
     .{ "allow-stream-local-forwarding", "AllowStreamLocalForwarding" },
     .{ "allow-agent-forwarding", "AllowAgentForwarding" },
+    .{ "agent-socket-path", "AgentSocketPath" },
+    .{ "per-source-penalty-exempt-list", "PerSourcePenaltyExemptList" },
     .{ "permit-open", "PermitOpen" },
     .{ "permit-listen", "PermitListen" },
     .{ "gateway-ports", "GatewayPorts" },

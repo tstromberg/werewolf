@@ -917,17 +917,14 @@ fn words(gpa: Allocator, line: []const u8) Allocator.Error![]const []const u8 {
 /// nothing runs them. Each path must be relative and clean.
 pub fn prune(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    for (forms) |fm| for (try fm.items(gpa, "prune")) |item| {
-        var it = mem.tokenizeAny(u8, item, " \t");
-        while (it.next()) |p| {
-            if (!cleanPath(p))
-                return f.fail(
-                    gpa,
-                    "form {s} prunes {s}: a path is relative and clean, usr/bin/bash",
-                    .{ forms[forms.len - 1].name, p },
-                );
-            try out.append(gpa, p);
-        }
+    for (forms) |fm| for (try fm.items(gpa, "prune")) |p| {
+        if (!cleanPath(p))
+            return f.fail(
+                gpa,
+                "form {s} prunes {s}: a path is relative and clean, usr/bin/bash",
+                .{ forms[forms.len - 1].name, p },
+            );
+        try out.append(gpa, p);
     };
     return out.items;
 }
@@ -1402,27 +1399,29 @@ fn netLine(
         const public = mem.eql(u8, w[w.len - 1], "public");
         const lan = mem.eql(u8, w[w.len - 1], "lan");
         if (lan and mem.eql(u8, who, "all")) return false;
-        const targets = w[2 .. w.len - @intFromBool(public or lan)];
+        const lo = mem.eql(u8, w[w.len - 1], "loopback");
+        const targets = w[2 .. w.len - @intFromBool(public or lan or lo)];
         if (targets.len == 0) return false;
         for (targets) |t| {
             if (mem.eql(u8, t, "icmp")) {
-                if (public or lan) return false;
+                if (public or lan or lo) return false;
                 try out.append(gpa, try gpa.print("connect {s} icmp", .{who}));
                 continue;
             }
             // any is every TCP port, for one user. public would refuse the
             // private networks a scan is for, and `all` would be every user.
             if (mem.eql(u8, t, "any")) {
-                if (public or lan or mem.eql(u8, who, "all")) return false;
+                if (public or lan or lo or mem.eql(u8, who, "all")) return false;
                 try out.append(gpa, try gpa.print("connect {s} tcp any", .{who}));
                 continue;
             }
             const proto = if (mem.startsWith(u8, t, "udp/")) "udp" else "tcp";
             if (lan and !mem.eql(u8, proto, "udp")) return false;
+            if (lo and !mem.eql(u8, proto, "tcp")) return false;
             const p = port(t, if (proto[0] == 'u') "udp/" else "tcp/") orelse return false;
             try out.append(gpa, try gpa.print(
                 "connect {s} {s} {d}{s}",
-                .{ who, proto, p, if (public) " public" else if (lan) " lan" else "" },
+                .{ who, proto, p, if (public) " public" else if (lan) " lan" else if (lo) " loopback" else "" },
             ));
         }
         return true;
@@ -1758,6 +1757,9 @@ test "prune: relative and clean paths only" {
     var f: Failure = .{};
     const got = try prune(gpa, &.{try testForm(gpa, "valkey", "prune:\n  - usr/bin/bash\n")}, &f);
     try testing.expectEqualStrings("usr/bin/bash", got[0]);
+    const spaced = try prune(gpa, &.{try testForm(gpa, "plex", "prune:\n  - usr/lib/plexmediaserver/Plex Script Host\n")}, &f);
+    try testing.expectEqual(1, spaced.len);
+    try testing.expectEqualStrings("usr/lib/plexmediaserver/Plex Script Host", spaced[0]);
     for ([_][]const u8{ "/usr/bin/bash", "./usr", "../etc", "usr/", "usr/..", "usr/." }) |p| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("prune:\n  - {s}\n", .{p}))};
         try testing.expectError(error.Form, prune(gpa, &forms, &f));

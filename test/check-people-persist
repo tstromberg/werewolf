@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Boot real init repeatedly on one /data volume; never reuse a retired identity.
+
+make check-people-persist supplies CHECK_ENV and QEMU arguments. Successful
+boots use test/boot; damaged-ledger boots must panic before service handover.
+NoCloud seeds use hdiutil on macOS and xorriso on Linux.
+"""
+
+import io
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+
+
+# These distinct names collide under the current people mapping.
+PERSON, COLLISION, UID = "u2guv05clv", "udm5vojgxd", 982829894
+KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGf9JfLCEyq5b4u2jFqCi6Q7BSQx5vLzPVRzCPkTaq2f"
+WORK = Path(os.environ["CHECK"]) / "people-persist"
+WORK.mkdir(parents=True, exist_ok=True)
+DISK = WORK / "data.img"
+QEMU = sys.argv[1:]
+
+
+def config(name, person):
+    path = WORK / f"{name}.tar"
+    with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
+        for filename, value in {
+            "hostname": "people-persist\n",
+            "users": f"{person} admin {KEY} people-persist\n" if person else "",
+        }.items():
+            data = value.encode()
+            entry = tarfile.TarInfo(filename)
+            entry.size = len(data)
+            entry.mode = 0o600
+            archive.addfile(entry, io.BytesIO(data))
+    return path
+
+
+def seed(uid):
+    directory = WORK / f"seed-{uid}"
+    directory.mkdir(exist_ok=True)
+    (directory / "meta-data").write_text("instance-id: people-persist\n")
+    (directory / "user-data").write_text(
+        f"#cloud-config\nusers:\n  - name: lima\n    uid: {uid}\n"
+        f"    ssh_authorized_keys:\n      - {KEY} nocloud-persist\n"
+    )
+    path = WORK / f"seed-{uid}.iso"
+    path.unlink(missing_ok=True)
+    if sys.platform == "darwin":
+        cmd = ["hdiutil", "makehybrid", "-iso", "-joliet",
+               "-default-volume-name", "cidata", "-o", str(path), str(directory)]
+    else:
+        cmd = ["xorriso", "-as", "mkisofs", "-quiet", "-V", "cidata",
+               "-J", "-r", "-o", str(path), str(directory)]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+    return path
+
+
+def command(config_disk, seed_disk=None, data=DISK):
+    cmd = QEMU + [
+        "-kernel", os.environ["KERNEL"],
+        "-initrd", str(Path(os.environ["OUT"]) / "initramfs.zst"),
+        "-append", os.environ["CMDLINE"] + " werewolf.data=vda",
+        "-drive", f"file={data},format=raw,if=virtio",
+        "-drive", f"file={config_disk},format=raw,if=virtio,readonly=on",
+    ]
+    if seed_disk:
+        cmd += ["-drive", f"file={seed_disk},format=raw,if=virtio,readonly=on"]
+    return cmd
+
+
+def boot(name, checks, config_disk, seed_disk=None):
+    path = WORK / f"{name}.checks"
+    path.write_text("\n".join(checks) + "\n")
+    log = WORK / f"{name}.log"
+    subprocess.run(["test/boot", f"people-{name}", str(path), str(log),
+                    *command(config_disk, seed_disk)], check=True)
+    if name != "enroll" and "werewolf: formatting " in log.read_text(errors="replace"):
+        raise RuntimeError(f"{name}: reformatted persistent data; see {log}")
+
+
+def as_user(uid, cmd):
+    return f"chpst -u :{uid}:{uid} {cmd}"
+
+
+def accounts(active):
+    checks = []
+    shell, shadow = ("/bin/ash", r"\*") if active else ("/sbin/nologin", "!")
+    for user, uid, source in [(PERSON, UID, "p"), ("lima", 1000, "n")]:
+        home = f"/data/home/{user}"
+        checks += [
+            f"ok {user}-account grep -qx '{user}:x:{uid}:{uid}::{home}:{shell}' /etc/passwd && "
+            f"grep -q '^{user}:{shadow}:' /etc/shadow && grep -qx '{user}:x:{uid}:' /etc/group",
+            f"ok {user}-reservation grep -qx '{source} {user} {uid} {uid}' /data/.werewolf/identities",
+            f"ok {user}-home [ \"$(stat -c '%u:%g:%a' {home})\" = {uid}:{uid}:700 ]",
+        ]
+        if active:
+            checks.append(f"ok {user}-key [ \"$(stat -c '%u:%a' /run/werewolf/keys/{user})\" = {uid}:600 ] && grep -q '{KEY}' /run/werewolf/keys/{user}")
+        else:
+            checks.append(f"ok {user}-revoked [ ! -e /run/werewolf/keys/{user} ]")
+    checks += [
+        "ok ledger-private [ \"$(stat -c '%u:%g:%a' /data/.werewolf)\" = 0:0:700 ] && "
+        "[ \"$(stat -c '%u:%g:%a' /data/.werewolf/identities)\" = 0:0:600 ] && "
+        "[ \"$(wc -l </data/.werewolf/identities)\" -eq 3 ]",
+        "ok admin-key " + ("grep -q people-persist /run/werewolf/keys/root" if active else "[ ! -s /run/werewolf/keys/root ]"),
+        "ok active-list " + (f"grep -qx {PERSON} /run/werewolf/people" if active else "[ ! -s /run/werewolf/people ]"),
+    ]
+    return checks
+
+
+def files(restored=False):
+    checks = [
+        "ok same-ledger cmp /data/identities.saved /data/.werewolf/identities",
+        f"ok outsider-uid [ \"$({as_user(1001, 'id -u')})\" = 1001 ]",
+    ]
+    for user, uid in [(PERSON, UID), ("lima", 1000)]:
+        path = f"/data/home/{user}/private"
+        checks += [
+            f"ok {user}-ownership [ \"$(stat -c '%i:%u:%g:%a' {path})\" = \"$(cat /data/{user}.stat)\" ] && grep -qx {user}-secret {path}",
+            f"ok {user}-private ! {as_user(1001, f'cat {path}')} 2>/tmp/private-error && grep -q 'Permission denied' /tmp/private-error",
+        ]
+        if restored:
+            checks.append(f"ok {user}-access {as_user(uid, f'cat {path}')} | grep -qx {user}-secret")
+    return checks
+
+
+def damaged(name, config_disk, seed_disk, debugfs, remove_only=False):
+    # Work offline on copies so each negative boot starts from the same good
+    # state. debugfs prints some errors with exit 0; verify the fault as well.
+    disk = WORK / f"{name}.img"
+    shutil.copyfile(DISK, disk)
+    # A shutdown may leave /data mounted read-only with a journal to replay.
+    # Replay it before editing, or it can restore the intact table at boot.
+    e2fsck = str(Path(debugfs).with_name("e2fsck"))
+    result = subprocess.run([e2fsck, "-p", str(disk)], capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"{name}: journal replay failed: {result.stdout}{result.stderr}")
+
+    def edit(request):
+        return subprocess.run([debugfs, "-w", "-R", request, str(disk)],
+                              check=True, capture_output=True, text=True)
+
+    edit("rm /.werewolf/identities")
+    if not remove_only:
+        bad = WORK / "invalid-identities"
+        bad.write_text("werewolf-identities 999\n")
+        edit(f"write {bad} /.werewolf/identities")
+        edit("set_inode_field /.werewolf/identities mode 0100600")
+        result = edit("cat /.werewolf/identities")
+        if result.stdout != bad.read_text():
+            raise RuntimeError(f"{name}: could not corrupt the ledger: {result}")
+    elif "File not found" not in edit("stat /.werewolf/identities").stderr:
+        raise RuntimeError(f"{name}: could not remove the ledger")
+
+    log = WORK / f"{name}.log"
+    with log.open("wb") as output:
+        subprocess.run(command(config_disk, seed_disk, disk), stdin=subprocess.DEVNULL,
+                       stdout=output, stderr=subprocess.STDOUT,
+                       timeout=int(os.environ.get("BOOT_TIMEOUT", "300")), check=False)
+    output = log.read_text(errors="replace")
+    reason = "unregistered data" if remove_only else "read identities"
+    if (f"people: {reason} failed; not handing over" not in output
+            or "Kernel panic" not in output or "handing over to runit" in output):
+        raise RuntimeError(f"{name}: expected account publication refusal; see {log}")
+    print(f"PASS   people-{name} refuses account publication", flush=True)
+
+
+def main():
+    debugfs = os.environ.get("DEBUGFS") or shutil.which("debugfs")
+    if not QEMU or not debugfs:
+        raise RuntimeError("requires QEMU arguments and DEBUGFS (e2fsprogs)")
+    # A new sparse disk for enrollment; all following successful boots reuse it.
+    with DISK.open("wb") as disk:
+        disk.truncate(256 * 1024 * 1024)
+    original = config("original", PERSON)
+    empty = config("empty", None)
+    collision = config("collision", COLLISION)
+    original_seed, changed_seed = seed(1000), seed(1001)
+    checks = accounts(True)
+    for user, uid in [(PERSON, UID), ("lima", 1000)]:
+        path = f"/data/home/{user}/private"
+        checks.append(f"ok {user}-create printf '%s\\n' {user}-secret >{path} && chmod 600 {path} && "
+                      f"chown {uid}:{uid} {path} && stat -c '%i:%u:%g:%a' {path} >/data/{user}.stat")
+    checks.append("ok save-ledger cp /data/.werewolf/identities /data/identities.saved")
+    boot("enroll", checks + files(restored=True), original, original_seed)
+    boot("retire", accounts(False) + files(), empty)
+    boot("conflict", accounts(False) + files() + [
+        f"seen hash-refused '{COLLISION}': name or UID is already reserved",
+        "seen nocloud-refused NoCloud name or UID is already reserved",
+        f"ok collision-absent ! grep -q '^{COLLISION}:' /etc/passwd && "
+        f"[ ! -e /data/home/{COLLISION} ] && [ ! -e /run/werewolf/keys/{COLLISION} ]",
+    ], collision, changed_seed)
+    boot("restore", accounts(True) + files(restored=True), original, original_seed)
+    damaged("corrupt", original, original_seed, debugfs)
+    damaged("missing", original, original_seed, debugfs, remove_only=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        sys.exit(f"FAIL   people-persist: {error}")

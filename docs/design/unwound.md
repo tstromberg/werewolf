@@ -82,9 +82,10 @@ Optional PID/exe/cgroup path/namespace snapshots describe socket-associated proc
 never authorize with them. Bound entries; cache boot/PID/start time for <=1s with age.
 Exec/migration can stale data; unavailable/ambiguous data is unknown.
 Observer access needs separate confinement review; no privileged fallback.
-A new bounded [syslog](syslog.md) channel must acknowledge acceptance before forwarding;
-this is not durability. Per-service quotas isolate floods; global sink failure stops
-all forwarding. Reserve health counters for overload refusals/losses; logs are private.
+DNS logging is best effort through [syslog](syslog.md). No acknowledgement or
+durability is required before forwarding; logging failure never changes DNS policy
+or answers. Count failed local writes; syslogd reports later suppression and storage
+drops. An absent sink at startup falls back to stderr. Logs are private.
 
 ## Drawbacks
 

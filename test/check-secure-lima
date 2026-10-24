@@ -90,7 +90,7 @@ def run(args, label, check=True, timeout=600):
 
 
 def ssh(command, label, **kwargs):
-    return run([howl, 'ssh', name, '--', command], label, **kwargs)
+    return run([howl, 'ssh', 'root@' + name, '--', command], label, **kwargs)
 
 
 def wait_boot(label, previous=None, anchor=None, committed=True):

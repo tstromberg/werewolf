@@ -1,0 +1,2 @@
+# Disposable protected image: the only addition is a probe invoked over SSH.
+base: playground

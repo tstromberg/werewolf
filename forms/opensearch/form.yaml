@@ -3,14 +3,14 @@
 # certificate, its transport on loopback alone and in TLS too, and one
 # user, admin, whose password comes from the config. No demo certificate,
 # demo user or anonymous access. werewolf's application feed lays
-# upstream's release (../packages/opensearch/opensearch.yaml), and java
+# upstream's release (../packages/databases/opensearch/opensearch.yaml), and java
 # starts it directly, without its bash scripts, after opensearch-setup
 # (forms/opensearch/cmd/opensearch-setup) writes its configuration. See
 # forms/opensearch/README.md.
 base: jre
 
 packages:
-  - opensearch-werewolf
+  - opensearch
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.

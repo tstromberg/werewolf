@@ -44,7 +44,7 @@ howl create limesurvey --with limesurvey --on gcp --allow-from me \
 ```
 
 Open `https://surveys.example.edu` once the name and TLS are in front of port 80. Mail
-and a directory are optional: `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password`,
+is optional: `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password`,
 `--mail-from`.
 
 ### Importing data
@@ -68,9 +68,11 @@ service after it is up.
 - Theme uploads stay on, for a department's branding. LimeSurvey unpacks no PHP from
   them.
 - A forged Host header is refused.
+- LDAP is omitted. A custom form can add `php-8.5-ldap` and its directory connection.
+- Yii's URL-rule and database-schema caches require object deserialization;
+  `php:deserialize` is granted only to LimeSurvey's PHP service.
 
 ### Network Exposure
 
 - listen: tcp/80 *
 - connect: tcp/587 global
-- connect: tcp/636 global

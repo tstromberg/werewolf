@@ -8,7 +8,7 @@ base: prod
 
 packages:
   - velociraptor
-  - caddy-werewolf
+  - caddy
 
 # The pinned Melange recipe supplies Velociraptor; Wolfi does not ship it.
 
