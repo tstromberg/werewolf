@@ -168,8 +168,13 @@ pub const Policy = struct {
             return .{ .allow = true, .why = .granted, .line = g.line };
         }
         const system_domain = p.inSystemDomain(n);
-        if ((system_domain or screened != 0 or unfiltered != 0) and endpoints.reason(n.text()) != null)
-            return .{ .allow = false, .why = .endpoint, .line = if (unfiltered != 0) unfiltered else screened };
+        if ((system_domain or screened != 0 or unfiltered != 0) and
+            endpoints.reason(n.text()) != null)
+            return .{
+                .allow = false,
+                .why = .endpoint,
+                .line = if (unfiltered != 0) unfiltered else screened,
+            };
         if (unfiltered != 0) return .{ .allow = true, .why = .granted, .line = unfiltered };
         if (system_domain) return .{ .allow = true, .why = .system_domain };
         if (screened != 0) return .{ .allow = true, .why = .screened, .line = screened };

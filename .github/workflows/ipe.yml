@@ -116,6 +116,7 @@ jobs:
             build/*/ipe/check/image-updater/*.log
             build/*/check/secureboot/*.log
             build/*/ipe/check/provider-ab-qemu/*.log
+            build/*/ipe/check/provider-ab-qemu/fixture-*/*.log
             build/*/ipe/check/provider-ab-qemu/phases.json
             build/*/ipe/check/tpm-guest/fixture.log
             build/*/ipe/check/tpm-guest/factory.log

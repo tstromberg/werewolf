@@ -327,6 +327,15 @@ pub fn elfExcused(path: []const u8, form: []const u8, machine: std.elf.EM) ?[]co
     return null;
 }
 
+/// OCI programs retain their publisher's build, including the copy staged
+/// for the updater. Native files elsewhere in a staged form are still checked.
+pub fn isOciPath(path: []const u8) bool {
+    if (mem.startsWith(u8, path, "oci/")) return true;
+    const staged = mem.cutPrefix(u8, path, "usr/share/werewolf/forms/") orelse return false;
+    const end = mem.findScalar(u8, staged, '/') orelse return false;
+    return end > 0 and mem.startsWith(u8, staged[end..], "/rootfs/oci/");
+}
+
 const testing = std.testing;
 
 /// hello_gz is `printf 'hello\n' | gzip -n`.
@@ -460,6 +469,20 @@ test elfExcused {
     try testing.expect(elfExcused("usr/lib/app/server", "rust-example", .AARCH64) != null);
     try testing.expectEqual(null, elfExcused("usr/lib/app/server", "rust-example", .X86_64));
     try testing.expectEqual(null, elfExcused("usr/lib/app/server", "go-example", .AARCH64));
+}
+
+test "OCI trees include staged copies, not native form files" {
+    for ([_][]const u8{
+        "oci/dns/usr/bin/server",
+        "usr/share/werewolf/forms/dns/rootfs/oci/dns/usr/bin/server",
+    }) |path| try testing.expect(isOciPath(path));
+    for ([_][]const u8{
+        "usr/bin/server",
+        "usr/share/werewolf/forms/dns/rootfs/usr/bin/server",
+        "usr/share/werewolf/forms/dns/rootfs/oci-other/server",
+        "usr/share/werewolf/forms/dns/oci/server",
+        "usr/share/werewolf/forms//rootfs/oci/server",
+    }) |path| try testing.expect(!isOciPath(path));
 }
 
 test configMisses {

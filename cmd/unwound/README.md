@@ -16,8 +16,7 @@ and `dns-direct: true` DNS servers; ordinary lookups use unwound.
 
 ## Goals
 
-- No grant, no DNS; grants name what each service may look up, and nothing
-  else reaches the resolvers.
+- No grant, no DNS; only granted services reach the resolvers.
 - Know which service asked from the kernel, never from what a process says.
 - Bound memory, work and what a screened grant can carry, per service.
 
@@ -79,11 +78,10 @@ TCP connections accept pipelined queries, answering one frame at a time.
 
 ## Drawbacks
 
-Screening may refuse generated names that need an exact grant. A service
-granted a name trusts whoever controls it.
-The endpoint list includes legitimate testing and development services; grant
-their names explicitly when required. It cannot identify every callback
-service or prevent use of literal IPs or DNS over allowed HTTPS connections.
+Screening may refuse generated names that need an exact grant. A grant trusts
+the name's controller. The endpoint list includes legitimate testing services;
+grant them explicitly when required. It cannot identify every callback service
+or prevent literal IPs or DNS over allowed HTTPS connections.
 
 ## Security Considerations
 
@@ -94,7 +92,7 @@ before cache lookup, and services have separate caches.
 
 ## Reliability Considerations
 
-256 questions in flight, 32 per service, 64 TCP clients, 8 per service; past
-those, SERVFAIL. If either side dies, runit restarts both. `make check-unwound`
-uses Linux namespaces and a fixture resolver; `make fuzz-unwound` covers
-queries, responses, policy and cache.
+256 questions in flight, 32 per service, 64 TCP clients, 8 per service; past these,
+SERVFAIL. TCP pipelines answer one frame at a time. Either side's death restarts
+both. `make check-unwound` uses namespaces and a fixture resolver;
+`make fuzz-unwound` covers queries, responses, policy and cache.

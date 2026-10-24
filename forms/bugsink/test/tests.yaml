@@ -339,5 +339,3 @@ suites:
             expect:
               connect_rules:
                 - tcp/443 public
-                - tcp/53
-                - udp/53

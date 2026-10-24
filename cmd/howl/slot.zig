@@ -662,7 +662,7 @@ fn checkPrograms(b: *B, root_tar: []const u8) !void {
     while (try it.next()) |e| {
         if (e.kind != .file) continue;
         const name = mem.cutPrefix(u8, e.name, "./") orelse e.name;
-        if (mem.startsWith(u8, name, "oci/")) continue;
+        if (image.isOciPath(name)) continue;
         const n: usize = @intCast(@min(e.size, head.len));
         try it.reader.readSliceAll(head[0..n]);
         it.unread_file_bytes = e.size - n;
