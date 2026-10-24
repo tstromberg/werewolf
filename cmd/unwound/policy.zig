@@ -3,10 +3,12 @@
 //! Grants only add: no order, no denials, no modes. A pattern is an exact
 //! name, `*.NAME` for every name below it (not NAME itself), or `*` for
 //! any name, which is screened (screen.zig) unless the line says
-//! `unfiltered`.
+//! `unfiltered`. Both broad wildcards exclude endpoints.zig's destinations;
+//! only named grants override those defaults.
 const std = @import("std");
 const dns = @import("dns");
 const wire = @import("wire.zig");
+const endpoints = @import("endpoints.zig");
 const mem = std.mem;
 
 pub const max_grants = 1024;
@@ -45,6 +47,8 @@ pub const Why = enum {
     /// unsupported is a type no grant can name: ANY, AXFR, UPDATE's.
     unsupported,
     no_grant,
+    /// endpoint is a shared callback service or IP-prefixed hostname.
+    endpoint,
 };
 
 /// Only an arbitrary screened wildcard needs domain-age evidence. Explicit
@@ -147,19 +151,27 @@ pub const Policy = struct {
     }
 
     /// decide answers whether service s may ask for name and type t. A
-    /// grant that is not screened wins over one that is, whatever the order.
+    /// named grant wins over a broad wildcard, whatever the order. Without
+    /// one, endpoint defaults apply to both screened and unfiltered `*`.
     pub fn decide(p: *const Policy, s: u8, n: *const wire.Name, t: u16) Decision {
         const qtype = wire.Type.from(t) orelse return .{ .allow = false, .why = .unsupported };
         var screened: u16 = 0;
+        var unfiltered: u16 = 0;
         for (p.grants[0..p.n]) |*g| {
             if (g.service != s or !g.types.contains(qtype) or !g.covers(n)) continue;
-            if (g.kind == .any and !g.unfiltered) {
-                if (screened == 0) screened = g.line;
+            if (g.kind == .any) {
+                if (g.unfiltered) {
+                    if (unfiltered == 0) unfiltered = g.line;
+                } else if (screened == 0) screened = g.line;
                 continue;
             }
             return .{ .allow = true, .why = .granted, .line = g.line };
         }
-        if (p.inSystemDomain(n)) return .{ .allow = true, .why = .system_domain };
+        const system_domain = p.inSystemDomain(n);
+        if ((system_domain or screened != 0 or unfiltered != 0) and endpoints.reason(n.text()) != null)
+            return .{ .allow = false, .why = .endpoint, .line = if (unfiltered != 0) unfiltered else screened };
+        if (unfiltered != 0) return .{ .allow = true, .why = .granted, .line = unfiltered };
+        if (system_domain) return .{ .allow = true, .why = .system_domain };
         if (screened != 0) return .{ .allow = true, .why = .screened, .line = screened };
         return .{ .allow = false, .why = .no_grant };
     }
@@ -331,4 +343,50 @@ test "the policy names each grant's rule and generation" {
     try q.parse(example ++ "lookup 1004 b.example A\n");
     try testing.expect(p.generation != q.generation);
     try testing.expectEqual(4, q.users.len);
+}
+
+test "default endpoint exclusions yield only to explicit grants" {
+    const p = try testing.allocator.create(Policy);
+    defer testing.allocator.destroy(p);
+    try p.parse(
+        "lookup 1 * A AAAA CNAME TXT\n" ++
+            "lookup 2 * A AAAA unfiltered\n" ++
+            "lookup 3 httpbin.org A\n" ++
+            "lookup 3 *.webhook.site A\n" ++
+            "lookup 3 192-0-2-1.example.com A\n" ++
+            "lookup 3 * A\n" ++
+            "lookup 4 * A AAAA unfiltered\n" ++
+            "lookup 4 httpbin.org A\n" ++
+            "lookup 4 *.ngrok.app A\n",
+    );
+    for ([_][]const u8{
+        "httpbin.org",
+        "token.oastify.com",
+        "127.0.0.1.203-0-113-1.sslip.io",
+        "192-0-2-1.example.com",
+        "2001-db8--1.example.com",
+    }) |text| {
+        const n = name(text);
+        for ([_]u16{ 1, 28, 5, 16 }) |t| {
+            const d = p.decide(0, &n, t);
+            try testing.expect(!d.allow);
+            try testing.expectEqual(Why.endpoint, d.why);
+        }
+        try testing.expectEqual(Why.endpoint, p.decide(1, &n, 1).why);
+    }
+    for ([_][]const u8{ "httpbin.org", "token.webhook.site", "192-0-2-1.example.com" }) |text| {
+        const n = name(text);
+        try testing.expectEqual(Why.granted, p.decide(2, &n, 1).why);
+    }
+    for ([_][]const u8{ "httpbin.org", "app.ngrok.app" }) |text| {
+        const n = name(text);
+        try testing.expectEqual(Why.granted, p.decide(3, &n, 1).why);
+        try testing.expectEqual(Why.endpoint, p.decide(3, &n, 28).why);
+    }
+    // A DHCP suffix cannot turn a blocked service into an automatic grant.
+    try testing.expect(p.setSystemDomain("oastify.com"));
+    const assigned = name("token.oastify.com");
+    try testing.expectEqual(Why.endpoint, p.decide(2, &assigned, 1).why);
+    const normal = name("api.example.com");
+    try testing.expectEqual(Why.screened, p.decide(0, &normal, 1).why);
 }

@@ -786,6 +786,8 @@ $(UNWOUND_SQLITE)/sqlite3.c: tools/checkout-unwound-sqlite
 build/$(ARCH)/unwound-age-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
 	@mkdir -p $(dir $@)
 	zig cc -target $(ARCH)-linux-musl -O2 -fPIC -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=0 -c $< -o $@
+# Both embed the age schema and the pinned PSL and RDAP data.
+$(call program_bin,unwound) $(call program_bin,unwound-age): cmd/unwound/age.sql $(wildcard cmd/unwound/data/*)
 $(call program_bin,unwound-age): cmd/unwound/age_authority.zig $(wildcard cmd/unwound/*.zig) $(wildcard lib/*.zig) build/$(ARCH)/unwound-age-sqlite.o $(PROGRAM_FLAGS_STAMP)
 	$(zig_check)
 	@mkdir -p $(dir $@)

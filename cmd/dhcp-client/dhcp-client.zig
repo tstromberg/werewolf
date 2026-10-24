@@ -592,11 +592,10 @@ const Parent = struct {
                         .reason = "the new lease differs",
                     });
                 };
-                var servers: dns_policy.Resolvers = if (p.local_validator)
-                    try dns_policy.validatedLocal(dns_policy.local_validator_text)
-                else
-                    .{};
-                if (!p.local_validator) for (m.lease.dns[0..m.lease.ndns]) |ip| try servers.add(ip);
+                var servers: dns_policy.Resolvers = .{};
+                if (p.local_validator)
+                    servers = try dns_policy.validatedLocal(dns_policy.local_validator_text)
+                else for (m.lease.dns[0..m.lease.ndns]) |ip| try servers.add(ip);
                 if (p.dns_socket) |*socket| try dns_policy.replace(
                     socket,
                     p.dns_users,

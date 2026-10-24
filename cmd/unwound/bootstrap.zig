@@ -2,6 +2,7 @@
 //! The caller fetches only over HTTPS and checks the resolved address again.
 const std = @import("std");
 const mem = std.mem;
+const age = @import("age.zig");
 
 /// rdapUrl applies RFC 9224's label-wise longest match. The returned URL is
 /// copied into out so it survives the bounded JSON parser's temporary arena.
@@ -30,8 +31,8 @@ pub fn rdapUrl(gpa: mem.Allocator, domain: []const u8, body: []const u8, out: []
     for (data.services) |service| {
         if (service[0].len > 512 or service[1].len > 16) return null;
         for (service[0]) |suffix| {
-            if (!validName(suffix) or !labelSuffix(domain, suffix)) continue;
-            const count = labels(suffix);
+            if (!validName(suffix) or !age.suffixMatch(domain, suffix)) continue;
+            const count = age.labels(suffix);
             if (count <= best_labels) continue;
             best_labels = count;
             best_url = null;
@@ -52,7 +53,8 @@ pub fn rdapUrl(gpa: mem.Allocator, domain: []const u8, body: []const u8, out: []
     return out[0 .. base.len + segment.len + domain.len];
 }
 
-fn validName(name: []const u8) bool {
+/// validName accepts a lower-case LDH host name, the only form fetched.
+pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 253 or name[0] == '.' or name[name.len - 1] == '.')
         return false;
     var parts = mem.splitScalar(u8, name, '.');
@@ -63,20 +65,6 @@ fn validName(name: []const u8) bool {
             return false;
     }
     return true;
-}
-
-fn labelSuffix(name: []const u8, suffix: []const u8) bool {
-    return mem.eql(u8, name, suffix) or
-        (name.len > suffix.len and mem.endsWith(u8, name, suffix) and
-            name[name.len - suffix.len - 1] == '.');
-}
-
-fn labels(name: []const u8) usize {
-    var count: usize = 1;
-    for (name) |c| if (c == '.') {
-        count += 1;
-    };
-    return count;
 }
 
 fn validBase(url: []const u8) bool {

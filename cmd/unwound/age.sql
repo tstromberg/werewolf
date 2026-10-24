@@ -60,7 +60,8 @@ END;
 -- One row for each external age check, including attempts that fail. This is
 -- intentionally independent of domain_age so LRU eviction does not erase the
 -- first request that caused an RDAP/crt.sh lookup. A scheduled refresh has no DNS
--- request. pid/exe/netns are NULL until independently verified by the kernel.
+-- request. Attribution stops at the kernel-bound socket UID. The process
+-- columns remain NULL and are retained for schema compatibility.
 CREATE TABLE IF NOT EXISTS age_check (
     id INTEGER PRIMARY KEY,
     domain TEXT NOT NULL COLLATE BINARY,
@@ -114,8 +115,8 @@ END;
 
 -- Check history is bounded independently of the indefinitely retained LRU
 -- evidence rows. Prune a batch only when the table grows past 120,000 checks;
--- never remove a cached domain's latest check. The single writer also caps
--- database bytes and checkpoints WAL during maintenance.
+-- never remove a cached domain's latest check. These row limits are what
+-- bound the database's size; SQLite's automatic checkpoint bounds its WAL.
 CREATE TRIGGER IF NOT EXISTS age_check_limit AFTER INSERT ON age_check
 WHEN (SELECT count(*) FROM age_check) > 120000
 BEGIN

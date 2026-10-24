@@ -2,6 +2,7 @@
 //! Only that worker may construct a Db; the DNS frontend never links SQLite.
 const std = @import("std");
 const age = @import("age.zig");
+const ipc = @import("age_ipc.zig");
 
 const sqlite3 = opaque {};
 const sqlite3_stmt = opaque {};
@@ -51,7 +52,7 @@ pub const Trigger = struct {
     dns_id: u16,
     qname: []const u8,
     qtype: u16,
-    transport: enum { udp, tcp },
+    transport: ipc.Transport,
     source_label: []const u8,
     service_uid: i64,
     policy_namespace: []const u8,
@@ -63,8 +64,8 @@ pub const Result = struct {
     finished_at: i64,
     rdap_result: enum { valid, unknown, @"error" },
     crtsh_result: ?enum { history, none, @"error" } = null,
-    source: enum { rdap, crtsh, none },
-    status: enum { valid, history, unknown, @"error" },
+    source: age.Source,
+    status: age.Status,
     registered_at: ?i64 = null,
     effective_at: ?i64 = null,
     ct_first_seen_at: ?i64 = null,
@@ -283,24 +284,8 @@ pub const Db = struct {
         const status = columnText(s.handle, 1) orelse return error.Corrupt;
         const evidence: age.Cached = .{
             .domain = domain,
-            .source = if (std.mem.eql(u8, source, "rdap"))
-                .rdap
-            else if (std.mem.eql(u8, source, "crtsh"))
-                .crtsh
-            else if (std.mem.eql(u8, source, "none"))
-                .none
-            else
-                return error.Corrupt,
-            .status = if (std.mem.eql(u8, status, "valid"))
-                .valid
-            else if (std.mem.eql(u8, status, "history"))
-                .history
-            else if (std.mem.eql(u8, status, "unknown"))
-                .unknown
-            else if (std.mem.eql(u8, status, "error"))
-                .@"error"
-            else
-                return error.Corrupt,
+            .source = std.meta.stringToEnum(age.Source, source) orelse return error.Corrupt,
+            .status = std.meta.stringToEnum(age.Status, status) orelse return error.Corrupt,
             .registered_at = columnOptionalInt(s.handle, 2),
             .effective_at = columnOptionalInt(s.handle, 3),
             .ct_first_seen_at = columnOptionalInt(s.handle, 4),
@@ -308,11 +293,7 @@ pub const Db = struct {
         };
         return .{
             .decision = .{
-                .source = switch (evidence.source) {
-                    .rdap => .rdap,
-                    .crtsh => .crtsh,
-                    .none => .none,
-                },
+                .source = evidence.source,
                 .verdict = age.cachedVerdict(evidence, domain, now),
             },
             .retry_after = sqlite3_column_int64(s.handle, 6),

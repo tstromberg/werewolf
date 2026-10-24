@@ -19,8 +19,11 @@ const dns = @import("dns");
 const wire = @import("wire.zig");
 const Policy = @import("policy.zig").Policy;
 const screen = @import("screen.zig");
+const endpoints = @import("endpoints.zig");
 const cache = @import("cache.zig");
 const upstream = @import("upstream.zig");
+const needsAge = @import("policy.zig").needsAge;
+const age = @import("age.zig");
 const age_ipc = @import("age_ipc.zig");
 const age_gate = @import("age_gate.zig");
 const age_worker = @import("age_worker.zig");
@@ -30,7 +33,6 @@ const frontend_id = 53;
 pub const upstream_id = 54;
 const policy_path = dns.policy_path;
 const log_socket = "/run/syslog/dev-log";
-const age_marker = "/usr/share/werewolf/age-enforce";
 const age_marker_text = "enforce\n";
 const max_policy = 256 * 1024;
 
@@ -94,9 +96,17 @@ fn run() !void {
         linux.close_range(3, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false }),
         "close inherited files",
     );
-    try policy.parse(try readPolicy());
-    const local_validator = try readLocalValidator();
-    const enforce_age = try readAgeMarker();
+    try policy.parse((readRootFile(policy_path, &policy_text, "policy") catch
+        return error.UnsafePolicy) orelse return error.NoPolicy);
+    // The upstream file must independently name the same loopback resolver.
+    const local_validator = readMarker(
+        dns.local_validator_path,
+        dns.local_validator_text,
+        "local validator",
+    ) catch return error.LocalValidator;
+    // Without the age marker, unwound only observes domain age.
+    const enforce_age = readMarker(dns.age_marker_path, age_marker_text, "age marker") catch
+        return error.AgeMarker;
     const udp = try listener(linux.SOCK.DGRAM);
     const tcp = try listener(linux.SOCK.STREAM);
     _ = try sys(linux.listen(tcp, 64), "listen");
@@ -184,37 +194,13 @@ fn run() !void {
     f.serve();
 }
 
-/// An absent image marker keeps observations only. A present marker must be
-/// immutable image data; a malformed marker fails startup rather than
-/// silently disabling the gate.
-fn readAgeMarker() !bool {
-    const fd = linux.open(age_marker, .{
-        .ACCMODE = .RDONLY,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0);
-    switch (linux.errno(fd)) {
-        .NOENT => return false,
-        .SUCCESS => {},
-        else => return error.AgeMarker,
-    }
-    defer _ = linux.close(@intCast(fd));
-    var st: linux.Statx = undefined;
-    _ = try sys(
-        linux.statx(
-            @intCast(fd),
-            "",
-            linux.AT.EMPTY_PATH,
-            .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
-            &st,
-        ),
-        "stat age marker",
-    );
-    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
-        st.size != age_marker_text.len) return error.AgeMarker;
-    var buf: [age_marker_text.len]u8 = undefined;
-    const n = try sys(linux.read(@intCast(fd), &buf, buf.len), "read age marker");
-    if (n != buf.len or !std.mem.eql(u8, &buf, age_marker_text)) return error.AgeMarker;
+/// readMarker reports whether the image ships the marker at path. A marker
+/// must be immutable image data holding exactly text; any other fails
+/// startup rather than silently changing what unwound does.
+fn readMarker(path: [*:0]const u8, comptime text: []const u8, comptime what: []const u8) !bool {
+    var buf: [text.len + 1]u8 = undefined;
+    const got = try readRootFile(path, &buf, what) orelse return false;
+    if (!std.mem.eql(u8, got, text)) return error.BadMarker;
     return true;
 }
 
@@ -237,14 +223,12 @@ fn connectAge() !i32 {
     return fd;
 }
 
-/// readPolicy reads the image's compiled network policy, which must be
-/// root's and unwritable by anyone else.
-fn readPolicy() ![]const u8 {
-    const fd: i32 = @intCast(try sys(linux.open(policy_path, .{
-        .ACCMODE = .RDONLY,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0), "open policy"));
+/// readRootFile reads all of path, which must be a regular file of root's
+/// that no one else may write and shorter than buf, or null if there is none.
+pub fn readRootFile(path: [*:0]const u8, buf: []u8, comptime what: []const u8) !?[]const u8 {
+    const opened = linux.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+    if (linux.errno(opened) == .NOENT) return null;
+    const fd: i32 = @intCast(try sys(opened, "open " ++ what));
     defer _ = linux.close(fd);
     var st: linux.Statx = undefined;
     _ = try sys(
@@ -255,60 +239,18 @@ fn readPolicy() ![]const u8 {
             .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
             &st,
         ),
-        "stat policy",
+        "stat " ++ what,
     );
     if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
-        st.size >= max_policy)
-        return error.UnsafePolicy;
+        st.size >= buf.len) return error.UnsafeFile;
     var got: usize = 0;
-    while (got < policy_text.len) {
-        const n = try sys(
-            linux.read(fd, policy_text[got..].ptr, policy_text.len - got),
-            "read policy",
-        );
+    while (got < buf.len) {
+        const n = try sys(linux.read(fd, buf[got..].ptr, buf.len - got), "read " ++ what);
         if (n == 0) break;
         got += n;
     }
-    if (got != st.size) return error.UnsafePolicy;
-    return policy_text[0..got];
-}
-
-/// readLocalValidator accepts only a root-owned immutable form marker. The
-/// upstream file must independently name the same loopback resolver.
-fn readLocalValidator() !bool {
-    const fd = linux.open(dns.local_validator_path, .{
-        .ACCMODE = .RDONLY,
-        .NOFOLLOW = true,
-        .CLOEXEC = true,
-    }, 0);
-    switch (linux.errno(fd)) {
-        .NOENT => return false,
-        .SUCCESS => {},
-        else => return error.LocalValidator,
-    }
-    defer _ = linux.close(@intCast(fd));
-    var st: linux.Statx = undefined;
-    _ = try sys(linux.statx(
-        @intCast(fd),
-        "",
-        linux.AT.EMPTY_PATH,
-        .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
-        &st,
-    ), "stat local validator");
-    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG or
-        st.size != dns.local_validator_text.len) return error.LocalValidator;
-    var buf: [dns.local_validator_text.len]u8 = undefined;
-    var have: usize = 0;
-    while (have < buf.len) {
-        const n = try sys(
-            linux.read(@intCast(fd), buf[have..].ptr, buf.len - have),
-            "read local validator",
-        );
-        if (n == 0) return error.LocalValidator;
-        have += n;
-    }
-    if (!std.mem.eql(u8, &buf, dns.local_validator_text)) return error.LocalValidator;
-    return true;
+    if (got != st.size) return error.UnsafeFile;
+    return buf[0..got];
 }
 
 fn listener(kind: u32) !i32 {
@@ -524,19 +466,19 @@ const Frontend = struct {
     fn domainUpdate(f: *Frontend) void {
         var buf: [255]u8 = undefined;
         const rc = linux.recvfrom(f.domain_channel, &buf, buf.len, linux.MSG.TRUNC, null, null);
-        if (linux.errno(rc) != .SUCCESS or rc < 1 or rc > buf.len or
-            buf[0] != rc - 1 or !policy.setSystemDomain(buf[1..rc]))
-        {
-            f.say("{{\"event\":\"system_domain_error\",\"rc\":{d},\"errno\":\"{t}\",\"length\":{" ++
-                "d}}}", .{
-                rc,
-                linux.errno(
-                    rc,
-                ),
-                if (linux.errno(rc) == .SUCCESS and rc > 0 and rc <= buf.len) buf[0] else 0,
-            });
+        const err = linux.errno(rc);
+        const got = err == .SUCCESS and rc > 0 and rc <= buf.len;
+        if (!got or buf[0] != rc - 1 or !policy.setSystemDomain(buf[1..rc])) {
+            f.say("{{\"event\":\"system_domain_error\",\"rc\":{d},\"errno\":\"{t}\"," ++
+                "\"length\":{d}}}", .{ rc, err, if (got) buf[0] else 0 });
             f.fail("system domain channel");
         }
+        // DHCP is not trusted to open a public suffix, such as co.uk, or a
+        // hosting provider's tenants to every service without age checks.
+        if (policy.system_domain) |*d| if (!age.exemptable(d.text(), age.psl)) {
+            f.say("{{\"event\":\"system_domain_refused\",\"name\":\"{s}\"}}", .{d.text()});
+            policy.system_domain = null;
+        };
         f.say("{{\"event\":\"system_domain\",\"name\":\"{s}\"}}", .{
             if (policy.system_domain) |*d| d.text() else "",
         });
@@ -663,7 +605,9 @@ const Frontend = struct {
             };
         };
         const d = policy.decide(s, &q.name, q.type);
-        if (!d.allow) return f.refuse(client, s, &q, @tagName(d.why), d.line, .{});
+        if (!d.allow) return f.refuse(client, s, &q, @tagName(d.why), d.line, .{
+            .detail = if (d.why == .endpoint) @tagName(endpoints.reason(q.name.text()).?) else null,
+        });
         const t = wire.Type.from(q.type).?;
         const screened = d.why == .screened or d.why == .system_domain;
         if (screened) if (screens[s].ask(&screen_key, q.name.text(), now())) |r| {
@@ -674,12 +618,16 @@ const Frontend = struct {
                 .bits = r.bits,
             });
         };
-        const age_required = @import("policy.zig").needsAge(d.why);
+        const age_required = needsAge(d.why);
+        const gated = age_required and f.enforce_age;
         if (age_required and !f.enforce_age) f.observeAge(s, &q, d.line, t, client);
-        if (!age_required or !f.enforce_age) {
+        if (!gated) {
             if (caches[s].find(q.name.text(), t, now())) |e| {
                 f.stats.cached += 1;
                 const records = e.records(&q.name, now(), &f.records);
+                const cached: Slot = .{ .service = s, .name = q.name, .type = t };
+                if (f.forbiddenAlias(&cached, records)) |to|
+                    return f.refuse(client, s, &q, "alias", d.line, .{ .alias = &to });
                 f.audit(s, &q.name, q.type, true, @tagName(d.why), d.line, .{
                     .rcode = e.rcode,
                     .answers = records.len,
@@ -723,8 +671,8 @@ const Frontend = struct {
             .type = t,
             .line = d.line,
             .screened = screened,
-            .age_required = age_required and f.enforce_age,
-            .stage = if (age_required and f.enforce_age) .age else .upstream,
+            .age_required = gated,
+            .stage = if (gated) .age else .upstream,
             .follows = out,
             .start = now(),
             .seq = f.seq,
@@ -734,7 +682,9 @@ const Frontend = struct {
             f.stats.merged += 1;
             return;
         }
-        if (slot.stage == .age) f.sendAge(i) else f.sendUpstream(i);
+        if (!gated) return f.sendUpstream(i);
+        if (!f.sendAge(&slotAgeRequest(slot)))
+            f.settle(i, false, .refused, &.{}, "age", .{ .detail = "queue_full" });
     }
 
     fn sendUpstream(f: *Frontend, i: usize) void {
@@ -763,10 +713,11 @@ const Frontend = struct {
         };
     }
 
-    fn sendAge(f: *Frontend, i: usize) void {
-        const request = slotAgeRequest(&f.slots[i]);
+    /// sendAge asks the age worker about request. A full channel loses it,
+    /// counted in age_lost; any other failure ends the frontend.
+    fn sendAge(f: *Frontend, request: *const age_ipc.Request) bool {
         var buf: [age_ipc.max_len]u8 = undefined;
-        const packet = age_ipc.encode(&buf, &request);
+        const packet = age_ipc.encode(&buf, request);
         const sent = linux.sendto(
             f.age_channel,
             packet.ptr,
@@ -777,14 +728,13 @@ const Frontend = struct {
         );
         if (linux.errno(sent) == .AGAIN) {
             f.stats.age_lost += 1;
-            f.settle(i, false, .refused, &.{}, "age", .{ .detail = "queue_full" });
-        } else if (linux.errno(sent) != .SUCCESS or sent != packet.len) {
-            f.fail("age worker channel");
+            return false;
         }
+        if (linux.errno(sent) != .SUCCESS or sent != packet.len) f.fail("age worker channel");
+        return true;
     }
 
     fn ageAnswers(f: *Frontend) void {
-        const psl = @embedFile("data/public_suffix_list.ascii.dat");
         for (0..64) |_| {
             var packet: [age_ipc.response_max + 1]u8 = undefined;
             const rc = linux.recvfrom(
@@ -806,7 +756,7 @@ const Frontend = struct {
             } else continue;
             const slot = &f.slots[i];
             const request = slotAgeRequest(slot);
-            switch (age_gate.decide(&request, &age_reply, psl)) {
+            switch (age_gate.decide(&request, &age_reply, age.psl)) {
                 .ignore => continue,
                 .refuse_young => f.settle(i, false, .refused, &.{}, "age", .{ .detail = "young" }),
                 .refuse_unknown => f.settle(
@@ -823,7 +773,7 @@ const Frontend = struct {
                     if (caches[slot.service].find(slot.name.text(), slot.type, now())) |e| {
                         f.stats.cached += 1;
                         const records = e.records(&slot.name, now(), &f.records);
-                        if (forbiddenAlias(slot, records)) |to| {
+                        if (f.forbiddenAlias(slot, records)) |to| {
                             f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
                             continue;
                         }
@@ -848,7 +798,7 @@ const Frontend = struct {
         client: Client,
     ) void {
         f.age_seq +%= 1;
-        const request: age_ipc.Request = .{
+        _ = f.sendAge(&.{
             .request_id = f.age_seq,
             .dns_id = q.id,
             .qtype = t,
@@ -860,22 +810,7 @@ const Frontend = struct {
                 .tcp => .tcp,
             },
             .name = q.name,
-        };
-        var buf: [age_ipc.max_len]u8 = undefined;
-        const packet = age_ipc.encode(&buf, &request);
-        const sent = linux.sendto(
-            f.age_channel,
-            packet.ptr,
-            packet.len,
-            linux.MSG.NOSIGNAL,
-            null,
-            0,
-        );
-        if (linux.errno(sent) == .AGAIN) {
-            f.stats.age_lost += 1;
-        } else if (linux.errno(sent) != .SUCCESS or sent != packet.len) {
-            f.fail("age observer channel");
-        }
+        });
     }
 
     fn refuse(
@@ -911,18 +846,23 @@ const Frontend = struct {
         return @as(u16, gen) << 8 | @as(u16, @intCast(i));
     }
 
-    fn forbiddenAlias(slot: *const Slot, records: []const wire.Record) ?wire.Name {
-        if (slot.type == .cname) return null;
+    /// A checked origin's aliases stay in its registered domain. An exempt
+    /// origin does not confer its exemption on a screened target.
+    fn forbiddenAlias(f: *Frontend, slot: *const Slot, records: []const wire.Record) ?wire.Name {
         for (records) |*record| {
             if (record.type != .cname) continue;
             const to = wire.target(record);
-            if (!policy.decide(slot.service, &to, @backingInt(slot.type)).allow or
-                (slot.age_required and
-                    !age_gate.sameRegistered(
-                        slot.name.text(),
-                        to.text(),
-                        @embedFile("data/public_suffix_list.ascii.dat"),
-                    ))) return to;
+            const target = policy.decide(slot.service, &to, @backingInt(slot.type));
+            // A direct CNAME query does not follow the alias, but must not
+            // return an excluded endpoint without a named grant either.
+            if (slot.type == .cname) {
+                if (target.why == .endpoint) return to;
+                continue;
+            }
+            if (!target.allow) return to;
+            if (slot.age_required) {
+                if (!age_gate.sameRegistered(slot.name.text(), to.text(), age.psl)) return to;
+            } else if (f.enforce_age and needsAge(target.why)) return to;
         }
         return null;
     }
@@ -957,7 +897,7 @@ const Frontend = struct {
             var a: wire.Answer = undefined;
             wire.parseResponse(msg, asked, &a) catch f.fail("upstream sent garbage");
             a.authenticated = a.authenticated and f.trust_ad;
-            if (forbiddenAlias(slot, a.slice())) |to| {
+            if (f.forbiddenAlias(slot, a.slice())) |to| {
                 f.settle(i, false, .refused, &.{}, "alias", .{ .alias = &to });
                 continue;
             }

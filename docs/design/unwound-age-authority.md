@@ -1,8 +1,7 @@
 # Authority for domain-age evidence
 
-Status: implemented with a protected mount view and a native fixture. Full
-image boot validation remains a release check; see the
-[domain-age design](unwound-age.md).
+Status: implemented with a protected mount view and checked in native
+fixtures and booted images. See the [domain-age design](unwound-age.md).
 
 ## Request provenance
 
@@ -16,13 +15,19 @@ The request fields in `age_check` are immutable after insertion. A cached
 domain may pin only a check for that same registered domain; completion and
 provider-result fields may be updated when the external check finishes.
 
-The schema has nullable PID, process start time, executable and network
-namespace inode fields. `provenance=uid_only` requires them to be NULL. A
-DNS socket does not identify the individual process that sent a datagram,
-and this image has no BPF syscall or tracing support. Do not infer a PID by
-racing `/proc` or trusting a self-reported name. Exact process attribution
-requires a separate kernel-backed provenance path, tested with fork/exec and
-socket handoff, before those fields may be filled.
+Decided 2026-10-23: attribution stops at the kernel-bound socket UID and
+policy namespace. A socket can be inherited or passed to another process;
+its service identity does not identify the current sender. Do not infer a
+PID by racing `/proc` or trusting a self-reported name. The image keeps BPF
+and tracing disabled and adds no kernel extension for process attribution.
+
+The schema retains nullable PID, process start time, executable and network
+namespace inode fields for compatibility. The writer always records
+`provenance=uid_only` and leaves all four fields NULL. Integration tests pass
+UDP and TCP sockets to another UID after their creator exits, then check
+the exact DNS request, original socket UID, source label and policy namespace
+in SQL. Storage tests refuse invented process fields and later changes to
+the recorded identity.
 
 ## SQLite authority
 
@@ -42,8 +47,19 @@ from dated evidence. Its host test uses the pinned SQLite code; run
 `make check-unwound-age-store`. The observe-only child logs `age_observe` with
 DNS ID, QNAME, qtype, transport, source label, UID and policy generation.
 A full channel increments `age_lost`; assigned system domains and explicit
-grants bypass it. The separate authority handles the SQLite cache and bounded
-HTTPS checks in one writer process.
+grants bypass it.
+
+The separate authority splits its work so no process holds more than it
+needs. The supervisor never opens the database. It restarts the writer, and
+for each check the writer asks for it forks a fetch child, kills it after 10
+seconds whatever it is doing, and relays its fixed 26-byte record. The writer
+holds SQLite and unwound's channel; Landlock leaves it no TCP connect, and its
+seccomp filter no socket, fork or signal. A fetch child keeps one pipe, reads
+only `/etc` and the resolver state, connects only to TCP 53 and 443, and its
+filter allows DNS, HTTPS and that pipe. A crashed or stalled fetch is recorded
+as an RDAP outage and refused; unwound keeps running. At most four checks run
+at once, one per service, taking each service's oldest question in turn, and
+questions for a domain already being checked wait on that check.
 
 The frontend independently derives the PSL boundary and refuses a mature
 reply naming another registered domain. An immutable image marker,

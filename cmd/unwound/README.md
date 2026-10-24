@@ -59,6 +59,16 @@ per service by the hour, hold each answer at least five minutes (one let go earl
 its name the budget again), and keep at most four records of public addresses or
 well-shaped names, with no aliases.
 
+All broad `*` grants, including `unfiltered`, refuse shared callback, request
+capture, tunnel and address-to-DNS domains from the compiled
+[endpoint list](endpoints.zig), at the apex and below it. They also refuse
+hostnames beginning with dotted/dashed IPv4, integer/hex IPv4 or dashed IPv6,
+regardless of the DNS suffix. Ordinary reverse PTR names remain available.
+Exact names and `*.domain` grants override these defaults for that service
+and the granted query types. The assigned system domain does not override them.
+Refusal precedes cache, age checks and upstream forwarding; alias targets
+are checked too, including cached aliases and direct CNAME answers.
+
 Audit records are JSON datagrams to syslogd, `unwound: {"event":"query",...}`,
 with the UID, name, type, decision, why, rule line, policy generation, rcode
 and latency. A question that gets no answer, or less of one, says why:
@@ -66,6 +76,7 @@ and latency. A question that gets no answer, or less of one, says why:
 | why | detail | answer |
 |---|---|---|
 | `no_grant`, `unsupported`, `alias` | (the type, or `alias`'s target) | REFUSED |
+| `endpoint` | `callback_domain`, `ip_prefix` | REFUSED |
 | `tunnel` | `long_name`, `many_labels`, `long_label`, `random_label`, `random_name`, with `bits` | REFUSED |
 | `budget` | `new_sites`, `new_names` | REFUSED |
 | `busy` | `slots`, `service_slots`, `channel`, `connections` | SERVFAIL |
@@ -84,6 +95,9 @@ TCP connections accept pipelined queries, answering one frame at a time.
 
 Screening may refuse generated names that need an exact grant. A service
 granted a name trusts whoever controls it.
+The endpoint list includes legitimate testing and development services; grant
+their names explicitly when required. It cannot identify every callback
+service or prevent use of literal IPs or DNS over allowed HTTPS connections.
 
 ## Security Considerations
 

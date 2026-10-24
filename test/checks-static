@@ -9,5 +9,6 @@ unseen refused          werewolf: network: .*refused
 unseen no-network       werewolf: no network
 ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
 ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
-ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
+ok  local-resolver   [ "$(readlink /etc/resolv.conf)" = /run/werewolf/network/resolv.conf ] && [ "$(cat /etc/resolv.conf)" = 'nameserver 127.0.0.53' ]
+ok  upstream-resolver [ "$(cat /run/werewolf/network/upstream)" = 'nameserver 10.0.2.3' ]
 ok  no-dhcp          [ ! -e /run/werewolf/network/lease.json ]

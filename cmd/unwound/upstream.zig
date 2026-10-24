@@ -210,8 +210,9 @@ fn refreshDomain() void {
     if (u.domain_checked) |last| if (t - last < reread_ms) return;
     u.domain_checked = t;
     var chosen: [253]u8 = undefined;
-    const configured = readDomain(dns.config_domain_name, &chosen);
-    const len = if (configured > 0) configured else readDomain(dns.dhcp_domain_name, &chosen);
+    // Root writes the config domain; dhcp-client (73), the DHCP one.
+    const configured = readDomain(dns.config_domain_name, 0, &chosen);
+    const len = if (configured > 0) configured else readDomain(dns.dhcp_domain_name, 73, &chosen);
     if (u.domain_sent and len == u.domain_len and
         std.mem.eql(u8, chosen[0..len], u.domain[0..u.domain_len])) return;
     var packet: [254]u8 = undefined;
@@ -224,7 +225,7 @@ fn refreshDomain() void {
     u.domain_sent = true;
 }
 
-fn readDomain(comptime file: [:0]const u8, out: *[253]u8) usize {
+fn readDomain(comptime file: [:0]const u8, owner: u32, out: *[253]u8) usize {
     const fd = linux.openat(
         u.network,
         file,
@@ -242,7 +243,7 @@ fn readDomain(comptime file: [:0]const u8, out: *[253]u8) usize {
         &st,
     )) != .SUCCESS or
         st.mode & linux.S.IFMT != linux.S.IFREG or st.mode & 0o022 != 0 or
-        st.uid != (if (std.mem.eql(u8, file, dns.config_domain_name)) @as(u32, 0) else 73) or
+        st.uid != owner or
         st.size > 254) return 0;
     var raw: [255]u8 = undefined;
     const rc = linux.read(@intCast(fd), &raw, raw.len);

@@ -3,24 +3,19 @@
 //! database and socket directories.
 const std = @import("std");
 const linux = std.os.linux;
+const dns = @import("dns");
 const init = @import("init.zig");
 
 const program = "/usr/lib/werewolf/unwound-age";
-const marker = "/usr/share/werewolf/age-enforce";
-const socket_dir = "/run/werewolf-age";
-const durable_dir = "/data/svc/unwound-age";
-const temporary_dir = "/run/werewolf-age-cache";
 
 pub fn start() !void {
-    if (!init.exists(marker)) return;
+    if (!init.exists(dns.age_marker_path)) return;
     if (!init.executable(program)) return error.MissingAgeAuthority;
-    const db_dir: [:0]const u8 = if (init.exists("/run/werewolf/nodata"))
-        temporary_dir
-    else
-        durable_dir;
-    if (std.mem.eql(u8, db_dir, durable_dir)) try directory("/data/svc", 0o755, null);
-    try directory(db_dir, 0o700, 55);
-    try directory(socket_dir, 0o755, 0);
+    const ephemeral = init.exists("/run/werewolf/nodata");
+    const db_dir: [:0]const u8 = if (ephemeral) dns.age_temporary_dir else dns.age_durable_dir;
+    if (!ephemeral) try directory("/data/svc", 0o755, null);
+    try directory(db_dir, 0o700, dns.age_id);
+    try directory(dns.age_socket_dir, 0o755, 0);
 
     var pair: [2]i32 = undefined;
     try okay(linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &pair));
@@ -50,7 +45,7 @@ pub fn start() !void {
     if (linux.read(pair[0], &response, 1) != 1 or response[0] != 'R')
         return error.AgeAuthorityFailed;
     try readOnlyBind(db_dir);
-    try readOnlyBind(socket_dir);
+    try readOnlyBind(dns.age_socket_dir);
     if (linux.write(pair[0], "G", 1) != 1) return error.AgeAuthorityFailed;
 }
 

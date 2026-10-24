@@ -5,7 +5,7 @@ const std = @import("std");
 const age = @import("age.zig");
 const bootstrap = @import("bootstrap.zig");
 
-const rdap_bootstrap = @embedFile("data/rdap-dns.json");
+pub const rdap_bootstrap = @embedFile("data/rdap-dns.json");
 pub const rdap_max = 64 << 10;
 pub const crtsh_max = 256 << 10;
 
@@ -68,7 +68,7 @@ fn unavailableError(err: anyerror) bool {
 /// crt.sh is consulted only after an RDAP transport/server availability
 /// failure. The caller still validates its JSON and date with age.crtsh.
 pub fn crtsh(client: *std.http.Client, domain: []const u8, body: *[crtsh_max]u8) ?[]const u8 {
-    if (!validDomain(domain)) return null;
+    if (!bootstrap.validName(domain)) return null;
     var url_buf: [320]u8 = undefined;
     const url = std.mem.print(&url_buf, "https://crt.sh/?q={s}&output=json", .{domain}) catch
         return null;
@@ -94,24 +94,11 @@ fn get(client: *std.http.Client, url: []const u8, body: []u8) !Response {
     return .{ .status = response.status, .body = writer.buffered() };
 }
 
-fn validDomain(domain: []const u8) bool {
-    if (domain.len == 0 or domain.len > 253 or domain[0] == '.' or
-        domain[domain.len - 1] == '.') return false;
-    var labels = std.mem.splitScalar(u8, domain, '.');
-    while (labels.next()) |label| {
-        if (label.len == 0 or label.len > 63 or label[0] == '-' or
-            label[label.len - 1] == '-') return false;
-        for (label) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-')
-            return false;
-    }
-    return true;
-}
-
 test "only normalized domain names may initiate a CT request" {
     const t = std.testing;
-    try t.expect(validDomain("example.com"));
+    try t.expect(bootstrap.validName("example.com"));
     for ([_][]const u8{ "", ".com", "example.com.", "EXAMPLE.COM", "a/b.com", "-x.com" }) |bad|
-        try t.expect(!validDomain(bad));
+        try t.expect(!bootstrap.validName(bad));
     var client: std.http.Client = undefined;
     var url: [512]u8 = undefined;
     var rdap_body: [rdap_max]u8 = undefined;
