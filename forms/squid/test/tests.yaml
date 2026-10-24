@@ -112,8 +112,6 @@ suites:
             expect:
               connect_rules:
                 - tcp/443 public
-                - tcp/53
-                - udp/53
           - exec:
               argv:
                 - /usr/lib/werewolf/test-squid-policy

@@ -72,9 +72,7 @@ suites:
               user: miniflux
               connect_rules:
                 - tcp/443 public
-                - tcp/53
                 - tcp/80 public
-                - udp/53
       - name: miniflux-unauth
         steps:
           - fetch:

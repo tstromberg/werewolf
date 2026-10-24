@@ -5,6 +5,10 @@
 # takes --build, this checkout's forms, so none needs werewolf's repository.
 howl=$1 smoke=$2/adhoc/smoke
 fail() { echo "howl-smoke: $1"; exit 1; }
+# A long validator refusal must not disappear when it exceeds the output buffer.
+long=$(awk 'BEGIN { for (i=0; i<3000; i++) printf "x"; printf "end-of-long-diagnostic" }')
+out=$("$howl" "$long" 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q 'end-of-long-diagnostic' || fail "long diagnostic disappeared"
 "$howl" versions -h >/dev/null 2>&1 || fail "howl versions -h"
 out=$("$howl" run --with playground --version 20261014T232908Z --build 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q -- '--version requires' || fail "version silently selected a source build"

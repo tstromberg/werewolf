@@ -28,10 +28,8 @@ suites:
               connect_rules:
                 - tcp/443 public
                 - tcp/465 public
-                - tcp/53
                 - tcp/587 public
                 - tcp/80 public
-                - udp/53
       - name: mm-admin
         steps:
           - fetch:

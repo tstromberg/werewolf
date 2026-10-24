@@ -64,10 +64,10 @@ suites:
         steps:
           - service: mastodon
             expect:
-              connect_rules: [tcp/443 public, tcp/80 public, tcp/53, udp/53]
+              connect_rules: [tcp/443 public, tcp/80 public]
           - service: mastodon-jobs
             expect:
-              connect_rules: [tcp/443 public, tcp/80 public, tcp/587 public, tcp/53, udp/53]
+              connect_rules: [tcp/443 public, tcp/80 public, tcp/587 public]
       - name: jobs-smtp
         steps:
           - file: /run/svc/mastodon-jobs/site

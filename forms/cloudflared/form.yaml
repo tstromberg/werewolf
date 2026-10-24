@@ -28,7 +28,10 @@ services:
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/2000 loopback]
     connect: [udp/7844 tcp/7844 tcp/443 tcp/80]
-    lookup: "*"
+    lookup:
+      - "*"
+      # Edge discovery and protocol/feature selection need SRV and TXT.
+      - "*.argotunnel.com A AAAA TXT SRV"
     secret: TUNNEL_TOKEN /run/config/cloudflared/token
     memory: 256
     nofile: 4096

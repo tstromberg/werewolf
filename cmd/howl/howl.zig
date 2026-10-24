@@ -179,8 +179,9 @@ fn fatal(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
 
 pub fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [2048]u8 = undefined;
-    const line = std.mem.print(&buf, "howl: " ++ fmt ++ "\n", args) catch return;
-    Io.File.stderr().writeStreamingAll(io, line) catch {};
+    var out = Io.File.stderr().writerStreaming(io, &buf);
+    out.interface.print("howl: " ++ fmt ++ "\n", args) catch return;
+    out.interface.flush() catch {};
 }
 
 /// Why holds the reason a verb refused, which main prints as one line.
