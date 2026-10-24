@@ -2,12 +2,11 @@
 
 ## Summary
 
-cloud-metadata reads the instance's base64 config tar from user data and leaves a
-rewritten copy at `/run/werewolf/cloud/config.tar`. init runs `once` at boot:
-an unknown cloud, absent data or non-Werewolf data writes nothing and exits 0;
-errors exit 1. With no argument, the service polls once a minute where cloud config
-was accepted and republishes people's accounts on changes (`lib/people.zig`);
-elsewhere it stays down.
+cloud-metadata fetches a base64-encoded config tar from cloud instance user data.
+`once` rewrites it for init at `/run/werewolf/cloud/config.tar`. It exits 0 without
+writing on unknown clouds or non-werewolf data, and 1 on errors. With no argument,
+the service refetches cloud config each minute and updates accounts on changes
+(`lib/people.zig`); it stays down on machines without cloud config.
 
 ## Background
 

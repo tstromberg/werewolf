@@ -144,32 +144,4 @@ with the QEMU command as arguments and form values in the environment (`CHECK_EN
 the Makefile). Test attacks: a refused `cat /proc/1/mem` proves more than reading
 `ptrace_scope=3`. Make a check fail before trusting it to pass.
 
-## Debugging a failure
-
-A FAIL includes the last progress line, kernel error and host kernel/QEMU/CPU/load.
-Boots panic on 20-second CPU stalls or two-minute blocked tasks; unresponsive VMs
-dump every virtual CPU's state before failing.
-
-```sh
-make check-one FORM=playground REPEAT=20             # how often does it fail?
-make check-one FORM=playground REPEAT=20 ACCEL=tcg   # without the hypervisor
-BOOT_TIMEOUT=20 make check-minimal                   # see a hang sooner
-```
-
-`check-one` keeps failures as `FORM-one-N.log`. Boot timings cover kernel, disk, slot,
-root, init and seal and stay in `/run/werewolf/boot`. The console shows warnings and
-worse (`loglevel=5`); `dmesg` keeps every line.
-
-## CI
-
-[check.yml](../.github/workflows/check.yml) runs both host architectures, four `forms`
-shards, three `shellfree` shards and four platform groups.
-[test/ci-forms](../test/ci-forms) tests one form at a time, discards successful images,
-and keeps logs, locks, native results and failed images. Platform boots share CPUs
-within their memory budget; [test/ci-setup](../test/ci-setup) installs pinned tools.
-
-Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
-`make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.
-`make check-native` attacks roots in `systemd-nspawn` ([test/cage](../test/cage)).
-
-`make ci` uses a persistent 16 GiB KVM Lima VM; delete `werewolf-ci-24.04` to reset.
+For failure diagnosis and CI layout, see [Debugging and CI](testing-ci.md).
