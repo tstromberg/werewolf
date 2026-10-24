@@ -11,7 +11,7 @@ Werewolf's [allowances](../../forms/README.md) relax defaults; grants name resou
 ## Goals
 
 - Use service allowances without ordered allow/deny rules, modes or exceptions.
-- Screen arbitrary names from bounded local data; never wait for an Internet lookup.
+- Screen arbitrary names with bounded local work and isolated age lookups.
 
 ## Non-Goals
 
@@ -51,7 +51,6 @@ Bare `*` screens names; `unfiltered` removes only that line's screening. Require
 with it. The endpoint defaults still require a named grant even with `unfiltered`.
 Type limits, quotas, parsing, audit and local resolution through unwound
 still apply.
-Explicit name/type grants work during screening outages and fix false positives.
 The assigned system domain and its descendants are granted to every service
 with DNS enabled, including supported types beyond A and AAAA. The automatic
 grant retains endpoint and tunnel screening and bypasses the 90-day age gate.
@@ -61,13 +60,11 @@ only exact names, leading `*.` or bare `*`. No regex or substring matching.
 Screening uses bounded name shape, entropy, per-service name and site budgets,
 answer holding and answer trimming. Screened wildcards also require domain-age
 evidence. See the [implementation plan](unwound-plan.md) for the actual limits.
-Endpoint lists remain deferred.
 Apply grants to aliases before follow-up/return; upstreams may already follow them.
 
 Builder adds `lookup` alongside `connect`, derives UID/service identity, and emits
 immutable `lookup UID PATTERN TYPE... [unfiltered]` records, expanding defaults/`all`.
 It grants local resolver transport automatically; HTTP egress still needs `connect`.
-The single directive carries names, types and screening; no `allow` marker is needed.
 Unknown types/modifiers fail the build. No process-supplied namespace authorizes DNS.
 Allow service-scoped lookup grants for native/OCI services; reject shared service UIDs.
 Whole-service replacement replaces DNS grants too; do not merge inherited grants back.
@@ -84,24 +81,20 @@ and a shared service user are refused.
 
 ## Age and endpoint evidence
 
-The [age design](unwound-age.md) describes the enforced gate. A reviewed
-endpoint list may identify
-known out-of-band DNS endpoints,
-but an entry would express risk policy rather than prove maliciousness.
+The [age design](unwound-age.md) describes enforcement. Endpoint lists identify
+risk policy, rather than prove maliciousness.
 
 Age defaults to 90 days from the current registry [RDAP] registration event.
 An RDAP answer can authorize from cache for seven days; the row can remain
 stored after that but needs a new check to authorize again.
 The [PSL] ICANN boundary identifies the registered domain; PRIVATE tenants
-need their own grant. On RDAP availability failure, crt.sh may provide a
-marked, 24-hour provisional decision from old CT history. It cannot override
-a young or ambiguous RDAP answer. One isolated age authority uses [RDAP bootstrap]
-over HTTPS and SQLite to retain the last 20,000 domains and the
-requests that caused external checks. DNS workers receive bounded verdicts
-over IPC. UID and service namespace come from the source label. A passed
-socket retains its service identity; individual process identity is not
-claimed. The local screen keeps its 3.5-bit entropy threshold and
-distinct-name budgets.
+need their own grant. On RDAP availability failure, crt.sh history can mark a
+domain young for 24 hours; it never authorizes maturity or overrides RDAP.
+One isolated authority uses [RDAP bootstrap] over HTTPS and SQLite to retain
+20,000 domains and their triggering requests. DNS workers receive bounded
+verdicts over IPC. Source labels establish UID and service namespace, including
+passed sockets; individual process identity is not claimed. The local screen
+keeps its 3.5-bit entropy threshold and distinct-name budgets.
 
 ## Drawbacks
 

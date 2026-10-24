@@ -27,8 +27,14 @@ for name in ['WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'UKI_ARGS', 'UKI_NATIVE']
 
 
 def run(args, label):
-    with (root / (label + '.log')).open('wb') as log:
-        subprocess.run(args, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+    path = root / (label + '.log')
+    try:
+        with path.open('wb') as log:
+            subprocess.run(args, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+    except subprocess.CalledProcessError:
+        print(f'ab-fixture: {label} failed; log: {path}', file=sys.stderr)
+        print(path.read_text(errors='replace')[-16000:], file=sys.stderr)
+        raise
 
 
 run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
@@ -45,7 +51,7 @@ name = 'provider-ab-' + mode + '-' + arch.replace('_', '-')
 form = root / name
 form.mkdir()
 (form / 'form.yaml').write_text('''base: prod-ssh
-packages: [openssl, caddy]
+packages: [openssl, caddy-werewolf]
 sshd:
   pubkey-accepted-algorithms: ssh-ed25519
 services:
