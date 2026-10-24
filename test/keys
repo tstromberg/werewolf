@@ -6,4 +6,4 @@
 set -eu
 rm -f "$1-key" "$1-key.pub" "$1-sk-key" "$1-sk-key.pub"
 ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f "$1-key"
-ssh-keygen -q -t ed25519-sk -w "$2" -N '' -C werewolf-check-sk -f "$1-sk-key"
+ssh-keygen -q -t ed25519-sk -w "$2" -O verify-required -N '' -C werewolf-check-sk -f "$1-sk-key"
