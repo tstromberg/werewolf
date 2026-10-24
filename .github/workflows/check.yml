@@ -235,11 +235,11 @@ jobs:
           persist-credentials: false
       - name: Restore public EFI stubs and check tools
         # checkout cleans out/, so these public build inputs must be restored
-        # every run. The second call installs any missing system tools without
-        # prompting, since CI has no interactive input.
+        # every run. System tools stay administrator-managed: the second call
+        # fails without installing anything if one is missing or out of date.
         run: |
           tools/install-deps -y stubs
-          tools/install-deps -y </dev/null
+          tools/install-deps </dev/null
           for tool in javac rustup; do
             command -v "$tool" >/dev/null || { echo "vm-arm64: no $tool on the runner" >&2; exit 1; }
           done
