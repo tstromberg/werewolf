@@ -8,12 +8,11 @@ nor `/boot` is lent as a mount: fixed operations use detached mounts and close t
 
 ## Background
 
-fence puts every process in a Landlock domain that refuses `mount`, `umount` and
-`pivot_root`, root's included. Three callers must still touch filesystems the machine
-does not keep mounted writable: slot-keep (the EFI entry, at commit), slot-update (a new
-slot and TPM boot state), and stage 3 (shutting `/data` and `/boot` down). init starts
-the broker before it execs fence, so the broker alone stays outside that domain.
-Programs ask through `lib/broker.zig`.
+fence forbids `mount`, `umount` and `pivot_root` for every process, including root.
+Three callers still need write access: slot-keep for the EFI entry, slot-update
+for a new slot and TPM boot state, and stage 3 to shut down `/data` and `/boot`.
+init starts the broker before fence, outside that domain. Callers use
+`lib/broker.zig`.
 
 ## Goals
 
@@ -30,9 +29,9 @@ Programs ask through `lib/broker.zig`.
 
 ## Detailed design
 
-- **The channels** are three `AF_UNIX`, `SOCK_SEQPACKET` socketpairs created by init:
-  descriptors `3` (`updater`), `4` (`keeper`) and `5` (`stage`) in the broker. Each
-  service closes the client descriptors of the other roles on startup.
+- **Channels**: init creates three `AF_UNIX`, `SOCK_SEQPACKET` socketpairs: broker
+  descriptors `3` (`updater`), `4` (`keeper`) and `5` (`stage`). Services close
+  other roles' client descriptors on startup.
 - **The EFI partition** (`werewolf.esp`'s FAT serial) is never attached. On `keeper`,
   the broker answers `esp-status` and `esp-commit`. On `updater`, it answers
   `esp-disarm` and `esp-arm` (one try of the other slot), `esp-inspect` (the other
@@ -41,10 +40,9 @@ Programs ask through `lib/broker.zig`.
   it). The entry's command line is digest-named too: the staging directory is writable
   by guest root, so unbound options would let root choose the trial boot's boot context.
   No asker names a path, a file, an entry, or its contents.
-- **The boot partition** (`werewolf.slots`'s ext4 UUID) is never attached either. On
-  `updater`, the broker mounts it detached, copies digest-checked staged files into
-  `/slot/{a,b}` (`slot-root`, `slot-decl`, `slot-meta`) or `/state/{0,1}`
-  (`slot-state`), syncs, and closes the mount.
+- **Boot partition** (`werewolf.slots`'s ext4 UUID): `updater` mounts it detached,
+  copies digest-checked staged files into `/slot/{a,b}` (`slot-root`, `slot-decl`,
+  `slot-meta`) or `/state/{0,1}` (`slot-state`), syncs, then closes the mount.
 - **Update reboot**: on `updater`, `reboot` sets two root-owned runit flags
   opened before confinement and wakes PID 1. Seccomp permits only those descriptors,
   modes and signal; the updater needs no filesystem override or signal capability.
@@ -95,10 +93,8 @@ Programs ask through `lib/broker.zig`.
 
 - **Never exits** once listening: without it no slot can be kept, and the machine falls
   back to the slot that last worked. A failing `poll` pauses 100 ms before retrying.
-- **Stalled clients** cannot block replies to other roles. Sends, including owner
-  descriptor replies, are nonblocking. A failed send closes that role's channel;
-  an empty packet or EOF also closes it. Replies are never silently dropped while
-  retaining a channel. `make check-mount-broker` exercises the real confined broker
-  in a private Linux mount namespace, including reply-queue saturation.
-- **Tested**: `check-slot`, `check-updater`, protected A/B lifecycle tests and every
-  shutdown.
+- **Stalled clients** cannot block other roles. Sends, including descriptor
+  replies, are nonblocking. Failed sends, empty packets and EOF close the role's
+  channel. `make check-mount-broker` tests reply-queue saturation in a private
+  Linux mount namespace.
+- **Tested**: `check-slot`, `check-updater`, protected A/B lifecycles and shutdown.

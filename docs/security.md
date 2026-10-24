@@ -158,9 +158,9 @@ image lacks, but can choose what boots next. `--dev` makes a local development i
 busybox-full, root SSH through a Howl-managed Ed25519 key, optional seal learning
 (refused calls logged, not blocked) and, with `werewolf.debug=1`, a root console shell
 without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/` and is passed by
-`howl ssh root@NAME`; it is separate from the keys used by playground. With both the checked debug
-command line and Howl's dev config marker, init mounts `/run/howl-dev` as executable RAM
-for developer SSH uploads. [Test iteration](design/local-test-iteration.md) uses SSH and
+`howl ssh root@NAME`; it is separate from playground's keys. With the checked
+debug line and Howl's dev marker, init mounts executable RAM at `/run/howl-dev`
+for SSH uploads. [Test iteration](design/local-test-iteration.md) uses SSH and
 `sh-shim`, without BusyBox, a console shell or seal learning, and confines a selected
 driver with its declared leash policy. Dev images require protections off:
 `--disable=secureboot,tpm,ipe`, and are never published. A root console fails posture.

@@ -1,8 +1,9 @@
 # Plex - Hardened VM
 
 [Plex Media Server](https://www.plex.tv/media-server-downloads/), behind Caddy,
-with a separate transcoder, callback proxy and media owner. The [manifest](form.yaml) defines
-the boundaries. [Image availability](../../docs/forms-catalog.md#images-and-downloads).
+with a separate transcoder, callback proxy and media owner. The
+[manifest](form.yaml) defines the boundaries.
+[Image availability](../../docs/forms-catalog.md#images-and-downloads).
 
 This form is experimental. The broker and callback boundary are under review.
 Normal account registration and playback through the confined VM have not yet
@@ -92,7 +93,8 @@ loopback adapter changes Plex's bind address; the firewall independently prevent
 external access to its internal ports.
 
 The form selects the private `musl-werewolf` runtime from
-[`packages/devel/musl`](../../../packages/devel/musl/README.md), retaining Plex's
+[`packages/devel/musl`](https://github.com/werewolf-linux/packages/tree/main/devel/musl),
+retaining Plex's
 musl ABI. It includes the upstream regex overflow fix and binds DNS sockets to
 loopback when all IPv4 resolvers are local. The package builds and runs resolver
 probes for successful answers, NXDOMAIN, nonlocal resolvers and mixed lists.
