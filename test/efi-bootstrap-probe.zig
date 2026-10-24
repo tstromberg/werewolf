@@ -43,6 +43,32 @@ fn run() !void {
     say("firmware revision={x}, UEFI revision={x}", .{
         efi.system_table.firmware_revision, efi.system_table.hdr.revision,
     });
+    const global: efi.Guid = .{
+        .time_low = 0x8be4df61,
+        .time_mid = 0x93ca,
+        .time_high_and_version = 0x11d2,
+        .clock_seq_high_and_reserved = 0xaa,
+        .clock_seq_low = 0x0d,
+        .node = .{ 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c },
+    };
+    inline for (.{ "SecureBoot", "SetupMode" }) |name| {
+        var buffer: [8]u8 = @splat(0);
+        const value = try efi.system_table.runtime_services.getVariable(
+            std.unicode.utf8ToUtf16LeStringLiteral(name),
+            &global,
+            &buffer,
+        );
+        if (value) |v| say(name ++ "={x}", .{v[0]}) else say(name ++ " absent", .{});
+    }
+    try keyVariable("PK", &global);
+    try keyVariable("KEK", &global);
+    const database: efi.Guid = .{
+        .time_low = 0xd719b2cb, .time_mid = 0x3d3a, .time_high_and_version = 0x4596,
+        .clock_seq_high_and_reserved = 0xa3, .clock_seq_low = 0xbc,
+        .node = .{ 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f },
+    };
+    try keyVariable("db", &database);
+    try keyVariable("dbx", &database);
     if (try boot.locateProtocol(Tcg2, null)) |tpm| {
         var capability: [256]u8 = @splat(0);
         capability[0] = 255;
@@ -68,6 +94,36 @@ fn run() !void {
 
 fn integer(comptime T: type, raw: [*]const u8, offset: usize) T {
     return std.mem.readInt(T, raw[offset..][0..@sizeOf(T)], .little);
+}
+
+fn keyVariable(comptime name: []const u8, guid: *const efi.Guid) !void {
+    const runtime = efi.system_table.runtime_services;
+    const wide = std.unicode.utf8ToUtf16LeStringLiteral(name);
+    const size = try runtime.getVariableSize(wide, guid) orelse {
+        say(name ++ " absent", .{});
+        return;
+    };
+    if (size[0] > 65536) return error.OversizePublicVariable;
+    const buffer = try efi.pool_allocator.alloc(u8, size[0]);
+    defer efi.pool_allocator.free(buffer);
+    const value = try runtime.getVariable(wide, guid, buffer) orelse return error.VariableDisappeared;
+    say(name ++ " bytes={d} attributes={x}", .{ value[0].len, @as(u32, @bitCast(value[1])) });
+    var remaining = value[0];
+    while (remaining.len != 0) {
+        if (remaining.len < 28) return error.MalformedSignatureList;
+        const length = integer(u32, remaining.ptr, 16);
+        const header = integer(u32, remaining.ptr, 20);
+        const entry = integer(u32, remaining.ptr, 24);
+        if (length < 28 or length > remaining.len or header > length - 28 or entry < 16 or
+            (length - 28 - header) % entry != 0) return error.MalformedSignatureList;
+        var at: usize = 28 + header;
+        while (at < length) : (at += entry) {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(remaining[at + 16 .. at + entry], &digest, .{});
+            say(name ++ " signature sha256={x}", .{&digest});
+        }
+        remaining = remaining[length..];
+    }
 }
 
 fn acpi() void {

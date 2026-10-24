@@ -1353,16 +1353,50 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
         "form {s}: lookup needs unwound, and its {s} account (forms/minimal)",
         .{ forms[forms.len - 1].name, unwound_upstream },
     );
-    sortStrings(out.items);
+    const kept = try loopbackOnly(gpa, out.items, forms[forms.len - 1].name, f);
+    sortStrings(kept);
     var text: std.ArrayList(u8) = .empty;
-    for (out.items, 0..) |line, i| {
-        if (i > 0 and mem.eql(u8, line, out.items[i - 1])) continue;
+    for (kept, 0..) |line, i| {
+        if (i > 0 and mem.eql(u8, line, kept[i - 1])) continue;
         try text.print(gpa, "{s}\n", .{line});
     }
     return text.items;
 }
 
 const unwound_upstream = "_unwoundnet";
+
+/// loopbackOnly returns grants without the loopback-only TCP grants another
+/// line holds: fence refuses a loopback line's users its port everywhere else,
+/// so beside a broader grant to the same users, or every user's, it would take
+/// that grant away. `all`'s loopback line beside another user's broader grant
+/// would take theirs, and fails.
+fn loopbackOnly(
+    gpa: Allocator,
+    grants: [][]const u8,
+    name: []const u8,
+    f: *Failure,
+) Error![][]const u8 {
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (grants) |line| {
+        const w = try words(gpa, line);
+        const held = w.len == 5 and mem.eql(u8, w[0], "connect") and mem.eql(u8, w[2], "tcp") and
+            mem.eql(u8, w[4], "loopback") and for (grants) |other|
+        {
+            const o = try words(gpa, other);
+            if (o.len != 4 or !mem.eql(u8, o[0], "connect") or !mem.eql(u8, o[2], "tcp") or
+                (!mem.eql(u8, o[3], w[3]) and !mem.eql(u8, o[3], "any"))) continue;
+            if (mem.eql(u8, o[1], w[1]) or mem.eql(u8, o[1], "all")) break true;
+            if (mem.eql(u8, w[1], "all")) return f.fail(
+                gpa,
+                "form {s}: net: {s} would refuse tcp/{s} beyond loopback to everyone, " ++
+                    "though {s} grants it: give the loopback grant to fewer users",
+                .{ name, line, w[3], other },
+            );
+        } else false;
+        if (!held) try kept.append(gpa, line);
+    }
+    return kept.items;
+}
 
 fn isDnsPort(word: []const u8) bool {
     for ([_][]const u8{
@@ -1803,6 +1837,32 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         &f,
     ));
     try testing.expect(mem.find(u8, f.text, "account demo has uid 590") != null);
+    // A loopback-only grant goes beside a broader one to the same users or
+    // to all; all's beside another user's broader grant would take it.
+    for ([_]struct { []const u8, []const u8 }{
+        .{
+            "  - connect :people tcp/22 loopback\n  - connect :people tcp/22\n",
+            "connect 500-60000 tcp 22\nconnect 65536-1073741823 tcp 22\n",
+        },
+        .{ "  - connect web tcp/22 loopback\n  - connect :all tcp/22\n", "connect all tcp 22\n" },
+        .{
+            "  - connect web tcp/22 loopback\n  - connect root tcp/22\n",
+            "connect 0 tcp 22\nconnect 300 tcp 22 loopback\n",
+        },
+        .{
+            "  - connect web tcp/22 loopback\n  - connect web tcp/443\n",
+            "connect 300 tcp 22 loopback\nconnect 300 tcp 443\n",
+        },
+    }) |c| try testing.expectEqualStrings(
+        c[1],
+        try net(gpa, &.{try testForm(gpa, "su", try gpa.print("net:\n{s}", .{c[0]}))}, passwd, &f),
+    );
+    try testing.expectError(error.Form, net(gpa, &.{try testForm(
+        gpa,
+        "su",
+        "net:\n  - connect :all tcp/22 loopback\n  - connect root tcp/22\n",
+    )}, passwd, &f));
+    try testing.expect(mem.find(u8, f.text, "though connect 0 tcp 22 grants it") != null);
     // Bare all and people are accounts' names, as any other word is.
     const named = try testForm(gpa, "named", "net:\n  - connect all tcp/443\n");
     try testing.expectEqualStrings(

@@ -211,14 +211,7 @@ fn rootSession() void {
         denied(w[0], fd, &.{.ACCES});
         if (linux.errno(fd) == .SUCCESS) _ = linux.close(@intCast(fd));
     }
-    if (serviceDirectory()) |dir| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.mem.printSentinel(&buf, "{s}/privilege-probe", .{dir}, 0) catch unreachable;
-        refusedCreate("root-cannot-change-service-data", path);
-    } else std.debug.print(
-        "SKIP root-cannot-change-service-data (no service-owned /data/svc)\n",
-        .{},
-    );
+    serviceData();
     for ([_][:0]const u8{ "/tmp/privilege-probe-root", "/data/privilege-probe-root" }) |path| {
         const fd = linux.open(
             path,
@@ -259,38 +252,63 @@ fn refusedCreate(name: []const u8, path: [:0]const u8) void {
     }
 }
 
-/// serviceDirectory returns a /data/svc directory a service, not root, owns.
-fn serviceDirectory() ?[]const u8 {
-    const State = struct {
-        var name: [std.fs.max_path_bytes]u8 = undefined;
-    };
+/// serviceData checks that root can change no /data/svc directory a service
+/// owns: Landlock refuses it, or the directory is mounted read-only.
+fn serviceData() void {
     const dir = linux.open(
         "/data/svc",
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
         0,
     );
-    if (linux.errno(dir) != .SUCCESS) return null;
+    if (linux.errno(dir) != .SUCCESS) {
+        std.debug.print("SKIP root-cannot-change-service-data (no /data/svc)\n", .{});
+        return;
+    }
     defer _ = linux.close(@intCast(dir));
+    var checked: usize = 0;
     var ents: [4096]u8 align(8) = undefined;
     while (true) {
         const n = linux.getdents64(@intCast(dir), &ents, ents.len);
-        if (linux.errno(n) != .SUCCESS or n == 0) return null;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
         var off: usize = 0;
         while (off < n) {
             const ent: *align(1) const linux.dirent64 = @ptrCast(&ents[off]);
             off += ent.reclen;
-            const entry = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
+            const entry: [*:0]const u8 = @ptrCast(&ent.name);
             if (ent.type != linux.DT.DIR or entry[0] == '.') continue;
             var st: linux.Statx = undefined;
-            const z = std.mem.printSentinel(&State.name, "/data/svc/{s}", .{entry}, 0) catch continue;
             if (linux.errno(linux.statx(
-                linux.AT.FDCWD,
-                z,
+                @intCast(dir),
+                entry,
                 0,
                 .{ .UID = true },
                 &st,
-            )) != .SUCCESS) continue;
-            if (st.uid != 0) return z;
+            )) != .SUCCESS or
+                st.uid == 0) continue;
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = std.mem.printSentinel(
+                &buf,
+                "/data/svc/{s}/privilege-probe",
+                .{std.mem.span(entry)},
+                0,
+            ) catch
+                continue;
+            const fd = linux.open(
+                path,
+                .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+                0o600,
+            );
+            std.debug.print("  {s}\n", .{path});
+            denied("root-cannot-change-service-data", fd, &.{ .ACCES, .ROFS });
+            if (linux.errno(fd) == .SUCCESS) {
+                _ = linux.close(@intCast(fd));
+                _ = linux.unlink(path);
+            }
+            checked += 1;
         }
     }
+    if (checked == 0) std.debug.print(
+        "SKIP root-cannot-change-service-data (none service-owned)\n",
+        .{},
+    );
 }

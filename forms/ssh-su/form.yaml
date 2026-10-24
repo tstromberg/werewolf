@@ -14,8 +14,9 @@ sshd:
   # Every su caller shares this source address. Keep external penalties.
   per-source-penalty-exempt-list: 127.0.0.1/32
 
+# People, who alone call su, reach the listener on loopback.
 net:
-  - connect :all tcp/22 loopback
+  - connect :people tcp/22 loopback
 
 # Services replace whole declarations. This is sshd's service with a public
 # localhost host-key pin published before the same daemon starts.
