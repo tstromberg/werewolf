@@ -1,7 +1,7 @@
 version: 1
 timeout: 1200s
 packages:
-  - postgresql-17-client
+  - postgresql-client
 suites:
   - name: nextcloud-ca
     readiness: true

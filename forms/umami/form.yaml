@@ -12,11 +12,11 @@ with: [postgresql, caddy]
 # pgcrypto, which Umami's first migration asks for, though it uses only
 # what PostgreSQL has built in.
 packages:
-  - postgresql-17-contrib
+  - postgresql-contrib~18
 
 # The checks read Umami's tables.
 dev:
-  - postgresql-17-client
+  - postgresql-client~18
 
 # make check's (forms/README.md): Node, PostgreSQL and Caddy together.
 check:

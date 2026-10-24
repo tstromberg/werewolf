@@ -17,7 +17,7 @@ with: [postgresql, caddy]
 
 # The check reads Mattermost's schema with psql.
 dev:
-  - postgresql-17-client
+  - postgresql-client~18
 
 # make check's, for this form alone (forms/README.md)
 check:

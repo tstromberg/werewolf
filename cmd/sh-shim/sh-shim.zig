@@ -432,7 +432,7 @@ fn redirects(suffix: []const u8, bad: *Bad) error{Refused}!Redirects {
 const testing = std.testing;
 
 test "parse PostgreSQL setup commands without changing their words" {
-    const backend = "\"/usr/libexec/postgresql17/postgres\"";
+    const backend = "\"/usr/libexec/postgresql18/postgres\"";
     const cases = [_]struct { command: []const u8, argc: usize, io: Redirects }{
         .{ .command = backend ++ " -V", .argc = 2, .io = .{} },
         .{ .command = backend ++ " --boot -F -c log_checkpoints=false", .argc = 5, .io = .{} },

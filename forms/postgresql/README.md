@@ -1,7 +1,7 @@
 # PostgreSQL - Hardened VM
 
 A database for the other services on this machine:
-[PostgreSQL](https://www.postgresql.org) 17, on a UNIX socket. The form's manifest is
+[PostgreSQL](https://www.postgresql.org) 18, on a UNIX socket. The form's manifest is
 [form.yaml](form.yaml).
 
 [Images, test status and download
@@ -31,7 +31,7 @@ howl create postgresql --with postgresql
 
 Nothing answers on the network. A form takes this one `with` and brings its own
 database. Statements are in [PostgreSQL's SQL
-reference](https://www.postgresql.org/docs/17/sql.html).
+reference](https://www.postgresql.org/docs/18/sql.html).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -63,7 +63,6 @@ every start.
   passwords.
 - The image's SQL files run on every start. An `INSERT` needs a conflict target, or the
   rows multiply. `--import` runs once.
-- Stay on 17. A new major version is a new form: the data needs `pg_upgrade`.
 - This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger uses
   `/bin/ash`. A form replacing the PostgreSQL service must keep its explicit initdb,
   sh-shim and locale run paths.

@@ -160,10 +160,12 @@ def damaged(name, config_disk, seed_disk, debugfs, remove_only=False):
         subprocess.run(command(config_disk, seed_disk, disk), stdin=subprocess.DEVNULL,
                        stdout=output, stderr=subprocess.STDOUT,
                        timeout=int(os.environ.get("BOOT_TIMEOUT", "300")), check=False)
-    output = log.read_text(errors="replace")
+    raw = log.read_bytes()
+    output = subprocess.run([sys.executable, str(Path(__file__).with_name("cloud-console"))],
+                            input=raw, capture_output=True, check=True).stdout.decode(errors="replace")
     reason = "unregistered data" if remove_only else "read identities"
     if (f"people: {reason} failed; not handing over" not in output
-            or "Kernel panic" not in output or "handing over to runit" in output):
+            or b"Kernel panic" not in raw or "handing over to runit" in output):
         raise RuntimeError(f"{name}: expected account publication refusal; see {log}")
     print(f"PASS   people-{name} refuses account publication", flush=True)
 

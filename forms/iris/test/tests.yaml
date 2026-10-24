@@ -1,7 +1,7 @@
 version: 1
 timeout: 600s
 packages:
-  - postgresql-17-client
+  - postgresql-client
 suites:
   - name: iris-ca
     readiness: true

@@ -77,7 +77,7 @@ assertion its expected and observed values and hashed logs; secrets are redacted
 ## PostgreSQL and Greenbone
 
 PostgreSQL ([forms/postgresql/test/](../../forms/postgresql/test/)): the variant alone
-adds pinned `postgresql-17-client`; the driver runs `psql -X -w -A -t -v
+adds pinned `postgresql-client`; the driver runs `psql -X -w -A -t -v
 ON_ERROR_STOP=1 -P pager=off` as postgres on the Unix socket with fixed SQL, bounded
 output and a deadline, checking locale, UTF-8 writes and rollback, while a separately
 confined identity must fail peer login; the server's policy and exposure stay. Phase one

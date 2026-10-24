@@ -18,6 +18,9 @@ if __name__ == '__main__':
         key = b'{"event":"host-key","key":"/run/svc/sshd/host-key","fingerprint":"SHA256:abc123","detail":"kept in /data"}\n'
         split = key.replace(b'abc123', b'abc[    1.551356] audit: type=1423 blockers=fs.write_file path=\r\n123')
         assert clean(split) == key
+        refusal = b'werewolf: people: unregistered data failed; not handing over\r\n'
+        split = refusal.replace(b'data', b'd[    0.408051] Kernel panic - not syncing: Attempted to kill init!\r\nata')
+        assert clean(split) == refusal.replace(b'\r', b'')
         print("pass   cloud-console: kernel interleaving preserves complete userspace records")
     else:
         sys.stdout.buffer.write(clean(sys.stdin.buffer.read()))

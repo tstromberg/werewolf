@@ -23,7 +23,7 @@ packages:
   - libstdc++
   - libgcc
   - zlib
-  - pgvector-17
+  - pgvector-18
 
 # make check's, for this form alone (forms/README.md)
 check:
