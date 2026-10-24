@@ -979,11 +979,31 @@ const Checked = struct { services: usize, memory: u64 };
 /// the machine would fail at boot. It returns the service count and memory total.
 fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
     const c = try howl.chain(io, gpa, dir, why);
+    // Inspect only the services that survive whole-service replacement, as
+    // netLines does when given the whole chain. Reading each original form
+    // separately would count ssh-su's replacement of sshd as two listeners.
+    const active = try gpa.dupe(forms.Form, c);
+    for (active, 0..) |*f, at| {
+        const services = f.spec.get("services") orelse continue;
+        var kept: std.ArrayList(forms.Entry) = .empty;
+        for (services.map) |service| {
+            const replaced = for (c[at + 1 ..]) |later| {
+                const next = later.spec.get("services") orelse continue;
+                if (next.get(service.key) != null) break true;
+            } else false;
+            if (!replaced) try kept.append(gpa, service);
+        }
+        const entries = try gpa.dupe(forms.Entry, f.spec.map);
+        for (entries) |*entry| if (std.mem.eql(u8, entry.key, "services")) {
+            entry.value = .{ .map = kept.items };
+        };
+        f.spec = .{ .map = entries };
+    }
     // Include loopback ports: two services binding one port collide either way.
     const Port = struct { port: u16, form: []const u8 };
     var ports_: std.ArrayList(Port) = .empty;
     var failure: forms.Failure = .{};
-    for (c) |f| for (forms.netLines(gpa, &.{f}, &failure) catch |err| switch (err) {
+    for (active) |f| for (forms.netLines(gpa, &.{f}, &failure) catch |err| switch (err) {
         error.Form => return why.refuse("{s}", .{failure.text}),
         else => return err,
     }) |line| {
