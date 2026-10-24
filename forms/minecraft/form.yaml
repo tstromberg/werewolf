@@ -39,8 +39,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/25565]
     connect: [tcp/443]
-    # Mojang publishes api.mojang.com through Azure Front Door.
-    lookup: ["*", "api-mojang-com-bxfdd0a4f8c6frfz.z01.azurefd.net", "mr-z01.tm-azurefd.net"]
+    # Mojang publishes api.mojang.com through Azure Front Door; unwound needs
+    # the origin and each cross-domain alias named to return its CNAME chain.
+    lookup: ["*", "api.mojang.com", "api-mojang-com-bxfdd0a4f8c6frfz.z01.azurefd.net", "mr-z01.tm-azurefd.net"]
     config: settings /run/config/minecraft/settings.json
     setting: players string... required
     render: json minecraft.json
