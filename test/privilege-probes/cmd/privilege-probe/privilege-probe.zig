@@ -21,11 +21,28 @@ pub fn main() void {
         linux.exit_group(2);
     }
     var ids: [3]u32 = undefined;
-    const got = linux.syscall3(.getresuid, @intFromPtr(&ids[0]), @intFromPtr(&ids[1]), @intFromPtr(&ids[2]));
-    check("all-user-ids-unprivileged", linux.errno(got) == .SUCCESS and ids[0] == uid and ids[1] == uid and ids[2] == uid);
+    const got = linux.syscall3(
+        .getresuid,
+        @intFromPtr(&ids[0]),
+        @intFromPtr(&ids[1]),
+        @intFromPtr(&ids[2]),
+    );
+    check(
+        "all-user-ids-unprivileged",
+        linux.errno(got) == .SUCCESS and ids[0] == uid and ids[1] == uid and ids[2] == uid,
+    );
     const gid = linux.getgid();
-    const groups = linux.syscall3(.getresgid, @intFromPtr(&ids[0]), @intFromPtr(&ids[1]), @intFromPtr(&ids[2]));
-    check("all-group-ids-unprivileged", linux.errno(groups) == .SUCCESS and gid != 0 and ids[0] == gid and ids[1] == gid and ids[2] == gid);
+    const groups = linux.syscall3(
+        .getresgid,
+        @intFromPtr(&ids[0]),
+        @intFromPtr(&ids[1]),
+        @intFromPtr(&ids[2]),
+    );
+    check(
+        "all-group-ids-unprivileged",
+        linux.errno(groups) == .SUCCESS and gid != 0 and ids[0] == gid and ids[1] == gid and
+            ids[2] == gid,
+    );
     var supplementary: [64]u32 = undefined;
     const count = linux.syscall2(.getgroups, supplementary.len, @intFromPtr(&supplementary));
     check("no-root-supplementary-group", linux.errno(count) == .SUCCESS and
@@ -35,8 +52,14 @@ pub fn main() void {
     var header: Header = .{};
     var caps: [2]Caps = undefined;
     const caprc = linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps));
-    check("no-capabilities", linux.errno(caprc) == .SUCCESS and std.mem.allEqual(u8, std.mem.asBytes(&caps), 0));
-    check("no-new-privileges", linux.prctl(@backingInt(linux.PR.GET_NO_NEW_PRIVS), 0, 0, 0, 0) == 1);
+    check(
+        "no-capabilities",
+        linux.errno(caprc) == .SUCCESS and std.mem.allEqual(u8, std.mem.asBytes(&caps), 0),
+    );
+    check(
+        "no-new-privileges",
+        linux.prctl(@backingInt(linux.PR.GET_NO_NEW_PRIVS), 0, 0, 0, 0) == 1,
+    );
     check("seccomp-active", linux.prctl(@backingInt(linux.PR.GET_SECCOMP), 0, 0, 0, 0) == 2);
     var leaked: usize = 0;
     for (3..1024) |fd| {
@@ -53,8 +76,17 @@ pub fn main() void {
     caps = @splat(.{ .effective = 0, .permitted = 0, .inheritable = 0 });
     caps[0].effective = 1 << 7;
     caps[0].permitted = 1 << 7;
-    denied("cannot-acquire-setuid-capability", linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&caps)), &.{.PERM});
-    for ([_][:0]const u8{ "/run/werewolf/shadow", "/run/werewolf/keys/root", "/data/.werewolf/identities", "/dev/tpmrm0" }) |path| {
+    denied(
+        "cannot-acquire-setuid-capability",
+        linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&caps)),
+        &.{.PERM},
+    );
+    for ([_][:0]const u8{
+        "/run/werewolf/shadow",
+        "/run/werewolf/keys/root",
+        "/data/.werewolf/identities",
+        "/dev/tpmrm0",
+    }) |path| {
         const fd = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         denied(path, fd, &.{.ACCES});
         if (linux.errno(fd) == .SUCCESS) _ = linux.close(@intCast(fd));
@@ -67,20 +99,43 @@ pub fn main() void {
         var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
         const path = "/run/werewolf/update-control.sock";
         @memcpy(addr.path[0..path.len], path);
-        denied("updater-control-refused", linux.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))), &.{.ACCES});
+        denied(
+            "updater-control-refused",
+            linux.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))),
+            &.{.ACCES},
+        );
     }
     denied("user-namespace-refused", linux.syscall1(.unshare, 0x10000000), &.{ .NOSYS, .PERM });
     denied("ptrace-refused", linux.syscall4(.ptrace, 0, 0, 0, 0), &.{ .NOSYS, .PERM });
     denied("bpf-filtered", linux.syscall3(.bpf, 0, 0, 0), &.{.NOSYS});
     denied("io-uring-filtered", linux.syscall2(.io_uring_setup, 0, 0), &.{.NOSYS});
-    denied("packet-socket-refused", linux.socket(linux.AF.PACKET, linux.SOCK.RAW, 0), &.{ .PERM, .ACCES, .AFNOSUPPORT });
-    denied("algorithm-socket-filtered", linux.socket(38, linux.SOCK.SEQPACKET, 0), &.{ .AFNOSUPPORT, .NOSYS });
+    denied(
+        "packet-socket-refused",
+        linux.socket(linux.AF.PACKET, linux.SOCK.RAW, 0),
+        &.{ .PERM, .ACCES, .AFNOSUPPORT },
+    );
+    denied(
+        "algorithm-socket-filtered",
+        linux.socket(38, linux.SOCK.SEQPACKET, 0),
+        &.{ .AFNOSUPPORT, .NOSYS },
+    );
     var winsize: [4]u16 = undefined;
     if (linux.errno(linux.ioctl(0, 0x5413, @intFromPtr(&winsize))) == .SUCCESS) {
         const nul: u8 = 0;
-        denied("terminal-input-injection-refused", linux.ioctl(0, 0x5412, @intFromPtr(&nul)), &.{ .IO, .PERM, .ACCES, .NOSYS });
+        denied(
+            "terminal-input-injection-refused",
+            linux.ioctl(0, 0x5412, @intFromPtr(&nul)),
+            &.{ .IO, .PERM, .ACCES, .NOSYS },
+        );
     } else std.debug.print("SKIP terminal-input-injection (no PTY)\n", .{});
-    const page = linux.mmap(null, 4096, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    const page = linux.mmap(
+        null,
+        4096,
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
     check("writable-memory-positive-control", linux.errno(page) == .SUCCESS);
     if (linux.errno(page) == .SUCCESS) {
         const bytes: [*]align(4096) u8 = @ptrFromInt(page);

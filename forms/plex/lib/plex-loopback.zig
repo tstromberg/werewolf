@@ -7,7 +7,13 @@ extern fn __errno_location() *c_int;
 fn datagram(fd: c_int) bool {
     var kind: c_int = 0;
     var size: linux.socklen_t = @sizeOf(c_int);
-    return linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.TYPE, @ptrCast(&kind), &size)) == .SUCCESS and
+    return linux.errno(linux.getsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.TYPE,
+        @ptrCast(&kind),
+        &size,
+    )) == .SUCCESS and
         kind == linux.SOCK.DGRAM;
 }
 
@@ -54,7 +60,14 @@ export fn connect(fd: c_int, addr: *const linux.sockaddr, len: linux.socklen_t) 
     return checked(linux.connect(fd, addr, len));
 }
 
-export fn sendto(fd: c_int, buf: [*]const u8, len: usize, flags: c_uint, addr: ?*const linux.sockaddr, addrlen: linux.socklen_t) isize {
+export fn sendto(
+    fd: c_int,
+    buf: [*]const u8,
+    len: usize,
+    flags: c_uint,
+    addr: ?*const linux.sockaddr,
+    addrlen: linux.socklen_t,
+) isize {
     if (!bindDatagram(fd)) return -1;
     return checkedWide(linux.sendto(fd, buf, len, flags, addr, addrlen));
 }

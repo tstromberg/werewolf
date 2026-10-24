@@ -33,7 +33,11 @@ pub fn main(init: std.process.Init) !void {
     const ledger = try people.openLedgerDir(data_fd);
     defer _ = linux.close(ledger);
     try ok(try people.freshData(data_fd));
-    const rows = [_]people.Identity{.{ .source = .people, .name = "alice", .id = people.userId("alice") }};
+    const rows = [_]people.Identity{.{
+        .source = .people,
+        .name = "alice",
+        .id = people.userId("alice"),
+    }};
     try people.commitLedger(gpa, ledger, &rows);
     try ok(!(try people.freshData(data_fd)));
     const loaded = try people.loadLedger(gpa, ledger);
@@ -97,15 +101,28 @@ pub fn main(init: std.process.Init) !void {
     const expanded = [_]people.Identity{
         rows[0], .{ .source = .people, .name = "bob", .id = people.userId("bob") },
     };
-    try std.testing.expectError(error.LedgerWrite, people.commitLedger(gpa, path_ledger, &expanded));
+    try std.testing.expectError(
+        error.LedgerWrite,
+        people.commitLedger(gpa, path_ledger, &expanded),
+    );
     try ok((try people.loadLedger(gpa, ledger)).len == 2);
     try std.testing.expectError(error.LedgerWrite, people.syncLedger(path_ledger));
     try people.syncLedger(ledger);
     try ok((try people.loadLedger(gpa, ledger)).len == 2);
 
-    try ok(linux.errno(linux.fchmodat2(ledger, "identities", 0o644, linux.AT.SYMLINK_NOFOLLOW)) == .SUCCESS);
+    try ok(linux.errno(linux.fchmodat2(
+        ledger,
+        "identities",
+        0o644,
+        linux.AT.SYMLINK_NOFOLLOW,
+    )) == .SUCCESS);
     try std.testing.expectError(error.BadLedger, people.loadLedger(gpa, ledger));
-    try ok(linux.errno(linux.fchmodat2(ledger, "identities", 0o600, linux.AT.SYMLINK_NOFOLLOW)) == .SUCCESS);
+    try ok(linux.errno(linux.fchmodat2(
+        ledger,
+        "identities",
+        0o600,
+        linux.AT.SYMLINK_NOFOLLOW,
+    )) == .SUCCESS);
 
     const bad = linux.openat(ledger, "identities", .{
         .ACCMODE = .WRONLY,

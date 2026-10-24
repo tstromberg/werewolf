@@ -1,6 +1,5 @@
 const std = @import("std");
 const linux = std.os.linux;
-const sandbox = @import("sandbox");
 const mem = std.mem;
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -18,7 +17,11 @@ fn media(io: Io, a: mem.Allocator) !void {
     try Dir.cwd().setFilePermissions(io, target, .fromMode(0o755), .{});
     var output = try Dir.cwd().openDir(io, target, .{});
     defer output.close(io);
-    var source = Dir.cwd().openDir(io, "/run/werewolf/import", .{ .iterate = true }) catch |err| switch (err) {
+    var source = Dir.cwd().openDir(
+        io,
+        "/run/werewolf/import",
+        .{ .iterate = true },
+    ) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };

@@ -113,8 +113,8 @@ The live fixture also checks that expired RDAP and CT evidence cannot
 release a positive DNS answer already in the DNS cache.
 Old domains still face the other screens.
 
-[RFC 9083](https://www.rfc-editor.org/rfc/rfc9083.html#section-4.5) defines
-RDAP events; [RFC 9224](https://www.rfc-editor.org/rfc/rfc9224.html#section-4)
-defines bootstrap matching. The [PSL](https://publicsuffix.org/list/) has
-separate ICANN and PRIVATE sections. [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html)
-describes CT log entries, which do not report registration age.
+[RFC 9083](https://www.rfc-editor.org/rfc/rfc9083.html#section-4.5) defines RDAP events;
+[RFC 9224](https://www.rfc-editor.org/rfc/rfc9224.html#section-4) defines bootstrap
+matching. The [PSL](https://publicsuffix.org/list/) has separate ICANN and PRIVATE
+sections. [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html) describes CT log
+entries, which do not report registration age.

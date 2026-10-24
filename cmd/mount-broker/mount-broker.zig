@@ -149,7 +149,14 @@ fn serve(log: *Log) noreturn {
 /// Never discard a reply and continue: that would misalign later requests.
 fn heard(log: *Log, fd: i32, role: broker.Role) bool {
     var in_buf: [1024]u8 = undefined;
-    const rc = linux.recvfrom(fd, &in_buf, in_buf.len, linux.MSG.TRUNC | linux.MSG.DONTWAIT, null, null);
+    const rc = linux.recvfrom(
+        fd,
+        &in_buf,
+        in_buf.len,
+        linux.MSG.TRUNC | linux.MSG.DONTWAIT,
+        null,
+        null,
+    );
     if (linux.errno(rc) == .INTR or linux.errno(rc) == .AGAIN) return true;
     if (linux.errno(rc) != .SUCCESS or rc == 0) return false;
     if (rc > in_buf.len) {
@@ -175,7 +182,14 @@ fn heard(log: *Log, fd: i32, role: broker.Role) bool {
 }
 
 fn reply(fd: i32, text: []const u8) bool {
-    return linux.sendto(fd, text.ptr, text.len, linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT, null, 0) == text.len;
+    return linux.sendto(
+        fd,
+        text.ptr,
+        text.len,
+        linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT,
+        null,
+        0,
+    ) == text.len;
 }
 
 // --- mounting ------------------------------------------------------------------
@@ -1474,7 +1488,10 @@ test "staged filesystem rejects links and foreign files and preserves live bytes
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "data/svc/autoupdate/work/slot");
     try tmp.dir.createDirPath(io, "dest");
-    try tmp.dir.writeFile(io, .{ .sub_path = "data/svc/autoupdate/work/slot/source", .data = "new" });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "data/svc/autoupdate/work/slot/source", .data = "new" },
+    );
     try tmp.dir.writeFile(io, .{ .sub_path = "dest/live", .data = "old" });
     const base = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
     defer testing.allocator.free(base);
@@ -1508,20 +1525,35 @@ fn stagedFilesystemProbe(root: [:0]const u8) !void {
     Sha256.hash("new", &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     const want: broker.EspArtifact = .{ .size = 3, .sha256 = &hex };
-    try testing.expectError(error.DigestMismatch, copyChecked(dest, "slot/source", "live", .{ .size = 2, .sha256 = &hex }, 100));
+    try testing.expectError(
+        error.DigestMismatch,
+        copyChecked(dest, "slot/source", "live", .{ .size = 2, .sha256 = &hex }, 100),
+    );
     const old = try fdOf(linux.open("/dest/live", .{}, 0), "staged probe live");
     var bytes: [16]u8 = undefined;
     const n = linux.read(old, &bytes, bytes.len);
     _ = linux.close(old);
     try testing.expectEqualStrings("old", bytes[0..n]);
     try testing.expectEqual(linux.E.NOENT, linux.errno(linux.open("/dest/live.tmp", .{}, 0)));
-    _ = try sandbox.sys(linux.symlinkat("slot", linux.AT.FDCWD, "/data/svc/autoupdate/work/link"), "staged probe symlink");
+    _ = try sandbox.sys(
+        linux.symlinkat("slot", linux.AT.FDCWD, "/data/svc/autoupdate/work/link"),
+        "staged probe symlink",
+    );
     try testing.expectError(error.SystemCall, openStagedFile("link/source"));
     try testing.expectError(error.SystemCall, openStagedFile("../outside"));
-    _ = try sandbox.sys(linux.linkat(linux.AT.FDCWD, source, linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0), "staged probe hardlink");
+    _ = try sandbox.sys(
+        linux.linkat(linux.AT.FDCWD, source, linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0),
+        "staged probe hardlink",
+    );
     try testing.expectError(error.NotRegularFile, openStagedFile("slot/source"));
-    _ = try sandbox.sys(linux.unlinkat(linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0), "staged probe unlink");
-    _ = try sandbox.sys(linux.mknodat(linux.AT.FDCWD, "/data/svc/autoupdate/work/fifo", linux.S.IFIFO | 0o600, 0), "staged probe fifo");
+    _ = try sandbox.sys(
+        linux.unlinkat(linux.AT.FDCWD, "/data/svc/autoupdate/work/hard", 0),
+        "staged probe unlink",
+    );
+    _ = try sandbox.sys(
+        linux.mknodat(linux.AT.FDCWD, "/data/svc/autoupdate/work/fifo", linux.S.IFIFO | 0o600, 0),
+        "staged probe fifo",
+    );
     try testing.expectError(error.NotRegularFile, openStagedFile("fifo"));
     _ = try sandbox.sys(linux.fchownat(linux.AT.FDCWD, source, 69, 69, 0), "staged probe owner");
     try testing.expectError(error.NotRegularFile, openStagedFile("slot/source"));

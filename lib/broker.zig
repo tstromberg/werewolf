@@ -584,7 +584,14 @@ fn receiveOwnerChannel(fd: i32) !?i32 {
 pub fn sendOwnerChannel(socket: i32, fd: ?i32) !void {
     if (fd == null) {
         const text = "ok none\n";
-        if (linux.sendto(socket, text, text.len, linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT, null, 0) != text.len)
+        if (linux.sendto(
+            socket,
+            text,
+            text.len,
+            linux.MSG.NOSIGNAL | linux.MSG.DONTWAIT,
+            null,
+            0,
+        ) != text.len)
             return error.OwnerChannelSend;
         return;
     }

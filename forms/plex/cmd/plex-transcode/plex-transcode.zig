@@ -31,7 +31,11 @@ pub fn main(init: std.process.Init) void {
         error.Usage;
     result catch |err| {
         var buf: [256]u8 = undefined;
-        const text = std.mem.print(&buf, "plex-transcode: {{\"event\":\"refused\",\"reason\":\"{s}\"}}\n", .{@errorName(err)}) catch unreachable;
+        const text = std.mem.print(
+            &buf,
+            "plex-transcode: {{\"event\":\"refused\",\"reason\":\"{s}\"}}\n",
+            .{@errorName(err)},
+        ) catch unreachable;
         _ = linux.write(2, text.ptr, text.len);
         std.process.exit(1);
     };
@@ -46,7 +50,10 @@ fn address() linux.sockaddr.un {
 fn peer(fd: i32, uid: u32) !void {
     var cred: Credentials = undefined;
     var size: linux.socklen_t = @sizeOf(Credentials);
-    _ = try sandbox.sys(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &size), "peer credentials");
+    _ = try sandbox.sys(
+        linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.PEERCRED, @ptrCast(&cred), &size),
+        "peer credentials",
+    );
     if (size != @sizeOf(Credentials) or cred.uid != uid) return error.WrongPeer;
 }
 
@@ -84,10 +91,16 @@ fn client(io: Io, a: mem.Allocator, args: []const [:0]const u8) !void {
     n += dir.len;
     packet[n] = 0;
     n += 1;
-    const fd: i32 = @intCast(try sandbox.sys(linux.socket(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0), "client socket"));
+    const fd: i32 = @intCast(try sandbox.sys(
+        linux.socket(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0),
+        "client socket",
+    ));
     defer _ = linux.close(fd);
     var addr = address();
-    _ = try sandbox.sys(linux.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))), "connect worker");
+    _ = try sandbox.sys(
+        linux.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))),
+        "connect worker",
+    );
     try peer(fd, try user(io, a, "plex-transcode"));
     var control: [32]u8 align(8) = @splat(0);
     mem.writeInt(usize, control[0..8], 28, endian);
@@ -95,7 +108,15 @@ fn client(io: Io, a: mem.Allocator, args: []const [:0]const u8) !void {
     mem.writeInt(i32, control[12..16], linux.SCM.RIGHTS, endian);
     for (0..3) |i| mem.writeInt(i32, control[16 + 4 * i ..][0..4], @intCast(i), endian);
     const iov = [_]std.posix.iovec_const{.{ .base = &packet, .len = n }};
-    const msg: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = &iov, .iovlen = 1, .control = &control, .controllen = control.len, .flags = 0 };
+    const msg: linux.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = control.len,
+        .flags = 0,
+    };
     if (linux.sendmsg(fd, &msg, linux.MSG.NOSIGNAL) != n) return error.SendRequest;
     var status: [1]u8 = undefined;
     if (linux.recvfrom(fd, &status, 1, 0, null, null) != 1) return error.WorkerLost;
@@ -106,7 +127,8 @@ fn inJobs(path: []const u8) bool {
     if (!mem.eql(u8, path, jobs) and !mem.startsWith(u8, path, jobs ++ "/")) return false;
     var parts = mem.splitScalar(u8, path, '/');
     _ = parts.next();
-    while (parts.next()) |part| if (part.len == 0 or mem.eql(u8, part, ".") or mem.eql(u8, part, "..")) return false;
+    while (parts.next()) |part| if (part.len == 0 or mem.eql(u8, part, ".") or
+        mem.eql(u8, part, "..")) return false;
     return true;
 }
 
@@ -115,7 +137,10 @@ fn worker(io: Io, a: mem.Allocator) !void {
     const caller = try user(io, a, "plex");
     try Dir.cwd().createDirPath(io, jobs);
     try Dir.cwd().setFilePermissions(io, jobs, .fromMode(0o770), .{});
-    const fd: i32 = @intCast(try sandbox.sys(linux.socket(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0), "worker socket"));
+    const fd: i32 = @intCast(try sandbox.sys(
+        linux.socket(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0),
+        "worker socket",
+    ));
     defer _ = linux.close(fd);
     _ = linux.unlinkat(linux.AT.FDCWD, socket_path, 0);
     var addr = address();
@@ -136,14 +161,26 @@ fn worker(io: Io, a: mem.Allocator) !void {
 
 fn serve(connection: i32) !void {
     var ready = [_]linux.pollfd{.{ .fd = connection, .events = linux.POLL.IN, .revents = 0 }};
-    if (linux.poll(&ready, 1, 2000) != 1 or ready[0].revents & linux.POLL.IN == 0) return error.RequestTimeout;
+    if (linux.poll(&ready, 1, 2000) != 1 or
+        ready[0].revents & linux.POLL.IN == 0) return error.RequestTimeout;
     var packet: [max_packet + 1]u8 = undefined;
     // All possible passed descriptors fit, so every received fd can be
     // closed even when the sender supplied a malformed control message.
     var control: [1040]u8 align(8) = @splat(0);
     var iov = [_]std.posix.iovec{.{ .base = &packet, .len = packet.len }};
-    var msg: linux.msghdr = .{ .name = null, .namelen = 0, .iov = &iov, .iovlen = 1, .control = &control, .controllen = control.len, .flags = 0 };
-    const n = try sandbox.sys(linux.recvmsg(connection, &msg, linux.MSG.CMSG_CLOEXEC | linux.MSG.TRUNC), "receive job");
+    var msg: linux.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = control.len,
+        .flags = 0,
+    };
+    const n = try sandbox.sys(
+        linux.recvmsg(connection, &msg, linux.MSG.CMSG_CLOEXEC | linux.MSG.TRUNC),
+        "receive job",
+    );
     var descriptors: [253]i32 = undefined;
     var count: usize = 0;
     defer for (descriptors[0..count]) |fd| {
@@ -154,7 +191,8 @@ fn serve(connection: i32) !void {
         const len = mem.readInt(usize, control[offset..][0..8], endian);
         if (len < 16 or len > msg.controllen - offset) return error.BadControl;
         if (mem.readInt(i32, control[offset + 8 ..][0..4], endian) != linux.SOL.SOCKET or
-            mem.readInt(i32, control[offset + 12 ..][0..4], endian) != linux.SCM.RIGHTS or (len - 16) % 4 != 0) return error.BadControl;
+            mem.readInt(i32, control[offset + 12 ..][0..4], endian) != linux.SCM.RIGHTS or
+            (len - 16) % 4 != 0) return error.BadControl;
         var at = offset + 16;
         while (at < offset + len) : (at += 4) {
             if (count == descriptors.len) return error.BadControl;
@@ -163,7 +201,8 @@ fn serve(connection: i32) !void {
         }
         offset += mem.alignForward(usize, len, 8);
     }
-    if (n == 0 or n > max_packet or count != 3 or msg.flags & (linux.MSG.TRUNC | linux.MSG.CTRUNC) != 0) return error.BadRequest;
+    if (n == 0 or n > max_packet or count != 3 or msg.flags & (linux.MSG.TRUNC |
+        linux.MSG.CTRUNC) != 0) return error.BadRequest;
     var argv: [max_args + 2:null]?[*:0]const u8 = @splat(null);
     argv[0] = native;
     const cwd = try parseRequest(packet[0..n], &argv);
@@ -173,18 +212,37 @@ fn serve(connection: i32) !void {
     var rewritten: usize = 0;
     for (1..max_args) |i| {
         const arg = argv[i] orelse break;
-        if (!mem.eql(u8, mem.span(arg), "-progressurl") and !mem.eql(u8, mem.span(arg), "-segment_list")) continue;
+        if (!mem.eql(u8, mem.span(arg), "-progressurl") and
+            !mem.eql(u8, mem.span(arg), "-segment_list")) continue;
         const url = argv[i + 1] orelse return error.BadCallback;
         const value = mem.span(url);
-        if (!mem.startsWith(u8, value, "http://127.0.0.1:32400/video/:/transcode/session/")) return error.BadCallback;
+        if (!mem.startsWith(
+            u8,
+            value,
+            "http://127.0.0.1:32400/video/:/transcode/session/",
+        )) return error.BadCallback;
         if (rewritten == callback_urls.len or value.len > 1900) return error.BadCallback;
-        const at = try std.fmt.bufPrintSentinel(&callback_urls[rewritten], "http://127.0.0.1:32402{s}", .{value[22..]}, 0);
+        const at = try std.mem.printSentinel(
+            &callback_urls[rewritten],
+            "http://127.0.0.1:32402{s}",
+            .{value[22..]},
+            0,
+        );
         argv[i + 1] = at;
         rewritten += 1;
     }
     const How = extern struct { flags: u64, mode: u64 = 0, resolve: u64 = 6 };
-    const how: How = .{ .flags = @as(u32, @bitCast(linux.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true })) };
-    const opened = linux.syscall4(.openat2, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(cwd.ptr), @intFromPtr(&how), @sizeOf(How));
+    const how: How = .{ .flags = @as(
+        u32,
+        @bitCast(linux.O{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }),
+    ) };
+    const opened = linux.syscall4(
+        .openat2,
+        @bitCast(@as(isize, linux.AT.FDCWD)),
+        @intFromPtr(cwd.ptr),
+        @intFromPtr(&how),
+        @sizeOf(How),
+    );
     const directory: i32 = @intCast(try sandbox.sys(opened, "job directory"));
     defer _ = linux.close(directory);
     const pid: i32 = @intCast(try sandbox.sys(linux.fork(), "fork transcoder"));
@@ -194,13 +252,23 @@ fn serve(connection: i32) !void {
         for (descriptors[0..3], 0..) |fd, i| {
             if (linux.errno(linux.dup3(fd, @intCast(i), 0)) != .SUCCESS) linux.exit_group(126);
         }
-        if (linux.errno(linux.close_range(3, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false })) != .SUCCESS)
+        if (linux.errno(linux.close_range(
+            3,
+            std.math.maxInt(i32),
+            .{ .UNSHARE = false, .CLOEXEC = false },
+        )) != .SUCCESS)
             linux.exit_group(126);
-        const codecs = home ++ "/Codecs/Plex Media Server/Codecs/a336ba9-16a9aaf440ee9a92b75f070b-linux-" ++ @tagName(@import("builtin").cpu.arch);
+        const codecs = home ++
+            "/Codecs/Plex Media Server/Codecs/a336ba9-16a9aaf440ee9a92b75f070b-linux-" ++
+            @tagName(@import("builtin").cpu.arch);
         const env = [_:null]?[*:0]const u8{
             "HOME=" ++ jobs,                                     "TMPDIR=" ++ jobs,
-            "PLEX_MEDIA_SERVER_CODEC_DIR=" ++ home ++ "/Codecs", "LD_LIBRARY_PATH=" ++ codecs ++ ":" ++ home ++ "/lib",
-            "PLEX_MEDIA_SERVER_HOME=" ++ home,                   "FFMPEG_EXTERNAL_LIBS=" ++ codecs ++ "/",
+            "PLEX_MEDIA_SERVER_CODEC_DIR=" ++ home ++ "/Codecs",
+            "LD_LIBRARY_PATH=" ++ codecs ++
+                ":" ++ home ++ "/lib",
+            "PLEX_MEDIA_SERVER_HOME=" ++ home,
+            "FFMPEG_EXTERNAL_LIBS=" ++
+                codecs ++ "/",
         };
         _ = linux.execve(native, &argv, &env);
         linux.exit_group(126);
@@ -219,8 +287,18 @@ fn serve(connection: i32) !void {
             return error.ClientLost;
         }
     }
-    const code = [_]u8{if (status & 0x7f == 0) @intCast((status >> 8) & 0xff) else 128 + @as(u8, @intCast(status & 0x7f))};
-    if (linux.sendto(connection, &code, 1, linux.MSG.NOSIGNAL, null, 0) != 1) return error.ReplyLost;
+    const code = [_]u8{if (status & 0x7f == 0)
+        @intCast((status >> 8) & 0xff)
+    else
+        128 + @as(u8, @intCast(status & 0x7f))};
+    if (linux.sendto(
+        connection,
+        &code,
+        1,
+        linux.MSG.NOSIGNAL,
+        null,
+        0,
+    ) != 1) return error.ReplyLost;
 }
 
 fn parseRequest(packet: []u8, argv: *[max_args + 2:null]?[*:0]const u8) ![:0]const u8 {
@@ -242,7 +320,14 @@ fn parseRequest(packet: []u8, argv: *[max_args + 2:null]?[*:0]const u8) ![:0]con
 test "job directories stay under the worker's scratch tree" {
     try std.testing.expect(inJobs(jobs));
     try std.testing.expect(inJobs(jobs ++ "/session/output"));
-    for ([_][]const u8{ "/", "/data/svc/plex", jobs ++ "-other", jobs ++ "/../state", jobs ++ "/./x", jobs ++ "//x" }) |path|
+    for ([_][]const u8{
+        "/",
+        "/data/svc/plex",
+        jobs ++ "-other",
+        jobs ++ "/../state",
+        jobs ++ "/./x",
+        jobs ++ "//x",
+    }) |path|
         try std.testing.expect(!inJobs(path));
 }
 

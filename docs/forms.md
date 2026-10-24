@@ -1,23 +1,17 @@
 # Forms
 
-A form says what a werewolf machine is for. Each is a directory,
-`forms/<name>/`: `form.yaml` (the Wolfi packages and accounts apko installs,
-and what apko cannot say: the form it is built on, its services, its network
-policy, the posture checks it fails and why), `rootfs/` (files laid over the
-packages) and, where needed, `cmd/`, `test/`, distro-specific `melange/` and a README.
-A form gets the parts of the form it is built on, and of that form's base.
-[forms/README.md](../forms/README.md) lists every file and key,
-[design/forms.md](design/forms.md) how forms compose; `make list-forms`
-shows the chains.
+A form declares a machine's packages, accounts, services, network policy and posture
+exceptions in `forms/<name>/form.yaml`. Its directory holds `rootfs/` overlays and,
+where needed, `cmd/`, `test/`, local `melange/` recipes and a README. It inherits its
+base's parts. [forms/README.md](../forms/README.md) lists the files and keys;
+[design/forms.md](design/forms.md) explains composition. `make list-forms` shows chains.
 
-[forms-catalog.md](forms-catalog.md) lists every form. Each boots the same
-way: stage0 opens its `root.erofs` read-only through dm-verity and hands over
-to init ([design/verified-boot.md](design/verified-boot.md)). `DEV=1` adds
-busybox and a console shell to any form. Howl's `--dev` also layers in root
-SSH using a local Ed25519 key managed under `$XDG_DATA_HOME/howl/keys/dev/`;
-`howl ssh root@NAME` selects that key for the VM. These are local debugging conveniences,
-and what ships is built without them. Native test authors can reuse that channel
-with [`howl test --iterate`](design/local-test-iteration.md).
+[forms-catalog.md](forms-catalog.md) lists every form. stage0 opens `root.erofs`
+read-only through dm-verity and hands over to init ([verified
+boot](design/verified-boot.md)). `DEV=1` adds BusyBox and a console shell. Howl's
+`--dev` also adds root SSH with a key under `$XDG_DATA_HOME/howl/keys/dev/`, selected by
+`howl ssh root@NAME`. Shipping images omit these debugging tools. Native tests can reuse
+the SSH channel with [`howl test --iterate`](design/local-test-iteration.md).
 
 ## The runtime forms
 
@@ -178,5 +172,4 @@ A setting not given is left out, so the daemon's default holds; `required`
 keeps the service down instead, as does an undeclared key or a value of the
 wrong type, with one line naming it.
 
-Building and shipping an application on these forms is
-[applications.md](applications.md).
+[Application packaging](applications.md) covers building and shipping on these forms.

@@ -93,7 +93,13 @@ pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
 /// sshIdentity is the key Lima puts in its NoCloud user's authorized_keys.
 pub fn sshIdentity(io: Io, gpa: Allocator, name: []const u8, user: []const u8) !?[]const u8 {
     const r = try std.process.run(gpa, io, .{
-        .argv = &.{ "limactl", "list", name, "--format", "{{.Config.User.Name}}|{{.IdentityFile}}" },
+        .argv = &.{
+            "limactl",
+            "list",
+            name,
+            "--format",
+            "{{.Config.User.Name}}|{{.IdentityFile}}",
+        },
     });
     if (r.term != .exited or r.term.exited != 0) return null;
     const text = std.mem.trim(u8, r.stdout, " \r\n");
