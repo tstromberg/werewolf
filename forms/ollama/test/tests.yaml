@@ -11,7 +11,7 @@ suites:
                 min: 65536
               capabilities: []
               no_new_privileges: true
-              connect_rules: [tcp/443 public, tcp/53, udp/53]
+              connect_rules: [tcp/443 public]
             await: 60s
       - name: ollama-api
         steps:

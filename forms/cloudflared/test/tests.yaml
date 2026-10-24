@@ -28,6 +28,9 @@ suites:
                 - protocol: tcp
                   address: 127.0.0.1
                   port: 2000
+                - protocol: tcp
+                  address: 127.0.0.53
+                  port: 53
       - name: cloudflared-trying
         steps:
           - fetch:
