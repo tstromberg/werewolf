@@ -1,20 +1,18 @@
-# postgresql: prod, with PostgreSQL 17 for the machine's own services. It
+# postgresql: prod, with PostgreSQL 18 for the machine's own services. It
 # answers on a UNIX socket in /run/svc/postgres and nothing else: no TCP
 # port, and the form declares none. Its data is in /data/svc/postgres.
 # leash starts it as the postgres user (etc/sv/postgres/service); before
 # each start pg-init makes the cluster if there is none, streams
 # /run/werewolf/import/*.sql into that first cluster, and applies the
 # SQL a form brings in /usr/share/werewolf-postgres. Local roles are
-# their system users (peer authentication). The major version is the
-# package's name: a new one is a new form, since its data needs
-# pg_upgrade. See forms/postgresql/README.md.
+# their system users (peer authentication). The package is pinned to major 18.
 base: prod
 
 packages:
-  - postgresql-17>=17.10-r1000
+  - postgresql~18
   - posix-libc-utils-bin  # locale -a, without ldd or its bash dependency
 
-dev: [postgresql-17-client]  # peer-authenticated SQL checks
+dev: [postgresql-client~18]  # peer-authenticated SQL checks
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).

@@ -227,7 +227,7 @@ class IterationInputs(unittest.TestCase):
                 plan['drivers'][0]['user'] = 'gatus'
                 self.assertNotEqual(original, fingerprint())
                 plan['drivers'][0]['user'] = 'root'
-                plan['packages'].append('postgresql-17-client')
+                plan['packages'].append('postgresql-client')
                 self.assertNotEqual(original, fingerprint())
 
     def test_fixture_bytes_refresh_vm_while_adjacent_driver_sources_stay_hot(self):
@@ -305,7 +305,7 @@ class Protocol(unittest.TestCase):
                                self.plan, self.context)
 
     def test_complete(self):
-        self.assertEqual(self.validate(self.records), 12)
+        self.assertEqual(self.validate(self.records), 13)
 
     def test_kernel_interleaving_inside_and_after_json(self):
         lines = ['werewolf-test: ' + json.dumps(r) + '\r\n' for r in self.records]
@@ -315,7 +315,7 @@ class Protocol(unittest.TestCase):
                     interrupted = list(lines)
                     line = interrupted[index]
                     interrupted[index] = line[:offset] + '[ 16.429304] audit: type=1302 denied\r\n' + line[offset:]
-                    self.assertEqual(native.validate(''.join(interrupted), self.plan, self.context), 12)
+                    self.assertEqual(native.validate(''.join(interrupted), self.plan, self.context), 13)
 
     def test_non_kernel_trailing_data_still_fails(self):
         lines = ['werewolf-test: ' + json.dumps(r) for r in self.records]
@@ -327,7 +327,7 @@ class Protocol(unittest.TestCase):
         name = 'test-postgres'
         records = [r for r in self.records if r.get('suite') == name or r.get('event') == 'complete']
         text = 'other service: ready\n' + '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
-        self.assertEqual(native.validate(text, self.plan, self.context, only_driver=name), 6)
+        self.assertEqual(native.validate(text, self.plan, self.context, only_driver=name), 7)
         with self.assertRaises(ValueError):
             native.validate(text, self.plan, self.context, only_driver='missing')
 
@@ -446,7 +446,7 @@ class Plans(unittest.TestCase):
 
     def test_greenbone_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
-        self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-17-client'])
+        self.assertEqual(plan['packages'], ['libcurl-openssl4', 'postgresql-client'])
         self.assertEqual(next(d for d in plan['drivers'] if d['mode'] == 'manager')['user'], '_oci-gvmd')
 
     def test_config_cannot_replace_context_or_read_arbitrary_host_files(self):
@@ -880,7 +880,7 @@ class RunIdentity(unittest.TestCase):
                         return
                     native.run('postgresql', 'x86_64', [])
                 report = json.loads((root / 'check/postgresql-native/results.json').read_text())
-                self.assertEqual([phase['cases'] for phase in report['phases']], [12, 11])
+                self.assertEqual([phase['cases'] for phase in report['phases']], [13, 12])
                 if update:
                     self.assertEqual(report['verify_config'], native.digest(fixture))
             finally:

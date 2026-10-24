@@ -1,6 +1,6 @@
 version: 1
 packages:
-  - postgresql-17-client
+  - postgresql-client
 suites:
   - name: test-postgres
     user: postgres
@@ -30,6 +30,22 @@ suites:
               exit: 0
               stdout: "1\n"
             await: 90s
+      - name: major-version
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: "SELECT current_setting('server_version_num')::integer / 10000\n"
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "18\n"
       - name: locale
         steps:
           - exec:

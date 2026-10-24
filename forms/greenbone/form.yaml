@@ -12,7 +12,7 @@ base: prod
 with: [postgresql, caddy, valkey]
 
 # The extension is built by ../packages/security/greenbone/pg-gvm.yaml against this PostgreSQL.
-packages: [pg-gvm, postgresql-17-contrib, glib, libical~3.0]
+packages: [pg-gvm, postgresql-contrib~18, glib, libical~3.0]
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).

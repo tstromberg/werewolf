@@ -13,7 +13,7 @@ packages:
   - neo4j-4.4
   # pg_trgm, which BloodHound's first migration creates. The postgresql
   # form ships the server alone.
-  - postgresql-17-contrib
+  - postgresql-contrib~18
   # Java 11. Neo4j 4.4 is the form's own package
   # (../packages/databases/bloodhound/neo4j.yaml), not a Wolfi package.
   - openjdk-11-default-jvm

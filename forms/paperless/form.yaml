@@ -16,7 +16,7 @@ packages:
   - python-3.15
   - libstdc++
   - libgcc
-  - libpq-17
+  - libpq~18
   - zlib
   # OCR and the file tools, Wolfi's, so a later package replaces them.
   - tesseract
@@ -34,7 +34,7 @@ packages:
 # The checks sign in with curl, which keeps the token.
 dev:
   - curl
-  - postgresql-17-client
+  - postgresql-client~18
 
 # make check's (forms/README.md): four Paperless services, Valkey and Caddy.
 check:

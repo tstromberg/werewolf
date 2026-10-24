@@ -8,7 +8,7 @@ only if both succeed.
 
 ## Background
 
-The `postgresql` form (and `demo`, built on it) runs PostgreSQL 17 as the
+The `postgresql` form (and `demo`, built on it) runs PostgreSQL 18 as the
 `postgres` user, for local clients over a UNIX socket. The server needs a
 cluster before it will start, and a form's roles, schemas and grants must be
 in it. Distros do this with a shell script; werewolf has no shell. leash runs
@@ -26,8 +26,7 @@ service if one fails.
 
 ## Non-Goals
 
-- Upgrading between major versions. A new major is a new form, since its
-  data needs `pg_upgrade`.
+- Migrating an existing cluster between major versions.
 - Backups, replication, or SQL from a config disk.
 
 ## Detailed design

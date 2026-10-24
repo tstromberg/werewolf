@@ -22,7 +22,7 @@ packages:
   # the build fails if one is missing.
   - icu-libs
   - libidn
-  - libpq-17
+  - libpq~18
   - libffi
   - libxml2
   - libxslt

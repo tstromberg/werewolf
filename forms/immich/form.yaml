@@ -15,8 +15,8 @@ packages:
   # The vector type Immich's search tables need, and the extensions its
   # migrations make: cube and earthdistance for places, pg_trgm and
   # unaccent for names, uuid-ossp for ids.
-  - pgvector-17
-  - postgresql-17-contrib
+  - pgvector-18
+  - postgresql-contrib~18
 
 # BusyBox wget truncates binary POST bodies at NUL; the upload check uses curl.
 dev: [curl]
