@@ -83,11 +83,21 @@ pub fn main(init: std.process.Init) !void {
     );
     const version = try http(gpa, "GET", "/api/v1/version", auth, "");
     const info = try std.json.parseFromSliceLeaky(std.json.Value, gpa, version.body, .{});
+    const packages = try Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/lib/apk/db/installed",
+        gpa,
+        .limited(64 << 20), // apk lists every file each package installs
+    );
     try ctx.result(
         io,
         suite,
         "version",
-        version.status == 200 and std.mem.eql(u8, info.object.get("version").?.string, "1.12.6"),
+        version.status == 200 and std.mem.eql(
+            u8,
+            info.object.get("version").?.string,
+            installedVersion(packages) orelse return error.NoLangflow,
+        ),
     );
     if (std.mem.eql(u8, ctx.phase, "seed")) {
         const body = try gpa.print(
@@ -171,12 +181,6 @@ pub fn main(init: std.process.Init) !void {
         std.mem.startsWith(u8, service, "exec /usr/lib/langflow/bin/python ") and
             std.mem.indexOf(u8, service, "/bin/sh") == null,
     );
-    const packages = try Io.Dir.cwd().readFileAlloc(
-        io,
-        "/usr/lib/apk/db/installed",
-        gpa,
-        .limited(64 << 20), // apk lists every file each package installs
-    );
     const prefix = "P:python-3.15\nV:";
     const at = std.mem.indexOf(u8, packages, prefix) orelse return error.NoPython;
     const rest = packages[at + prefix.len ..];
@@ -194,6 +198,37 @@ pub fn main(init: std.process.Init) !void {
         "private-listener",
         try driver.tcpPrivate(io, gpa, 7860, true),
     );
+}
+
+fn installedVersion(database: []const u8) ?[]const u8 {
+    var records = std.mem.splitSequence(u8, database, "\n\n");
+    while (records.next()) |record| {
+        var name: ?[]const u8 = null;
+        var version: ?[]const u8 = null;
+        var fields = std.mem.splitScalar(u8, record, '\n');
+        while (fields.next()) |field| {
+            if (std.mem.startsWith(u8, field, "P:")) name = field[2..];
+            if (std.mem.startsWith(u8, field, "V:")) version = field[2..];
+        }
+        if (!std.mem.eql(u8, name orelse continue, "langflow")) continue;
+        const text = version orelse return null;
+        const revision = std.mem.lastIndexOf(u8, text, "-r") orelse return null;
+        if (revision == 0 or revision + 2 == text.len) return null;
+        for (text[revision + 2 ..]) |digit| if (!std.ascii.isDigit(digit)) return null;
+        return text[0..revision];
+    }
+    return null;
+}
+
+test "API version follows the installed Langflow package without its APK revision" {
+    try std.testing.expectEqualStrings(
+        "1.13.0",
+        installedVersion("P:other\nV:9-r0\n\nP:langflow\nV:1.13.0-r2\n").?,
+    );
+    try std.testing.expectEqualStrings("1.12.6", installedVersion("P:langflow\nV:1.12.6-r0\n").?);
+    try std.testing.expect(installedVersion("P:langflow-base\nV:1.13.0-r2\n") == null);
+    try std.testing.expect(installedVersion("P:langflow\nV:1.13.0\n") == null);
+    try std.testing.expect(installedVersion("P:langflow\nV:1.13.0-rx\n") == null);
 }
 
 fn findFlowId(value: std.json.Value, name: []const u8) ?[]const u8 {

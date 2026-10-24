@@ -332,6 +332,7 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/greenbone/test/web.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/moodle/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/langflow/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
@@ -927,7 +928,7 @@ _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
 		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt test/check-secureboot \
 		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
-		-m $(CHECK_MEMORY) -no-reboot
+		-m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci
 _check-metadata:
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci

@@ -123,13 +123,15 @@ programs: [slot-update]
 
 # The updater's network half, as _update: Wolfi and Alpine for apk, and the
 # CVE sources, Wolfi's security.json and the kernel CNA's records on
-# git.kernel.org, all over HTTPS, and the names to find them. Root, which
+# git.kernel.org and Werewolf's tier feed, all over HTTPS. Root, which
 # builds and installs the slot, has no network at all.
 net:
   - connect _update tcp/443
   - lookup _update packages.wolfi.dev
   - lookup _update dist.werewolf-linux.org
   - lookup _update git.kernel.org
+  - lookup _update *.source.kernel.org
+  - lookup _update raw.githubusercontent.com
   - connect _unwoundage tcp/443 public
   - lookup _unwoundage * A AAAA unfiltered
 

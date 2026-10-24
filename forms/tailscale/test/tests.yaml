@@ -37,10 +37,16 @@ suites:
         steps:
           - listeners: tcp
             expect:
-              equals: []
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.53
+                  port: 53
           - listeners: udp
             expect:
               equals:
+                - protocol: udp
+                  address: 127.0.0.53
+                  port: 53
                 - protocol: udp
                   address: 0.0.0.0
                   port: 41641

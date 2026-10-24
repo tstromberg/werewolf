@@ -86,6 +86,9 @@ suites:
             expect:
               equals:
                 - protocol: tcp
+                  address: 127.0.0.53
+                  port: 53
+                - protocol: tcp
                   address: 0.0.0.0
                   port: 4317
                 - protocol: tcp
