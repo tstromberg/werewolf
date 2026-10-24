@@ -202,8 +202,14 @@ fn check(io: Io, gpa: mem.Allocator) !void {
         "syslog-check: credentials, escaping, truncation and fd rejection verified\n",
         .{},
     );
-    try flooding(io, gpa);
     try shutdown(io, pid);
+    // Serial-console emulation can throttle ingestion below the PID limit.
+    // Console delivery is checked above; exercise floods with file output only.
+    try dir.writeFile(io, .{ .sub_path = "/run/config/syslog.conf", .data = "console no\n" });
+    const flood_logger = try launch();
+    try ready(io, flood_logger);
+    try flooding(io, gpa);
+    try shutdown(io, flood_logger);
     if (exists(io, "/data/log/messages") and
         (try dir.statFile(io, "/data/log/messages", .{})).size != 0) return error.NotDrained;
 
@@ -294,18 +300,28 @@ fn waitHealth(
     return error.BadHealthStatus;
 }
 
-fn logAs(uid: u32, text: []const u8, count: usize) !i32 {
+fn logAs(uid: u32, text: []const u8, count: usize, batch: usize) !i32 {
     const pid = try call(linux.fork());
     if (pid == 0) {
         _ = call(linux.setgroups(0, &.{})) catch linux.exit_group(1);
         _ = call(linux.setresgid(uid, uid, uid)) catch linux.exit_group(1);
         _ = call(linux.setresuid(uid, uid, uid)) catch linux.exit_group(1);
+        // Exercise coarse wakeups even when the host has high-resolution timers.
+        _ = call(linux.prctl(
+            @backingInt(linux.PR.SET_TIMERSLACK),
+            10 * std.time.ns_per_ms,
+            0,
+            0,
+            0,
+        )) catch linux.exit_group(1);
         const fd = sender() catch linux.exit_group(1);
         for (0..count) |index| {
             const n = linux.sendto(fd, text.ptr, text.len, linux.MSG.NOSIGNAL, null, 0);
             if (linux.errno(n) != .SUCCESS or n != text.len) linux.exit_group(1);
-            // Exceed the PID rate while giving the real disk writer CPU time.
-            if (index % 4 == 3)
+            // Give the disk writer CPU time. A 1 ms sleep can take a full
+            // scheduler tick, so the noisy sender needs a larger batch to
+            // exceed 1,000 messages/second on kernels with coarse timers.
+            if (index % batch == batch - 1)
                 _ = linux.nanosleep(&.{ .sec = 0, .nsec = std.time.ns_per_ms }, null);
         }
         linux.exit_group(0);
@@ -320,11 +336,11 @@ fn waitSender(pid: i32) !void {
 }
 
 fn flooding(io: Io, gpa: mem.Allocator) !void {
-    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid);
+    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid, 32);
     try waitSender(noisy);
     // These share the noisy process's UID but each stays below the PID limit.
-    try waitSender(try logAs(65537, "pid-sibling-one", 600));
-    try waitSender(try logAs(65537, "pid-sibling-two", 600));
+    try waitSender(try logAs(65537, "pid-sibling-one", 600, 4));
+    try waitSender(try logAs(65537, "pid-sibling-two", 600, 4));
     for (0..500) |_| {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();

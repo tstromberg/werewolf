@@ -10,7 +10,7 @@ A service file declares its per-machine settings, each of one of ten types,
 and a format to render them in: `env`, `json` or `conf`. One program,
 `service-config`, renders any service's settings from the config tar,
 unprivileged, in its leash; `howl pack` checks them with the same code.
-The syntax, types and formats are in [forms.md](../forms.md#settings).
+The [settings guide](../settings.md#syntax) lists the syntax, types and formats.
 
 ## Background
 

@@ -43,10 +43,9 @@ python3 test/form-coverage --list   # each form's integration cases
 [Live tests](testing-live.md) cover network, cloud and remote hosts; see
 [secure boot tests](testing-secure-boot.md) for Secure Boot, TPM and signed updates.
 
-Besides the build's tools, `make check` needs QEMU, `expect` and `mke2fs` (`brew install
-qemu e2fsprogs` on a Mac); the tutorial forms also need Go, rustup with the
-architecture's Linux musl target, the .NET 10 SDK and a JDK. `make check-dns` runs as
-root, or as a user with subordinate ids.
+`make check` also needs QEMU, `expect` and `mke2fs` (`brew install qemu e2fsprogs` on
+macOS); tutorials need Go, rustup with Linux musl targets, .NET 10 and a JDK.
+`make check-dns` needs root or subordinate ids.
 
 ## What `make check` does
 
@@ -92,23 +91,19 @@ Other boots cover what one boot cannot:
 | the slot | find `root.erofs` by UUID, keep `/boot` read-only, commit its EFI entry once healthy for a minute | a 128 MiB ext4 and a FAT EFI partition with one counted entry |
 | each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image](../test/check-legacy-image); the shared image workflow |
 
-Each machine gets a blank disk, a config disk with a fixed test `data.key` (LUKS2
-`/data`) and forwarded ports (22200 and 23200 plus its place among the forms), so
-`make -j` runs them together. test/boot waits for events up to a limit, with no fixed
-delays. On an M4, `make -j8 check` takes about 25 s for forms and another minute for
-the slot to commit. Logs stay in `build/<arch>/check/`.
+Each machine gets blank/config disks, a fixed test LUKS2 key and distinct forwarded
+ports (22200 and 23200 plus its form index), so `make -j` can run them together.
+test/boot waits for bounded events; logs stay in `build/<arch>/check/`.
 
 ## Form integration coverage
 
-A service or application form needs at least five distinct cases through the running
-service: read/write, authentication, wrong-password rejection, unsupported operations,
-configured content or persistence across reboot. Assertions about one operation count as
-one case; name it for the behaviour tested. Shared boot and posture checks do not count.
-`python3 test/form-coverage` enforces the minimum in `make test`; `--list` finds each
-form's cases. The [exceptions](../test/form-coverage-exceptions) explain shared suites
-for foundations and runtime-only forms. Review still judges case quality. `make
-check-apps` builds the `-app` forms and `php` with
-[test/app-fixtures](../test/app-fixtures) and tests their HTTP behaviour.
+A service/application form needs five distinct cases through its running service:
+read/write, authentication, refusals, configured content or reboot persistence. Name
+each behaviour; assertions about one operation count once, and shared boot/posture
+checks do not count. `python3 test/form-coverage` enforces this in `make test`;
+`--list` shows cases and [exceptions](../test/form-coverage-exceptions) explain shared
+suites. Review judges quality. `make check-apps` tests HTTP for `-app` forms and `php`
+using [test/app-fixtures](../test/app-fixtures).
 
 ## Writing a check
 

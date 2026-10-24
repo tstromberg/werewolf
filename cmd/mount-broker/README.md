@@ -27,9 +27,9 @@ FAT serial comes only from the kernel command line, parsed through `lib/cmdline.
 
 ## Detailed design
 
-- **The channels** are three `AF_UNIX`, `SOCK_SEQPACKET` socketpairs created by init:
-  descriptors `3` (`updater`), `4` (`keeper`) and `5` (`stage`) in the broker. Each
-  service closes the client descriptors of the other roles on startup.
+- **Channels**: init creates three `AF_UNIX`, `SOCK_SEQPACKET` socketpairs: broker
+  descriptors `3` (`updater`), `4` (`keeper`) and `5` (`stage`). Services close
+  other roles' client descriptors on startup.
 - **The EFI partition** (`werewolf.esp`'s FAT serial) is never attached. On `keeper`,
   the broker answers `esp-status` and `esp-commit`. On `updater`, it answers
   `esp-disarm` and `esp-arm` (one try of the other slot), `esp-inspect` (the other
@@ -38,10 +38,9 @@ FAT serial comes only from the kernel command line, parsed through `lib/cmdline.
   it). The entry's command line is digest-named too: the staging directory is writable
   by guest root, so unbound options would let root choose the trial boot's boot context.
   No asker names a path, a file, an entry, or its contents.
-- **The boot partition** (`werewolf.slots`'s ext4 UUID) is never attached either. On
-  `updater`, the broker mounts it detached, copies digest-checked staged files into
-  `/slot/{a,b}` (`slot-root`, `slot-decl`, `slot-meta`) or `/state/{0,1}`
-  (`slot-state`), syncs, and closes the mount.
+- **Boot partition** (`werewolf.slots`'s ext4 UUID): `updater` mounts it detached,
+  copies digest-checked staged files into `/slot/{a,b}` (`slot-root`, `slot-decl`,
+  `slot-meta`) or `/state/{0,1}` (`slot-state`), syncs, then closes the mount.
 - **Update reboot**: on `updater`, `reboot` sets two root-owned runit flags
   opened before confinement and wakes PID 1. Seccomp permits only those descriptors,
   modes and signal; the updater needs no filesystem override or signal capability.

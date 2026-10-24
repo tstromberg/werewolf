@@ -64,9 +64,9 @@ config tar to select its behavior. It runs no shell.
 - Until the seal it runs as root with every capability, and the kernel
   parses whatever filesystem a config or seed disk carries.
 - A single-slot machine that fails closed reboots into the same image.
-- `/data` follows links (`symfollow`), since the updater and apk build
-  roots there, so a service could plant a link for a root program walking
-  its directory. None does today. Open; listed in docs/security.md.
+- `/data` follows links (`symfollow`) for updater and apk builds. A service
+  could plant a link for a root program walking its directory. None does
+  today; see docs/security.md.
 
 ## Alternatives Considered
 
