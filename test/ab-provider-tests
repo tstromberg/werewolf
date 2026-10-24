@@ -77,6 +77,23 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
         work.mkdir()
         return Provider(kind, fixture, work, 'howl')
 
+    disk = root / 'fixture-disk'
+    disk.write_bytes(b'fixture')
+    for arch in ('x86_64', 'aarch64'):
+        qemu = machine('qemu', 'qemu-' + arch)
+        qemu.fixture = dict(fixture, arch=arch, mode='secure', disk=str(disk))
+
+        def enroll(directory):
+            directory.mkdir()
+            (directory / 'vars.fd').write_bytes(b'variables')
+
+        qemu.enroll = enroll
+        with patch('ab_providers.port', return_value=23456), \
+                patch('ab_providers.subprocess.Popen') as launch:
+            qemu.start_qemu()
+        args = launch.call_args.args[0]
+        assert args[args.index('virtio-rng-pci') - 1] == '-device'
+
     with patch.dict('os.environ', {'BHYVE_BINARY': '/var/tmp/rtc-test/bhyve',
                                   'BHYVE_ARM64_FIRMWARE': '/var/tmp/firmware-test/u-boot.bin',
                                   'BHYVE_TAP': 'tap7',

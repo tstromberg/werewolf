@@ -137,7 +137,8 @@ class Provider:
                 '-m', '3072', '-nographic', '-drive', f'file={disk},format=qcow2,if=virtio',
                 '-drive', f'file={self.work}/config.tar,format=raw,if=virtio,readonly=on',
                 '-netdev', f'user,id=n0,hostfwd=tcp:127.0.0.1:{self.ssh_port}-:22',
-                '-device', 'virtio-net-pci,netdev=n0,romfile=']
+                '-device', 'virtio-net-pci,netdev=n0,romfile=',
+                '-device', 'virtio-rng-pci']
         firmware = self.work / 'enrolled'
         if self.fixture['mode'] == 'plain':
             self.env['ENROLL_TEST_SETUP'] = '1'
