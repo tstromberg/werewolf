@@ -4,11 +4,10 @@ base: prod
 
 programs: [plex-loopback.so]
 
-# Build locally until the vendor package is published in the application feed.
-recipes:
-  - ../../../packages/devel/musl/musl.yaml
-  - ../../../packages/multimedia/plex/plex.yaml
-  - ../../../packages/www/caddy/caddy.yaml
+packages:
+  - musl-werewolf
+  - plexmediaserver
+  - caddy
 
 prune:
   - usr/lib/plexmediaserver/Plex Script Host
