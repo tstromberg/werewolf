@@ -25,12 +25,11 @@ from the checkout:
 howl run --build --with node-example
 ```
 
-Open a service's guide first: many need credentials or certificates before
-they start, and `howl pack --build --with FORM -h` lists the form's
-configuration flags. `--build` uses this checkout. Secure deployment is the
-default, and a prebuilt download needs a published protected image for the
-form, host and architecture: see the [host support table](../README.md#secure-boot)
-and the [howl guide](../cmd/howl/README.md).
+Open a service's guide first: many need credentials or certificates before they start,
+and `howl pack --build --with FORM -h` lists the form's configuration flags. `--build`
+uses this checkout. Secure deployment is the default, and a prebuilt download needs a
+published protected image for the form, host and architecture: see the [deployment
+design](design/secure-local-deployment.md) and the [howl guide](../cmd/howl/README.md).
 
 ## Images and downloads
 

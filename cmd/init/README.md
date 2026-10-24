@@ -8,11 +8,9 @@ sets the kernel's protections, reads the config, brings up the network and
 
 ## Background
 
-stage0 mounts the verified, read-only root, so all that changes lives in
-`/run`, `/tmp`, `/var/tmp` and `/data`. init is in every form and must not
-know which: it decides from the tools the image carries (DHCP client,
-mke2fs, cryptsetup), the command line's `werewolf.*` words
-(`lib/cmdline.zig`) and one config tar. It runs no shell.
+stage0 hands over a verified, read-only root. Only `/run`, `/tmp`, `/var/tmp` and
+`/data` change. init uses the image's tools, the kernel command line
+(`lib/cmdline.zig`) and one config tar to serve every form; it runs no shell.
 
 ## Goals
 
@@ -34,13 +32,12 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
    if the form allows `pty`; cgroup2 for leash; accounts copied to `/run`.
 2. **Kernel** (`kernel.zig`): lockdown to confidentiality, sysctls, audit of
    refused execs, then MDWE on PID 1 unless the form allows `jit`. A refused
-   sysctl or MDWE ends the boot, except in a container, where they are the
-   host's. The sysctls of what the kernel leaves out (BPF, io_uring, the
-   module loader, SysRq) do not exist, and are skipped.
-3. **Config** (`config.zig`): one tar, from the first block device holding
-   one; others are logged and ignored. A confined child (no capabilities,
-   Landlock, seccomp) extracts it to `/run/config`. A NoCloud volume labelled
-   `cidata` stages a user and keys and adds Lima's data files, never replacing the tar's.
+   sysctl or MDWE ends boot except in containers, where they are the host's.
+   Absent sysctls for disabled BPF, io_uring, modules or SysRq are skipped.
+3. **Config** (`config.zig`): one tar, from the first block device holding one; others
+   are logged and ignored. A confined child (no capabilities, Landlock, seccomp)
+   extracts it to `/run/config`. A NoCloud volume labelled `cidata` stages a user and
+   keys and adds Lima's data files, never replacing the tar's.
 4. **Network** (`network.zig`): `iface-up` with the command line's or the
    tar's address (`lib/network.zig`), else `dhcp-client up`. Router
    advertisements count on that NIC only. Without a disk config,
@@ -66,9 +63,8 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
 - Until the seal it runs as root with every capability, and the kernel
   parses whatever filesystem a config or seed disk carries.
 - A single-slot machine that fails closed reboots into the same image.
-- `/data` follows links (`symfollow`), since the updater and apk build
-  roots there, so a service could plant a link for a root program walking
-  its directory. None does today. Open; listed in docs/security.md.
+- `/data` allows links for updater/apk roots. A service could plant one for a root
+  program walking its directory; none does today. Open in docs/security.md.
 
 ## Alternatives Considered
 

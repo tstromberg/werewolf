@@ -40,27 +40,26 @@ Omitted types mean A AAAA; explicit lists replace that line's default. Grants un
 `all` expands to the image's supported query types, never DNS ANY, transfers or UPDATE.
 Exact names and `*.domain` are deliberate grants without age/endpoint/entropy checks.
 The latter covers descendants, not the apex; it grants the entire subtree's authority.
-Broad `*` grants refuse the compiled [callback and tunnel domain list](../../cmd/unwound/endpoints.zig)
-and IP-prefixed hostnames. This includes dotted/dashed IPv4, integer/hex IPv4,
-and dashed IPv6 prefixes under any DNS suffix; ordinary reverse PTR names remain
-available. The block uses whole suffixes and label boundaries, including the
-listed apex. It runs before cache access, age checks and upstream DNS, and applies
-to alias targets too. A matching exact name or `*.domain` grant overrides the
-block for its service and query types, regardless of grant order.
+Broad `*` grants refuse the compiled [callback and tunnel domain
+list](../../cmd/unwound/endpoints.zig) and IP-prefixed hostnames. This includes
+dotted/dashed IPv4, integer/hex IPv4, and dashed IPv6 prefixes under any DNS suffix;
+ordinary reverse PTR names remain available. The block uses whole suffixes and label
+boundaries, including the listed apex. It runs before cache access, age checks and
+upstream DNS, and applies to alias targets too. A matching exact name or `*.domain`
+grant overrides the block for its service and query types, regardless of grant order.
 Bare `*` screens names; `unfiltered` removes only that line's screening. Require `*`
-with it. The endpoint defaults still require a named grant even with `unfiltered`.
-Type limits, quotas, parsing, audit and local resolution through unwound
-still apply.
-The assigned system domain and its descendants are granted to every service
-with DNS enabled, including supported types beyond A and AAAA. The automatic
-grant retains endpoint and tunnel screening and bypasses the 30-day age gate.
-The FQDN from boot metadata takes precedence over DHCP option 15.
-Canonicalize all names to lowercase ASCII/A-labels without one terminal dot; accept
-only exact names, leading `*.` or bare `*`. No regex or substring matching.
-Screening uses bounded name shape, entropy, per-service name and site budgets,
-answer holding and answer trimming. Screened wildcards also require domain-age
-evidence. See the [implementation plan](unwound-plan.md) for the actual limits.
-Apply grants to aliases before follow-up/return; upstreams may already follow them.
+with it. The endpoint defaults still require a named grant even with `unfiltered`. Type
+limits, quotas, parsing, audit and local resolution through unwound still apply. The
+assigned system domain and its descendants are granted to every service with DNS
+enabled, including supported types beyond A and AAAA. The automatic grant retains
+endpoint and tunnel screening and bypasses the 30-day age gate. The FQDN from boot
+metadata takes precedence over DHCP option 15. Canonicalize all names to lowercase
+ASCII/A-labels without one terminal dot; accept only exact names, leading `*.` or bare
+`*`. No regex or substring matching. Screening uses bounded name shape, entropy,
+per-service name and site budgets, answer holding and answer trimming. Screened
+wildcards also require domain-age evidence. See the [implementation
+plan](unwound-plan.md) for the actual limits. Apply grants to aliases before
+follow-up/return; upstreams may already follow them.
 
 Builder adds `lookup` alongside `connect`, derives UID/service identity, and emits
 immutable `lookup UID PATTERN TYPE... [unfiltered]` records, expanding defaults/`all`.

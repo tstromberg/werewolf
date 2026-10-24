@@ -139,7 +139,9 @@ pub fn accounts(m: *Machine) void {
     defer _ = linux.close(ledger_dir);
     const loaded = people.loadLedger(m.gpa, ledger_dir) catch |err| switch (err) {
         error.NoLedger => blk: {
-            if (!(people.freshData(data_fd) catch false)) return accountFailure("unregistered data");
+            if (!(people.freshData(
+                data_fd,
+            ) catch false)) return accountFailure("unregistered data");
             break :blk @as([]const people.Identity, &.{});
         },
         else => return accountFailure("read identities"),
@@ -168,7 +170,13 @@ pub fn accounts(m: *Machine) void {
     for (c.keys) |k| {
         const path = m.fmtZ("/run/werewolf/keys/{s}", .{k.name});
         writeAccount(m, path, k.text, 0o600);
-        if (linux.errno(linux.fchownat(linux.AT.FDCWD, path, k.id, k.id, linux.AT.SYMLINK_NOFOLLOW)) != .SUCCESS)
+        if (linux.errno(linux.fchownat(
+            linux.AT.FDCWD,
+            path,
+            k.id,
+            k.id,
+            linux.AT.SYMLINK_NOFOLLOW,
+        )) != .SUCCESS)
             return accountFailure("own key");
     }
     if (c.root_keys.len > 0) {

@@ -188,7 +188,13 @@ pub fn apply(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
         return @import("verbs.zig").sshTo(
             io,
             gpa,
-            &.{ try gpa.print("root@{s}", .{o.name}), "--", "/usr/lib/werewolf/slot-update", "try", hash },
+            &.{
+                try gpa.print("root@{s}", .{o.name}),
+                "--",
+                "/usr/lib/werewolf/slot-update",
+                "try",
+                hash,
+            },
             why,
         );
     };
