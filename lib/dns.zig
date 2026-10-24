@@ -233,7 +233,11 @@ pub fn plan(u: Users, r: *const Resolvers, buf: *[max_rules]route.Rule) []const 
             n += 1;
         }
         buf[n] = .{
-            .priority = 300,
+            // Keep dynamic, source-specific replies separate from fence's
+            // broad reply rules (300). Netlink's EEXIST lookup treats an
+            // omitted source selector as a wildcard, which can hide those
+            // broader rules when these were installed first.
+            .priority = 301,
             .action = 1,
             .table = 255,
             .src = ip,
