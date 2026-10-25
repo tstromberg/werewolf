@@ -1,19 +1,7 @@
-            :$&&&&&$X:   ------------------------------------------------------
-        $&+X     X     &&   Werewolf Linux playground:
-      &:       :&.+   $&  ;$   a hardened, declarative environment to play in!
-    &:       +$&&X;&&$&     ;&
-  .&.     ;&&&$&+&&&&&&&     .&   Locked down by default:
- .&     $&&&$&&&&&&&&&&&&     :&     - / is read-only
- &&    &&&&&&&&&&&&+$& x&      $&    - /data is the only persistent location
-+     :&&&&&&&&X$ X&&&:&&&.      :   - seccomp and Landlock confine processes
-&+   $X$&&&&&x&&&&&$&.  : &$     X   - Application firewalling is in place
-&   +&&&$&&&&$&&$$+X&;$ :&:      &   - Signed binary verification is TBD
-&;  $&&$&&&&&&&$&&: X&           $
-$+  &&&&&&&&&&&&$&&:;;&          .   Useful commands, in /usr/lib/werewolf:
- &+:&&&&&$&&&&&&&X&Xx &&$       &     posture     security checks
-  & &&&&&&x&&&&&&X&;::$&$      &     slot-update  install updates (A/B)
-   &+&&&&&&X&&&&&$&&$$&&     $&
-    &&&&&&&&&&&&&&&&+&&$&: .+&   Found a way to run arbitrary code as root?
-      &&&&&&&&&&&&&&&X&&&&$&     Open an issue at
-        +&&$&&&x+&&&&$&X$+       https://github.com/werewolf-linux/werewolf
-            :X&&&&&$+:   ------------------------------------------------------
+
+ /\       /\
+/  \_____/  \
+\   o   o   /    Werewolf Linux
+ \   \ /   /     Root holds none of the keys that matter.
+  \___V___/
+

@@ -21,9 +21,6 @@ const secure_boot_var =
 const setup_mode_var =
     "/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c";
 
-/// Init records stage0's check; posture independently validates the TPM policy.
-const rollback_marker = "/run/werewolf/rollback-checked";
-
 /// parseSecureBoot reads the SecureBoot variable's bytes: four attribute
 /// bytes, then the value. null says the bytes are not a variable to judge.
 fn parseSecureBoot(data: []const u8) ?bool {
@@ -179,70 +176,57 @@ fn imagePolicy(p: *Posture) !void {
 }
 
 fn rollback(p: *Posture) !void {
-    const has_tpm = exists(p.io, "/dev/tpmrm0");
+    const has_tpm = exists(p.io, tpm.device);
     var rb: posture.Check = .{
         .id = "boot-rollback-protected",
         .area = "boot",
         .name = "Rollback protected",
-        .why = "Retired signed images must be refused while both authorized A/B releases remain " ++
+        .why = "Retired signed images must be refused while the retained A/B release remains " ++
             "bootable.",
-        .how = "the running release belongs to the protected TPM pair, checked before handover, " ++
-            "marked in " ++ rollback_marker,
-        .result = .skip,
+        .how = "stage0 admitted this release at or above its channel's TPM floor before " ++
+            "handover, as " ++ tpm.Marker.path ++ " records",
+        .result = .fail,
     };
-    // A root SSH session may not open the TPM (forms/sshd's Landlock layer).
-    if (has_tpm and !tpmOpens()) {
-        rb.detail = "this process may not use the TPM, as an SSH session may not";
+    const text = p.read(tpm.Marker.path);
+    // A root SSH session may not read init's records (forms/sshd's Landlock layer).
+    if (text.len == 0 and exists(p.io, tpm.Marker.path)) {
+        rb.detail = "this process may not read stage0's record, as an SSH session may not";
+        rb.result = .skip;
         return p.fromBoot(rb);
     }
-    if (has_tpm) p.tpm = tpmState(p);
-    const checked_rollback = exists(p.io, rollback_marker);
-    rb.result = if (rollbackProtected(has_tpm, checked_rollback) and pairProtected(p))
-        .pass
-    else
-        .fail;
+    var bad: cmdline.Failure = .{};
+    const found = tpm.Marker.parse(text);
+    if (found) |m| p.tpm = .{ .handle = m.handle, .floor = m.floor, .index = m.index };
+    const release = cmdline.parse(p.read("/proc/cmdline"), &bad);
+    rb.result = if (has_tpm and found != null and release != null and
+        floorMatches(release.?, found.?)) .pass else .fail;
     rb.detail = if (!has_tpm)
-        "no TPM device: no protected release authorization"
+        "no TPM device: no release floor"
+    else if (found == null)
+        "stage0 recorded no TPM floor for this boot"
+    else if (rb.result == .fail)
+        "the recorded floor is not this boot's release"
     else
-        "protected A/B authorization must match this boot";
+        "";
     try p.add(rb);
 }
 
-/// tpmOpens reports whether this process may open the TPM for commands.
-fn tpmOpens() bool {
-    const fd = linux.open("/dev/tpmrm0", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
-    switch (linux.errno(fd)) {
-        .ACCES, .PERM => return false,
-        .SUCCESS => _ = linux.close(@intCast(fd)),
-        else => {},
-    }
-    return true;
+/// floorMatches reports whether stage0's record is of this boot's release.
+fn floorMatches(release: cmdline.Cmdline, m: tpm.Marker) bool {
+    const channel = release.channel orelse return false;
+    return tpm.handle(channel) == m.handle and release.index.? == m.index;
 }
 
-/// tpmState reads the A/B pair's anchor and PCR 11, or returns null.
-fn tpmState(p: *Posture) ?posture.Tpm {
-    const key = tpm.keyAt(p.io, p.gpa, "") catch return null;
-    var device = tpm.Device.open(p.io) catch return null;
-    defer device.close();
-    const anchor = device.anchor(key) catch return null;
-    const pcr = device.pcr11() catch return null;
-    return .{
-        .anchor = p.gpa.dupe(u8, &std.fmt.bytesToHex(anchor, .lower)) catch return null,
-        .pcr11 = p.gpa.dupe(u8, &std.fmt.bytesToHex(pcr, .lower)) catch return null,
-    };
-}
-
-fn pairProtected(p: *Posture) bool {
-    var bad: cmdline.Failure = .{};
-    const cmd = cmdline.parse(p.read("/proc/cmdline"), &bad) orelse return false;
-    if (cmd.slots == null) return false;
-    return tpm.protected(p.io, p.gpa, cmd.release, "/boot/state");
-}
-
-/// rollbackProtected requires both protected storage and stage0's proof that
-/// the running release belongs to its protected pair.
-fn rollbackProtected(has_tpm: bool, checked: bool) bool {
-    return has_tpm and checked;
+test floorMatches {
+    var f: cmdline.Failure = .{};
+    const line = "werewolf.native=1 werewolf.secure=1 " ++
+        "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000 " ++
+        "werewolf.channel=abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd" ++
+        " werewolf.index=7";
+    const release = cmdline.parse(line, &f).?;
+    try testing.expect(floorMatches(release, .{ .handle = 0x0150abcd, .floor = 3, .index = 7 }));
+    try testing.expect(!floorMatches(release, .{ .handle = 0x0150abcd, .floor = 3, .index = 8 }));
+    try testing.expect(!floorMatches(release, .{ .handle = 0x0150abce, .floor = 3, .index = 7 }));
 }
 
 test parseSecureBoot {
@@ -251,13 +235,6 @@ test parseSecureBoot {
     try testing.expectEqual(null, parseSecureBoot(&.{ 0, 0, 0, 0, 2 }));
     try testing.expectEqual(null, parseSecureBoot(&.{ 0, 0, 0, 0 }));
     try testing.expectEqual(null, parseSecureBoot(""));
-}
-
-test rollbackProtected {
-    try testing.expect(!rollbackProtected(false, false));
-    try testing.expect(!rollbackProtected(true, false));
-    try testing.expect(!rollbackProtected(false, true));
-    try testing.expect(rollbackProtected(true, true));
 }
 
 test parseSwitch {

@@ -1055,8 +1055,8 @@ const floor = blk: {
 /// /run/werewolf, with the accounts and keys, nor /run/cgroup, with every
 /// service's limits. /run/runit holds runsv's controls and the reboot flag;
 /// /run/ssh-agent, ssh-su's forwarded agents; /dev/pts and /dev/ptmx, ptys.
-/// Not /dev/tpmrm0: a session could extend PCR 11 or exhaust the TPM's
-/// lockout; posture and ab-status read what posture recorded at boot.
+/// Not /dev/tpmrm0: a session could raise the release floor past every
+/// release, or spend the TPM's lockout; posture reads stage0's record.
 const login_writes = [_]Floor{
     .{ .path = "/data", .access = sandbox.writes },
     .{ .path = "/tmp", .access = sandbox.writes },

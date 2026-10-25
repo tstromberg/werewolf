@@ -1,6 +1,7 @@
 # Independent updates from public signed images
 
-Proposed 2026-10-24. Protocol v3, replacing [exact pairs](tpm-ab-retirement.md).
+Built 2026-10-24 (lib/tpm.zig, cmd/stage0, cmd/mount-broker, cmd/slot-update, cmd/howl);
+Lima/QEMU, GCP, AWS and Azure validation in [testing-live.md](../testing-live.md).
 
 ## Summary
 
@@ -11,9 +12,8 @@ and keeps the A/B fallback. Nothing signs per machine; the operator need never r
 ## Background
 
 Protocol v2 binds each transition to a machine nonce and predecessor, so the operator's
-machine (the one running `howl`) signs for every VM on every update and delivers owner
-credentials in attested capsules ([cloud-tpm-enrollment.md](cloud-tpm-enrollment.md)):
-a laptop driving one VM, not thousands of unrelated users on GCP, AWS and Azure.
+`howl` signs for every VM on every update and delivers owner credentials in capsules: a
+laptop driving one VM, not thousands of unrelated users on GCP, AWS and Azure.
 
 ## Goals
 
@@ -31,9 +31,10 @@ a laptop driving one VM, not thousands of unrelated users on GCP, AWS and Azure.
 
 ## Detailed design
 
-**Release index.** Each channel (`FORM/PROVIDER/ARCH`; one per custom application)
-numbers its releases 1, 2, 3, …, each the signed head's plus one, fixing no less. The
-UKI's signed command line and the manifest carry `werewolf.channel=SHA256`, `.index=N`.
+**Release index.** Each channel (`FORM/PROVIDER`; one per custom application) numbers
+each architecture's releases 1, 2, 3, …, each the signed head's plus one, fixing no
+less. The UKI's signed command line and the manifest carry `werewolf.channel=SHA256`
+and `werewolf.index=N`.
 
 **TPM state.** One NV counter in the owner hierarchy, the floor, at handle `0x0150`
 plus the channel digest's first two bytes (the publisher refuses a colliding channel):
@@ -54,11 +55,10 @@ image exist.
 
 **Every boot.** stage0 requires Secure Boot on, setup mode off and a TPM; disables the
 platform hierarchy; verifies owner and lockout authorization set, clear disabled and the
-counter at its channel's handle with exactly the expected public area; and requires its
-index ≥ floor. It then raises the floor to the lower index of the two
-installed releases, its own from the command line and the other slot's from its
-manifest, verified with the pinned image key and against its UKI's hash (an unverifiable
-slot counts as this one), and hands over: nothing older than the fallback boots again.
+counter at its channel's handle with exactly the expected public area; requires its
+index ≥ floor; and hands over, passing init what it found for posture. It reads the
+floor and never raises it: the broker raised it before the fallback's predecessor was
+overwritten, so after any install nothing older than the fallback boots again.
 
 **Updates.** The updater service fetches the channel head as `_update` (TCP 443 and 53
 only) and verifies it offline with the pinned image key: same channel, index above the
@@ -111,10 +111,10 @@ stale other-slot manifests, foreign and partly enrolled TPMs, and a service's re
 
 ## Reliability Considerations
 
-Release promotion requires the CI test `test/check-independent-updates` on each target,
-like `check-tpm-guest`: it builds A, B and C with disposable keys, boots a guest from
-A's public image with only a static file server reachable, and watches the guest's own
-updater install B, then C, on schedule, asserting running index, floor and channel after
-each boot. It exercises skipped releases, key rotation, offline boot, wrong signatures
-and channels, failed trials, operator rollback, retired replay and a power cut at every
-durable step, keeping disk and TPM; on QEMU/swtpm, then GCP, AWS and Azure.
+Release promotion requires the CI test `test/check-independent-updates` on each target:
+it builds A, B and C with disposable keys, boots a guest from A's public image with only
+a static file server reachable, and watches the guest's own updater install B, then C,
+on schedule, asserting running index, floor and channel after each boot. It exercises
+skipped releases, key rotation, offline boot, wrong signatures and channels, failed
+trials, operator rollback, retired replay and a power cut at every durable step, keeping
+disk and TPM; on QEMU/swtpm, then GCP, AWS and Azure.

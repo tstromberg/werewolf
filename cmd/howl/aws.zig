@@ -118,43 +118,10 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
-}
-
-/// A machine's PK/KEK are separate from its code signer, and participate
-/// in the AMI identity. Reusing another machine's enrolled AMI is refused.
-pub fn ensureImageWithAuthority(
-    io: Io,
-    gpa: Allocator,
-    p: Place,
-    form: []const u8,
-    arch: howl.Arch,
-    disk: []const u8,
-    work: []const u8,
-    authority: ?[]const u8,
-    kind: @import("secureboot.zig").BootKind,
-    why: *howl.Why,
-) ![]const u8 {
-    const cert = if (kind == .bootstrap) blk: {
-        if (authority == null) return error.MissingBootstrapAuthority;
-        break :blk try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
-    } else try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
-    var digest = try images.sha256(io, disk);
-    if (authority) |owner| {
-        const path = try gpa.print("{s}/owner.der", .{work});
-        try howl.run(io, why, &.{ "openssl", "x509", "-in", owner, "-outform", "DER", "-out", path });
-        const der = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
-        const code = try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/boot.der", .{work}), gpa, .limited(4096));
-        const owner_key = try @import("tpm").firmware.certificateKey(der);
-        const code_key = try @import("tpm").firmware.certificateKey(code);
-        if (std.mem.eql(u8, owner_key.modulus, code_key.modulus)) return error.SharedBootAuthority;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&digest);
-        hash.update(der);
-        var combined: [32]u8 = undefined;
-        hash.final(&combined);
-        digest = std.fmt.bytesToHex(combined, .lower);
-    }
+    // The image's own boot certificate is PK, KEK and db: the published
+    // vendor's for a download, the builder's for a --build.
+    const cert = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    const digest = try images.sha256(io, disk);
     const helper = try gpa.print("{s}/enroll-boot", .{work});
     try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = @import("files").enroll_boot });
     defer Dir.cwd().deleteFile(io, helper) catch {};
@@ -162,14 +129,25 @@ pub fn ensureImageWithAuthority(
     const template = try gpa.print("{s}/build-helper.yaml", .{work});
     try Dir.cwd().writeFile(io, .{ .sub_path = setup, .data = @import("files").build_helper });
     defer Dir.cwd().deleteFile(io, setup) catch {};
-    try Dir.cwd().writeFile(io, .{ .sub_path = template, .data = @import("files").build_helper_template });
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = template, .data = @import("files").build_helper_template },
+    );
     defer Dir.cwd().deleteFile(io, template) catch {};
     try howl.run(io, why, &.{
-        "env",                                                      try gpa.print("WEREWOLF_HELPER_SETUP={s}", .{setup}),
-        try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}), "sh",
-        helper,                                                     @tagName(arch),
-        cert,                                                       work,
-        "aws",                                                      authority orelse cert,
+        "env",
+        try gpa.print(
+            "WEREWOLF_HELPER_SETUP={s}",
+            .{setup},
+        ),
+        try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}),
+        "sh",
+        helper,
+        @tagName(arch),
+        cert,
+        work,
+        "aws",
+        cert,
     });
     const name = try images.name(gpa, form, arch, &digest);
     if (ask(io, gpa, p, &.{
@@ -682,18 +660,10 @@ pub fn delete(
     why: *howl.Why,
 ) !void {
     if (inst) |i| {
-        // The isolated enrollment PID 1 deliberately has no ACPI shutdown
-        // service and no writable workload filesystem to flush.
-        const immediate: []const []const u8 = if (std.mem.eql(u8, i.form, "tpm-bootstrap"))
-            &.{"--skip-os-shutdown"}
-        else
-            &.{};
         try howl.run(
             io,
             why,
-            try aws(gpa, p, try std.mem.concat(gpa, []const u8, &.{
-                &.{ "ec2", "terminate-instances", "--instance-ids", i.id }, immediate,
-            })),
+            try aws(gpa, p, &.{ "ec2", "terminate-instances", "--instance-ids", i.id }),
         );
         try howl.run(
             io,

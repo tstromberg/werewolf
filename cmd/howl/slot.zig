@@ -37,11 +37,10 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     var disabled: Io.Writer.Allocating = .init(b.gpa);
     try cmdline.writeProtections(&disabled.writer, b.spec.disabled, ",");
     try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\ndisable {s}\nnative {}\n" ++
-        "tpm {s}\nfirmware {}\nca {s}\nport {d}\npermit-host {s}\npermit-port {d}\n", .{
+        "tpm {}\nindex {d}\nca {s}\nport {d}\n", .{
         b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
-        disabled.written(),           b.spec.boot_native,            b.spec.tpm_pub orelse "",
-        b.spec.tpm_firmware,          b.spec.update_ca orelse "",    b.spec.update_port orelse 443,
-        b.spec.permit_host orelse "", b.spec.permit_port orelse 0,
+        disabled.written(),           b.spec.boot_native,            b.spec.tpm,
+        b.spec.image_index,           b.spec.update_ca orelse "",    b.spec.update_port orelse 443,
     }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
@@ -54,7 +53,6 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     };
     const signer: []const []const u8 = if (b.spec.ipe_cert) |cert| &.{cert} else &.{};
     const boot_signer: []const []const u8 = if (b.spec.boot_cert) |cert| &.{cert} else &.{};
-    const tpm_signer: []const []const u8 = if (b.spec.tpm_pub) |pubkey| &.{pubkey} else &.{};
     const update_ca: []const []const u8 = if (b.spec.update_ca) |cert| &.{cert} else &.{};
     const inputs = try mem.concat(
         b.gpa,
@@ -63,7 +61,6 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
             &fixed,
             signer,
             boot_signer,
-            tpm_signer,
             update_ca,
             b.form_files,
             b.rootfs,
@@ -98,7 +95,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
             .dev = b.spec.dev,
             .dev_shell = b.spec.dev_shell,
             .ipe = b.spec.ipe_kernel != null,
-            .tpm = b.spec.tpm_firmware or b.spec.tpm_pub != null,
+            .tpm = b.spec.tpm,
             .posture_known = embedded.posture_known,
         };
         var f: forms.Failure = .{};
@@ -120,29 +117,19 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
 
     const d = try b.path("{s}/usr/share/werewolf", .{meta_dir});
     if (b.spec.ipe_kernel != null) try b.put(d, "ipe", "required\n");
-    if (b.spec.boot_key != null) try b.put(d, "secure-boot", "required\n");
-    if (b.spec.tpm_firmware) {
-        const der = try b.capture(stamp, &.{
-            "openssl", "x509", "-in", b.spec.boot_cert.?, "-outform", "DER",
-        });
-        _ = try @import("tpm").firmware.certificateKey(der);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(der, &digest, .{});
+    if (b.spec.boot_cert) |cert| {
+        // stage0 requires firmware to admit this one signer (cmd/stage0).
+        try b.put(d, "secure-boot", "required\n");
+        const der = try Dir.cwd().createFile(b.io, try b.path("{s}/boot.der", .{d}), .{});
+        defer der.close(b.io);
+        try b.run(&.{ "openssl", "x509", "-in", cert, "-outform", "DER" }, .{ .stdout = der });
+    }
+    if (b.spec.tpm) {
+        // stage0 refuses to hand this root over unless its channel's TPM
+        // floor admits the release the signed UKI names.
         const target = try b.path("{s}/tpm", .{d});
         try Dir.cwd().createDirPath(b.io, target);
-        try b.put(target, "protocol", "2-firmware\n");
-        try b.put(target, "vendor.sha256", &digest);
-        if (b.spec.permit_host) |host| {
-            try b.put(target, "permit-host", host);
-            try b.put(target, "permit-port", try b.path("{d}\n", .{b.spec.permit_port.?}));
-        }
-    } else if (b.spec.tpm_pub) |pubkey| {
-        const data = try b.read(pubkey, 8192);
-        _ = try @import("apk").parseKey(b.gpa, data);
-        const target = try b.path("{s}/tpm", .{d});
-        try Dir.cwd().createDirPath(b.io, target);
-        try b.put(target, "protocol", "2\n");
-        try b.put(target, "signer.pub", data);
+        try b.put(target, "protocol", @import("tpm").protocol);
     }
     if (b.spec.ipe_updates) |url| {
         const dest = try b.path("{s}/image-update", .{d});
@@ -158,18 +145,12 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         if (b.spec.update_port) |port| {
             if (port == 0) return error.BadImageChannel;
             try b.put(dest, "port", try b.path("{d}\n", .{port}));
-            try b.put(dest, "permit-context", "2\n");
             const net_path = try b.path("{s}/net", .{d});
             const net = try b.read(net_path, 64 << 10);
             try b.write(net_path, try b.path("{s}connect 69 tcp {d}\n", .{ net, port }));
         }
-        if (b.spec.permit_port) |port| if (port != (b.spec.update_port orelse 443)) {
-            const net_path = try b.path("{s}/net", .{d});
-            const net = try b.read(net_path, 64 << 10);
-            try b.write(net_path, try b.path("{s}connect 69 tcp {d}\n", .{ net, port }));
-        };
-        if (b.spec.update_ca != null and b.spec.permit_host == null) {
-            // Legacy roots bake their CA; firmware transport roots receive signed public CA bytes.
+        if (b.spec.update_ca != null) {
+            // A channel on a private CA, as a test's, has the root trust it.
             const existing = try b.capture(stamp, &.{
                 "bsdtar", "-xOf", rootfs, "etc/ssl/certs/ca-certificates.crt",
             });
@@ -870,8 +851,6 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     const options = try b.path("{s}.options", .{target});
     var want: Io.Writer.Allocating = .init(b.gpa);
     try want.writer.print("size-mib {d}\n", .{b.spec.disk.size_mib});
-    const boot_state = b.spec.boot_state orelse b.env.get("WEREWOLF_BOOT_STATE");
-    try want.writer.print("boot-state {s}\n", .{boot_state orelse ""});
     if (!qcow2) for (b.spec.disk.args) |arg| try want.writer.print("arg {s}\n", .{arg});
     const was = Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(64 << 10)) catch "";
     if (!mem.eql(u8, was, want.written())) try b.write(options, want.written());
@@ -883,13 +862,12 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
         try b.path("{s}/prebuilt/{t}/latest.json", .{ out, b.spec.arch }),
         try b.path("{s}/prebuilt/{t}/latest.json.sig", .{ out, b.spec.arch }),
     } else &.{};
-    const state_inputs: []const []const u8 = if (boot_state) |file| &.{file} else &.{};
     const began = try b.begin(target, try mem.concat(b.gpa, []const u8, &.{ &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
         boot,                                  b.self,
         options,
-    }, signed_inputs, proof_inputs, state_inputs })) orelse return;
+    }, signed_inputs, proof_inputs })) orelse return;
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});

@@ -64,28 +64,28 @@ a host-verified direct launch would require a separate trust design.
 
 ### Protected rollback
 
-TPM policy must keep the current and retained last-known-good releases bootable. A
-healthy commit preserves its predecessor; retire releases when replacing that fallback.
-Signed boot identity must match protected authorization before handover. The [exact-pair
-retirement protocol](tpm-ab-retirement.md) replaces the serial prototype. Its opt-in
-guest checks, provisioning and actual QEMU x86_64 power cuts are verified.
+The current and retained last-known-good releases must both stay bootable, so releases
+retire only when that fallback is replaced. The [TPM floor](independent-updates.md)
+replaces the serial prototype: one counter per channel, which the signed UKI's
+`werewolf.index` must reach, raised to the running index before a slot is overwritten.
 
-Guest root must not replace the protected anchor, clear the TPM, or provision
-a replacement index with weaker permissions. Hierarchy credentials remain on
-the host. NV writes need authenticated transitions preserving the retained fallback;
-an ordinary owner-writable index or guest-held password is insufficient.
-Unprovisioned devices fail mandatory boot and cannot pass protected-rollback posture.
+Guest root must not lower the counter, clear the TPM, or define a replacement with
+weaker attributes. The first boot defines the counter, disables clear and sets owner
+and lockout passwords that nothing keeps, so no one holds hierarchy credentials;
+anyone holding the device may only increment it. A TPM in any other state fails
+mandatory boot and cannot pass protected-rollback posture.
 
 ### Clouds
 
 AWS AMIs can carry enrolled UEFI data. GCP images accept signature databases. Those
-paths must bind the certificate to the signed disk and enable enforcement on the
-instance. Azure uses a specialized TrustedLaunchSupported gallery definition and a
-version with NoSignatureTemplate plus our PK/KEK/db, then enables Trusted Launch.
-Uploads verify the actual loader and UKI against their certificate first. Azure requests
-explicitly use JSON and read back the exact enrollment before launch. Tests distinguish
-argument construction from live firmware acceptance. Azure firmware inconsistently
-reports SetupMode=1; reliable deployment remains blocked.
+paths bind the image's boot certificate, as the whole PK, KEK and db, to the signed disk
+and enable enforcement and a vTPM on the instance. Azure uses a specialized
+TrustedLaunchSupported gallery definition; a version that brought its own PK booted in
+setup mode, so the version keeps Microsoft's PK via the Microsoft UEFI CA template, adds
+the image's certificate to db, and revokes Microsoft's UEFI CAs in dbx. Uploads verify
+the loader and UKI against their certificate first, and requests use JSON and read the
+enrollment back. On every provider, stage0 refuses handover unless the EFI db less dbx
+is exactly the image's signer, so no second signer can boot another loader.
 
 ## Drawbacks
 
@@ -104,17 +104,17 @@ reports SetupMode=1; reliable deployment remains blocked.
 
 EFI path variables are routing hints, never executable-code authority.
 Authenticating the UKI, verifying the exact root and enforcing IPE remain
-necessary independently of rollback protection. TPM policy tests must cover
+necessary independently of rollback protection. TPM floor tests must cover
 actual device commands and hierarchy reset paths, not just serial comparisons.
 
 ## Reliability Considerations
 
 Initial tests use disposable keys, cloned variables and local TPM state. They prove A/B
-updates, tamper, unsigned image, wrong signer and loader-option override rejection. QEMU
-x86_64 TPM-gated boots refuse retired releases, missing TPMs and unmeasured UKIs. Power
-cuts preserve B; commit and operator rollback retain both members. Lima arm64 and Linux
-QEMU are verified. Cloud enrollment follows the proposed [TPM bootstrap
-design](cloud-tpm-enrollment.md). References:
+updates, tamper, unsigned image, wrong signer and loader-option override rejection.
+`test/check-tpm-floor` attacks the counter on swtpm; `test/check-independent-updates`
+boots Lima or QEMU guests through updates, operator rollback, a power cut at the floor's
+increment and a restored retired release, which stage0 refuses. Clouds enroll the same
+way ([testing-live.md](../testing-live.md)). References:
 [systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml), [QEMU
 variables](https://www.qemu.org/docs/master/devel/uefi-vars.html), [GCP
 enrollment](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images).

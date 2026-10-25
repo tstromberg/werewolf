@@ -383,7 +383,6 @@ fn keepMachineConfig(
         if (!mem.eql(u8, entry.name, "network") and !mem.eql(u8, entry.name, "data.key") and
             !mem.eql(u8, entry.name, "authorized_keys") and
             !mem.eql(u8, entry.name, "hostname") and
-            !mem.eql(u8, entry.name, "machine-transport") and
             !mem.eql(u8, entry.name, "update-policy.json")) continue;
         if (entry.size > old.len - reader.seek) return error.TruncatedConfig;
         const prior = old[reader.seek..][0..@intCast(entry.size)];

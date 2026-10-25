@@ -40,18 +40,20 @@ by hand.
 `build` makes a *file*, by itself and byte for byte as make's `_dist-form` did
 ([howl-build.md](howl-build.md)), never with `DEV`, so every image has a release's
 manifest ([releases.md](../releases.md)). `run`/`create` default to protected Lima on
-macOS and QEMU on Linux; currently they require `--build`. Published protected downloads
-remain gated ([design](published-secure-boot.md)). `--disable=LIST` gives up protections
-by name (`secureboot`, `tpm`, `ipe`), never by default: one profile gives all three for
-now, so only the whole list is taken, and a machine's command line names what it lacks
-(`werewolf.disable`) for posture and the login message
+macOS and QEMU on Linux, from werewolf's published image
+([design](published-secure-boot.md)) or, with `--build`, this checkout; clouds take
+`--build` images only. `--disable=LIST` gives up protections by name (`secureboot`,
+`tpm`, `ipe`), never by default: one profile gives all three for now, so only the whole
+list is taken, and a machine's command line names what it lacks (`werewolf.disable`) for
+posture and the login message
 ([security](../security.md#protections-a-machine-can-be-made-without)). `create` makes a
 *machine*: source builds if stale, packs, uploads only an image the cloud lacks, starts
 the machine, waits for init's `up in`, and prints `NAME ADDRESS FORM`. `run` uses
 `werewolf-run`, reusing an unchanged protected VM and resuming its existing image when
 stopped. Changed image inputs replace it. Each platform is driven by its own tool
 (`limactl`, `qm`, `gcloud`, `aws`, `az`…) with argument lists. The provider supplies VM
-existence and runtime state; local files retain build inputs and enrollment credentials.
+existence and runtime state; local files retain build inputs, firmware variables and TPM
+state.
 
 | Target | Choice, and why |
 | --- | --- |
@@ -108,7 +110,7 @@ one on the machine, so its private half never leaves.
 
 - **Provider inventory**: a machine left by a laptop that died mid-`create`
   is in the provider's list, for `delete`. Lima files left after an external
-  deletion are cleared before the name is reused. Enrollment credentials
-  are retained for extant instances, including stopped ones.
+  deletion are cleared before the name is reused. Firmware variables and TPM
+  state are retained for extant instances, including stopped ones.
 - **Open: tested by hand.** `make check` uses `howl pack`; the cloud
   checks run `create` and `delete`, but nothing runs them on a schedule.

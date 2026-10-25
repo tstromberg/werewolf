@@ -88,7 +88,7 @@ class Images(unittest.TestCase):
             dict(scope='build:kernel', name='gcc', version='15-r0', checksum='e' * 64),
         ], images=[])
 
-    def bundle(self, path, serial, form='playground'):
+    def bundle(self, path, serial, form='playground', index=1):
         (path / 'slot').mkdir(parents=True)
         for name in downloads.FILES:
             (path / 'slot' / name).write_bytes((name + serial).encode())
@@ -96,8 +96,8 @@ class Images(unittest.TestCase):
         for name in ('latest.json', 'latest.json.sig'):
             (path / 'prebuilt/x86_64' / name).write_bytes((name + serial).encode())
         shutil.copyfile(self.disk, path / 'disk.img.zst')
-        manifest = dict(form=form, image=dict(arch='x86_64', build=digest(serial), serial=serial),
-                        raw_size=512 << 20, permit_host='10.0.2.2')
+        manifest = dict(form=form, image=dict(arch='x86_64', build=digest(serial), serial=serial, index=index),
+                        raw_size=512 << 20)
         (path / 'boot.json').write_text(json.dumps(manifest))
         (path / 'boot.json.sig').write_bytes(catalog.sign((path / 'boot.json').read_bytes(), self.key))
         return path
@@ -107,15 +107,21 @@ class Images(unittest.TestCase):
         work = self.root / ('run-' + serial)
         statuses = statuses or {}
         selected = only or (('playground',) if focused else ('minimal', 'playground'))
+        previous = self.rows()
+
+        def index(form):
+            # As resolve plans it: the release after the channel's last published one.
+            return 1 + max([previous.get((form, provider, 'x86_64'), {}).get('latest', {}).get('index', 0)
+                            for provider in catalog.PROVIDERS['x86_64']] + [0])
         targets = [dict(form=form, arch='x86_64', status=statuses.get(form, 'build'), inputs=digest(form),
-                        commit='b' * 40, serial=serial) for form in selected]
+                        commit='b' * 40, serial=serial, index=index(form)) for form in selected]
         if not focused and only is None:
             targets.append(dict(form='prod-ssh', arch='x86_64', status='resolution failed'))
         snapshots = work / ('snapshots' if flat else 'snapshots/inputs-x86_64-1')
         images.write(snapshots / 'plan.json', dict(arch='x86_64', shard=1, targets=targets))
         verified = work / ('verified' if flat else 'verified/verified-x86_64-1')
         gates = work / ('gated' if flat else 'gated/gated-qemu-x86_64')
-        bundle = self.bundle(gates / 'bundle', serial)
+        bundle = self.bundle(gates / 'bundle', serial, index=index('playground'))
         results = []
         for target in targets:
             results.append(dict(target, status='passed' if target['status'] == 'build' else target['status']))
@@ -202,6 +208,7 @@ class Images(unittest.TestCase):
         published = rows[('playground', 'qemu', 'x86_64')]
         self.assertEqual(catalog.PUBLISHED, published['status'])
         self.assertEqual(self.serial, published['latest']['serial'])
+        self.assertEqual(1, published['latest']['index'])
         self.assertEqual(catalog.NO_RUNNER, rows[('minimal', 'qemu', 'x86_64')]['status'])
         self.assertNotIn('latest', rows[('minimal', 'qemu', 'x86_64')])
         self.assertEqual('resolution failed', rows[('prod-ssh', 'qemu', 'x86_64')]['status'])
@@ -263,6 +270,7 @@ class Images(unittest.TestCase):
         rows = self.rows()
         latest = rows[('playground', 'qemu', 'x86_64')]['latest']
         self.assertEqual(later, latest['serial'])
+        self.assertEqual(previous['index'] + 1, latest['index'])
         release = json.loads((self.root / 'store' / latest['object'] / 'release-notes.json').read_text())
         self.assertEqual({k: previous[k] for k in ('serial', 'commit', 'object')}, release['previous'])
         changes = {p['name']: p['kind'] for p in release['packages']}
@@ -366,8 +374,13 @@ class Images(unittest.TestCase):
             catalog.open_index(catalog.encode(changed), self.trust / 'image.crt')
         latest = dict(serial=self.serial, commit='b' * 40, descriptor='d' * 64, size=1,
                       object='nginx/qemu/x86_64/objects/' + 'd' * 64)
+        published = dict(row, status=catalog.PUBLISHED, latest=dict(latest, index=2,
+                         object='caddy/qemu/x86_64/objects/' + 'd' * 64))
+        self.assertEqual(published, catalog.validate(published))
         for bad in [[row, row], [dict(row, provider='lima')], [dict(row, status='\x1b[2J')],
-                    [dict(row, latest=latest)], [dict(row, extra=1)]]:
+                    [dict(row, latest=latest)], [dict(row, extra=1)],
+                    *([dict(published, latest=dict(published['latest'], index=index))]
+                      for index in (0, -1, '2', True, None))]:
             with self.assertRaises(ValueError):
                 catalog.open_index(catalog.envelope(dict(format=catalog.FORMAT, forms=bad), self.key),
                                    self.trust / 'image.crt')
@@ -387,19 +400,21 @@ class Images(unittest.TestCase):
 
     def test_gated_forms_build_their_lifecycle_updates_for_each_provider(self):
         for form in ('minimal', 'prod-ssh'):
-            targets = [(name, provider) for name, provider, _ in images.bundles(
-                dict(form=form, arch='aarch64', serial='20261015T120000Z'))]
+            targets = [(name, provider) for name, provider, _, _ in images.bundles(
+                dict(form=form, arch='aarch64', serial='20261015T120000Z', index=1))]
             self.assertEqual([('lima', 'lima'), ('qemu', 'qemu'), ('qemu-update-1', 'qemu'),
                               ('qemu-update-2', 'qemu')], targets)
-        names = [(name, provider) for name, provider, _ in
-                 images.bundles(dict(form='playground', arch='aarch64', serial='20261015T120000Z'))]
+        names = [(name, provider) for name, provider, _, _ in
+                 images.bundles(dict(form='playground', arch='aarch64', serial='20261015T120000Z', index=1))]
         self.assertEqual([('lima', 'lima'), ('lima-update-1', 'lima'), ('lima-update-2', 'lima'),
                           ('qemu', 'qemu'), ('qemu-update-1', 'qemu'), ('qemu-update-2', 'qemu')], names)
-        serials = [serial for _, _, serial in images.bundles(dict(form='playground', arch='x86_64',
-                                                                  serial='20261015T120000Z'))]
-        self.assertEqual(['20261015T120000Z', '20261015T120001Z', '20261015T120002Z'], serials)
+        # The updates are the next releases of the channel: later serials and indices.
+        releases = [(serial, index) for _, _, serial, index in images.bundles(dict(form='playground', arch='x86_64',
+                                                                                   serial='20261015T120000Z', index=7))]
+        self.assertEqual([('20261015T120000Z', 7), ('20261015T120001Z', 8), ('20261015T120002Z', 9)], releases)
         self.assertEqual(['qemu', 'qemu-update-1', 'qemu-update-2'],
-                         [n for n, _, _ in images.bundles(dict(form='minimal', arch='x86_64', serial='20261015T120000Z'))])
+                         [n for n, _, _, _ in images.bundles(dict(form='minimal', arch='x86_64',
+                                                                  serial='20261015T120000Z', index=1))])
 
     def test_gate_runners_are_label_lists_and_x86_needs_none(self):
         self.assertEqual(set(images.forms()), {form for g in images.gates({})['include'] for form in g['forms']})
@@ -540,16 +555,23 @@ class Images(unittest.TestCase):
                 patch.object(images, 'tool_versions', return_value={}), \
                 patch.object(images, 'resolved_identity', return_value='a' * 64):
             images.resolve('x86_64', 1, 1, snapshot, focused=True)
-        self.assertEqual([('archs', 'playground'), ('names', 'playground'), ('recipes', 'playground')], queries)
+            # A release takes the index after its channel's last published one.
+            with patch.object(images.catalog, 'read_index', return_value={
+                    ('playground', 'qemu', 'x86_64'): dict(latest=dict(index=4))}):
+                images.resolve('x86_64', 1, 1, self.root / 'next-snapshot', focused=True)
+        self.assertEqual([('archs', 'playground'), ('names', 'playground'), ('recipes', 'playground')] * 2, queries)
         plan = json.loads((snapshot / 'plan.json').read_text())
-        self.assertEqual([('playground', 'build')], [(t['form'], t['status']) for t in plan['targets']])
-        self.assertEqual(2, run.call_count)  # Release and integration locks.
+        self.assertEqual([('playground', 'build', 1)], [(t['form'], t['status'], t['index']) for t in plan['targets']])
+        self.assertEqual(1, json.loads((snapshot / 'playground/input.json').read_text())['index'])
+        plan = json.loads((self.root / 'next-snapshot/plan.json').read_text())
+        self.assertEqual([5], [t['index'] for t in plan['targets']])
+        self.assertEqual(4, run.call_count)  # Release and integration locks, for each plan.
         for arch, shard, shards in [('aarch64', 1, 1), ('x86_64', 1, 8)]:
             with self.assertRaisesRegex(ValueError, 'single x86_64 shard'):
                 images.resolve(arch, shard, shards, self.root / 'invalid', focused=True)
 
     def test_nonmatching_builds_fail_before_testing_or_writing_evidence(self):
-        target = dict(form='minimal', arch='x86_64', serial=self.serial, inputs=digest('minimal'))
+        target = dict(form='minimal', arch='x86_64', serial=self.serial, index=1, inputs=digest('minimal'))
         first, second = self.root / 'one/minimal', self.root / 'two/minimal'
         for copy in (first, second):
             self.bundle(copy / 'qemu', self.serial, form='minimal')
@@ -570,9 +592,9 @@ class Images(unittest.TestCase):
     def test_builds_keep_only_what_later_jobs_read(self):
         for form in ('minimal', 'playground'):
             output = self.root / 'candidates' / form
-            target = dict(form=form, arch='x86_64', serial=self.serial)
-            for name, _, serial in images.bundles(target):
-                self.bundle(output / name, serial, form=form)
+            target = dict(form=form, arch='x86_64', serial=self.serial, index=1)
+            for name, _, serial, index in images.bundles(target):
+                self.bundle(output / name, serial, form=form, index=index)
             for name in ('inputs.tar.gz', 'packages.json'):
                 (output / name).write_bytes(name.encode())
             whole = images.digests(output)

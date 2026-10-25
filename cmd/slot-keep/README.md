@@ -62,8 +62,8 @@ a read-only Landlock domain before judging service health.
    points at this slot, it skips the write.
 5. **Commit**: the broker creates `/run/werewolf/committed`, root-owned,
    only after keeping the EFI entry. The keeper logs one line and
-   parks (`sv down .`). Commit never retires the retained A/B release in the TPM;
-   retirement belongs to replacing the inactive slot (docs/design/tpm-ab-retirement.md).
+   parks (`sv down .`). Commit never touches the TPM floor; it rises only when the
+   updater replaces the inactive slot (docs/design/independent-updates.md).
 
 ## Drawbacks
 

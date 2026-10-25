@@ -46,19 +46,6 @@ pub fn fetcherBounded(
     out: i32,
     parent: linux.pid_t,
 ) noreturn {
-    fetcherPinned(id, root, url, body, maximum, null, out, parent);
-}
-
-pub fn fetcherPinned(
-    id: u32,
-    root: ?[*:0]const u8,
-    url: []const u8,
-    body: i32,
-    maximum: usize,
-    ca: ?[]const u8,
-    out: i32,
-    parent: linux.pid_t,
-) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const status = fetchInto(
@@ -69,7 +56,6 @@ pub fn fetcherPinned(
         body,
         out,
         maximum,
-        ca,
     ) catch |err| sandbox.whyNot(arena.allocator(), err);
     sandbox.say(out, 0, status, "");
 }
@@ -82,7 +68,6 @@ fn fetchInto(
     body: i32,
     out: i32,
     maximum: usize,
-    ca: ?[]const u8,
 ) ![]const u8 {
     try sandbox.closeAllButAnonymous(&.{ body, out });
     var threaded: Io.Threaded = .init_single_threaded;
@@ -90,12 +75,7 @@ fn fetchInto(
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     // Read the CA bundle before the chroot hides it.
     const now = Io.Clock.real.now(io);
-    if (ca) |der| {
-        _ = try @import("tpm").firmware.certificateKey(der);
-        try client.ca_bundle.bytes.appendSlice(gpa, der);
-        try client.ca_bundle.parseCert(gpa, 0, now.toSeconds());
-        if (client.ca_bundle.map.count() != 1) return error.BadTransportCertificate;
-    } else try client.ca_bundle.rescan(gpa, io, now);
+    try client.ca_bundle.rescan(gpa, io, now);
     client.now = now;
     const port_file = Io.Dir.cwd().readFileAlloc(
         io,
@@ -108,17 +88,6 @@ fn fetchInto(
     };
     const port = try std.fmt.parseUnsigned(u16, std.mem.trim(u8, port_file, "\n"), 10);
     if (port == 0) return error.BadImageChannel;
-    const permit_text = Io.Dir.cwd().readFileAlloc(
-        io,
-        @import("tpm").metadata ++ "/permit-port",
-        gpa,
-        .limited(16),
-    ) catch |err| switch (err) {
-        error.FileNotFound => "443",
-        else => return err,
-    };
-    const permit_port = try std.fmt.parseUnsigned(u16, std.mem.trim(u8, permit_text, "\n"), 10);
-    if (permit_port == 0) return error.BadPermitTransport;
     try sandbox.limit(.FSIZE, maximum);
     if (linux.geteuid() != id) try sandbox.dropTo(id, root);
     const etc: i32 = @intCast(try sandbox.sys(
@@ -146,7 +115,7 @@ fn fetchInto(
         };
         n += 1;
     }
-    try sandbox.landlock(rules[0..n], &.{ 443, 53, port, permit_port });
+    try sandbox.landlock(rules[0..n], &.{ 443, 53, port });
     // Only what a traced request needs: the resolver's files, DNS over UDP
     // (bound to port 0) or TCP, TLS over TCP, and writes to body, out and
     // stderr.

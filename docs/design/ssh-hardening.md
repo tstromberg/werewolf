@@ -67,8 +67,8 @@ handles writes, granting only /data, /tmp, /var/tmp, /dev/shm, /dev/pts, /run/ru
 `before`, which publishes ssh-su's host-key pin. Developer SSH (`--dev`, sshd-dev)
 keeps the old pledge, DAC_OVERRIDE, SYS_RESOURCE, SETPCAP and a bind-only layer,
 which the services its nested leashes test inherit. Posture in a session takes
-boot's result, named `(cached)`, for what it cannot ask (netlink, the TPM, leashing,
-its attack lock), `--no-cache` skipping them; ab-status reads boot's TPM state.
+boot's result, named `(cached)`, for what it cannot ask (netlink, leashing, its attack
+lock), `--no-cache` skipping them; ab-status reads stage0's TPM floor record.
 
 ## Drawbacks
 

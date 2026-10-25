@@ -24,7 +24,7 @@ def authorize(howl, provider, bundle):
     metadata = json.loads((trust / 'trust.json').read_text())
     request = dict(source=metadata['source'], cache='unused', form=raw['form'], arch=raw['image']['arch'],
         provider=provider, boot_certificate=str(trust / 'boot.crt'), image_certificate=str(trust / 'image.crt'),
-        channel='https://%s:%d/%s' % ('192.168.5.2' if provider == 'lima' else '10.0.2.2', metadata['permit_port'], raw['form']))
+        channel='%s/%s/%s' % (metadata['source'], raw['form'], provider))
     downloads.validate_request(request)
     signature = bundle / 'boot.json.sig'
     try:

@@ -38,40 +38,32 @@ pub fn main(init: std.process.Init) !void {
     const enforce = read(io, gpa, ipe.base ++ "/enforce") catch "";
     const policy_root = ipe.policyRoot(policy);
     const hash = std.fmt.bytesToHex(policy_root orelse return error.BadIpePolicy, .lower);
-    var anchor: [64]u8 = @splat(0);
-    var pcr: [64]u8 = @splat(0);
-    var protected = false;
+    // stage0's record of the floor it admitted this boot at; a root SSH
+    // session may not read init's records, so then take posture's at boot.
+    var found: ?tpm.Marker = null;
     var cached = false;
-    if (boot.tpm) {
-        const key = try tpm.keyAt(io, gpa, "");
-        if (tpm.Device.open(io)) |opened| {
-            var device = opened;
-            defer device.close();
-            anchor = std.fmt.bytesToHex(try device.anchor(key), .lower);
-            pcr = std.fmt.bytesToHex(try device.pcr11(), .lower);
-            protected = tpm.protected(io, gpa, boot.release, "/boot/state");
+    if (boot.channel != null) {
+        if (read(io, gpa, tpm.Marker.path)) |text| {
+            found = tpm.Marker.parse(text);
         } else |err| switch (err) {
-            // A root SSH session may not use the TPM (forms/sshd's Landlock
-            // layer): read what posture recorded at boot.
             error.AccessDenied => {
                 const saved = try bootReport(io, gpa);
                 const state = saved.tpm orelse return error.NoBootTpmState;
-                if (state.anchor.len != anchor.len or state.pcr11.len != pcr.len)
-                    return error.BadBootTpmState;
-                @memcpy(&anchor, state.anchor);
-                @memcpy(&pcr, state.pcr11);
-                for (saved.checks) |c| if (std.mem.eql(u8, c.id, "boot-rollback-protected")) {
-                    protected = std.mem.eql(u8, c.result, "pass");
-                };
+                found = .{ .handle = state.handle, .floor = state.floor, .index = state.index };
                 cached = true;
             },
             else => return err,
         }
     }
+    const protected = if (found) |m|
+        tpm.handle(boot.channel.?) == m.handle and boot.index.? == m.index and m.floor <= m.index
+    else
+        false;
     const output = try std.json.Stringify.valueAlloc(gpa, .{
         .boot_id = std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/random/boot_id"), "\n"),
         .release = std.mem.trim(u8, try read(io, gpa, "/usr/share/werewolf/ab-release"), "\n"),
-        .release_id = if (boot.release) |release| &std.fmt.bytesToHex(release, .lower) else "",
+        .channel = if (boot.channel) |channel| &std.fmt.bytesToHex(channel, .lower) else "",
+        .index = boot.index orelse 0,
         .slot = if (boot.slot) |s| @tagName(s) else "",
         .root_hash = &hash,
         .verified_root = verified_root,
@@ -79,8 +71,8 @@ pub fn main(init: std.process.Init) !void {
         .secure_boot = on.len == 5 and on[4] == 1 and setup.len == 5 and setup[4] == 0,
         .committed = exists(io, "/run/werewolf/committed"),
         .rollback_protected = protected,
-        .tpm_anchor = if (boot.tpm) anchor[0..] else "",
-        .pcr11 = if (boot.tpm) pcr[0..] else "",
+        .floor = if (found) |m| m.floor else 0,
+        .handle = if (found) |m| m.handle else 0,
         .cached = cached,
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, output);
@@ -89,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
 
 /// BootReport is what ab-status needs of posture's report at boot.
 const BootReport = struct {
-    tpm: ?struct { anchor: []const u8, pcr11: []const u8 } = null,
+    tpm: ?struct { handle: u32, floor: u64, index: u64 } = null,
     checks: []const struct { id: []const u8, result: []const u8 },
 };
 

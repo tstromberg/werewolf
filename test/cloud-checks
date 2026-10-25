@@ -33,7 +33,8 @@ elif tool == 'howl':
         markers = {
             'verity': "stage0: slot a: root.erofs, read-only, verified",
             'secureboot': 'stage0: Secure Boot enforced outside setup mode',
-            'tpm': 'stage0: TPM release authorization checked; reset authority protected',
+            'firmwaretrust': "stage0: Secure Boot admits only this image's signer",
+            'tpm': 'stage0: TPM floor 1: release 1 admitted; reset authority sealed',
             'ipe': 'stage0: IPE: only this root image may execute; policy administration removed',
             'sshd': 'Server listening on 0.0.0.0 port 22',
         }
@@ -103,11 +104,11 @@ with tempfile.TemporaryDirectory(prefix='ww-cloud-checks-') as temporary:
     for cloud in ('aws', 'azure', 'gcp'):
         for mode in ('build', 'download'):
             output = run(cloud, mode)
-            for check in ('ssh-login-t', 'ssh-login-root', 'tpm-authorization',
-                          'ipe-enforced', 'secure-boot', 'posture', 'runtime-protections', 'reconfigure', 'delete'):
+            for check in ('ssh-login-t', 'ssh-login-root', 'tpm-floor',
+                          'ipe-enforced', 'secure-boot', 'firmware-trust', 'posture', 'runtime-protections', 'reconfigure', 'delete'):
                 assert 'ok     ' + check in output, (cloud, mode, check, output)
         assert 'FAIL' in run(cloud, 'build', 'provider')
-    for bad in ('verity', 'secureboot', 'tpm', 'ipe', 'sshd', 'posture',
+    for bad in ('verity', 'secureboot', 'firmwaretrust', 'tpm', 'ipe', 'sshd', 'posture',
                 'disabled', 'ssh-t', 'ssh-root', 't-is-root', 'runtime'):
         assert 'FAIL' in run('aws', 'build', bad), bad
 

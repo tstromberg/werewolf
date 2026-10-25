@@ -49,6 +49,7 @@ def boot(backend):
                     assert b'Kernel panic' not in seen
                     if b'posture: fail=' in seen and b'"unexpected":[]' in seen:
                         assert b'Secure Boot enforced outside setup mode' in seen
+                        assert b"Secure Boot admits only this image's signer" in seen
                         assert b'native UKI selected slot a' in seen and b'verified (root hash' in seen
                         break
                 if client.poll() is not None and client.returncode != 0:
