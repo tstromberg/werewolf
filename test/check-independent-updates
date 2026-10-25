@@ -110,7 +110,8 @@ def ok(what):
 
 
 def ssh(command, label, **kwargs):
-    return run([howl, 'ssh', 'root@' + name, '--', command], label, **kwargs)
+    # Use the fixture identity through our SSH wrapper, never the runner's agent.
+    return run([howl, 'ssh', 'root@' + name, '--no-agent', '--', command], label, **kwargs)
 
 
 def status():
