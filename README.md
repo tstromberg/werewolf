@@ -2,15 +2,14 @@
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-**So immutable that if you don't declare the exploit in advance, it can't execute.**
+**What if we actually just used the security features the Linux kernel provides by default?**
 
-Werewolf Linux is an experiment with a simple goal: the most secure Linux VM environment ever shipped.
+Werewolf Linux is an experiment with a simple goal: creating the most secure VM environment ever built.
 
 Inspired by NixOS, ChromeOS, OpenBSD, and NanoVMs it takes the idea of a declarative, immutable  
-distro to the extreme. In a production environment, not even root can drop a persistent backdoor, 
-unless it's been declared in advance. Our protections would have prevented 48 of 49
-[CISA known-exploited Linux vulnerabilities](docs/cve-mitigation-survey.md) (we've intentionally
-not addressed the last one due to performance impacts).
+distro to the extreme. Powered by modern Linux security controls like [Landlock](https://docs.kernel.org/userspace-api/landlock.html), [Seccomp-BPF](https://www.kernel.org/doc/html/v4.19/userspace-api/seccomp_filter.html), [dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html), [IPE](https://docs.kernel.org/admin-guide/LSM/ipe.html), [EROFS](https://docs.kernel.org/filesystems/erofs.html), [YAMA](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html), and [A/B system updates](https://source.android.com/docs/core/ota/ab) configured by default, it's impossible to drop a persistent backdoor - even as root. We've hardened our dependencies and reduced our attack surface so much that our production images generally don't include a shell. 
+
+In a survey of [CISA known-exploited Linux vulnerabilities](docs/cve-mitigation-survey.md), Werewolf would have prevented 48 of 49 exploits.
 
 ## The ten craziest things we did
 
