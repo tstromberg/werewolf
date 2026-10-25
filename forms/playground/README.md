@@ -3,8 +3,8 @@
 The default `howl run` environment provides an interactive SSH shell and accepts
 ordinary SSH key files. Its software and permissions are in [form.yaml](form.yaml).
 It includes our hardened Python 3.15 and BusyBox tools; mksh supplies `/bin/sh`.
-It includes [SSH-backed su](../ssh-su/README.md), with software keys allowed for
-the local VM. The root key must be available through a forwarded agent. Root and
+[SSH-backed su](../ssh-su/README.md) accepts software keys for the local VM.
+The root key must be available through a forwarded agent. Root and
 people may look up any name through unwound, audited, and connect to TCP 22, 80,
 443, 8000 and 8080 anywhere; everything else stays closed.
 
