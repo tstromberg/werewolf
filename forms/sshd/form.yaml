@@ -20,12 +20,9 @@ accounts:
       homedir: /var/empty
       shell: /sbin/nologin
 
-paths:
-  # PAM's password helper, setgid shadow, arrives through openssh-server.
-  # Nothing here authenticates with a password.
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
+# Password authentication is unused; remove its helper if a dependency brings it.
+prune:
+  - usr/bin/unix_chkpwd
 
 # Taken back of werewolf's defaults (lib/allow.zig): pseudo-terminals,
 # for ssh logins; prod-ssh and playground take them with this form.

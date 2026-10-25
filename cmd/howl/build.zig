@@ -809,8 +809,28 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);
     try env.put("COPYFILE_DISABLE", "1");
-    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |k| _ = env.swapRemove(k);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |k|
+        _ = env.swapRemove(k);
     return env;
+}
+
+test "build tools do not inherit the caller's Make protection opt-outs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var caller = std.process.Environ.Map.init(gpa);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |key|
+        try caller.put(key, "inherited");
+    try caller.put("PATH", "/tools");
+    const saved = howl.environ;
+    defer howl.environ = saved;
+    howl.environ = &caller;
+    const env = try toolEnv(gpa);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |key| {
+        try std.testing.expect(env.get(key) == null);
+        try std.testing.expectEqualStrings("inherited", caller.get(key).?);
+    }
+    try std.testing.expectEqualStrings("/tools", env.get("PATH").?);
 }
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {

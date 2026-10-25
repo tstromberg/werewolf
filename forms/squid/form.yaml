@@ -27,13 +27,7 @@ prune:
   - usr/libexec/storeid_file_rewrite
   - usr/libexec/url_fake_rewrite.sh
   - usr/libexec/url_lfs_rewrite
-
-paths:
-  # PAM's password helper, setgid shadow, arrives through libcap, which
-  # Squid links. Nothing here authenticates with a password.
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
+  - usr/bin/unix_chkpwd  # No UNIX password authentication.
 
 # make check's (forms/README.md): Squid resolves names itself, from an
 # unconnected UDP socket on an ephemeral port, which test/checks' listeners
