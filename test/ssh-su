@@ -8,7 +8,10 @@ import tempfile
 import time
 
 
-port, prefix, provider, mode = sys.argv[1:]
+port, prefix, provider, mode = sys.argv[1:5]
+wrong_host = sys.argv[5:] == ["--wrong-host"]
+if sys.argv[5:] and not wrong_host:
+    sys.exit("ssh-su: unknown test phase")
 software = mode == "playground"
 prefix = str(Path(prefix).resolve())
 provider = str(Path(provider).resolve())
@@ -30,11 +33,15 @@ def check(name, result, success, message):
     print(f"pass   {name}", flush=True)
 
 
-def admin(command):
-    result = run(ssh + ["root@127.0.0.1", command])
+def remote(user, command):
+    result = run(ssh + [user + "@127.0.0.1", command])
     if result.returncode:
         raise RuntimeError(result.stdout)
     return result
+
+
+def admin(command):
+    return remote("root", command)
 
 
 with tempfile.TemporaryDirectory(prefix="su-agent-", dir="/tmp") as tmp:
@@ -66,6 +73,9 @@ with tempfile.TemporaryDirectory(prefix="su-agent-", dir="/tmp") as tmp:
                        input="printf '\\nsu-result:%s:%s\\n' \"$(id -u)\" \"${SSH_AUTH_SOCK-unset}\"; exit\n")
 
         identity("-sk-key")
+        if wrong_host:
+            check("su-rejects-wrong-host", elevate(), False, "Host key verification failed")
+            sys.exit(0)
         check("su-root-login", elevate(), True, "su-result:0:unset")
         check("su-agent-required", elevate(forward=False), False,
               "su: agent forwarding required; reconnect with ssh -A")
@@ -74,19 +84,13 @@ with tempfile.TemporaryDirectory(prefix="su-agent-", dir="/tmp") as tmp:
               False, "")
 
         # User configuration cannot replace the pin or run a local command.
-        admin("mkdir -p /data/home/operator/.ssh; "
-              "printf 'Host *\\n ProxyCommand /bin/false\\n' "
-              "> /data/home/operator/.ssh/config; "
-              "chown -R operator:operator /data/home/operator/.ssh")
+        remote("operator", "mkdir -p ~/.ssh; "
+               "printf 'Host *\\n ProxyCommand /bin/false\\n' > ~/.ssh/config")
         check("su-ignores-user-config", elevate(), True, "su-result:0:unset")
 
-        admin("cp /run/werewolf/ssh_known_hosts /run/werewolf/su-test-pin; "
-              "printf 'werewolf-local ' > /run/werewolf/ssh_known_hosts; "
-              "cat /run/config/authorized_keys >> /run/werewolf/ssh_known_hosts")
-        try:
-            check("su-rejects-wrong-host", elevate(), False, "Host key verification failed")
-        finally:
-            admin("mv /run/werewolf/su-test-pin /run/werewolf/ssh_known_hosts")
+        # Even root's SSH session cannot change the trusted local host pin.
+        check("su-host-pin-read-only", run(ssh + ["root@127.0.0.1",
+              ": >> /run/werewolf/ssh_known_hosts"]), False, "Permission denied")
 
         # These keys are authorized for root, but their signatures lack a
         # required property. Each attempt uses a new SSH authentication.
@@ -103,13 +107,14 @@ with tempfile.TemporaryDirectory(prefix="su-agent-", dir="/tmp") as tmp:
         identity("-sk-key")
         check("su-fresh-authentication", elevate(), True, "su-result:0:unset")
 
-        # Four concurrent auth failures exceed the default source-penalty
-        # threshold. Another user must still be able to elevate immediately.
+        # Four auth failures exceed the default source-penalty threshold.
+        # Keep them below PerSourceMaxStartups so every attempt authenticates.
+        # Another user must still be able to elevate immediately.
         identity("-stranger")
         burst = run(ssh + ["-A", "operator@127.0.0.1",
                           "for n in 1 2 3 4; do "
-                          "ssh -F /etc/ssh/su_config -S none root@127.0.0.1 true & "
-                          "done; wait"], env=env)
+                          "ssh -F /etc/ssh/su_config -S none root@127.0.0.1 true; "
+                          "done"], env=env)
         if burst.stdout.count("Permission denied (publickey)") != 4:
             raise RuntimeError(f"su-penalty-burst: {burst.stdout}")
         identity("-sk-key")
