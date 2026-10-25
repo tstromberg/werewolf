@@ -36,6 +36,7 @@ if provider not in ('lima', 'qemu'):
     sys.exit('check-independent-updates: provider must be lima or qemu')
 arch = 'aarch64' if os.uname().machine in ('arm64', 'aarch64') else 'x86_64'
 howl = str(Path(howl).resolve())
+source_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
 work = Path(output).resolve()
 work.mkdir(parents=True, mode=0o700, exist_ok=False)
 os.umask(0o077)
@@ -362,6 +363,10 @@ try:
     ssh('/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=60)
     wait_boot('C', 3, 3, trial['boot_id'])
     ok('a failed trial of E falls back to C at floor 3')
+    evidence = dict(format='werewolf-update-evidence/1', provider=provider, arch=arch,
+                    commit=source_commit, passed=True, checks=dict(ab_upgrade=True, operator_rollback=True,
+                    unhealthy_fallback=True, retirement_cuts=True))
+    (work / 'result.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print('pass   independent-updates: %d checks on %s' % (len(passed), provider), flush=True)
 finally:
     if server:

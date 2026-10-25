@@ -17,13 +17,16 @@ IPE enforcement; its manifest explicitly records all three disabled protections.
 A signed download authenticates its files, not the platform's boot environment.
 `howl run` defaults to secure boot and never substitutes a legacy image.
 
-Secure targets publish only after their exact bundles pass all twelve protected
-lifecycle gates. QEMU covers all three published forms through a host-private owner
-channel; Lima currently covers `playground` through SSH. Each target requires a
-configured gate runner and passing evidence. Legacy targets require reproducibility,
-coverage, integration, package-updater tests, raw/qcow2 parity and boots of the exact
-qcow2 and direct
-image without Secure Boot or a TPM.
+Secure targets publish only after all twelve protected lifecycle gates pass. Eight
+prove the exact candidate's download, protected boot, tamper refusal and retained
+enrollment. The four update gates prove the same source revision's updates, rollback,
+TPM-floor power cuts, retired-release refusal and failed-trial fallback on disposable
+keys, on the same provider and architecture. A candidate follows its signed public
+channel, so its future updates cannot run before publication. QEMU drives all three
+published forms through the owner channel; Lima currently tests `playground` over SSH.
+Legacy targets require reproducibility, coverage, integration, package-updater tests,
+raw/qcow2 parity and boots of the exact disk and direct image without Secure Boot
+or TPM.
 
 ## Publication
 

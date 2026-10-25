@@ -49,4 +49,69 @@ class Trust(unittest.TestCase):
                 consumer_trust.mirror_roots(self.root / 'mirror.crt')
 
 
+
+class Evidence(unittest.TestCase):
+    def updates(self):
+        return dict(format='werewolf-update-evidence/1', provider='qemu', arch='x86_64',
+                    commit='a' * 40, passed=True,
+                    checks={name: True for name in consumer_trust.UPDATE_GATES})
+
+    def boot(self):
+        return dict(ready=True, committed=True, paused=True, boot_id='first-boot',
+                    cmdline='werewolf.channel=' + 'c' * 64 + ' werewolf.index=7',
+                    checks=[dict(id=name, result='pass') for name in consumer_trust.PUBLISHED_CHECKS])
+
+    def admit(self, value):
+        return consumer_trust.candidate_boot(value, consumer_trust.PUBLISHED_CHECKS, 'c' * 64, 7)
+
+    def test_only_matching_complete_update_evidence_is_admitted(self):
+        consumer_trust.validate_updates(self.updates(), 'qemu', 'x86_64', 'a' * 40)
+        for key, wrong in [('format', 'old'), ('passed', 1), ('passed', False),
+                           ('provider', 'lima'), ('arch', 'aarch64'), ('commit', 'b' * 40)]:
+            with self.subTest(key=key, value=wrong):
+                value = self.updates()
+                value[key] = wrong
+                with self.assertRaises(ValueError):
+                    consumer_trust.validate_updates(value, 'qemu', 'x86_64', 'a' * 40)
+        for name in consumer_trust.UPDATE_GATES:
+            for wrong in (False, 1, None):
+                value = self.updates()
+                value['checks'][name] = wrong
+                with self.assertRaises(ValueError):
+                    consumer_trust.validate_updates(value, 'qemu', 'x86_64', 'a' * 40)
+            value = self.updates()
+            del value['checks'][name]
+            with self.assertRaises(ValueError):
+                consumer_trust.validate_updates(value, 'qemu', 'x86_64', 'a' * 40)
+
+    def test_candidate_must_commit_and_match_the_signed_release(self):
+        self.assertEqual('first-boot', self.admit(self.boot())['boot_id'])
+        for key in ('ready', 'committed'):
+            for state in (False, 1, None):
+                value = self.boot()
+                value[key] = state
+                self.assertIsNone(self.admit(value))
+        for cmdline in ('', 'werewolf.release=' + 'c' * 64,
+                        'werewolf.channel=' + 'd' * 64 + ' werewolf.index=7',
+                        'werewolf.channel=' + 'c' * 64 + ' werewolf.index=6',
+                        self.boot()['cmdline'] + ' werewolf.index=7'):
+            value = self.boot()
+            value['cmdline'] = cmdline
+            with self.assertRaises(ValueError):
+                self.admit(value)
+
+    def test_no_protection_or_tamper_probe_can_be_missing_or_failed(self):
+        for name in consumer_trust.PUBLISHED_CHECKS:
+            value = self.boot()
+            value['checks'] = [entry for entry in value['checks'] if entry['id'] != name]
+            with self.assertRaises(ValueError):
+                self.admit(value)
+            value['checks'].append(dict(id=name, result='fail'))
+            with self.assertRaises(ValueError):
+                self.admit(value)
+        value = self.boot()
+        value['checks'].append(value['checks'][0])
+        with self.assertRaises(ValueError):
+            self.admit(value)
+
 unittest.main()

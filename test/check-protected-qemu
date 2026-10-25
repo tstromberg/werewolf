@@ -39,6 +39,13 @@ def check():
             kernel = work / 'test-kernel.tar'
             run(['sh', 'tools/test-kernel', 'x86_64', trust / 'image.crt', kernel], env)
             env['WEREWOLF_PROTECTED_TEST_KERNEL'] = str(kernel)
+            updates = Path('build/protected-qemu-validation/updates')
+            update_env = {name: value for name, value in env.items()
+                          if not name.startswith('WEREWOLF_PROTECTED_')}
+            update_env.update(XDG_DATA_HOME=str(work / 'data'), WEREWOLF_IPE_KERNEL=str(kernel),
+                              WEREWOLF_IPE_KEY=str(work / 'private/image.key'),
+                              WEREWOLF_IPE_CRT=str(trust / 'image.crt'))
+            run([sys.executable, 'test/check-independent-updates', 'build/host/howl', updates, 'qemu'], update_env)
             for form in image_profiles.BASE_FORMS:
                 start = datetime.datetime.now(datetime.timezone.utc)
                 bundles = []
@@ -51,7 +58,7 @@ def check():
                 run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/authorize-protected',
                      'build/host/howl', 'qemu', *bundles], env)
                 output = Path('build/protected-qemu-validation') / form
-                run([sys.executable, 'test/check-published-lifecycle', 'build/host/howl', *bundles, output], env)
+                run([sys.executable, 'test/check-published-lifecycle', 'build/host/howl', 'qemu', bundles[0], updates, output], env)
                 # Exercise the actual signatures, export admission and qcow2 too.
                 run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/export-protected',
                      'build/host/howl', bundles[0], output / 'gates.json', 'qemu', work / ('assets-' + form)], env)
