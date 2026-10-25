@@ -13,6 +13,10 @@ packages:
 dev:
   - samba-client
 
+# Nothing here authenticates with a UNIX password.
+prune:
+  - usr/bin/unix_chkpwd
+
 # 445 is not HTTP.
 check:
   skip: [http-answering]

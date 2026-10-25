@@ -60,7 +60,8 @@ jobs:
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
         run: |
           make ipe-kernel
-          make IPE=1 check-ipe
+          # This probe boots its kernel directly; firmware and TPM gates run below.
+          make IPE=1 DISABLE=secureboot,tpm check-ipe
           make IPE=1 check-image-updater
           make IPE=1 check-image-updater-uki
           make IPE=1 check-ab-qemu

@@ -97,7 +97,16 @@ const Lifecycle = struct {
         const descriptor = try l.describe(bundle);
         const evidence = try l.readJson(updates, "result.json");
         var why: host.check.Why = .{};
-        updated(evidence, l.provider, l.arch, l.form, &why) catch return c.fail("{s}", .{why.text});
+        const revision = try c.must(&.{ "git", "rev-parse", "HEAD" }, "", .{});
+        const source_commit = mem.trim(u8, revision.stdout, " \t\r\n");
+        updated(
+            evidence,
+            l.provider,
+            l.arch,
+            l.form,
+            source_commit,
+            &why,
+        ) catch return c.fail("{s}", .{why.text});
 
         // QEMU's sockets are Unix paths under a 108-byte limit; a fresh
         // consumer stays independent of the checkout's possibly deep path.
@@ -479,12 +488,13 @@ const Lifecycle = struct {
 };
 
 /// updated judges check-independent-updates' evidence: a pass on this
-/// provider and architecture, attesting every update gate.
+/// provider, architecture and source revision, attesting every update gate.
 fn updated(
     evidence: json.Value,
     provider: []const u8,
     arch: []const u8,
     workload: []const u8,
+    commit: []const u8,
     why: *host.check.Why,
 ) !void {
     const format = published.text(evidence, "format") orelse "";
@@ -492,8 +502,9 @@ fn updated(
         !published.isTrue(published.field(evidence, "passed")))
         return why.refuse("the update evidence records no pass", .{});
     if (!mem.eql(u8, published.text(evidence, "provider") orelse "", provider) or
-        !mem.eql(u8, published.text(evidence, "arch") orelse "", arch))
-        return why.refuse("the update evidence is of another provider or architecture", .{});
+        !mem.eql(u8, published.text(evidence, "arch") orelse "", arch) or
+        !mem.eql(u8, published.text(evidence, "commit") orelse "", commit))
+        return why.refuse("the update evidence is of another target or source revision", .{});
     if (mem.eql(u8, workload, "postdoc-server") and
         !mem.eql(u8, published.text(evidence, "form") orelse "", workload))
         return why.refuse("postdoc publication requires its own signed A/B workload evidence", .{});
@@ -602,34 +613,40 @@ fn exists(io: Io, path: []const u8) bool {
 }
 
 const testing = std.testing;
+const source_revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const channel_id = "abababababababababababababababababababababababababababababababab";
 
-test "the update evidence must pass for this provider and architecture" {
+test "the update evidence must pass for this target and source revision" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
     const good =
-        \\{"format":"werewolf-update-evidence/1","provider":"qemu","arch":"x86_64","passed":true,
+        \\{"format":"werewolf-update-evidence/1","provider":"qemu","arch":"x86_64","passed":true,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         \\ "checks":{"ab_upgrade":true,"operator_rollback":true,"unhealthy_fallback":true,"retirement_cuts":true}}
     ;
     var why: host.check.Why = .{};
     const value = try json.parseFromSliceLeaky(json.Value, gpa, good, .{});
-    try updated(value, "qemu", "x86_64", "playground", &why);
+    try updated(value, "qemu", "x86_64", "playground", source_revision, &why);
     try testing.expectError(
         error.Refused,
-        updated(value, "qemu", "x86_64", "postdoc-server", &why),
+        updated(value, "qemu", "x86_64", "postdoc-server", source_revision, &why),
     );
     var app = try json.parseFromSliceLeaky(json.Value, gpa, good, .{});
     try app.object.put(gpa, "form", .{ .string = "postdoc-server" });
-    try updated(app, "qemu", "x86_64", "postdoc-server", &why);
+    try updated(app, "qemu", "x86_64", "postdoc-server", source_revision, &why);
     try testing.expectError(
         error.Refused,
-        updated(value, "lima", "x86_64", "playground", &why),
+        updated(value, "lima", "x86_64", "playground", source_revision, &why),
     );
     for ([_][2][]const u8{
         .{ "\"passed\":true", "\"passed\":false" },
         .{ "\"retirement_cuts\":true", "\"retirement_cuts\":false" },
         .{ "update-evidence/1", "update-evidence/0" },
+        .{ "\"commit\":\"" ++ source_revision ++ "\"", "\"commit\":\"wrong-revision\"" },
+        .{
+            "\"commit\":\"" ++ source_revision ++ "\"",
+            "\"missing_commit\":\"" ++ source_revision ++ "\"",
+        },
     }) |change| {
         const bad = try mem.replaceOwned(u8, gpa, good, change[0], change[1]);
         try testing.expectError(
@@ -639,6 +656,7 @@ test "the update evidence must pass for this provider and architecture" {
                 "qemu",
                 "x86_64",
                 "playground",
+                source_revision,
                 &why,
             ),
         );

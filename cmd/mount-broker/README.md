@@ -8,22 +8,19 @@ nor `/boot` is lent as a mount: fixed operations use detached mounts and close t
 
 ## Background
 
-fence puts every process in a Landlock domain that refuses `mount`, `umount` and
-`pivot_root`, root's included. Three callers must still touch filesystems the machine
-does not keep mounted writable: slot-keep (the EFI entry, at commit), slot-update (a new
-slot, TPM boot state and the TPM floor), and stage 3 (shutting `/data` and `/boot`
-down). init starts the broker outside fence; programs ask through `lib/broker.zig`.
+fence refuses mount, umount and pivot_root for every process, including root.
+slot-keep must commit EFI entries; slot-update installs slots and updates TPM boot
+state and floors; stage 3 shuts down `/data` and `/boot`. Init starts the broker
+outside fence; callers use `lib/broker.zig`.
 
 ## Goals
 
-- No program but the broker can mount after boot.
 - The broker fixes devices, paths and mount options; callers request named operations.
 - Authority to ask is an inherited socketpair descriptor per role, never a `/run` path.
 
 ## Non-Goals
 
-Serving processes without a role descriptor or choosing filesystems by path. UUID or
-FAT serial comes only from the kernel command line, parsed through `lib/cmdline.zig`.
+No path-based filesystem choices or unassigned callers; identity uses `lib/cmdline.zig`.
 
 ## Detailed design
 

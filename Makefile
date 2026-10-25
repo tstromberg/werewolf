@@ -80,7 +80,7 @@ KERNEL_ROOTFS ?=
 WEREWOLF_IPE_CRT ?=
 WEREWOLF_IPE_KEY ?=
 # Only the caller may opt out of protections: missing build inputs are a refusal,
-# never consent. A check is such a caller, and names what it gives up (CHECK_DISABLE).
+# never consent. Direct-boot checks name their opt-outs with CHECK_DISABLE.
 comma := ,
 DISABLE ?=
 ifneq ($(strip $(DISABLE)),)
@@ -590,7 +590,7 @@ FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
 NATIVE_TEST_FORMS := $(filter-out bastion,$(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
-# A check boots its image directly: no firmware or TPM, and IPE only under IPE=1.
+# A check boots directly: no firmware or TPM, and IPE only under IPE=1.
 CHECK_DISABLE = secureboot,tpm$(if $(IPE),,$(comma)ipe)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1 DISABLE=$(CHECK_DISABLE)

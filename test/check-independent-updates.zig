@@ -106,6 +106,8 @@ const Test = struct {
         const lima = mem.eql(u8, t.provider, "lima");
         t.arch = if (builtin.cpu.arch == .aarch64) "aarch64" else "x86_64";
         t.howl = try c.absolute(c.args[1]);
+        const revision = try c.must(&.{ "git", "rev-parse", "HEAD" }, "", .{});
+        const source_commit = mem.trim(u8, revision.stdout, " \t\r\n");
         const work = try c.absolute(c.args[2]);
         if (Io.Dir.cwd().access(io, work, .{})) |_| {
             return c.fail("{s} exists already", .{work});
@@ -290,7 +292,7 @@ const Test = struct {
         _ = try c.must(&(restore ++ .{ release_a, disk }), "restore-a", .{});
         try t.refusedRestore();
         t.ok("a restored disk holding retired A is refused by stage0", .{});
-        t.powerOff();
+        try t.powerOff(true);
         try Io.Dir.cwd().rename(saved, .cwd(), disk, io);
         try t.restart("restored");
         cc = try t.waitBoot("C", 3, 2, null, true);
@@ -308,6 +310,7 @@ const Test = struct {
             .format = "werewolf-update-evidence/1",
             .provider = t.provider,
             .arch = t.arch,
+            .commit = source_commit,
             .form = t.source_form,
             .passed = true,
             .checks = .{
@@ -393,9 +396,13 @@ const Test = struct {
         });
         const hit = proxy.waitHit(.fromSeconds(900));
         const failure = proxy.failed();
-        if (hit and failure == null) t.powerOff();
+        const powered_off = if (hit and failure == null)
+            t.powerOff(false)
+        else
+            @as(anyerror!void, {});
         proxy.cancel();
         checking.stop(.fromSeconds(60));
+        try powered_off;
         if (!hit or failure != null)
             return c.fail("the floor increment was not reached: {s}", .{failure orelse "timeout"});
         try t.restartProxy();
@@ -636,8 +643,11 @@ const Test = struct {
 
     /// powerOff cuts the machine's power, as a host crash would: the VM and
     /// its TPM die at once, and the TPM's NV keeps what it last committed.
-    fn powerOff(t: *Test) void {
-        const pids = t.powered() catch return;
+    fn powerOff(t: *Test, stopped: bool) !void {
+        const pids = try t.powered();
+        // Retired-image refusal may already have removed QEMU's pidfile.
+        // A real power-cut proof requires both owned processes.
+        try powerCutPids(pids, stopped);
         for (pids) |pid| std.posix.kill(pid, .KILL) catch {};
     }
 
@@ -816,6 +826,21 @@ fn str(v: json.Value, key: []const u8) ![]const u8 {
 fn pidFile(io: Io, gpa: Allocator, path: []const u8) ?std.posix.pid_t {
     const text = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64)) catch return null;
     return std.fmt.parseInt(std.posix.pid_t, mem.trim(u8, text, " \t\r\n"), 10) catch null;
+}
+
+fn powerCutPids(pids: []const std.posix.pid_t, stopped: bool) !void {
+    if (!stopped and pids.len != 2) return error.MissingPowerCutProcesses;
+    for (pids) |pid| if (pid <= 1) return error.InvalidOwnedProcess;
+}
+
+test "power cuts require owned processes but retired-image refusal may have stopped them" {
+    try powerCutPids(&.{ 100, 101 }, false);
+    try std.testing.expectError(error.MissingPowerCutProcesses, powerCutPids(&.{100}, false));
+    try std.testing.expectError(error.MissingPowerCutProcesses, powerCutPids(&.{}, false));
+    try powerCutPids(&.{100}, true);
+    try powerCutPids(&.{}, true);
+    for ([_]std.posix.pid_t{ -1, 0, 1 }) |pid|
+        try std.testing.expectError(error.InvalidOwnedProcess, powerCutPids(&.{pid}, true));
 }
 
 /// matching is the pids of ps's "pid command" lines containing pattern.

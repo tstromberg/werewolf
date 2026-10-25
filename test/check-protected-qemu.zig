@@ -54,7 +54,13 @@ const Protected = struct {
         var env = try c.env.clone(gpa);
         const private = try joinPath(gpa, &.{ p.work, "private" });
         const public = try joinPath(gpa, &.{ p.work, "public" });
-        const tools = [_][]const u8{ "make", release, "build/host/check-published-lifecycle" };
+        const tools = [_][]const u8{
+            "make",
+            release,
+            "build/host/check-published-lifecycle",
+            "build/host/check-independent-updates",
+            "build/host/test-sk.so",
+        };
         try p.run(&tools, &env, "make-tools", 3600);
         const create = [_][]const u8{ release, "create-protected-trust", private, public };
         try p.run(&create, &env, "create-trust", 600);
@@ -78,8 +84,35 @@ const Protected = struct {
         try p.run(&test_kernel, &env, "test-kernel", 1800);
         try env.put("WEREWOLF_PROTECTED_TEST_KERNEL", kernel);
 
-        const candidates = "build/qemu-validation-candidates";
+        const updates = "build/protected-qemu-validation/updates";
+        var update_env = try env.clone(gpa);
+        for ([_][]const u8{
+            "WEREWOLF_PROTECTED_BOOT_KEY",
+            "WEREWOLF_PROTECTED_IMAGE_KEY",
+            "WEREWOLF_PROTECTED_TEST_KERNEL",
+        }) |key| _ = update_env.swapRemove(key);
+        try update_env.put("XDG_DATA_HOME", try joinPath(gpa, &.{ p.work, "data" }));
+        try update_env.put("WEREWOLF_IPE_KERNEL", kernel);
+        try update_env.put("WEREWOLF_IPE_KEY", try joinPath(gpa, &.{ private, "image.key" }));
+        try update_env.put("WEREWOLF_IPE_CRT", image_crt);
         const images = try published.Images.load(io, gpa);
+        const workload: []const u8 = for (images.forms) |form| {
+            if (mem.eql(u8, form, "postdoc-server")) break "postdoc-server";
+        } else "playground";
+        try p.run(
+            &.{
+                "build/host/check-independent-updates",
+                "build/host/howl",
+                updates,
+                "qemu",
+                workload,
+            },
+            &update_env,
+            "independent-updates",
+            7200,
+        );
+
+        const candidates = "build/qemu-validation-candidates";
         for (images.forms) |form| {
             const start = @divFloor(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s);
             var bundles: [3][]const u8 = undefined;
@@ -117,9 +150,9 @@ const Protected = struct {
             try p.run(&.{
                 "build/host/check-published-lifecycle",
                 "build/host/howl",
+                "qemu",
                 bundles[0],
-                bundles[1],
-                bundles[2],
+                updates,
                 output,
             }, &env, try gpa.print("lifecycle-{s}", .{form}), 7200);
             // Exercise the actual signatures, export admission and qcow2 too.

@@ -42,12 +42,13 @@ Path forms are never updated. Progress goes to stderr, the machine record to std
 `pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
 The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Lima (macOS) and QEMU (Linux) download a protected
-[image](../../docs/design/published-secure-boot.md) by default; clouds take protected
-`--build` images, as werewolf publishes none yet. Missing tools fail. Other providers
-and `--dev` need protections
-[disabled](../../docs/security.md#protections-a-machine-can-be-made-without). Local VMs
-use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
+**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux), which download a
+[protected image](../../docs/design/published-secure-boot.md). Clouds take protected
+`--build` images: werewolf publishes none yet. Other providers and `--dev` require
+[disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without). Missing
+tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and
+Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -64,18 +65,8 @@ Local engines and Proxmox attach the tar read-only; clouds take base64 user data
 `werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once and delete
 keeps. Cloud ports start closed; create's `--allow-from me|CIDR` opens the form's.
 
-**SSH.** `howl ssh [NAME]` logs in as your local username, GCP included; `root@NAME` is
-root (`root@werewolf-run` for run's machine), `USER@NAME -- COMMAND...` another account,
-and a missing account or failed login never falls back to root. `run` and `create`
-default to `--add-current-user=auto`: without `users`, an SSH-enabled form gets your
-account and the `~/.ssh` keys its policy accepts; `yes` adds it beside configured users
-(a declared account wins); `no`, or an empty `users` map or file, leaves it out. It gets
-no implicit `admin`. `pack --on TARGET` defaults the same; `pack` alone adds it only
-with `yes`. Lima's NoCloud account stays, its logins also offering Lima's key; `--dev`
-SSH takes only root. FIDO keys enter a dedicated, destination-constrained 20-hour agent
-(`--identity KEY` selects them, `--no-agent` skips it); first use pins the host key with
-an authentication-free handshake, and GCP opens TCP 22 to this host's public IP when no
-Howl SSH firewall rule exists. See [su](../../forms/ssh-su/README.md).
+**SSH.** See [Howl SSH connections](../../docs/design/howl-ssh.md) for account
+defaults, developer access, forwarded agents and cloud firewall behavior.
 
 **Second create.** The machine keeps its disk and takes the new config. On protected
 Lima and QEMU machines ([data import](../../docs/design/data-import.md)), a repeated

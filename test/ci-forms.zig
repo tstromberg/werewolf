@@ -170,6 +170,7 @@ fn command(gpa: Allocator, arch: Arch, targets: []const []const u8) ![]const []c
         "-j1",
         try gpa.print("ARCH={t}", .{arch}),
         try gpa.print("BUILD=build/{t}", .{arch}),
+        "DISABLE=secureboot,tpm,ipe",
     });
     try argv.appendSlice(gpa, targets);
     return argv.items;
@@ -469,7 +470,8 @@ test "each group checks its targets, with make for the architecture" {
     defer arena.deinit();
     const gpa = arena.allocator();
     const base = [_][]const u8{
-        "make", "--no-print-directory", "-j1", "ARCH=x86_64", "BUILD=build/x86_64",
+        "make",        "--no-print-directory", "-j1",
+        "ARCH=x86_64", "BUILD=build/x86_64",   "DISABLE=secureboot,tpm,ipe",
     };
     const want = [_][]const []const u8{
         &.{"check-alpha"},

@@ -817,35 +817,28 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);
     try env.put("COPYFILE_DISABLE", "1");
-    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "DISABLE" }) |k| _ = env.swapRemove(k);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |k|
+        _ = env.swapRemove(k);
     return env;
 }
 
-test "the make howl runs inherits no make variables, DISABLE included" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+test "build tools do not inherit the caller's Make protection opt-outs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var given: std.process.Environ.Map = .init(gpa);
-    for ([_][2][]const u8{
-        .{
-            "MAKEFLAGS",
-            "n",
-        },
-        .{ "MAKELEVEL", "1" },
-        .{ "DISABLE", "secureboot,tpm,ipe" },
-        .{ "PATH", "/bin" },
-    }) |kv| try given.put(kv[0], kv[1]);
+    var caller = std.process.Environ.Map.init(gpa);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |key|
+        try caller.put(key, "inherited");
+    try caller.put("PATH", "/tools");
     const saved = howl.environ;
     defer howl.environ = saved;
-    howl.environ = &given;
+    howl.environ = &caller;
     const env = try toolEnv(gpa);
-    for ([_][]const u8{
-        "MAKEFLAGS",
-        "MAKELEVEL",
-        "DISABLE",
-    }) |k| try std.testing.expect(env.get(k) == null);
-    try std.testing.expectEqualStrings("/bin", env.get("PATH").?);
-    try std.testing.expectEqualStrings("1", env.get("COPYFILE_DISABLE").?);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "DISABLE" }) |key| {
+        try std.testing.expect(env.get(key) == null);
+        try std.testing.expectEqualStrings("inherited", caller.get(key).?);
+    }
+    try std.testing.expectEqualStrings("/tools", env.get("PATH").?);
 }
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {

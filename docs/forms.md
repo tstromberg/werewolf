@@ -114,31 +114,8 @@ environment variable, `secret NAME PATH` reads one line into NAME; howl takes it
 
 ## People
 
-A form that runs sshd takes root's keys from the boot config (`--root-keys`). A manifest
-can also name accounts, with security keys, and make some admins, whose keys log in as
-root too:
-
-```yaml
-users:
-  tom:
-    keys: [sk-ssh-ed25519@openssh.com AAAAGnNr... tom@yubikey]
-    admin: true
-```
-
-`users: {alice: {}}` is an account without keys; an admin must have keys. prod-ssh and
-playground include [ssh-su](../forms/ssh-su/README.md): root reauthenticates through a
-forwarded agent, with FIDO presence and verification in production. People are never in
-the image: howl packs them into the boot config, init makes each an account (uid mapped
-from its name into `[65536, 2^30)`, NoCloud's kept in 500-60000; home on `/data`) and
-writes its keys where sshd looks; `net` grants them all as `:people`. Names and IDs stay
-reserved in `/data/.werewolf/identities` after removal; cloud metadata locks absent
-people and reapplies active keys as they change. Services have distinct users; an
-application's components may share one with `shared-user: true` on each, sharing files,
-processes and network policy while Landlock, seccomp and limits stay per service. When
-`users` is absent, `howl run` and `howl create` add your local account with the `~/.ssh`
-public keys the form's SSH policy accepts, never as an admin;
-`--add-current-user=auto|yes|no`, `howl pack` and Lima's NoCloud account follow
-[cmd/howl/README.md](../cmd/howl/README.md#detailed-design).
+People come from boot configuration or cloud metadata. See [people and SSH
+accounts](people.md) for keys, admin grants, account lifecycle and Howl defaults.
 
 ## Settings
 

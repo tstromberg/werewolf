@@ -1,6 +1,8 @@
 packages: [openssh-server, openssh-sftp-server]
 programs: [dhcp-client, sh-shim]
 allow: [pty]
+prune:
+  - usr/bin/unix_chkpwd
 accounts:
   groups:
     - groupname: _netcfg

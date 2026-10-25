@@ -1,22 +1,20 @@
 # Form images
 
-One workflow publishes `minimal`, `prod-ssh`, `playground` and `postdoc-server` on
-aarch64 and x86_64. Each has two explicit boot profiles: `secure-boot` requires Secure
-Boot, IPE and an enrolled TPM; `legacy-boot` runs without those three requirements,
-retaining sandboxing and the verified root. Download signatures and attestations
-authenticate both profiles. Browse the [image
-catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run `howl forms
---published` for protected targets. `howl run` continues to require the secure profile;
-it never falls back to a compatibility disk. Legacy assets are explicit R2 downloads;
-all selected forms are also attached to the GitHub release ([releases.md](releases.md)).
+One workflow publishes `minimal`, `prod-ssh`, `playground` and `postdoc-server` for
+aarch64 and x86_64. `secure-boot` requires Secure Boot, IPE and an enrolled TPM;
+`legacy-boot` keeps sandboxing and verified root without those requirements.
+Signatures and attestations authenticate both. Browse the [image
+catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run
+`howl forms --published` for protected targets. `howl run` requires the secure profile.
+Legacy assets download from R2; all forms ship in [GitHub releases](releases.md).
 
 ## The pipeline
 
-[form-images.yml](../.github/workflows/form-images.yml) runs on pushes to
-main that touch a form, hourly, and on demand. Each target's digest covers its
-form chain, shared code and tests, trust, exact packages and checksums, OCI
-digests, melange environments and host tools. An authenticated catalog row with
-matching inputs and a passing attempt skips the build; failures retry every run.
+[form-images.yml](../.github/workflows/form-images.yml) runs hourly, on demand and on
+pushes to main that touch a form. Each target's digest covers its form chain, shared
+code and tests, trust, exact packages and checksums, OCI digests, melange environments
+and host tools. A passing authenticated catalog row with matching inputs skips the
+build; failures retry every run.
 `force` rebuilds the selected targets.
 
 Pushes and manual dispatch default to `target=base`; the hourly run uses `target=all`.
@@ -133,11 +131,9 @@ the inventory and both notes.
 
 ## Protected production downloads
 
-`howl run` takes a production-signed download by default for a published
-target; `--build` makes the image here, signed with your own keys. A
-machine signed locally keeps its trust; adopt a download under a new
-name. The trust and layout are in
-[design/protected-downloads.md](design/protected-downloads.md).
+`howl run` downloads production-signed images for published targets; `--build` uses your
+own keys. Locally signed machines keep their trust; adopt downloads under a new name.
+See [design/protected-downloads.md](design/protected-downloads.md) for trust and layout.
 
 `release export-protected` admits the gated bundle and derives a qcow2 from its
 authenticated raw disk. Its signed `werewolf-downloads/1` manifest binds every
@@ -170,12 +166,10 @@ howl versions --with playground --on qemu --arch x86_64
 howl create upgrade-test --with playground --on qemu --version 20261014T232908Z
 ```
 
-`howl run` also takes `--version`. A timestamp, full `base-images-SERIAL` tag,
-or older `protected-SERIAL` tag selects the initial image from GitHub releases.
-Discovery supports `--json`; its defaults are playground and the host's provider and
-architecture. Every install still verifies the embedded vendor keys and signed
-artifacts. An explicit version has a separate cache floor, so it can install an old
-image without lowering the latest channel's floor. It requires the download path;
-`--build` and `--disable` cannot be combined with it. Use a new machine name to test
-upgrades: existing enrollments retain their rollback protection. The version selects
-the initial image; the machine's updater still follows its channel to the latest.
+`howl run` also takes `--version`: a timestamp, `base-images-SERIAL` tag or older
+`protected-SERIAL` tag selects the initial GitHub image. Discovery supports `--json`
+and defaults to playground on the host's provider and architecture. Every install
+verifies vendor keys and signatures. Explicit versions have a separate cache floor;
+older images cannot lower the latest channel's floor. They require downloads and
+cannot use `--build` or `--disable`. Test upgrades under a new machine name: existing
+enrollments retain rollback protection. Updates still follow the channel to the latest.

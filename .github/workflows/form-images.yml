@@ -354,6 +354,7 @@ jobs:
           path: |
             build/lifecycle/**/*.log
             build/lifecycle/**/result.json
+            build/lifecycle/**/storage-fault.json
             updates/*.log
             updates/evidence.jsonl
             updates/result.json
