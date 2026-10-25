@@ -143,6 +143,21 @@ pub fn admitHead(io: Io, gpa: Allocator, request: Request, arch: howl.Arch) !Man
     return m;
 }
 
+/// admitDeployment admits a head a machine of form may be deployed from:
+/// form's own, with the definition it is configured by.
+pub fn admitDeployment(
+    io: Io,
+    gpa: Allocator,
+    request: Request,
+    arch: howl.Arch,
+    form: []const u8,
+) !Manifest {
+    const m = try admitHead(io, gpa, request, arch);
+    if (!std.mem.eql(u8, m.form, form)) return error.WrongBootForm;
+    if (m.configuration == null) return error.MissingDeploymentDefinition;
+    return m;
+}
+
 pub fn verify(io: Io, gpa: Allocator, request: Request, arch: howl.Arch) !Verified {
     const m = try admitHead(io, gpa, request, arch);
     const head = try image.open(gpa, try key(io, gpa, request.image_certificate), try read(
@@ -343,14 +358,12 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     }
     if (args.len == 7 and std.mem.eql(u8, args[0], "head")) {
         const arch = howl.archName(args[5]) orelse return error.WrongImageArch;
-        const m = try admitHead(io, gpa, .{
+        const m = try admitDeployment(io, gpa, .{
             .directory = args[1],
             .boot_certificate = args[2],
             .image_certificate = args[3],
             .channel = args[4],
-        }, arch);
-        if (!std.mem.eql(u8, m.form, args[6])) return error.WrongBootForm;
-        if (m.configuration == null) return error.MissingDeploymentDefinition;
+        }, arch, args[6]);
         try Io.File.stdout().writeStreamingAll(io, try std.json.Stringify.valueAlloc(gpa, m, .{}));
         return;
     }
@@ -381,9 +394,9 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
 
 /// seal makes p's built image a boot bundle: the slot, its signed head and
 /// the compressed disk beside a boot.json the image key signs, which binds
-/// the form, the disk and the boot certificate. release/build-protected seals werewolf's images
-/// with
-/// it, and howl the images it builds with the user's own keys.
+/// the form, the disk and the boot certificate. `release build-protected`
+/// (tools/release) seals werewolf's images with it, and howl the images it
+/// builds with the user's own keys.
 pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
     const arch = howl.archName(p.arch) orelse return error.WrongImageArch;
     const published = @import("published.zig");
@@ -595,4 +608,312 @@ test "durable files are exclusive and private" {
     try t.expectError(error.PathAlreadyExists, durable(t.io, file, "again"));
     const st = try tmp.dir.statFile(t.io, "record", .{});
     try t.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+/// Fixture signs boot profiles for verify's refusals. Its keys come from
+/// openssl: Zig has no RSA signer.
+const Fixture = struct {
+    io: Io,
+    gpa: Allocator,
+    root: []const u8,
+    arch: howl.Arch,
+    channel: []const u8,
+    manifest: std.json.Value,
+
+    fn init(io: Io, gpa: Allocator, root: []const u8) !Fixture {
+        var f: Fixture = .{
+            .io = io,
+            .gpa = gpa,
+            .root = root,
+            .arch = howl.hostArch() orelse return error.SkipZigTest,
+            .channel = undefined,
+            .manifest = undefined,
+        };
+        for ([_][]const u8{ "vendor", "foreign" }) |name| try f.keypair(name, 2048);
+        const der = try capture(io, gpa, &.{
+            "openssl", "x509", "-in", try f.path("vendor.crt"), "-outform", "DER",
+        });
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(der, &digest, .{});
+        const text = try Dir.cwd().readFileAlloc(
+            io,
+            "lib/testdata/prebuilt/image.json",
+            gpa,
+            .limited(64 << 10),
+        );
+        var signed = try std.json.parseFromSliceLeaky(std.json.Value, gpa, text, .{});
+        try signed.object.put(gpa, "arch", .{ .string = @tagName(f.arch) });
+        const files = &signed.object.getPtr("files").?.object;
+        try files.put(
+            gpa,
+            "uki.efi",
+            try artifactValue(gpa, .{ .size = 1, .sha256 = &@as([64]u8, @splat('1')) }),
+        );
+        try signed.object.put(gpa, "build", .{ .string = try buildOf(gpa, signed) });
+        f.channel = signed.object.get("channel").?.string;
+        var m: std.json.ObjectMap = .empty;
+        try m.put(gpa, "format", .{ .string = format });
+        try m.put(gpa, "form", .{ .string = "playground" });
+        try m.put(gpa, "image", signed);
+        try m.put(
+            gpa,
+            "disk",
+            try artifactValue(gpa, .{ .size = 1, .sha256 = &@as([64]u8, @splat('0')) }),
+        );
+        try m.put(gpa, "raw_size", .{ .integer = 8 << 30 });
+        try m.put(gpa, "boot_certificate", .{
+            .string = try gpa.dupe(u8, &std.fmt.bytesToHex(digest, .lower)),
+        });
+        f.manifest = .{ .object = m };
+        return f;
+    }
+
+    fn path(f: *const Fixture, name: []const u8) ![]const u8 {
+        return f.gpa.print("{s}/{s}", .{ f.root, name });
+    }
+
+    fn openssl(f: *const Fixture, argv: []const []const u8) !void {
+        const result = try std.process.run(f.gpa, f.io, .{
+            .argv = argv,
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(1 << 20),
+        });
+        if (result.term != .exited or result.term.exited != 0) return error.OpensslFailed;
+    }
+
+    fn keypair(f: *const Fixture, name: []const u8, bits: u16) !void {
+        const private = try f.path(try f.gpa.print("{s}.key", .{name}));
+        const cert = try f.path(try f.gpa.print("{s}.crt", .{name}));
+        try f.openssl(&.{
+            "openssl", "req",   "-x509", "-newkey", try f.gpa.print("rsa:{d}", .{bits}),
+            "-nodes",  "-days", "1",     "-subj",   "/CN=boot-image-test",
+            "-keyout", private, "-out",  cert,
+        });
+    }
+
+    fn sign(f: *const Fixture, file: []const u8, signer: []const u8) !void {
+        const private = try f.path(try f.gpa.print("{s}.key", .{signer}));
+        const out = try f.gpa.print("{s}.sig", .{file});
+        try f.openssl(&.{ "openssl", "dgst", "-sha256", "-sign", private, "-out", out, file });
+    }
+
+    /// invoke signs m as boot.json, then verifies it as a download would,
+    /// trusting the image certificate trust.crt.
+    fn invoke(f: *const Fixture, m: std.json.Value, o: struct {
+        signer: []const u8 = "vendor",
+        mutate: bool = false,
+        trust: []const u8 = "vendor",
+    }) !Verified {
+        const head = try f.path("boot.json");
+        const data = try std.json.Stringify.valueAlloc(f.gpa, m, .{});
+        try Dir.cwd().writeFile(f.io, .{ .sub_path = head, .data = data });
+        try f.sign(head, o.signer);
+        if (o.mutate) try Dir.cwd().writeFile(f.io, .{
+            .sub_path = head,
+            .data = try f.gpa.print("{s} ", .{data}),
+        });
+        return verify(f.io, f.gpa, .{
+            .directory = f.root,
+            .boot_certificate = try f.path("vendor.crt"),
+            .image_certificate = try f.path(try f.gpa.print("{s}.crt", .{o.trust})),
+            .channel = f.channel,
+        }, f.arch);
+    }
+};
+
+fn artifactValue(gpa: Allocator, a: image.Artifact) !std.json.Value {
+    var o: std.json.ObjectMap = .empty;
+    try o.put(gpa, "size", .{ .integer = @intCast(a.size) });
+    try o.put(gpa, "sha256", .{ .string = a.sha256 });
+    return .{ .object = o };
+}
+
+fn buildOf(gpa: Allocator, signed: std.json.Value) ![]const u8 {
+    const files = try std.json.parseFromValueLeaky(
+        image.Files,
+        gpa,
+        signed.object.get("files").?,
+        .{},
+    );
+    return gpa.dupe(u8, &image.buildId(files));
+}
+
+/// pe is a minimal PE32+ image holding sections, as tools/uki.zig reads one.
+fn pe(gpa: Allocator, machine: u16, sections: []const [2][]const u8) ![]u8 {
+    const coff = 0x40 + 4;
+    const opt = coff + 20;
+    const start = std.mem.alignForward(usize, opt + 112 + 40 * sections.len, 512);
+    var size = start;
+    for (sections) |s| size += s[1].len;
+    const out = try gpa.alloc(u8, size);
+    @memset(out, 0);
+    @memcpy(out[0..2], "MZ");
+    std.mem.writeInt(u32, out[0x3c..][0..4], 0x40, .little);
+    @memcpy(out[coff - 4 ..][0..4], "PE\x00\x00");
+    std.mem.writeInt(u16, out[coff..][0..2], machine, .little);
+    std.mem.writeInt(u16, out[coff + 2 ..][0..2], @intCast(sections.len), .little);
+    std.mem.writeInt(u16, out[coff + 16 ..][0..2], 112, .little);
+    std.mem.writeInt(u16, out[coff + 18 ..][0..2], 0x22, .little);
+    std.mem.writeInt(u16, out[opt..][0..2], 0x20b, .little);
+    std.mem.writeInt(u32, out[opt + 32 ..][0..4], 512, .little);
+    std.mem.writeInt(u32, out[opt + 36 ..][0..4], 512, .little);
+    var at: u32 = @intCast(start);
+    for (sections, 0..) |s, i| {
+        const h = opt + 112 + 40 * i;
+        const len: u32 = @intCast(s[1].len);
+        @memcpy(out[h..][0..s[0].len], s[0]);
+        for ([_]struct { usize, u32 }{
+            .{ 8, len }, .{ 12, at }, .{ 16, len }, .{ 20, at }, .{ 36, 0x40000040 },
+        }) |field| std.mem.writeInt(u32, out[h + field[0] ..][0..4], field[1], .little);
+        @memcpy(out[at..][0..len], s[1]);
+        at += len;
+    }
+    return out;
+}
+
+test "boot profiles reach the artifact gate only under the vendor's signature" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const f = try Fixture.init(t.io, gpa, try tmp.dir.realPathFileAlloc(t.io, ".", gpa));
+    try t.expectError(error.FileNotFound, f.invoke(f.manifest, .{}));
+    // An RSA-4096 signature is the largest a head may carry.
+    try f.keypair("big", 4096);
+    try t.expectError(error.FileNotFound, f.invoke(f.manifest, .{
+        .signer = "big",
+        .trust = "big",
+    }));
+    try t.expectEqual(512, (try tmp.dir.statFile(t.io, "boot.json.sig", .{})).size);
+    try t.expectError(error.BadSignature, f.invoke(f.manifest, .{ .signer = "foreign" }));
+    try t.expectError(error.BadSignature, f.invoke(f.manifest, .{ .mutate = true }));
+}
+
+test "signed weak profiles and unknown fields cannot pass admission" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const f = try Fixture.init(t.io, gpa, try tmp.dir.realPathFileAlloc(t.io, ".", gpa));
+    const original = try std.json.Stringify.valueAlloc(gpa, f.manifest, .{});
+    for ([_]struct { []const []const u8, std.json.Value, anyerror }{
+        .{ &.{"format"}, .{ .string = "werewolf-boot/1" }, error.BadBootImageProfile },
+        .{ &.{ "image", "format" }, .{ .string = "werewolf-image/1" }, error.NotAnIpeImage },
+        .{ &.{ "image", "ipe" }, .{ .bool = false }, error.NotAnIpeImage },
+        .{
+            &.{ "image", "channel_id" },
+            .{ .string = &@as([63]u8, @splat('0')) },
+            error.BadImageRelease,
+        },
+        .{
+            &.{ "image", "channel_id" },
+            .{ .string = &@as([64]u8, @splat('A')) },
+            error.BadImageRelease,
+        },
+        .{ &.{ "image", "index" }, .{ .integer = 0 }, error.BadImageRelease },
+        .{ &.{"raw_size"}, .{ .integer = 32 << 30 }, error.BadBootImageSize },
+        .{ &.{ "disk", "size" }, .{ .integer = 3 << 30 }, error.BadBootImageSize },
+        .{ &.{"form"}, .{ .string = "../foreign" }, error.BadBootImageProfile },
+        .{
+            &.{"boot_certificate"},
+            .{ .string = &@as([64]u8, @splat('0')) },
+            error.WrongBootCertificate,
+        },
+        .{
+            &.{ "image", "channel" },
+            .{ .string = "https://foreign.test/shop" },
+            error.WrongImageChannel,
+        },
+        .{ &.{"allow_insecure"}, .{ .bool = true }, error.UnknownField },
+        // Protocol v2's permit endpoint, PCR 11 and boot context are no longer fields.
+        .{ &.{"permit_host"}, .{ .string = "192.168.5.2" }, error.UnknownField },
+        .{ &.{"permit_port"}, .{ .integer = 9443 }, error.UnknownField },
+        .{ &.{"pcr11"}, .{ .string = &@as([64]u8, @splat('1')) }, error.UnknownField },
+        .{
+            &.{ "image", "boot_context" },
+            .{ .string = &@as([64]u8, @splat('0')) },
+            error.UnknownField,
+        },
+    }) |case| {
+        const fields, const value, const reason = case;
+        var changed = try std.json.parseFromSliceLeaky(std.json.Value, gpa, original, .{});
+        var cursor = &changed;
+        for (fields[0 .. fields.len - 1]) |name| cursor = cursor.object.getPtr(name).?;
+        try cursor.object.put(gpa, fields[fields.len - 1], value);
+        t.expectError(reason, f.invoke(changed, .{})) catch |err| {
+            std.debug.print("{s}\n", .{fields[fields.len - 1]});
+            return err;
+        };
+    }
+}
+
+test "the signed UKI must name the manifest's channel and index" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var f = try Fixture.init(t.io, gpa, try tmp.dir.realPathFileAlloc(t.io, ".", gpa));
+    const signed = f.manifest.object.getPtr("image").?;
+    const channel_id = signed.object.get("channel_id").?.string;
+    const index: u64 = @intCast(signed.object.get("index").?.integer);
+    const native = "werewolf.native=1 werewolf.secure=1 " ++
+        "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("https://foreign.test/shop", &digest, .{});
+    const foreign = std.fmt.bytesToHex(digest, .lower);
+    const head = try gpa.print("prebuilt/{t}", .{f.arch});
+    try tmp.dir.createDirPath(t.io, "slot");
+    try tmp.dir.createDirPath(t.io, head);
+    const disk = "compressed-disk-fixture";
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "disk.img.zst", .data = disk });
+    try f.manifest.object.put(gpa, "disk", try artifactValue(gpa, try image.hashBytes(gpa, disk)));
+    const release = " werewolf.channel={s} werewolf.index={d}";
+    for ([_]struct { ?[]const u8, anyerror }{
+        // The identity holds and the sections match; the unsigned PE then fails Authenticode.
+        .{ try gpa.print(native ++ release, .{ channel_id, index }), error.BootImageToolFailed },
+        .{ try gpa.print(native ++ release, .{ &foreign, index }), error.WrongBootIdentity },
+        .{ try gpa.print(native ++ release, .{ channel_id, index + 1 }), error.WrongBootIdentity },
+        .{ native, error.WrongBootIdentity },
+        .{
+            native ++ " werewolf.tpm=2 werewolf.release=" ++ &@as([64]u8, @splat('1')),
+            error.BadBootIdentity,
+        },
+        .{ null, error.MissingBootIdentity },
+    }) |case| {
+        const line, const reason = case;
+        var payloads: [image.names.len][]const u8 = undefined;
+        for (image.names[0 .. payloads.len - 1], payloads[0 .. payloads.len - 1]) |name, *p|
+            p.* = try gpa.print("fixture:{s}", .{name});
+        var sections: std.ArrayList([2][]const u8) = .empty;
+        try sections.appendSlice(
+            gpa,
+            &.{ .{ ".linux", payloads[0] }, .{ ".initrd", payloads[2] } },
+        );
+        if (line) |l| try sections.append(gpa, .{ ".cmdline", try gpa.print("{s}\x00", .{l}) });
+        payloads[payloads.len - 1] =
+            try pe(gpa, if (f.arch == .aarch64) 0xaa64 else 0x8664, sections.items);
+        var files: std.json.ObjectMap = .empty;
+        for (image.names, payloads) |name, p| {
+            try tmp.dir.writeFile(t.io, .{
+                .sub_path = try gpa.print("slot/{s}", .{name}),
+                .data = p,
+            });
+            try files.put(gpa, name, try artifactValue(gpa, try image.hashBytes(gpa, p)));
+        }
+        try signed.object.put(gpa, "files", .{ .object = files });
+        try signed.object.put(gpa, "build", .{ .string = try buildOf(gpa, signed.*) });
+        const latest = try gpa.print("{s}/{s}/latest.json", .{ f.root, head });
+        try Dir.cwd().writeFile(t.io, .{
+            .sub_path = latest,
+            .data = try std.json.Stringify.valueAlloc(gpa, signed.*, .{}),
+        });
+        try f.sign(latest, "vendor");
+        try t.expectError(reason, f.invoke(f.manifest, .{}));
+    }
 }

@@ -2,7 +2,7 @@
 # ci-compilers installs the Go, Rust and .NET that the tutorial forms
 # (go-example, rust-example, aspnet-example) compile with on the host,
 # pinned, so every job of a run has the same compilers whichever runner
-# image it lands on. release/form-images records their versions in each
+# image it lands on. build/host/release form-images records their versions in each
 # form's inputs and refuses a build whose compilers changed. It installs
 # under ~/.cache/werewolf-compilers, as the job's user, and puts them on a
 # GitHub Actions job's PATH. Like ci-setup, a second run does nothing.

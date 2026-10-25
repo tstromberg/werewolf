@@ -140,7 +140,8 @@ jobs:
         # the runner. Forms jobs check demo, so persist need not first.
         run: |
           if [ "${{ matrix.group }}" = forms ] || [ "${{ matrix.group }}" = shellfree ]; then
-            ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} test/ci-forms ${{ matrix.group }}
+            make build/host/ci-forms
+            ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} build/host/ci-forms ${{ matrix.group }}
           else
             jobs=$(test/ci-vm-jobs)
             make -k -j"$jobs" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
@@ -265,7 +266,8 @@ jobs:
         # Complete and clean each form before the next. Platform checks
         # still share CPUs within the declared guest memory budget.
         run: |
-          ARCH=aarch64 SHARD='' test/ci-forms all
+          make build/host/ci-forms
+          ARCH=aarch64 SHARD='' build/host/ci-forms all
           jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs platform boots at once"
           make -k -j"$jobs" check-platform

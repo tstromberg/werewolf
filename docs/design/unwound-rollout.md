@@ -9,7 +9,7 @@ external DNS lookup. An isolated lab run used the composed Caddy policy and
 Ubuntu's Caddy 2.6 with `werewolf-linux.org` and Let's Encrypt's staging CA.
 Caddy's A and AAAA lookups of `acme-staging-v02.api.letsencrypt.org` were both
 allowed by screening. The fixture resolver returned NXDOMAIN, so no ACME
-request was made. `test/check-unwound-caddy` reproduces that audit in a Linux
+request was made. `make check-unwound-caddy` reproduces that audit in a Linux
 lab with Caddy installed. Other ACME endpoints and later Caddy versions still
 need observation before changing the provisional entropy threshold.
 

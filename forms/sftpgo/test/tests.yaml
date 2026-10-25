@@ -1,0 +1,140 @@
+version: 1
+suites:
+  # SFTPGo's identity, its private files, and nothing but SFTP on :22. What a
+  # user can and cannot do over SFTP, the host suite below tries from the
+  # host, as a user would: a shell-free test image carries no SSH client.
+  - name: sftpgo
+    cases:
+      - name: sftpgo-user
+        steps:
+          - service: sftpgo
+            expect:
+              user: sftpgo
+              uid:
+                min: 65536
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+      - name: sftpgo-host-key
+        steps:
+          - file: /data/svc/sftpgo/id_ed25519
+            expect:
+              type: file
+              uid: sftpgo
+              mode: '600'
+              body:
+                contains: PRIVATE KEY
+      - name: sftpgo-private
+        steps:
+          - file: /run/svc/sftpgo/users
+            expect:
+              type: file
+              uid: sftpgo
+              mode: '600'
+          - file: /data/svc/sftpgo/sftpgo.db
+            expect:
+              type: file
+              uid: sftpgo
+      - name: sftpgo-only-sftp
+        steps:
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 2022
+                - port: 8080
+                - port: 8090
+                - port: 2121
+                - port: 10000
+      # What check uploaded before the reboot (sftp-round-trip) is kept in
+      # its directory, as SFTPGo's.
+      - name: sftpgo-uploaded
+        phases: [verify]
+        steps:
+          - file: /data/svc/sftpgo/users/check/werewolf-check
+            expect:
+              type: file
+              uid: sftpgo
+              body: "werewolf check\n"
+host:
+  # check, by the run's key file (test/config), may move files and do
+  # nothing else. Each refusal comes after SFTPGo let check in, so a machine
+  # that never answered refuses nothing; the one failed login is last.
+  - name: sftpgo-sftp
+    cases:
+      - name: sftp-round-trip
+        phases: [seed]
+        steps:
+          - sftp:
+              user: check
+              key: file
+              path: werewolf-check
+              put: "werewolf check\n"
+            await: 60s
+            expect:
+              status: 0
+              content: "werewolf check\n"
+      - name: sftp-kept
+        phases: [verify]
+        steps:
+          - sftp:
+              user: check
+              key: file
+              path: werewolf-check
+            await: 60s
+            expect:
+              status: 0
+              content: "werewolf check\n"
+      # The host key SFTPGo offered before the reboot is the one it offers
+      # after: /data keeps it.
+      - name: sftp-host-key-kept
+        steps:
+          - ssh:
+              user: check
+              key: file
+              same_host_key: true
+            expect:
+              stderr:
+                contains: Authenticated to
+      - name: sftp-no-session
+        steps:
+          - ssh:
+              user: check
+              key: file
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: Authenticated to
+      - name: sftp-no-remote
+        steps:
+          - ssh:
+              user: check
+              key: file
+              remote_forward: true
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains_all:
+                  - Authenticated to
+                  - forwarding failed
+      - name: sftp-pq-required
+        steps:
+          - ssh:
+              user: check
+              key: file
+              kex: curve25519-sha256
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: no matching key exchange method
+      - name: sftp-keys-only
+        steps:
+          - ssh:
+              user: check
+              key: none
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: Permission denied (publickey)

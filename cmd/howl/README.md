@@ -22,13 +22,12 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
 | `form [-f FILE] ... -o DIR` | writes a form from a manifest and the line, whose flags are form.yaml's keys ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same |
-| `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); `--boot-native --tpm`, `--image-index` and `--update-ca` make a protected slot; two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
+| `_build`, `_bhyve`, `_firecracker`, `_tpm`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); `--boot-native --tpm`, `--image-index` and `--update-ca` make a protected slot; three supervisors, the last a protected machine's swtpm (`swtpm.zig`); the OCI unpacker ([oci.md](../../docs/design/oci.md)); `_build-helper` and `_native-firmware` serve tools/enroll-boot ([macOS builds](../../docs/macos-builds.md)) |
 
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl`
-  (`~/.local/share/howl`).
+- Records: `build/machines/NAME`; keys: `$XDG_DATA_HOME/howl` (`~/.local/share/howl`).
 
 ## Non-Goals
 
@@ -43,17 +42,17 @@ Path forms are never updated. Progress goes to stderr, the machine record to std
 `pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
 The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux), which download a
-[protected image](../../docs/design/published-secure-boot.md). Clouds take protected
-`--build` images: werewolf publishes none yet. Other providers and `--dev` require
-[disabling protections](../../docs/security.md#protections-a-machine-can-be-made-without).
-Missing tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU
-and Lima-managed).
+**Engines.** Lima (macOS) and QEMU (Linux) download a protected
+[image](../../docs/design/published-secure-boot.md) by default; clouds take protected
+`--build` images, as werewolf publishes none yet. Missing tools fail. Other providers
+and `--dev` need protections
+[disabled](../../docs/security.md#protections-a-machine-can-be-made-without). Local VMs
+use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
-| bhyve | FreeBSD x86_64 or arm64 (experimental, [limits](../../docs/testing-live.md#bhyve)), supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm, Python 3; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
+| bhyve | FreeBSD x86_64 or arm64 (experimental, [limits](../../docs/testing-live.md#bhyve)), supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
@@ -61,38 +60,28 @@ and Lima-managed).
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
-their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
-delete keeps the image. Cloud ports start closed; `--allow-from me|CIDR` opens the
-form's ports at creation, and `howl ssh` opens only GCP TCP 22 to this host when needed.
+Local engines and Proxmox attach the tar read-only; clouds take base64 user data and a
+`werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once and delete
+keeps. Cloud ports start closed; create's `--allow-from me|CIDR` opens the form's.
 
-**SSH.** `howl ssh` and `howl ssh NAME` log in as your local username, including
-on GCP. `run` and `create` default to `--add-current-user=auto`: when `users`
-is absent, an SSH-enabled form gets your local account and the public keys in
-`~/.ssh` its SSH policy accepts. `--add-current-user=yes` adds it alongside
-configured users; an existing account declaration wins. `no` disables the addition.
-An explicit empty `users` map or config file disables `auto`. Lima keeps its
-NoCloud account for all modes; developer SSH keeps its root-only login.
-The generated account has no implicit `admin` grant. `pack --on TARGET` uses
-the same default; `pack` without a target adds the account only with `yes`.
-Use `howl ssh root@NAME` for root, including `root@werewolf-run` for the unnamed
-run machine. `howl
-ssh USER@NAME -- COMMAND...` selects another account. Connections to Lima's NoCloud
-account also offer Lima's identity key. A missing account or failed login does not fall
-back to root. Developer SSH only accepts root, so use `root@NAME` for a `--dev` VM.
-Local FIDO keys enter a dedicated, destination-constrained 20-hour agent;
-`--identity KEY` selects keys, `--no-agent` skips forwarding. First use pins
-the host key with an authentication-free SSH handshake. GCP opens TCP 22 to
-the current public IP when no Howl SSH firewall rule exists. See
-[su](../../forms/ssh-su/README.md).
+**SSH.** `howl ssh [NAME]` logs in as your local username, GCP included; `root@NAME` is
+root (`root@werewolf-run` for run's machine), `USER@NAME -- COMMAND...` another account,
+and a missing account or failed login never falls back to root. `run` and `create`
+default to `--add-current-user=auto`: without `users`, an SSH-enabled form gets your
+account and the `~/.ssh` keys its policy accepts; `yes` adds it beside configured users
+(a declared account wins); `no`, or an empty `users` map or file, leaves it out. It gets
+no implicit `admin`. `pack --on TARGET` defaults the same; `pack` alone adds it only
+with `yes`. Lima's NoCloud account stays, its logins also offering Lima's key; `--dev`
+SSH takes only root. FIDO keys enter a dedicated, destination-constrained 20-hour agent
+(`--identity KEY` selects them, `--no-agent` skips it); first use pins the host key with
+an authentication-free handshake, and GCP opens TCP 22 to this host's public IP when no
+Howl SSH firewall rule exists. See [su](../../forms/ssh-su/README.md).
 
-**Second create.** The machine keeps its disk and takes the new config. Protected
-machines admit a repeated `--import DIR` only when it matches the chosen init snapshot;
-`howl import NAME DIR` selects new initial data, `howl sync NAME DIR` adds and replaces
-files without deleting destination-only data, if the form supports the mode. Both stage
-while the VM runs and apply at the next full stop/start through howl, not a guest
-reboot; initial import refuses a populated destination. Protected local Lima and QEMU
-only ([data import](../../docs/design/data-import.md)).
+**Second create.** The machine keeps its disk and takes the new config. On protected
+Lima and QEMU machines ([data import](../../docs/design/data-import.md)), a repeated
+`--import DIR` must match the init snapshot; `howl import NAME DIR` gives an empty
+destination new initial data, `howl sync NAME DIR` adds and replaces files, as the form
+allows. Both stage while the VM runs and apply only at its next howl stop and start.
 
 ## Drawbacks
 

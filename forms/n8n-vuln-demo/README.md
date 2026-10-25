@@ -60,8 +60,10 @@ See [n8n deployment documentation](https://docs.n8n.io/hosting/).
 - `listen: tcp/5678 *`
 - The broker on 5679 and health checks on 5680/5681 stay private.
 
-The native test checks owner setup, authenticated workflow creation, persistence after
-reboot, expression evaluation and JavaScript Code execution through the external runner.
+The native test checks readiness, the editor, the public-only anonymous settings, the
+direct Node runtime and its database, owner setup, authenticated workflow creation,
+persistence after reboot, expression evaluation and JavaScript Code execution through
+the external runner.
 A
 [CVE-2025-68613](https://github.com/n8n-io/n8n/security/advisories/GHSA-v98v-ff95-f3cp)
 regression expression reads only `process.version`; this proves the sandbox escape

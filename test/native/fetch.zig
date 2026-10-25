@@ -89,7 +89,11 @@ pub const Client = struct {
         var output: Output = .{ .arena = a };
         const url = try requestUrl(req, a);
         try check(api.curl_easy_setopt(handle, 10002, url.ptr)); // URL
-        try check(api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, ""))); // no proxy env
+        // No proxy from the environment. A libcurl built without proxies,
+        // which knows no proxy option (CURLE_NOT_BUILT_IN or
+        // CURLE_UNKNOWN_OPTION), has none to take.
+        const proxy = api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, ""));
+        if (proxy != 4 and proxy != 48) try check(proxy);
         try check(api.curl_easy_setopt(handle, 181, @as(c_long, 3))); // HTTP + HTTPS only
         try check(api.curl_easy_setopt(handle, 52, @as(c_long, 0))); // no automatic redirects
         try check(api.curl_easy_setopt(handle, 99, @as(c_long, 1))); // no signals

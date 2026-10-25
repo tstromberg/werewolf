@@ -78,7 +78,11 @@ fn request(io: Io, a: std.mem.Allocator, args: []const []const u8) !void {
         10002,
         @as([*:0]const u8, "http://127.0.0.1:3128/"),
     )); // Fixed proxy endpoint, never the requested destination.
-    try option(api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, "")));
+    // No proxy from the environment. A libcurl built without proxies, which
+    // knows no proxy option (CURLE_NOT_BUILT_IN or CURLE_UNKNOWN_OPTION), has
+    // none to take.
+    const proxy = api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, ""));
+    if (proxy != 4 and proxy != 48) try option(proxy);
     try option(api.curl_easy_setopt(handle, 99, @as(c_long, 1)));
     try option(api.curl_easy_setopt(handle, 155, @as(c_long, 10000)));
     try option(api.curl_easy_setopt(handle, 156, @as(c_long, 5000)));

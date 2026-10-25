@@ -29,8 +29,7 @@ weaknesses:
   network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers remain restricted
   network-root-https-arbitrary: root may reach SSH, HTTP and HTTPS anywhere (tcp/22, 80, 443, 8000, 8080), to try things out
   network-ssh-config: forwarded agents provide fresh authentication for su
-  network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
+  network-no-login: sshd provides operator access by key
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
-  programs-no-shell: bash, for Lima's readiness probes, and busybox-full's shell, for those who log in
+  programs-no-downloaders: SSH and scp support operator access
+  programs-no-shell: bash serves Lima readiness probes; mksh provides operator shells and /bin/sh

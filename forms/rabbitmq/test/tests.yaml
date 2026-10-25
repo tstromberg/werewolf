@@ -1,0 +1,79 @@
+version: 1
+suites:
+  - name: rabbitmq-ready
+    source: driver.zig
+    mode: ready
+    readiness: true
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    fixtures:
+      password: /run/config/rabbitmq/password
+    cases:
+      seed: [rabbitmq-ready]
+      verify: [rabbitmq-ready]
+  - name: rabbitmq
+    cases:
+      - name: rabbitmq-local
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 5672
+            await: 60s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: '127.0.0.1'
+                  port: 5672
+          - listeners:
+              protocol: tcp
+              port: 4369
+            await: 60s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: '127.0.0.1'
+                  port: 4369
+          - listeners:
+              protocol: tcp
+              port: 25672
+            await: 60s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: '127.0.0.1'
+                  port: 25672
+      - name: rabbitmq-user
+        steps:
+          - service: rabbitmq
+            await: 60s
+            expect:
+              uid:
+                min: 1
+              capabilities: []
+              no_new_privileges: true
+      # rabbitmq-wire searches /run/svc/rabbitmq for the password itself.
+      - name: rabbitmq-secret
+        steps:
+          - file: /run/svc/rabbitmq/password
+            expect:
+              exists: false
+          - file: /data/svc/rabbitmq/.erlang.cookie
+            expect:
+              type: file
+              mode: '600'
+          - file: /data/svc/rabbitmq
+            expect:
+              type: directory
+              mode: '700'
+  - name: rabbitmq-wire
+    source: driver.zig
+    mode: wire
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    fixtures:
+      password: /run/config/rabbitmq/password
+    cases:
+      seed: [rabbitmq-works, rabbitmq-guest, rabbitmq-secret]
+      verify: [rabbitmq-kept, rabbitmq-guest, rabbitmq-secret]

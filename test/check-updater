@@ -18,9 +18,21 @@ set -eu
 dir=$CHECK/update-$FORM
 rm -rf "$dir/claim" "$dir/slots" "$dir/slots.img" "$dir/b"
 mkdir -p "$dir/claim/usr/share/werewolf" "$dir/slots/slot/a"
-# linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
-awk -F. '{ split($3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $1, $2, z[1] - 1, z[2] }' \
-	"$OUT/meta/usr/share/werewolf/kernel" >"$dir/claim/usr/share/werewolf/kernel"
+# linux-werewolf-7.2.12-r6 claims 7.2.11-r6, and the mainline 7.3-r7 claims 7.2-r7.
+awk '{
+	if (!match($0, /-[0-9][0-9.]*-r[0-9]+$/)) exit 1
+	split(substr($0, RSTART + 1), vr, "-")
+	k = split(vr[1], v, ".")
+	for (i = k; i > 0 && v[i] == 0; i--) ;
+	if (i == 0) exit 1
+	v[i]--
+	out = v[1]
+	for (j = 2; j <= k; j++) out = out "." v[j]
+	printf "%s-%s-%s\n", substr($0, 1, RSTART - 1), out, vr[2]
+}' "$OUT/meta/usr/share/werewolf/kernel" >"$dir/claim/usr/share/werewolf/kernel" || {
+	echo "FAIL   update claim: no older release than $(cat "$OUT/meta/usr/share/werewolf/kernel")"
+	exit 1
+}
 printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
 claimed=usr/share/werewolf/kernel
 if [ -n "${PUBLISHED:-}" ]; then

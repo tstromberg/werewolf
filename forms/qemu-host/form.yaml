@@ -24,8 +24,6 @@ net:
 weaknesses:
   network-root-dns-assigned: root forwards its guests' DNS queries to unwound, which may resolve any name for them, audited
   network-root-https-arbitrary: root forwards its guests' HTTPS connections
-  network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
-  programs-no-shell: busybox-full's shell, for those who log in
+  network-no-login: sshd, by security key, provides operator access
+  programs-no-shell: mksh provides operator shells and /bin/sh
   ?kernel-no-hypervisor: it runs virtual machines, as its form allows, wherever its host lends it the hardware (EL2 on aarch64, VMX or SVM on x86_64)

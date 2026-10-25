@@ -1,0 +1,1064 @@
+# The legacy form cases of the 730949c inventory (docs/design/test-probes.md).
+# A case counts as the case of its name in the form's tests.yaml or native
+# suites, or a retained legacy check; under replacements, as the SUITE/CASE
+# assertions that replace it, when it was split or renamed.
+base: '730949c300be98fbae4fcd86afec9b85a608db19'
+forms:
+  adguard-home:
+    - agh-blocks
+    - agh-config
+    - agh-login
+    - agh-no-busybox
+    - agh-no-wizard
+    - agh-resolves
+    - agh-settings
+    - agh-squatter
+    - agh-strangers
+    - agh-user
+    - agh-wrong-password
+  aspnet-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  authelia:
+    - authelia-ban
+    - authelia-forged
+    - authelia-health
+    - authelia-hosts
+    - authelia-one-factor
+    - authelia-portal
+  bastion:
+    - bastion-private
+    - bastion-user
+    - bastion-users
+  blocky:
+    - blocky-blocks
+    - blocky-resolves
+    - blocky-settings
+    - blocky-squatter
+    - blocky-strangers
+    - blocky-tls-only
+    - blocky-user
+  bloodhound:
+    - bh-admin
+    - bh-anon
+    - bh-bind
+    - bh-health
+    - bh-user
+    - bh-wrong
+    - neo4j-bolt
+    - neo4j-user
+  bugsink:
+    - bs-anon
+    - bs-data
+    - bs-event
+    - bs-health
+    - bs-https
+    - bs-login
+    - bs-net
+    - bs-no-admin
+    - bs-project
+    - bs-signup
+    - bs-snappea
+    - bs-user
+    - bs-wrong
+    - bs-wrong-key
+  caddy:
+    - caddy-headers
+    - caddy-https
+    - caddy-kept
+    - caddy-no-admin
+    - caddy-redirect
+    - caddy-user
+  cloudflared:
+    - cloudflared-metrics
+    - cloudflared-not-ready
+    - cloudflared-private
+    - cloudflared-trying
+    - cloudflared-user
+  continuwuity:
+    - continuwuity-admin
+    - continuwuity-closed
+    - continuwuity-https
+    - continuwuity-unauth
+    - continuwuity-up
+    - continuwuity-wrong-password
+  cron:
+    - cron-job-runs
+    - cron-leashed
+    - cron-pledged
+    - cron-shell-refused
+    - cron-unlisted-refused
+  demo:
+    - demo-headers
+    - demo-hidden
+    - demo-logo
+    - demo-page
+    - demo-readonly
+    - scan-cpu-share
+  dependency-track:
+    - dtrack-admin
+    - dtrack-anon
+    - dtrack-bind
+    - dtrack-health
+    - dtrack-published
+    - dtrack-user
+  galene:
+    - galene-group
+    - galene-hashed
+    - galene-https
+    - galene-join
+    - galene-join-refused
+    - galene-redirect
+    - galene-udp
+    - galene-unlisted
+  gatus:
+    - gatus-health
+    - gatus-history
+    - gatus-no-metrics
+    - gatus-readonly
+    - gatus-target
+    - gatus-user
+  gitea:
+    - gitea-admin
+    - gitea-api
+    - gitea-host-key
+    - gitea-no-install
+    - gitea-private
+    - gitea-pushed
+    - gitea-secrets
+    - gitea-user
+  go-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  grafana:
+    - grafana-admin
+    - grafana-anon
+    - grafana-data
+    - grafana-health
+    - grafana-https
+    - grafana-key
+    - grafana-plugin
+    - grafana-quiet
+    - grafana-root-url
+    - grafana-signup
+    - grafana-user
+    - grafana-wrong
+  greenbone:
+    - greenbone-alone
+    - greenbone-assets
+    - greenbone-bind
+    - greenbone-cache
+    - greenbone-caps
+    - greenbone-feed
+    - greenbone-gvmd
+    - greenbone-link
+    - greenbone-login
+    - greenbone-posture
+    - greenbone-published
+    - greenbone-redis
+    - greenbone-scanner
+  haproxy:
+    - haproxy-httpoxy
+    - haproxy-proxies
+    - haproxy-setup
+    - haproxy-slow
+    - haproxy-unavailable
+  headscale:
+    - hs-api-closed
+    - hs-health
+    - hs-https
+    - hs-join-refused
+    - hs-no-admin
+    - hs-state
+    - hs-user
+  home-assistant:
+    - ha-api-locked
+    - ha-discovery-groups
+    - ha-discovery-policy
+    - ha-http-stable
+    - ha-login
+    - ha-loopback
+    - ha-mdns-answer
+    - ha-onboarded
+    - ha-onboarding-closed
+    - ha-private
+    - ha-up
+    - ha-user
+    - ha-wrong-password
+  immich:
+    - immich-admin
+    - immich-defaults
+    - immich-exif
+    - immich-library
+    - immich-offline
+    - immich-signup-closed
+    - immich-thumbnail
+    - immich-up
+    - immich-upload
+    - immich-user
+  iris:
+    - iris-admin
+    - iris-bind
+    - iris-db-policy
+    - iris-login
+    - iris-published
+    - iris-user
+  jellyfin:
+    - jf-admin
+    - jf-alone
+    - jf-library
+    - jf-set-up
+    - jf-wizard-shut
+  jre-app:
+    - app-unshipped
+  jre-example:
+    - java-head
+    - java-method-refused
+    - java-not-found
+    - java-site
+    - java-traversal
+  kafka:
+    - kafka-acl-user
+    - kafka-no-acl
+    - kafka-no-login
+    - kafka-setup
+    - kafka-up
+  keycloak:
+    - keycloak-admin
+    - keycloak-host
+    - keycloak-https
+    - keycloak-management
+    - keycloak-oidc
+    - keycloak-refused
+  langflow:
+    - langflow-api
+    - langflow-direct-python
+    - langflow-editor
+    - langflow-inference-invalid-shape
+    - langflow-local-inference
+    - langflow-services
+    - langflow-state
+  langflow-vuln-demo:
+    - langflow-api
+    - langflow-direct-python
+    - langflow-editor
+    - langflow-inference-invalid-shape
+    - langflow-local-inference
+    - langflow-services
+    - langflow-state
+  limesurvey:
+    - ls-hidden
+    - ls-host
+    - ls-http
+    - ls-in-mariadb
+    - ls-installed
+    - ls-login
+    - ls-plugin-planted
+    - ls-plugin-upload
+    - ls-private
+    - ls-uploads-data
+    - ls-wrong-password
+  loki:
+    - loki-alone
+    - loki-auth
+    - loki-invalid-push
+    - loki-ready
+    - loki-roundtrip
+    - loki-wrong-password
+  mariadb-local:
+    - mariadb-data
+    - mariadb-migrate
+    - mariadb-no-files
+    - mariadb-no-tcp
+    - mariadb-socket
+  mariadb-tcp:
+    - mariadb-tcp
+    - mariadb-tcp-role
+    - mariadb-tcp-root-refused
+    - mariadb-tcp-roundtrip
+    - mariadb-tcp-wrong-password
+  mastodon:
+    - assets-served
+    - https-redirect
+    - jobs-egress
+    - jobs-smtp
+    - mastodon-health
+    - mastodon-instance
+    - mastodon-owner
+    - secrets-private
+    - streaming-health
+  mattermost:
+    - mm-admin
+    - mm-no-plugin
+    - mm-no-signup
+    - mm-ping
+    - mm-schema
+    - mm-user
+  mediawiki:
+    - mw-anon-edit
+    - mw-anon-signup
+    - mw-code-hidden
+    - mw-installed
+    - mw-login
+    - mw-main-page
+    - mw-private
+    - mw-throttled
+    - mw-update
+    - mw-upload-banned
+    - mw-upload-pdf
+    - mw-user
+    - mw-wrong-password
+  minecraft:
+    - mc-files
+    - mc-no-rcon
+    - mc-ping
+    - mc-stranger
+    - mc-up
+  miniflux:
+    - miniflux-admin
+    - miniflux-category
+    - miniflux-health
+    - miniflux-https
+    - miniflux-ssrf
+    - miniflux-unauth
+    - miniflux-wrong-password
+  minio:
+    - minio-anonymous
+    - minio-live
+    - minio-no-console
+    - minio-object-private
+    - minio-private
+    - minio-round-trip
+    - minio-user
+  misp:
+    - misp-admin
+    - misp-bind
+    - misp-db
+    - misp-login
+    - misp-password
+    - misp-published
+    - misp-secrets
+    - misp-serve
+    - misp-user
+  mongodb:
+    - mongodb-data
+    - mongodb-kept
+    - mongodb-local
+    - mongodb-no-javascript
+    - mongodb-user
+    - mongodb-works
+  moodle:
+    - moodle-cron
+    - moodle-hidden
+    - moodle-https
+    - moodle-install
+    - moodle-installed
+    - moodle-login
+    - moodle-no-exec
+    - moodle-no-signup
+    - moodle-path-info
+    - moodle-private
+    - moodle-public
+    - moodle-tables
+    - moodle-user
+  mosquitto:
+    - mqtt-acl
+    - mqtt-no-anonymous
+    - mqtt-private
+    - mqtt-round-trip
+    - mqtt-tls-only
+    - mqtt-user
+    - mqtt-wrong-password
+  mox:
+    - mox-inbound
+    - mox-listening
+    - mox-no-relay
+    - mox-setup
+    - mox-smtp
+    - mox-submitted
+    - mox-web
+  n8n:
+    - n8n-database
+    - n8n-health
+    - n8n-native-runtime
+    - n8n-settings
+    - n8n-ui
+  n8n-vuln-demo:
+    - n8n-database
+    - n8n-health
+    - n8n-native-runtime
+    - n8n-settings
+    - n8n-ui
+  nats:
+    - config-restart
+    - nats-jetstream
+    - nats-monitor-local
+    - nats-no-anonymous
+    - nats-permissions
+    - nats-private
+    - nats-round-trip
+    - nats-tls-only
+    - nats-user
+    - nats-wrong-password
+  nextcloud:
+    - nc-cron
+    - nc-cron-wait
+    - nc-hidden
+    - nc-https
+    - nc-installed
+    - nc-login
+    - nc-no-installer
+    - nc-no-signup
+    - nc-no-web-update
+    - nc-private
+    - nc-public-only
+    - nc-user
+    - nc-webdav
+    - nc-wrong-password
+  nginx:
+    - nginx-head
+    - nginx-headers
+    - nginx-method-refused
+    - nginx-not-found
+    - nginx-site
+    - nginx-traversal
+  node-app:
+    - app-unshipped
+  node-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  oauth2-proxy:
+    - o2p-auth-401
+    - o2p-forged
+    - o2p-ping
+    - o2p-private
+    - o2p-user
+    - o2p-wall
+  ollama:
+    - ollama-api
+    - ollama-models
+    - ollama-origin
+    - ollama-private
+    - ollama-pull-fails
+    - ollama-user
+  open-webui:
+    - owui-add-user
+    - owui-admin
+    - owui-cors
+    - owui-data
+    - owui-health
+    - owui-https
+    - owui-no-user-code
+    - owui-ollama
+    - owui-public
+    - owui-signup-closed
+    - owui-unauth
+    - owui-user
+    - owui-wrong-password
+  openbao:
+    - bao-admin-login
+    - bao-audited
+    - bao-cluster-local
+    - bao-private
+    - bao-raw-off
+    - bao-tls-only
+    - bao-unsealed
+    - bao-user
+    - bao-wrong-password
+  opencanary:
+    - oc-ftp
+    - oc-host-key
+    - oc-http
+    - oc-https
+    - oc-login-logged
+    - oc-smb
+    - oc-ssh
+    - oc-user
+  openldap:
+    - ldap-add-search
+    - ldap-admin
+    - ldap-hashed
+    - ldap-no-anonymous
+    - ldap-no-cleartext
+    - ldap-no-config
+    - ldap-no-prehashed
+    - ldap-user
+  opensearch:
+    - os-refuses
+    - os-search
+    - os-setup
+    - os-transport
+    - os-up
+  otel-collector:
+    - otel-config
+    - otel-grpc-no-token
+    - otel-grpc-span
+    - otel-http-span
+    - otel-no-token
+    - otel-tls-only
+  overleaf:
+    - overleaf-admin
+    - overleaf-apart
+    - overleaf-no-claim
+    - overleaf-starting
+    - overleaf-up
+    - overleaf-write18
+  paperless:
+    - pl-again-login
+    - pl-again-no-sqlite
+    - pl-again-postgres
+    - pl-anon
+    - pl-data
+    - pl-document-kept
+    - pl-document-upload
+    - pl-document-worker
+    - pl-https
+    - pl-login
+    - pl-no-oom
+    - pl-no-preload
+    - pl-no-tcp
+    - pl-peer-refusal
+    - pl-postgres
+    - pl-shared-user
+    - pl-signup
+    - pl-up
+    - pl-wrong
+  php:
+    - php-missing-script
+    - php-placeholder
+    - php-socket-private
+  php-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  pi-hole:
+    - ph-blocks
+    - ph-local
+    - ph-login
+    - ph-resolves
+    - ph-squatter
+    - ph-stranger
+    - ph-user
+    - ph-wrong
+  postdoc-server:
+    - cloudflared-metrics
+    - postdoc-analyzes
+    - postdoc-healthy
+    - postdoc-info
+    - postdoc-loopback
+    - postdoc-pledged
+    - postdoc-private
+    - postdoc-remembers
+    - postdoc-unauth
+    - postdoc-user
+    - postdoc-wrong-token
+    - sshd-listens
+  postgresql:
+    - postgres-local
+    - postgres-peer
+    - postgres-redirs
+    - postgres-rollback
+    - postgres-shim
+    - postgres-sql
+  prometheus:
+    - prom-auth
+    - prom-invalid-query
+    - prom-no-admin
+    - prom-scrapes
+    - prom-setup
+    - prom-wrong-password
+  python-app:
+    - app-unshipped
+  python-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  qemu-host:
+    - qemu-corrupt
+    - qemu-disk
+    - qemu-no-jit
+    - qemu-resize
+    - qemu-roundtrip
+    - qemu-snapshot
+  rabbitmq:
+    - rabbitmq-guest
+    - rabbitmq-kept
+    - rabbitmq-local
+    - rabbitmq-secret
+    - rabbitmq-user
+    - rabbitmq-works
+  restic-server:
+    - rs-alone
+    - rs-append-only
+    - rs-backup
+    - rs-private
+    - rs-stranger
+    - rs-user
+    - rs-wrong-password
+  ruby-app:
+    - app-unshipped
+  ruby-example:
+    - ruby-content-type
+    - ruby-fragmented
+    - ruby-framing
+    - ruby-greeting
+    - ruby-reconnect
+  rust-example:
+    - app-content-type
+    - app-greeting
+    - app-health
+    - app-method-refused
+    - app-not-found
+    - app-query
+  samba:
+    - samba-guest
+    - samba-kept
+    - samba-network
+    - samba-new-account
+    - samba-new-other
+    - samba-new-user
+    - samba-no-preload
+    - samba-old-pass
+    - samba-other
+    - samba-removed
+    - samba-round
+    - samba-smb2
+    - samba-unix-users
+    - samba-up
+    - samba-wrong
+  sftpgo:
+    - sftpgo-host-key
+    - sftpgo-only-sftp
+    - sftpgo-private
+    - sftpgo-uploaded
+    - sftpgo-user
+  sh-shim:
+    - sh-shim-no-shell
+    - sh-shim-path
+    - sh-shim-redirs
+    - sh-shim-refuses
+    - sh-shim-words
+    - sh-shim-yields
+  solr:
+    - solr-admin
+    - solr-cores
+    - solr-create-core
+    - solr-direct-java
+    - solr-hardened-jvm
+    - solr-home
+    - solr-home-confined
+    - solr-index-document
+    - solr-ping
+    - solr-query-document
+  solr-vuln-demo:
+    - solr-demo-admin
+    - solr-demo-cores
+    - solr-demo-direct-java
+    - solr-demo-home
+    - solr-demo-log4j
+    - solr-demo-version
+  squid:
+    - squid-allows
+    - squid-by-address
+    - squid-cachemgr
+    - squid-config
+    - squid-exact
+    - squid-inward
+    - squid-listeners
+    - squid-no-version
+    - squid-plain-http
+    - squid-port-25
+    - squid-source
+    - squid-unlisted
+    - squid-up
+  step-ca:
+    - step-acme
+    - step-health
+    - step-no-admin
+    - step-policy
+    - step-private
+    - step-roots
+    - step-user
+  suricata:
+    - rules-cache
+    - suricata-caps
+    - suricata-no-preload
+    - suricata-rule
+    - suricata-rules
+    - suricata-socket
+    - suricata-started
+    - suricata-user
+  syncthing:
+    - st-auth-file
+    - st-gui
+    - st-gui-loopback
+    - st-health
+    - st-keys
+    - st-no-password
+    - st-options
+    - st-user
+  tailscale:
+    - tailscale-config
+    - tailscale-listeners
+    - tailscale-no-ingress
+    - tailscale-no-tun
+    - tailscale-private
+    - tailscale-user
+  umami:
+    - umami-admin
+    - umami-alone
+    - umami-anon
+    - umami-collect
+    - umami-default
+    - umami-health
+    - umami-https
+    - umami-pg-only
+    - umami-tracker
+    - umami-unknown
+    - umami-user
+  unbound:
+    - unbound-anchor
+    - unbound-answers
+    - unbound-forwards
+    - unbound-no-ctl
+    - unbound-refuses
+  valkey:
+    - valkey-no-admin
+    - valkey-no-tcp
+    - valkey-ping
+    - valkey-snapshots
+    - valkey-socket
+    - valkey-user
+    - valkey-works
+  valkey-tcp:
+    - valkey-auth
+    - valkey-cap
+    - valkey-tcp
+    - valkey-tcp-no-admin
+    - valkey-tcp-roundtrip
+    - valkey-uncapped
+    - valkey-wrong-password
+  vaultwarden:
+    - vw-admin-locked
+    - vw-alive
+    - vw-invite
+    - vw-login
+    - vw-private
+    - vw-register
+    - vw-signup-closed
+    - vw-user
+    - vw-vault
+    - vw-wrong-password
+  velociraptor:
+    - vr-admin
+    - vr-anon
+    - vr-config
+    - vr-frontend
+    - vr-health
+    - vr-user
+    - vr-wrong
+  vuln-demo:
+    - vuln-audit-enabled
+    - vuln-dashboard
+    - vuln-langflow
+    - vuln-n8n
+    - vuln-no-shell-runs
+    - vuln-request-log
+    - vuln-solr
+  webshell-example:
+    - webshell-escaped
+    - webshell-history
+    - webshell-method-refused
+    - webshell-not-found
+    - webshell-page
+    - webshell-secret-refused
+  wordpress:
+    - wp-hidden
+    - wp-installed
+    - wp-login
+    - wp-no-file-mods
+    - wp-no-pingback
+    - wp-private
+    - wp-rate-limited
+    - wp-uploads-data
+    - wp-user
+    - wp-users-hidden
+    - wp-wrong-password
+  wordpress-mariadb:
+    - wpm-in-mariadb
+    - wpm-installed
+    - wpm-login
+    - wpm-php-role
+    - wpm-wrong-password
+  zeek:
+    - zeek-caps
+    - zeek-connection-log
+    - zeek-dns-log
+    - zeek-started
+    - zeek-user
+  zot:
+    - zot-alone
+    - zot-only-v2
+    - zot-pull
+    - zot-push
+    - zot-reader-push
+    - zot-stranger
+    - zot-stranger-pull
+    - zot-stranger-push
+    - zot-user
+    - zot-wrong-password
+replacements:
+  sh-shim:
+    sh-shim-redirs:
+      - test-sh-shim/sh-shim-redirs
+      - test-sh-shim-fds/sh-shim-closed-fds
+  postgresql:
+    postgres-shim:
+      - test-postgres-policy/shim-policy
+    postgres-redirs:
+      - test-postgres-policy/shim-output
+      - test-postgres-policy/shim-discard
+      - test-postgres-policy/shim-file-refused
+    postgres-sql:
+      - test-postgres/locale
+      - test-postgres/write
+      - test-postgres/utf8
+    postgres-peer:
+      - test-postgres-denied/peer-refused
+    postgres-rollback:
+      - test-postgres/rollback
+    postgres-local:
+      - test-postgres-policy/no-tcp-listener
+  grafana:
+    grafana-plugin:
+      - test-grafana/grafana-plugin
+      - test-grafana/grafana-plugin-kept
+  valkey:
+    valkey-socket:
+      - test-valkey-policy/valkey-socket
+      - test-valkey-denied/valkey-socket-refused
+  valkey-tcp:
+    valkey-tcp:
+      - test-valkey-tcp/valkey-tcp
+      - test-valkey-tcp-policy/valkey-tcp-listener
+  openbao:
+    bao-audited:
+      - test-openbao/bao-admin-login
+    bao-raw-off:
+      - test-openbao/bao-admin-login
+  mariadb-local:
+    mariadb-migrate:
+      - test-mariadb-local/mariadb-migrate
+      - test-mariadb-local/mariadb-kept
+  mariadb-tcp:
+    mariadb-tcp-roundtrip:
+      - test-mariadb-admin/mariadb-tcp-account
+      - test-mariadb-network/mariadb-tcp-roundtrip
+      - test-mariadb-network/mariadb-tcp-kept
+  loki:
+    loki-roundtrip:
+      - test-loki/loki-roundtrip
+      - test-loki/loki-kept
+  miniflux:
+    miniflux-category:
+      - test-miniflux/miniflux-category
+      - test-miniflux/miniflux-category-kept
+  restic-server:
+    rs-backup:
+      - test-restic/rs-backup
+      - test-restic/rs-kept
+  vaultwarden:
+    vw-invite:
+      - test-vaultwarden/vw-account
+    vw-register:
+      - test-vaultwarden/vw-account
+    vw-login:
+      - test-vaultwarden/vw-account
+      - test-vaultwarden/vw-kept
+    vw-vault:
+      - test-vaultwarden/vw-account
+      - test-vaultwarden/vw-kept
+  minio:
+    minio-private:
+      - test-minio/minio-private
+      - test-minio-denied/minio-private-refused
+    minio-round-trip:
+      - test-minio/minio-round-trip
+      - test-minio/minio-kept
+  cloudflared:
+    cloudflared-private:
+      - test-cloudflared/cloudflared-private
+      - test-cloudflared-denied/cloudflared-private-refused
+  authelia:
+    authelia-ban:
+      - test-authelia/authelia-ban
+      - test-authelia/authelia-ban-kept
+  unbound:
+    unbound-no-ctl:
+      - test-unbound/unbound-no-ctl
+      - test-unbound-policy/unbound-no-sockets
+    unbound-refuses:
+      - test-unbound/unbound-refuses
+      - test-unbound-policy/unbound-no-policy-override
+  kafka:
+    kafka-setup:
+      - test-kafka-files/kafka-setup
+      - test-kafka-logfiles/kafka-console-logs
+    kafka-acl-user:
+      - test-kafka/kafka-acl-user
+      - test-kafka/kafka-kept
+  umami:
+    umami-collect:
+      - test-umami/umami-collect
+      - test-umami/umami-collect-kept
+  php:
+    php-socket-private:
+      - test-php/php-socket-private
+      - test-php-denied/php-socket-refused
+  wordpress-mariadb:
+    wpm-php-role:
+      - test-wordpress-mariadb/wpm-php-role
+      - test-wordpress-mariadb-php/wpm-php-file-refused
+  open-webui:
+    owui-add-user:
+      - test-open-webui/owui-add-user
+      - test-open-webui/owui-no-user-code
+  openldap:
+    ldap-hashed:
+      - test-openldap/ldap-hashed
+      - test-openldap-privacy/ldap-secret-copies
+  mosquitto:
+    mqtt-acl:
+      - test-mqtt/mqtt-acl
+      - test-mqtt/mqtt-read-admin
+      - test-mqtt/mqtt-read-other
+  haproxy:
+    haproxy-setup:
+      - test-haproxy/haproxy-setup
+      - test-haproxy-wire/haproxy-no-sockets
+  opencanary:
+    oc-host-key:
+      - test-opencanary/oc-host-key
+      - test-opencanary-key-denied/oc-private-key-refused
+  suricata:
+    rules-cache:
+      - test-suricata/rules-cache
+      - test-suricata-security/rules-cache-identities
+  paperless:
+    pl-postgres:
+      - test-paperless-database/pl-postgres
+      - test-paperless-sqlite/pl-no-sqlite
+    pl-login:
+      - test-paperless/pl-document-upload
+      - test-paperless/pl-document-kept
+    pl-document-worker:
+      - test-paperless/pl-document-upload
+    pl-again-login:
+      - test-paperless/pl-document-kept
+  squid:
+    squid-config:
+      - test-squid/squid-config
+      - test-squid/squid-listeners
+      - test-squid-policy/squid-no-control-socket
+      - test-squid-policy/squid-resolver
+    squid-listeners:
+      - test-squid/squid-listeners
+      - test-squid-policy/squid-resolver
+  zot:
+    zot-push:
+      - test-zot/zot-push
+      - test-zot/zot-pull
+  wordpress:
+    wp-no-file-mods:
+      - test-wordpress/wp-no-file-mods
+      - test-wordpress-code-denied/wp-code-write-refused
+  opensearch:
+    os-search:
+      - test-opensearch/os-search
+      - test-opensearch/os-search-kept
+    os-setup:
+      - test-opensearch/os-setup
+      - test-opensearch-files/os-no-plaintext-secrets
+    os-refuses:
+      - test-opensearch/os-refuses
+      - test-opensearch-files/os-no-demo-certificates
+      - test-opensearch-tls/os-no-plain-http
+  mediawiki:
+    mw-upload-banned:
+      - test-mediawiki/mw-upload-banned
+      - test-mediawiki-files/mw-no-banned-files
+    mw-upload-pdf:
+      - test-mediawiki/mw-upload-pdf
+      - test-mediawiki/mw-pdf-kept
+  bugsink:
+    bs-project:
+      - test-bugsink-project/bs-project
+      - test-bugsink-project/bs-project-kept
+    bs-event:
+      - test-bugsink/bs-event
+      - test-bugsink/bs-event-kept
+  greenbone:
+    greenbone-feed:
+      - test-greenbone-platform/greenbone-feed
+      - test-greenbone-isolation/greenbone-feed-command
+  immich:
+    immich-upload:
+      - test-immich-upload/immich-upload
+      - test-immich-upload/immich-upload-kept
+    immich-thumbnail:
+      - test-immich/immich-thumbnail-hash
+      - test-immich-files/immich-thumbnail
+  nextcloud:
+    nc-webdav:
+      - test-nextcloud/nc-webdav-seed
+      - test-nextcloud/nc-webdav-kept
+    nc-no-web-update:
+      - test-nextcloud/nc-web-update-hidden
+      - test-nextcloud-code-denied/nc-code-write-refused
+    nc-cron-wait:
+      - test-nextcloud-cron/nc-cron
+  moodle:
+    moodle-no-exec:
+      - test-moodle/moodle-paths-disabled
+      - test-moodle-database/moodle-paths-kept
+      - test-moodle-code-denied/moodle-code-write-refused
+    moodle-private:
+      - test-moodle/moodle-private-metadata
+      - test-moodle-private/moodle-private-tree
+  postdoc-server:
+    postdoc-private:
+      - test-postdoc/postdoc-private
+      - test-postdoc-private/postdoc-token-root-only
+      - test-postdoc-tunnel-private/postdoc-token-service-only
+  minecraft:
+    mc-no-rcon:
+      - test-minecraft/mc-no-rcon-listener
+      - test-minecraft-game/mc-no-rcon
+  langflow:
+    langflow-inference-invalid-shape:
+      - test-langflow/inference-invalid-shape
+    langflow-local-inference:
+      - test-langflow/local-inference
+  langflow-vuln-demo:
+    langflow-inference-invalid-shape:
+      - test-langflow/inference-invalid-shape
+    langflow-local-inference:
+      - test-langflow/local-inference

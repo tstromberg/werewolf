@@ -88,11 +88,19 @@ image_delete() {
 	aws) aws ec2 deregister-image --image-id "$2" && aws ec2 delete-snapshot --snapshot-id "$3" ;;
 	azure)
 		gallery=$(printf '%s' "$1" | tr '-' '_')
-		az sig image-version delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot \
+		gone=
+		if az sig image-version delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot \
 			--gallery-image-version 1.0.0 -o none &&
-		az sig image-definition delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot -o none &&
-		az sig delete -g "$group" --gallery-name "$gallery" -o none &&
-		az disk delete -g "$group" -n "$1" --yes -o none ;;
+			az sig image-definition delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot -o none; then
+			# The gallery's delete has failed right after its image's, which
+			# a later try took: try for two minutes.
+			for try in 1 2 3 4 5 6 7 8; do
+				az sig delete -g "$group" --gallery-name "$gallery" -o none && { gone=1; break; }
+				sleep 15
+			done
+		fi
+		# The disk goes whatever the gallery did.
+		az disk delete -g "$group" -n "$1" --yes -o none && [ -n "$gone" ] ;;
 	esac
 }
 # leftovers lists what is left of the machine after delete, one per line.
@@ -130,7 +138,10 @@ cleanup() {
 		made_image=$(sed -n -E 's/^(howl|werewolf): image ([a-z0-9-]*): making it .*/\2/p' "$work/create.err" 2>/dev/null)
 		[ -z "$made_image" ] || images | while read -r image id snapshot; do
 			[ "$image" = "$made_image" ] || continue
-			image_delete "$image" "$id" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
+			image_delete "$image" "$id" "$snapshot" >"$work/image-delete.log" 2>&1 || {
+				say "could not delete image $image:"
+				sed 's/^/  /' "$work/image-delete.log"
+			}
 		done
 	fi
 	rm -rf "$work"
@@ -149,7 +160,7 @@ log=$work/serial.log
 raw=$work/serial.raw.log
 serial() {
 	"$howl" console "$name" --on "$cloud" 2>/dev/null >"$raw" || true
-	python3 test/cloud-console <"$raw" >"$log"
+	build/host/cloud-console <"$raw" >"$log"
 }
 seen() { grep -a -q -E "$1" "$log"; }
 # await_posture waits until posture reports host $1, which it does after
@@ -230,7 +241,7 @@ aws)
 azure)
 	v=$(az vm show -g "$group" -n "$name" \
 		--query '{security:securityProfile,os:osProfile}' -o json) || true
-	if printf '%s' "$v" | python3 test/azure-security; then
+	if printf '%s' "$v" | build/host/azure-security; then
 		ok trusted-launch
 		ok specialized-image
 	else
@@ -304,7 +315,7 @@ if seen 'Server listening on 0.0.0.0 port 22'; then
 		-o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$work/known_hosts" \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
 		"root@$addr" 'cat /run/werewolf/posture.json' >"${keep%-serial.log}-posture.json" &&
-		python3 test/cloud-posture "$name" <"${keep%-serial.log}-posture.json"; then
+		build/host/cloud-posture "$name" <"${keep%-serial.log}-posture.json"; then
 		ok runtime-protections
 	else
 		fail "runtime-protections: root's runtime posture is missing or a required protection did not pass"

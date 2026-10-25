@@ -8,23 +8,20 @@ on:
       - 'boot/**'
       - 'forms/**'
       - 'lib/**'
-      - 'tools/local-prerequisites'
+      - 'lib/security-inputs.zig'
       - 'tools/test-kernel'
-      - 'test/local-prerequisites'
       - 'test/ci-setup'
       - 'cmd/howl/**'
       - 'cmd/slot-update/**'
-      - 'tools/owner-control'
       - 'test/owner*'
       - 'lib/prebuilt.zig'
       - 'lib/cmdline.zig'
       - 'files.zig'
-      - 'tools/boot-download'
-      - 'release/*protected*'
-      - 'release/prepare-protected'
+      - 'lib/boot-download.zig'
+      - 'tools/release/**'
+      - 'release/images.yaml'
       - 'release/protected/**'
       - 'test/boot-*'
-      - 'test/protected-*'
       - 'test/check-published-*'
       - 'test/check-protected-*'
       - '.github/workflows/protected-images.yml'
@@ -53,9 +50,9 @@ jobs:
       - name: Native admission, downloads, production trust and publication gates
         run: |
           make -j"$(nproc)" test
-          make howl
+          make howl build/host/release
       - name: Resolve one package snapshot
-        run: python3 release/protected-inputs build/host/howl x86_64 build/protected-inputs
+        run: build/host/release protected-inputs build/host/howl x86_64 build/protected-inputs
       - name: Keep the resolved public package locks
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -68,7 +65,6 @@ jobs:
     # The test kernel builds from source, half an hour or more.
     timeout-minutes: 210
     env:
-      PYTHONDONTWRITEBYTECODE: '1'
       WEREWOLF_PROTECTED_INPUTS: ${{ github.workspace }}/build/protected-inputs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -83,7 +79,7 @@ jobs:
       - name: Use the shared image package locks
         run: mkdir -p build/lock && cp build/protected-inputs/*.lock.json build/lock/
       - name: Complete QEMU lifecycle and qcow2 export with disposable test authority
-        run: python3 test/check-protected-qemu
+        run: make build/host/check-protected-qemu && build/host/check-protected-qemu
       - name: Keep public runtime evidence and build logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

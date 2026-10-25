@@ -13,10 +13,6 @@ packages:
   - git
   - openssh-keygen        # the SSH host key, Ed25519, once (forms/gitea/cmd/gitea-init)
 
-# make check's, for this form alone (forms/README.md)
-check:
-  web: 3000
-
 services:
   # Gitea, as its own user: it may bind :3000 and :22 and no other port,
   # read its configuration and the image, write only its own directories,

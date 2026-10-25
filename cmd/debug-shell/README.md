@@ -34,7 +34,7 @@ is a different image, so the shell never ships. runit starts it as
   Otherwise it says why (unless the word is simply absent) and runs
   `sv down .`, so runsv does not restart it. While it serves, posture's
   `processes-no-root-console` fails, and the login message says so.
-- **The shell:** it execs `getty -n -l /bin/ash -L 115200 TTY vt100`. TTY is
+- **The shell:** it execs `getty -n -l /bin/mksh -L 115200 TTY vt100`. TTY is
   the last `console=` on the command line, cut to its leading letters and
   digits (`ttyS0,115200` is `ttyS0`), or `console`. Before the exec it says
   on the console that a passwordless root shell is open, and where.

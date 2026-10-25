@@ -7,7 +7,8 @@ suites:
         steps:
           - file: /data/svc/suricata/suricata.log
             expect:
-              body: {contains: Engine started}
+              body:
+                contains: Engine started
             await: 180s
   - name: suricata
     cases:
@@ -25,7 +26,8 @@ suites:
           - service: suricata
             expect:
               user: suricata
-              uid: {min: 65536}
+              uid:
+                min: 65536
               capabilities: [net_raw, net_admin]
               bounding_capabilities: [net_raw, net_admin]
               no_new_privileges: true
@@ -43,13 +45,15 @@ suites:
         steps:
           - file: /data/svc/suricata/suricata.log
             expect:
-              body: {contains: Engine started}
+              body:
+                contains: Engine started
             await: 180s
       - name: suricata-rule
         steps:
           - file: /data/svc/suricata/suricata.log
             expect:
-              body: {contains: werewolf.rules}
+              body:
+                contains: werewolf.rules
       - name: rules-cache
         steps:
           - file: /data/svc/rules-fetch/rules/werewolf.rules
@@ -60,7 +64,8 @@ suites:
           - file: /usr/share/suricata/rules/werewolf.rules
             expect:
               type: file
-              size: {min: 1}
+              size:
+                min: 1
   - name: suricata-security
     source: driver.zig
     mode: security

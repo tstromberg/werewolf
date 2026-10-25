@@ -3,7 +3,7 @@ base: minimal
 
 # sh-shim, /bin/sh for programs that run `sh -c COMMAND`: one program and
 # its words, nothing else (cmd/sh-shim). /bin/sh is the shim only where
-# no package or later form gives one: a form with busybox gets busybox's.
+# no package or later form gives one: the shell form supplies mksh instead.
 programs: [sh-shim]
 
 # Taken back of werewolf's defaults (lib/allow.zig): every leashed service

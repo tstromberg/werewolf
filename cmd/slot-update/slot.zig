@@ -97,8 +97,8 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         try copyOut(u, r, "usr/share/werewolf/local/overlay", scratch, ".");
         try copyTree(u, r, app, "", &.{});
     }
-    // The sh shim is /bin/sh where no package (busyboxLinks laid
-    // busybox's) or form gave one, as the build lays it (cmd/sh-shim).
+    // The sh shim is /bin/sh where no package (such as mksh) or form
+    // gave one, as the build lays it (cmd/sh-shim).
     if (try r.exists(u, "usr/lib/werewolf/sh-shim") and !try r.exists(u, "usr/bin/sh"))
         try r.symLink(u, "/usr/lib/werewolf/sh-shim", "usr/bin/sh");
     // Remove what the form prunes (form.yaml's prune), as the build does. A
@@ -765,6 +765,9 @@ fn busyboxLinks(u: *Update, r: Root) !void {
     const d = "etc/busybox-paths.d";
     for (r.list(u, d) catch return) |name| {
         for (try u.lines(try r.read(u, try u.gpa.print("{s}/{s}", .{ d, name })))) |p| {
+            // Old BusyBox manifests can survive a package update. /bin/sh
+            // belongs to mksh (or sh-shim in a shell-free image), never BusyBox.
+            if (std.mem.eql(u8, p, "usr/bin/sh") or std.mem.eql(u8, p, "bin/sh")) continue;
             if (!try r.exists(u, p)) try r.symLink(u, "/usr/bin/busybox", p);
         }
     }

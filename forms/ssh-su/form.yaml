@@ -36,6 +36,5 @@ services:
 weaknesses:
   network-no-login: SSH provides operator shells and fresh authentication for su
   network-ssh-config: operator sessions may forward an agent for local reauthentication
-  programs-no-downloaders: interactive tools include SSH, scp and busybox wget
-  programs-no-interpreters: busybox-full supplies awk for interactive use
-  programs-no-shell: busybox-full supplies operator shells
+  programs-no-downloaders: SSH and scp support operator access
+  programs-no-shell: mksh provides operator shells and /bin/sh

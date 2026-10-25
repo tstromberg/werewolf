@@ -2,9 +2,11 @@
 // the nginx that serves what it makes, in place of the image's runit.
 // leash starts it as _oci-clsi in its own copy of the image's root
 // (etc/sv/clsi/service), so TeX, which runs what its users write, shares
-// no user, file or secret with the rest of Overleaf. TeX may read only
-// its project and TeX's own files (openin_any=p), write only beneath it
-// (openout_any=p), and run only TeX Live's short list of helpers
+// no user, file or secret with the rest of Overleaf. Each compile runs
+// on a leash of its own, clsi-confine's (clsi-settings.cjs): TeX may
+// read only its project and TeX's own files, which TeX Live no longer
+// enforces (openin_any), and write only beneath it (openout_any=p, and
+// clsi-confine). It runs only TeX Live's short list of helpers
 // (shell_escape=p). If either program exits, the other is stopped and
 // this exits, so runsv starts both again. See forms/overleaf/README.md.
 import { spawn } from 'node:child_process'
@@ -23,7 +25,7 @@ for (const d of ['data/compiles', 'data/output', 'data/cache', 'tmp/texmf-var', 
 const env = {
   ...process.env,
   LISTEN_ADDRESS: '127.0.0.1',
-  openin_any: 'p',
+  OVERLEAF_CONFIG: '/werewolf/clsi-settings.cjs',
   openout_any: 'p',
   shell_escape: 'p',
 }

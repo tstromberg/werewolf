@@ -24,7 +24,7 @@ pub const Arch = enum { aarch64, x86_64 };
 /// Build describes a build beyond its chain.
 pub const Build = struct {
     arch: Arch,
-    /// dev marks a DEV=1 build, with busybox-full and the debug shell.
+    /// dev marks a DEV=1 build, with mksh, BusyBox tools and the debug shell.
     dev: bool = false,
     /// SSH iteration has developer access without BusyBox or a console shell.
     dev_shell: bool = true,
@@ -243,7 +243,7 @@ pub fn compose(
     const login_shell = if (b.dev and !b.dev_shell)
         "root:x:0:0:root:/root:/usr/lib/werewolf/sh-shim\n"
     else
-        "root:x:0:0:root:/root:/bin/ash\n";
+        "root:x:0:0:root:/root:/bin/mksh\n";
     const users = if (b.dev or hasForm(forms, "sshd"))
         try mem.replaceOwned(
             u8,

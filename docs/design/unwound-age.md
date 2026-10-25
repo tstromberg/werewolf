@@ -95,14 +95,14 @@ exception and PRIVATE rules; RDAP registration and resets; bounded crt.sh
 history parsing; and threshold, expiry and clock boundaries with the
 30-day default. Cached evidence is reclassified by its fetch date and domain.
 PSL and IANA versions are retained for audit, not cache invalidation. It
-accepts only normalized ASCII PSL input. `tools/update-unwound-age-data`
-converts the official PSL to A-labels with `idna==3.20` and pins it alongside
-the IANA RDAP DNS bootstrap in `cmd/unwound/data`. The authority embeds both.
-`sources.json` records
-source URLs, SHA-256 hashes, versions and generation details. Refresh by
-downloading the two official URLs into local files and passing both paths to
-the updater; review the data diff before building an image. The updater makes
-no network requests.
+accepts only normalized ASCII PSL input. `tools/update-unwound-age-data.zig`
+converts the official PSL to A-labels (RFC 3492, STD3 rules; it refuses a
+Unicode label it cannot prove already mapped) and pins it alongside the IANA
+RDAP DNS bootstrap in `cmd/unwound/data`. The authority embeds both.
+`sources.json` records source URLs, SHA-256 hashes, versions and generation
+details. Refresh by downloading the two official URLs into local files and
+passing both paths to the updater; review the data diff before building an
+image. The updater makes no network requests.
 `cmd/unwound/bootstrap.zig` selects a pinned IANA entry by longest label match
 and requires HTTPS. `make check-unwound-age-store`, `check-unwound-age`,
 `check-unwound-age-live`, `check-unwound-age-mount` and

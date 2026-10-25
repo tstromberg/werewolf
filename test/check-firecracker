@@ -70,13 +70,7 @@ scp -q "$host:$work/build/machines/$name/console.log" "$log"
 # A kernel record can land inside the console's posture line; strip whole
 # records, as test/boot does, so the line's halves join.
 clean=$CHECK/firecracker-console.clean
-python3 - "$log" "$clean" <<'EOF'
-import re
-import sys
-t = open(sys.argv[1], errors="replace").read().replace("\r", "")
-t = re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", t)
-open(sys.argv[2], "w").write(t)
-EOF
+build/host/cloud-console <"$log" >"$clean"
 
 grep -a -q 'handing over to runit' "$clean" || fail "the machine never reached runit"
 grep -a -E -q 'stage0: slot [ab]:.*verified' "$clean" || fail "the root was not verified through dm-verity"
@@ -95,7 +89,7 @@ done
 # ssh reaches the machine through its tap, with the host's key, and runs
 # posture there again: the line must agree with the console's.
 again=$(ssh "$host" "cd $work && build/host/howl ssh root@$name -- /usr/lib/werewolf/posture --line" |
-	python3 -c 'import re,sys; print(re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", sys.stdin.read().replace("\r","")), end="")') ||
+	build/host/cloud-console) ||
 	fail "ssh did not reach the machine"
 got2=$(printf '%s\n' "$again" | sed -E 's/.*fail=([^ ]*).*/\1/' | tr ',' ' ')
 [ "$got2" = "$got" ] || fail "posture over ssh disagrees with the console's"

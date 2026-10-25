@@ -92,7 +92,11 @@ suites:
                 credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcy0x
             expect:
               status: 200
-              json: {'': {count: 1}, /admin: {type: object}}
+              json:
+                '':
+                  count: 1
+                /admin:
+                  type: object
           - file: /run/svc/opensearch/opensearch-security/internal_users.yml
             expect:
               type: file
@@ -132,26 +136,34 @@ suites:
             expect:
               status: 401
   - name: opensearch-files
-    source: driver.zig
-    mode: files
-    user: root
-    policy:
-      pledge: stdio rpath
     cases:
-      seed:
-        - os-no-plaintext-secrets
-        - os-no-demo-certificates
-      verify:
-        - os-no-plaintext-secrets
-        - os-no-demo-certificates
+      - name: os-no-plaintext-secrets
+        steps:
+          - tree: /run/svc/opensearch
+            expect:
+              entries:
+                max: 20000
+              content:
+                absent: werewolf-check-pass-1
+      # The image's demo certificates and their keys are gone.
+      - name: os-no-demo-certificates
+        steps:
+          - tree: /usr/share/opensearch
+            timeout: 60s
+            expect:
+              entries:
+                max: 20000
+              name:
+                not_matches: '\.pem$|^esnode|^kirk'
+  # The TLS listener answers plaintext with nothing: a reset or a bare close.
   - name: opensearch-tls
-    source: driver.zig
-    mode: plaintext
-    user: root
-    policy:
-      pledge: stdio inet
     cases:
-      seed:
-        - os-no-plain-http
-      verify:
-        - os-no-plain-http
+      - name: os-no-plain-http
+        steps:
+          - tcp:
+              connect: 127.0.0.1:9200
+              exchange:
+                - send: "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                - close:
+                    - eof
+                    - reset

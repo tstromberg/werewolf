@@ -5,15 +5,19 @@ suites:
     cases:
       - name: haproxy-ready
         steps:
-          - fetch: {url: 'http://127.0.0.1/'}
-            expect: {status: 503}
+          - fetch:
+              url: 'http://127.0.0.1/'
+            expect:
+              status: 503
             await: 60s
   - name: haproxy
     cases:
       - name: haproxy-unavailable
         steps:
-          - fetch: {url: 'http://127.0.0.1/'}
-            expect: {status: 503}
+          - fetch:
+              url: 'http://127.0.0.1/'
+            expect:
+              status: 503
       - name: haproxy-setup
         steps:
           - file: /run/svc/haproxy/haproxy.cfg
@@ -26,7 +30,8 @@ suites:
           - service: haproxy
             expect:
               user: haproxy
-              uid: {min: 65536}
+              uid:
+                min: 65536
               capabilities: [net_bind_service]
               no_new_privileges: true
   - name: haproxy-wire

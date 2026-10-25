@@ -17,17 +17,18 @@ packages:
 allow: [jit]
 
 # bash, which a dependency brings and nothing runs; the admin's shell is
-# prod-ssh's busybox.
+# prod-ssh's mksh.
 prune:
   - usr/bin/bash
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-no-login: sshd, by security key, is how the media comes in; busybox-full brings telnetd too, which nothing starts
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk; dotnet runs Jellyfin
-  programs-no-shell: busybox-full's shell, for those who log in
+  network-ssh-config: forwarded agents provide fresh authentication for su
+  network-no-login: sshd, by security key, is how operators copy media in
+  programs-no-downloaders: SSH and scp support media transfers
+  programs-no-interpreters: dotnet runs Jellyfin
+  programs-no-shell: mksh provides operator shells and /bin/sh
   kernel-write-xor-execute: .NET compiles Jellyfin to machine code as it runs (allow jit)
 
 services:

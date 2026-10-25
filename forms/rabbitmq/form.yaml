@@ -7,8 +7,6 @@ allow: [jit]
 weaknesses:
   kernel-write-xor-execute: Erlang's BEAM runtime compiles broker bytecode as it runs
 
-dev: [python-3.14]
-
 check:
   memory: 2048
 

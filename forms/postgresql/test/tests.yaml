@@ -35,8 +35,7 @@ suites:
           - exec:
               argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
                      -h, /run/svc/postgres, -U, postgres, -d, postgres]
-              stdin: "SELECT current_setting('server_encoding') || '/' || datcollate || '/'\
-                \ || datctype FROM pg_database WHERE datname=current_database()\n"
+              stdin: "SELECT current_setting('server_encoding') || '/' || datcollate || '/' || datctype FROM pg_database WHERE datname=current_database()\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'
@@ -51,8 +50,7 @@ suites:
           - exec:
               argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
                      -h, /run/svc/postgres, -U, postgres, -d, postgres]
-              stdin: "CREATE TABLE native_test(value text PRIMARY KEY); INSERT INTO native_test\
-                \ VALUES (current_setting('application_name')), ('h' || chr(233) || 'llo');\n"
+              stdin: "CREATE TABLE native_test(value text PRIMARY KEY); INSERT INTO native_test VALUES (current_setting('application_name')), ('h' || chr(233) || 'llo');\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'
@@ -84,8 +82,7 @@ suites:
           - exec:
               argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
                      -h, /run/svc/postgres, -U, postgres, -d, postgres]
-              stdin: "SELECT encode(convert_to(value, 'UTF8'),'hex') FROM native_test WHERE\
-                \ value LIKE 'h%'\n"
+              stdin: "SELECT encode(convert_to(value, 'UTF8'),'hex') FROM native_test WHERE value LIKE 'h%'\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'
@@ -100,8 +97,7 @@ suites:
           - exec:
               argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
                      -h, /run/svc/postgres, -U, postgres, -d, postgres]
-              stdin: "BEGIN; INSERT INTO native_test VALUES ('rolled-back'); ROLLBACK; SELECT\
-                \ count(*) FROM native_test WHERE value='rolled-back'\n"
+              stdin: "BEGIN; INSERT INTO native_test VALUES ('rolled-back'); ROLLBACK; SELECT count(*) FROM native_test WHERE value='rolled-back'\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'

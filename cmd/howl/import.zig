@@ -101,11 +101,26 @@ pub fn write(io: Io, a: Allocator, src: []const u8, dir: []const u8, why: *Why) 
     try activate(io, a, dir, record, false);
 }
 
-pub fn prepare(io: Io, a: Allocator, src: []const u8, dir: []const u8, mode: Mode, why: *Why) !Record {
+pub fn prepare(
+    io: Io,
+    a: Allocator,
+    src: []const u8,
+    dir: []const u8,
+    mode: Mode,
+    why: *Why,
+) !Record {
     return prepareWithReuse(io, a, src, dir, mode, null, why);
 }
 
-fn prepareWithReuse(io: Io, a: Allocator, src: []const u8, dir: []const u8, mode: Mode, retained: ?Record, why: *Why) !Record {
+fn prepareWithReuse(
+    io: Io,
+    a: Allocator,
+    src: []const u8,
+    dir: []const u8,
+    mode: Mode,
+    retained: ?Record,
+    why: *Why,
+) !Record {
     const given = if (std.mem.trimEnd(u8, src, "/").len == 0)
         "/"
     else
@@ -161,13 +176,22 @@ fn prepareWithReuse(io: Io, a: Allocator, src: []const u8, dir: []const u8, mode
     const digest = try data.identity(io, a, stage, mode);
     if (retained) |record| {
         if (record.mode == mode and std.mem.eql(u8, record.digest, &digest)) return record;
-        return why.refuse("a different import is already selected; use howl import or howl sync explicitly", .{});
+        return why.refuse(
+            "a different import is already selected; use howl import or howl sync explicitly",
+            .{},
+        );
     }
     var batch_nonce: [32]u8 = undefined;
     try io.randomSecure(&batch_nonce);
     const id = std.fmt.bytesToHex(batch_nonce, .lower);
     const home = try a.print("{s}/imports/{s}", .{ dir, id });
-    try data.writeHeader(io, a, stage, data.manifest, .{ .mode = mode, .id = &id, .digest = &digest });
+    try data.writeHeader(
+        io,
+        a,
+        stage,
+        data.manifest,
+        .{ .mode = mode, .id = &id, .digest = &digest },
+    );
     try stage.setFilePermissions(
         io,
         data.manifest,

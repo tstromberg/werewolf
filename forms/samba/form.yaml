@@ -13,13 +13,6 @@ packages:
 dev:
   - samba-client
 
-# PAM's password helper, setgid shadow, arrives through Samba's libraries.
-# Nothing here authenticates with a UNIX password.
-paths:
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
-
 # 445 is not HTTP.
 check:
   skip: [http-answering]

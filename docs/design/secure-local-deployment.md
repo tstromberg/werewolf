@@ -33,9 +33,9 @@ Lima on macOS uses QEMU, like Linux. A download follows werewolf's public channe
 Use `vmType: qemu`, enrolled firmware and Lima's persistent `tpm: true`. Keep the TPM
 state in the instance's private `swtpm` directory across restarts and expose only the
 emulated guest device: neither state nor control sockets are mounts. Linux QEMU uses a
-private host supervisor for persistent swtpm (`tools/local-tpm`); QEMU receives the
-control socket, the guest only the device. Missing enrolled backing state fails, and
-shutdown must finish before state removal.
+private host supervisor for persistent swtpm (`howl _tpm`, cmd/howl/swtpm.zig); QEMU
+receives the control socket, the guest only the device. Missing enrolled backing state
+fails, and shutdown must finish before state removal.
 
 ### Invocation and prerequisites
 

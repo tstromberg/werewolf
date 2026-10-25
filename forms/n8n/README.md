@@ -59,9 +59,10 @@ See [n8n deployment documentation](https://docs.n8n.io/hosting/).
 - `listen: tcp/5678 127.0.0.1`
 - The broker on 5679 and health checks on 5680/5681 stay private.
 
-The native test checks owner setup, authenticated workflow creation, persistence
-after reboot, expression evaluation and JavaScript Code execution through the
-external runner:
+The native test checks readiness, the editor, the public-only anonymous settings, the
+direct Node runtime and its database, owner setup, authenticated workflow creation,
+persistence after reboot, expression evaluation and JavaScript Code execution through
+the external runner:
 
 ```sh
 howl test --with n8n

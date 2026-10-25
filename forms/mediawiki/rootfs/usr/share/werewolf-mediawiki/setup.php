@@ -119,6 +119,7 @@ if ( $have === false ) {
 		$site['name'] ?? 'Wiki',
 		$site['admin'] ?? 'Admin',
 	];
+	require __DIR__ . '/installer.php';
 	$done = 'installed';
 } elseif ( $have !== $want ) {
 	define( 'MW_CONFIG_FILE', CONF );

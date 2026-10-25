@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
-    // As control/t: an interactive ash ignores TERM, so send it HUP. Exit 0
+    // As control/t: an interactive shell ignores TERM, so send it HUP. Exit 0
     // tells runsv the signal was sent.
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "t")) {
         const text = Io.Dir.cwd().readFileAlloc(
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     if (linux.errno(linux.access("/usr/share/werewolf/dev", linux.F_OK)) != .SUCCESS)
         park(io, "werewolf.debug=1 ignored: only a DEV=1 build gives a console shell");
     if (!executable("/usr/bin/getty") or
-        !executable("/bin/ash")) park(io, "werewolf.debug=1, but this form has no shell to give");
+        !executable("/bin/mksh")) park(io, "werewolf.debug=1, but this form has no shell to give");
 
     const tty = consoleName(line);
     say(io, "werewolf.debug=1: a root shell, without a password, on {s}", .{tty});
@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
             "/usr/bin/getty",
             "-n",
             "-l",
-            "/bin/ash",
+            "/bin/mksh",
             "-L",
             "115200",
             tty,

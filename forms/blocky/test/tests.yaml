@@ -84,17 +84,13 @@ suites:
               stdout: "0.0.0.0\n"
             timeout: 5s
             await: 90s
+  # With the server down, a process bound to its port cannot send as it.
   - name: blocky-source-port
-    source: driver.zig
-    mode: squatter
-    user: root
     policy:
-      pledge: stdio rpath wpath proc inet unix connect exec
       run:
         - /usr/bin/sv
         - /usr/bin/drill
     cases:
-      seed:
-        - blocky-squatter
-      verify:
-        - blocky-squatter
+      - name: blocky-squatter
+        steps:
+          - squat: blocky

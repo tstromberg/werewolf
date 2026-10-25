@@ -11,12 +11,6 @@ umask 077
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
 	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
 	-keyout "$d/tls.key" -out "$d/tls.crt" 2>/dev/null
-python3 -I - "$d/passwords" <<'PY'
-import base64, hashlib, os, sys
-def entry(user, password):
-	salt = os.urandom(12)
-	dk = hashlib.pbkdf2_hmac('sha512', password.encode(), salt, 101, dklen=64)
-	return '%s:$7$101$%s$%s' % (user, base64.b64encode(salt).decode(), base64.b64encode(dk).decode())
-open(sys.argv[1], 'w').write(entry('check', 'werewolf-check') + '\n' + entry('other', 'werewolf-other') + '\n' + entry('admin', 'werewolf-admin') + '\n')
-PY
+# passwords holds each user's PBKDF2-SHA512 hash, as mosquitto_passwd writes it.
+cp "${0%/*}/passwords" "$d/passwords"
 printf 'user check\ntopic readwrite test/#\nuser other\ntopic readwrite other/#\nuser admin\ntopic readwrite admin/#\ntopic read test/#\ntopic read other/#\n' >"$d/acls"

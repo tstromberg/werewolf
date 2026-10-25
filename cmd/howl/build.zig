@@ -50,7 +50,7 @@ pub const Spec = struct {
     arch: howl.Arch,
     /// dev adds a shell, as DEV=1 does.
     dev: bool = false,
-    /// dev_shell adds BusyBox and form-specific debug tools. SSH iteration
+    /// dev_shell adds mksh, BusyBox tools and form-specific debug tools. SSH iteration
     /// keeps developer access but uses sh-shim and the native clients only.
     dev_shell: bool = true,
     /// disabled is what --disable gave up of werewolf's protections. An
@@ -810,13 +810,42 @@ pub fn prepare(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec) !B {
 
 /// toolEnv returns the tools' environment: COPYFILE_DISABLE=1, so macOS's
 /// tar adds no AppleDouble files, and no make variables, so a make that
-/// runs howl passes the make howl runs nothing but what howl says.
+/// runs howl passes the make howl runs nothing but what howl says. Make
+/// exports DISABLE from its command line; the make howl runs refuses it
+/// from the environment, and howl has already taken it as --disable.
 fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);
     try env.put("COPYFILE_DISABLE", "1");
-    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |k| _ = env.swapRemove(k);
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "DISABLE" }) |k| _ = env.swapRemove(k);
     return env;
+}
+
+test "the make howl runs inherits no make variables, DISABLE included" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var given: std.process.Environ.Map = .init(gpa);
+    for ([_][2][]const u8{
+        .{
+            "MAKEFLAGS",
+            "n",
+        },
+        .{ "MAKELEVEL", "1" },
+        .{ "DISABLE", "secureboot,tpm,ipe" },
+        .{ "PATH", "/bin" },
+    }) |kv| try given.put(kv[0], kv[1]);
+    const saved = howl.environ;
+    defer howl.environ = saved;
+    howl.environ = &given;
+    const env = try toolEnv(gpa);
+    for ([_][]const u8{
+        "MAKEFLAGS",
+        "MAKELEVEL",
+        "DISABLE",
+    }) |k| try std.testing.expect(env.get(k) == null);
+    try std.testing.expectEqualStrings("/bin", env.get("PATH").?);
+    try std.testing.expectEqualStrings("1", env.get("COPYFILE_DISABLE").?);
 }
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {

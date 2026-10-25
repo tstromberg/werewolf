@@ -3,7 +3,7 @@
 #
 # cloud-boot boots prod as a machine on PROVIDER (gcp, aws, hetzner, azure;
 # hyperv, which uses Azure's names on a desktop; or none, for a machine on no
-# cloud), with no address and no config disk. test/metadata serves PAYLOAD
+# cloud), with no address and no config disk. test/metadata.zig serves PAYLOAD
 # (good or hostile) at 169.254.169.254. cloud-boot runs CHECKS on the console
 # (test/boot), then judges what the console and the metadata server saw:
 #
@@ -26,7 +26,7 @@ port_file=$dir/$name.port
 server_log=$dir/$name.server.log
 rm -f "$port_file" "$server_log"
 : >"$server_log"
-python3 -I test/metadata "$payload" "$port_file" "$server_log" &
+build/host/metadata "$payload" "$port_file" "$server_log" &
 server=$!
 trap 'kill $server 2>/dev/null || true' EXIT
 i=0

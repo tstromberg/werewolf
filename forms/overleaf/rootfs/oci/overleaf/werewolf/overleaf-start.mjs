@@ -128,7 +128,9 @@ const services = [
   ['document-updater', 'document-updater/app.js'],
   ['docstore', 'docstore/app.js'],
   ['filestore', 'filestore/app.js'],
-  ['history-v1', 'history-v1/app.js', { NODE_CONFIG_DIR: '/overleaf/services/history-v1/config' }],
+  // history-v1 alone names no host when it listens (loopback.cjs).
+  ['history-v1', 'history-v1/app.js', { NODE_CONFIG_DIR: '/overleaf/services/history-v1/config' },
+    ['--require', '/werewolf/loopback.cjs']],
   ['project-history', 'project-history/app.js'],
   ['notifications', 'notifications/app.ts'],
   ['chat', 'chat/app.js'],
@@ -148,8 +150,8 @@ function stop(code) {
 }
 
 function start(env) {
-  for (const [name, main, own = {}] of services) {
-    const child = spawn(process.execPath, [`/overleaf/services/${main}`], {
+  for (const [name, main, own = {}, flags = []] of services) {
+    const child = spawn(process.execPath, [...flags, `/overleaf/services/${main}`], {
       cwd: `/overleaf/services/${main.split('/')[0]}`,
       env: { ...env, ...own },
       stdio: 'inherit',

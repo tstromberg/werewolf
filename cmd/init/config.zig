@@ -148,7 +148,7 @@ pub fn accounts(m: *Machine) void {
     };
     const home_dir = people.openHomeDir(data_fd) catch return accountFailure("open homes");
     defer _ = linux.close(home_dir);
-    const shell: []const u8 = if (exists("/bin/ash")) "/bin/ash" else "/sbin/nologin";
+    const shell: []const u8 = if (exists("/bin/mksh")) "/bin/mksh" else "/sbin/nologin";
     const desired_nocloud: ?people.NoCloud = if (m.nocloud_user.len > 0)
         .{ .name = m.nocloud_user, .id = m.nocloud_uid, .keys = m.nocloud_keys }
     else

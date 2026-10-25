@@ -1,0 +1,145 @@
+version: 1
+suites:
+  - name: n8n-service
+    cases:
+      - name: n8n-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/healthz
+            await: 180s
+            expect:
+              status: 200
+              json:
+                /status: ok
+          # Until migrated, n8n answers every other path 200 "starting up".
+          - fetch:
+              url: http://127.0.0.1:5678/healthz/readiness
+            await: 180s
+            expect:
+              status: 200
+              json:
+                /status: ok
+      - name: n8n-ui
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/
+            await: 60s
+            expect:
+              status: 200
+              body:
+                matches: "[Nn]8[Nn]"
+                not_matches: starting up
+      - name: n8n-settings
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/rest/settings
+            expect:
+              status: 200
+              json:
+                /data/settingsMode: public
+      - name: n8n-native-runtime
+        steps:
+          - file: /etc/sv/n8n/service
+            expect:
+              body:
+                matches: "(^|\n)exec /usr/bin/node "
+                not_matches: /bin/sh
+      - name: n8n-database
+        steps:
+          - file: /data/svc/n8n/.n8n/database.sqlite
+            expect:
+              type: file
+              uid: n8n
+              size:
+                min: 1
+      - name: n8n-loopback-ports
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 5678
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 5678
+          - listeners:
+              protocol: tcp
+              port: 5679
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 5679
+          - listeners:
+              protocol: tcp
+              port: 5680
+            await: 60s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 5680
+  - name: test-n8n
+    source: driver.zig
+    mode: http
+    user: n8n
+    memory: 256
+    policy:
+      pledge: stdio rpath wpath inet connect
+      read: [/etc/sv/n8n/service, /usr/lib/apk/db/installed]
+      connect: [tcp/5678]
+    cases:
+      seed:
+        - ready
+        - editor
+        - auth-required
+        - login
+        - persisted-workflow
+        - run-workflow
+        - code-runner
+        - cve-2025-68613-fixed
+        - direct-node
+        - hardened-node
+        - private-listener
+        - owner-setup
+        - create-workflow
+      verify:
+        - ready
+        - editor
+        - auth-required
+        - login
+        - persisted-workflow
+        - run-workflow
+        - code-runner
+        - cve-2025-68613-fixed
+        - direct-node
+        - hardened-node
+        - private-listener
+  # After the driver, which sets up the owner in seed.
+  - name: n8n-api
+    cases:
+      - name: version
+        steps:
+          - name: package
+            file: /usr/lib/n8n/node_modules/n8n/package.json
+            expect:
+              json:
+                /name: n8n
+          - fetch:
+              url: http://127.0.0.1:5678/rest/login
+              method: POST
+              session: owner
+              json:
+                emailOrLdapLoginId: owner@example.org
+                password: "Werewolf-check-123!"
+            expect:
+              status: 200
+          - fetch:
+              url: http://127.0.0.1:5678/rest/settings
+              session: owner
+            expect:
+              status: 200
+              json:
+                /data/versionCli:
+                  step: package
+                  json: /version

@@ -1,0 +1,91 @@
+version: 1
+suites:
+  - name: langflow-service
+    cases:
+      - name: langflow-editor
+        steps:
+          - fetch:
+              url: http://127.0.0.1:7860/
+            await: 180s
+            expect:
+              status: 200
+              body:
+                matches: "[Ll]angflow"
+      - name: langflow-services
+        steps:
+          - fetch:
+              url: http://127.0.0.1:7860/health_check
+            await: 60s
+            expect:
+              status: 200
+              json:
+                /status: ok
+      - name: langflow-api
+        steps:
+          - fetch:
+              url: http://127.0.0.1:7860/openapi.json
+            expect:
+              status: 200
+              json:
+                /paths/~1api~1v1~1flows~1:
+                  type: object
+      - name: langflow-direct-python
+        steps:
+          - file: /etc/sv/langflow/service
+            expect:
+              body:
+                matches: "(^|\n)exec /usr/lib/langflow/bin/python "
+                not_matches: "/bin/sh|(^|\n)run "
+      - name: langflow-state
+        steps:
+          - file: /data/svc/langflow/langflow.db
+            expect:
+              type: file
+              uid: langflow
+              size:
+                min: 1
+  - name: test-langflow
+    source: driver.zig
+    mode: http
+    user: langflow
+    memory: 1024
+    allow: [python:native]
+    policy:
+      pledge: stdio rpath wpath inet connect proc exec
+      read: [/etc/sv/langflow/service, /usr/lib/apk/db/installed]
+      connect: [tcp/7860]
+      run: [/usr/lib/langflow/bin/python]
+    cases:
+      seed:
+        - ready
+        - version
+        - editor
+        - auth-required
+        - login
+        - create-flow
+        - persisted-flow
+        - cve-2026-33017-fixed
+        - local-inference
+        - inference-invalid-shape
+        - direct-python
+        - hardened-python
+        - private-listener
+        - local-embedding
+        - signup-disabled
+        - ffi-callback
+      verify:
+        - ready
+        - version
+        - editor
+        - auth-required
+        - login
+        - persisted-flow
+        - cve-2026-33017-fixed
+        - local-inference
+        - inference-invalid-shape
+        - direct-python
+        - hardened-python
+        - private-listener
+        - local-embedding
+        - signup-disabled
+        - ffi-callback

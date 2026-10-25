@@ -150,8 +150,8 @@ fn pollStart(log: *Log) !void {
     const ledger_dir = try people.openLedgerDir(data_dir);
     const home_dir = try people.openHomeDir(data_dir);
     _ = linux.close(data_dir);
-    const shell: []const u8 = if (linux.faccessat(linux.AT.FDCWD, "/bin/ash", linux.X_OK, 0) == 0)
-        "/bin/ash"
+    const shell: []const u8 = if (linux.faccessat(linux.AT.FDCWD, "/bin/mksh", linux.X_OK, 0) == 0)
+        "/bin/mksh"
     else
         "/sbin/nologin";
     // The key types sshd must see verified, read before the publisher's

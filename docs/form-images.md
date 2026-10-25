@@ -1,15 +1,14 @@
 # Form images
 
-One workflow publishes only `minimal`, `prod-ssh` and `playground` on aarch64
-and x86_64. Each has two explicit boot profiles: `secure-boot` requires
-Secure Boot, IPE and an enrolled TPM; `legacy-boot` runs without those three
-requirements, retaining sandboxing and the verified root. Download signatures
-and attestations authenticate both profiles. Browse the
-[image catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run
-`howl forms --published` for protected targets. `howl run` continues to require
-the secure profile; it never falls back to a compatibility disk. Legacy assets
-are explicit R2 downloads; all three forms are also attached to the GitHub release
-([releases.md](releases.md)).
+One workflow publishes `minimal`, `prod-ssh`, `playground` and `postdoc-server` on
+aarch64 and x86_64. Each has two explicit boot profiles: `secure-boot` requires Secure
+Boot, IPE and an enrolled TPM; `legacy-boot` runs without those three requirements,
+retaining sandboxing and the verified root. Download signatures and attestations
+authenticate both profiles. Browse the [image
+catalog](https://dist.werewolf-linux.org/boot/v1/index.html) or run `howl forms
+--published` for protected targets. `howl run` continues to require the secure profile;
+it never falls back to a compatibility disk. Legacy assets are explicit R2 downloads;
+all selected forms are also attached to the GitHub release ([releases.md](releases.md)).
 
 ## The pipeline
 
@@ -21,13 +20,13 @@ matching inputs and a passing attempt skips the build; failures retry every run.
 `force` rebuilds the selected targets.
 
 Pushes and manual dispatch default to `target=base`; the hourly run uses `target=all`.
-Both scopes select exactly the same three forms. Other forms remain available for
-source builds and are excluded from image publication.
-`target=playground/qemu/x86_64` keeps a focused recovery lane. Focused builds
-run alongside full builds. A shared publication lock protects the catalog;
-other targets keep their status, inputs and previous release.
+Both scopes select exactly the same forms from `release/images.yaml`. Other forms remain
+available for source builds and are excluded from image publication.
+`target=playground/qemu/x86_64` keeps a focused recovery lane. Focused builds run
+alongside full builds. A shared publication lock protects the catalog; other targets
+keep their status, inputs and previous release.
 
-A changed form is built by `release/build-protected` for each provider of its
+A changed form is built by `build/host/release build-protected` for each provider of its
 architecture, with the dedicated boot and image keys: signed UEFI boot, IPE, a verified
 root and the TPM floor, nothing given up, at its channel's next release index, one past
 the last published. A provider's gateway is baked into the verified root, so each form,
@@ -41,13 +40,21 @@ these jobs holds the signature that admits a bundle.
 
 Each gate job downloads one shard and judges its forms independently; a failed form
 retains its evidence while other forms can publish. Unchanged forms need no
-authorization or boot. For each changed target, it authorizes three candidates with the
-image key, on the runner that boots them, and runs all twelve [lifecycle
-gates](design/protected-downloads.md) on the exact files
-(`test/check-published-lifecycle`). QEMU drives all three published forms through the
-production host-private owner channel, with no guest SSH or added test code. Its
-unhealthy trial receives real disk write errors and must fall back through the
-production 600-second deadman. Lima retains the `playground` SSH driver.
+authorization or boot. A candidate's updater follows the public mirror its signature
+names, so the job first proves this tree's updates, rollback, floor power cuts, refusal
+of a retired release and failed-trial fallback on keys made for that step alone
+(`test/check-independent-updates.zig`). For each changed target it then authorizes the
+candidate with the image key and holds the exact files to the other [lifecycle
+gates](design/protected-downloads.md) (`test/check-published-lifecycle.zig`). QEMU
+drives published forms through the host-private owner channel; Lima uses SSH for
+`playground` and `postdoc-server`. Postdoc also receives disposable API and tunnel
+tokens and a host-only software security key on both providers. The gate checks its real
+JIT server, analysis API, tunnel metrics and a persisted verdict after stop/resume; it
+does not require a live Cloudflare tunnel or weaken the guest's security-key-only SSH
+policy. Postdoc publication additionally requires update evidence from the
+`postdoc-server` workload: its API and saved verdict are checked after every committed
+upgrade and rollback in the signed A/B sequence, including recovery after power cuts and
+a failed trial.
 
 `legacy-build` uses the same resolved form/package snapshots on independent
 runners, without code-signing or TPM credentials. `legacy-check` compares the
@@ -59,13 +66,13 @@ signs a separate `werewolf-legacy-downloads/1` manifest with
 Its immutable objects and release floor live under `legacy-boot/FORM/ARCH`.
 
 Both profiles enter one `base-images-SERIAL` GitHub release. Changed images (`minimal`,
-`prod-ssh`, `playground`) are attached and listed in R2. All assets receive attestations
-and R2 parity checks before the draft becomes public. Signed package changes compare
-each target with its own last published inventory, and GitHub generates the included PR
-and contributor notes. The old scheduled image publisher is retired.
-`boot-profiles.json` is the signed inventory of both profiles; `index.json` preserves
-the protected catalog used by existing clients. After publication, native QEMU runners
-use a fresh source-free consumer to discover each new image in the signed public
+`prod-ssh`, `playground`, `postdoc-server`) are attached and listed in R2. All assets
+receive attestations and R2 parity checks before the draft becomes public. Signed
+package changes compare each target with its own last published inventory, and GitHub
+generates the included PR and contributor notes. The old scheduled image publisher is
+retired. `boot-profiles.json` is the signed inventory of both profiles; `index.json`
+preserves the protected catalog used by existing clients. After publication, native QEMU
+runners use a fresh source-free consumer to discover each new image in the signed public
 catalog, download it from R2, verify its protected boot, repeat the command, check its
 authenticated update channel, and stop and resume it. This adds no guest shell or test
 code; the full two-update A/B and power-cut sequence runs before publication. The HTML
@@ -84,14 +91,15 @@ gate runner holds the image key during the job, so it serves this repository alo
 workflow never runs for pull requests). It keeps what `test/ci-setup` installs, and Lima
 on macOS. Separate consumer state can run concurrently.
 
-A target that fails its profile's checks is not published; the others are, and
-the catalog keeps the last published release beside the failed attempt.
-[publishing-health.yml](../.github/workflows/publishing-health.yml)
-reports failures and recovery. The scripts are `release/form-images`,
-`release/image_catalog.py` and `release/image_notes.py`. Pull requests run
-the QEMU lifecycle with disposable keys instead
-([protected-images.yml](../.github/workflows/protected-images.yml)), with
-no production secrets and no upload.
+A target that fails its profile's checks is not published; the others are, and the
+catalog keeps the last published release beside the failed attempt.
+[publishing-health.yml](../.github/workflows/publishing-health.yml) reports failures and
+recovery. The pipeline is `build/host/release form-images`
+([tools/release](../tools/release/README.md)); the published forms, profiles,
+architectures and gates are [release/images.yaml](../release/images.yaml). Pull requests
+run the QEMU lifecycle with disposable keys instead
+([protected-images.yml](../.github/workflows/protected-images.yml)), with no production
+secrets and no upload.
 
 ```text
 boot/v1/index.html                                 browse every form
@@ -131,11 +139,11 @@ machine signed locally keeps its trust; adopt a download under a new
 name. The trust and layout are in
 [design/protected-downloads.md](design/protected-downloads.md).
 
-`release/export-protected` admits the gated bundle and derives a qcow2 from its
+`release export-protected` admits the gated bundle and derives a qcow2 from its
 authenticated raw disk. Its signed `werewolf-downloads/1` manifest binds every
 asset's size and SHA-256, descriptor, lifecycle evidence, source commit and run.
-`release/publish-protected` uploads immutable objects before signed heads and keeps
-an upload recovery floor. `release/check-protected-download` fetches from public R2,
+`release publish-protected` uploads immutable objects before signed heads and keeps
+an upload recovery floor. `release check-protected-download` fetches from public R2,
 performs native admission, and compares every object with its release asset. The
 GitHub draft becomes public after attestation and parity checks for every target.
 

@@ -1,0 +1,43 @@
+# The images werewolf publishes (docs/releases.md). build/host/release reads
+# this table: form-images builds each form for every architecture and
+# provider in both boot profiles, and the workflows' matrices come from it.
+# lib/form.zig parses it: block maps and lists, scalars and [a, b] lists.
+
+# Published forms. Build shard N of M takes every Mth form from the Nth.
+forms: [minimal, prod-ssh, playground, postdoc-server]
+profiles: [secure-boot, legacy-boot]
+
+# Each architecture's build runner and the providers it has images for. A
+# provider's gateway is baked into the verified root, so each is its own image.
+arches:
+  x86_64:
+    runner: ubuntu-26.04
+    providers: [qemu]
+  aarch64:
+    runner: ubuntu-26.04-arm
+    providers: [lima, qemu]
+
+# The forms whose bundles each provider's lifecycle gates test. QEMU uses the
+# production owner channel; Lima uses SSH, with a host-only software security
+# key for postdoc-server's security-key-only login policy.
+gates:
+  qemu: [minimal, prod-ssh, playground, postdoc-server]
+  lima: [playground, postdoc-server]
+
+# Who runs those gates: hosted runner labels, or the environment variable that
+# holds a self-hosted runner's labels as a JSON list. Without one a target is
+# not gated, and so not published.
+runners:
+  - target: qemu/x86_64
+    labels: [ubuntu-26.04]
+  - target: qemu/aarch64
+    variable: ARM64_KVM_RUNNER
+  - target: lima/aarch64
+    variable: LIMA_RUNNER
+
+# Build shards per architecture, at most.
+shards: 16
+# What a build must pass before its bundles are gated.
+checks: [coverage, integration, reproducible]
+# The one target a recovery dispatch builds and publishes.
+focused: playground/qemu/x86_64

@@ -80,7 +80,11 @@ their own source. Logs contain attacker-controlled text and render as text.
 
 The host-side appliance check exercises the shipping image without adding guest
 programs or permissions. After building with `BUILD=build/vuln-demo-check`, run
-`forms/vuln-demo/test/appliance --build build/vuln-demo-check`. It checks the
-normal HTTP endpoints, two arbitrary SSH passwords, direct commands, refusal
-refusal of non-root users, shell/PTY/forwarding/private-key reads, and
-request/exec/violation logs.
+`make check-vuln-demo-appliance` ([test/appliance.zig](test/appliance.zig); another
+build: `VULN_DEMO_BUILD=DIR`). It checks the normal HTTP endpoints, two arbitrary SSH
+passwords, direct commands, refusal of non-root users,
+shell/PTY/forwarding/private-key reads, and request/exec/violation logs.
+
+`howl test --with vuln-demo` boots a native test image, without a shell, and checks
+the dashboard, each product's health or version, request capture, the kernel and exec
+audit log, and that no service runs a shell ([test/tests.yaml](test/tests.yaml)).

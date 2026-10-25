@@ -42,13 +42,15 @@ published third-party packages. See [the design](docs/design/package-promotion.m
 | `lib/` | code the programs share: sandboxing, seccomp promises, verity, forms |
 | `../packages/CATEGORY/NAME/` | recipes or Wolfi derivations, maintenance metadata, patches, locks and tests |
 | `forms/NAME/` | a form: `form.yaml` (its packages, and what werewolf adds), `rootfs/`, `test/` ([forms/README.md](forms/README.md)) |
-| `test/` | the scripts `make check` boots and attacks machines with |
-| `release/` | building, signing and publishing releases |
+| `test/` | the checks `make check` boots and attacks machines with; `test/host/` is what they share |
+| `tools/` | build-host programs, never in an image; `tools/release/` builds, signs and publishes releases |
+| `release/` | release keys, `images.yaml` (what is published) and a release's shell steps |
 | `docs/` | user docs; `docs/design/` holds design docs |
 
 The image has no shell, so everything that runs on a machine is a small Zig program.
-Tools that run on the build host (`release/*`, `test/*`) are POSIX shell, on purpose:
-that is where a shell already is.
+Programs on the build host are Zig too, sharing `lib/` and `test/host/`, with tables
+people edit in YAML. A POSIX shell script is fine for a step that only runs other
+commands. Python and Go appear only where a form runs them.
 
 ## Make a change
 
@@ -63,8 +65,8 @@ that is where a shell already is.
    (100 lines at most), and unit tests beside its code (`test "..." {}`).
 4. A larger change starts as a design doc in `docs/design/`, on the same template.
 5. Service and application forms need at least five distinct integration cases
-   covering useful behavior and refusals. Run `python3 test/form-coverage --list`
-   to inspect coverage; [the testing guide](docs/testing.md#form-integration-coverage)
+   covering useful behavior and refusals. Run `make form-coverage` to inspect
+   coverage; [the testing guide](docs/testing.md#form-integration-coverage)
    explains the foundation and runtime exceptions.
 
 ## Style

@@ -1,0 +1,340 @@
+version: 1
+# Git and ssh are clients here, as a user's would be: the push goes through
+# Gitea's own SSH server on :22, by git's ext:: transport, so no shell runs.
+# ssh comes with scp and sftp, which nothing here runs.
+packages:
+  - openssh-client
+prune: [usr/bin/scp, usr/bin/sftp]
+suites:
+  - name: gitea-ready
+    readiness: true
+    cases:
+      - name: gitea-up
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/version
+            expect:
+              status: 200
+            await: 60s
+  - name: gitea
+    fixtures:
+      ssh-public: /run/config/tests/gitea-ssh-public
+    policy:
+      run:
+        - /usr/bin/git
+        - /usr/bin/ssh
+    cases:
+      - name: gitea-user
+        steps:
+          - service: gitea
+            expect:
+              user: gitea
+              uid:
+                min: 65536
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+      - name: gitea-api
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/version
+            expect:
+              status: 200
+              json:
+                /version:
+                  type: string
+            await: 60s
+      - name: gitea-admin
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/user
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+            expect:
+              status: 200
+              json:
+                /login: admin
+                /is_admin: true
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/user
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d3JvbmctcGFzc3dvcmQtaGVyZQ==
+            expect:
+              status: 401
+      # No installer, and no one signs themselves up. Gitea checks the
+      # request's origin, not a token: this one, from no browser, is let
+      # through to the refusal itself.
+      - name: gitea-no-install
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/install
+            expect:
+              status: 404
+          - fetch:
+              url: http://127.0.0.1:3000/user/sign_up
+            expect:
+              status: 200
+              body:
+                matches: '[Rr]egistration is disabled'
+          - fetch:
+              url: http://127.0.0.1:3000/user/sign_up
+              method: POST
+              form:
+                user_name: stranger
+                email: stranger@example.test
+                password: werewolf-check-pass
+                retype: werewolf-check-pass
+            expect:
+              status: 403
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/users/stranger
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+            expect:
+              status: 404
+      - name: gitea-repo-made
+        phases: [seed]
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/user/repos
+              method: POST
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+              json:
+                name: check
+                private: true
+                default_branch: main
+            expect:
+              status: 201
+              json:
+                /full_name: admin/check
+                /private: true
+      - name: gitea-key-added
+        phases: [seed]
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/user/keys
+              method: POST
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+              json:
+                title: check
+                key:
+                  fixture: ssh-public
+            expect:
+              status: 201
+              json:
+                /title: check
+      # A commit naming the run, pushed over SSH with the key just added.
+      # The host key is kept, so the second boot can insist on it.
+      - name: gitea-push
+        phases: [seed]
+        steps:
+          - exec:
+              argv: [/usr/bin/git, init, -q, -b, main, /tmp/gitea-check]
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/git
+                - -C
+                - /tmp/gitea-check
+                - commit
+                - -q
+                - --allow-empty
+                - -m
+                - run: true
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+                GIT_AUTHOR_NAME: check
+                GIT_AUTHOR_EMAIL: check@example.test
+                GIT_COMMITTER_NAME: check
+                GIT_COMMITTER_EMAIL: check@example.test
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/git
+                - -c
+                - protocol.ext.allow=always
+                - -C
+                - /tmp/gitea-check
+                - push
+                - -q
+                - ext::/usr/bin/ssh -F /dev/null -i /run/config/tests/gitea-ssh-key -o
+                  IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o
+                  StrictHostKeyChecking=accept-new -o
+                  UserKnownHostsFile=/data/gitea-test-known-hosts git@127.0.0.1 %S
+                  admin/check.git
+                - +HEAD:main
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+            timeout: 60s
+            expect:
+              exit: 0
+          - file: /data/gitea-test-known-hosts
+            expect:
+              body:
+                matches: '^127\.0\.0\.1 ssh-ed25519 '
+      - name: gitea-private
+        steps:
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/repos/admin/check
+            expect:
+              status: 404
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/repos/admin/check
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+            expect:
+              status: 200
+              json:
+                /private: true
+      - name: gitea-pushed
+        steps:
+          - file: /data/svc/gitea/repos/admin/check.git
+            expect:
+              type: directory
+              uid: gitea
+          - fetch:
+              url: http://127.0.0.1:3000/api/v1/repos/admin/check/branches/main
+              authorization:
+                scheme: Basic
+                credentials: YWRtaW46d2VyZXdvbGYtY2hlY2stcGFzcw==
+            # Gitea records a pushed branch from a queue, after the push.
+            await: 60s
+            expect:
+              status: 200
+              json:
+                /name: main
+                /commit/message:
+                  contains:
+                    run: true
+      # After the reboot, the seed's commit comes back over SSH from a
+      # host key that must be the one the seed saw.
+      - name: gitea-push-kept
+        phases: [verify]
+        steps:
+          - exec:
+              argv: [/usr/bin/git, init, -q, /tmp/gitea-kept]
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+            expect:
+              exit: 0
+          - exec:
+              argv:
+                - /usr/bin/git
+                - -c
+                - protocol.ext.allow=always
+                - -C
+                - /tmp/gitea-kept
+                - fetch
+                - -q
+                - ext::/usr/bin/ssh -F /dev/null -i /run/config/tests/gitea-ssh-key -o
+                  IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o
+                  StrictHostKeyChecking=yes -o
+                  UserKnownHostsFile=/data/gitea-test-known-hosts git@127.0.0.1 %S
+                  admin/check.git
+                - main
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+            timeout: 60s
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/git, -C, /tmp/gitea-kept, log, '-1', --format=%B, FETCH_HEAD]
+              env:
+                GIT_CONFIG_NOSYSTEM: '1'
+                GIT_CONFIG_GLOBAL: /dev/null
+            expect:
+              exit: 0
+              stdout:
+                contains:
+                  run: true
+      # Gitea's SSH runs git and nothing else: no command, no forward, no
+      # classical key exchange, no password.
+      - name: gitea-no-command
+        steps:
+          - exec:
+              argv: [/usr/bin/ssh, -F, /dev/null, -i, /run/config/tests/gitea-ssh-key, -o,
+                     IdentitiesOnly=yes, -o, BatchMode=yes, -o, ConnectTimeout=10, -o,
+                     StrictHostKeyChecking=no, -o, UserKnownHostsFile=/dev/null,
+                     git@127.0.0.1, id]
+            expect:
+              exit:
+                min: 1
+              stdout:
+                not_matches: uid=
+              stderr:
+                contains: 'error:'
+      - name: gitea-no-remote
+        steps:
+          - exec:
+              argv: [/usr/bin/ssh, -F, /dev/null, -i, /run/config/tests/gitea-ssh-key, -o,
+                     IdentitiesOnly=yes, -o, BatchMode=yes, -o, ConnectTimeout=10, -o,
+                     StrictHostKeyChecking=no, -o, UserKnownHostsFile=/dev/null, -o,
+                     ExitOnForwardFailure=yes, -R, '127.0.0.1:0:127.0.0.1:22',
+                     git@127.0.0.1, 'true']
+            expect:
+              exit: 255
+              stderr:
+                contains: remote port forwarding failed
+      - name: gitea-pq-required
+        steps:
+          - exec:
+              argv: [/usr/bin/ssh, -F, /dev/null, -i, /run/config/tests/gitea-ssh-key, -o,
+                     IdentitiesOnly=yes, -o, BatchMode=yes, -o, ConnectTimeout=10, -o,
+                     StrictHostKeyChecking=no, -o, UserKnownHostsFile=/dev/null, -o,
+                     KexAlgorithms=curve25519-sha256, git@127.0.0.1, 'true']
+            expect:
+              exit: 255
+              stderr:
+                contains: no matching key exchange method
+      - name: gitea-keys-only
+        steps:
+          - exec:
+              argv: [/usr/bin/ssh, -F, /dev/null, -o, BatchMode=yes, -o, ConnectTimeout=10,
+                     -o, StrictHostKeyChecking=no, -o, UserKnownHostsFile=/dev/null, -o,
+                     PubkeyAuthentication=no, -o,
+                     'PreferredAuthentications=password,keyboard-interactive',
+                     git@127.0.0.1, 'true']
+            expect:
+              exit: 255
+              stderr:
+                contains: Permission denied (publickey)
+      - name: gitea-secrets
+        steps:
+          - file: /data/svc/gitea/secrets/secret_key
+            expect:
+              uid: gitea
+              mode: '600'
+          - file: /data/svc/gitea/secrets/internal_token
+            expect:
+              uid: gitea
+              mode: '600'
+          - file: /run/svc/gitea/admin-password
+            expect:
+              uid: gitea
+              mode: '600'
+      - name: gitea-host-key
+        steps:
+          - file: /data/svc/gitea/ssh/gitea.ed25519.pub
+            expect:
+              body:
+                matches: '^ssh-ed25519 '
+          - file: /data/svc/gitea/ssh/gitea.ed25519
+            expect:
+              uid: gitea
+              mode: '600'

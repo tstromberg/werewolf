@@ -12,6 +12,7 @@ const gcp = @import("gcp.zig");
 const aws = @import("aws.zig");
 const azure = @import("azure.zig");
 const progress = @import("progress.zig");
+const keys = @import("keys.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -34,51 +35,30 @@ const testing = std.testing;
 /// port, or on GCP at its external address. Dev Lima runs use the address
 /// recorded for their current boot.
 pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    var rest: []const []const u8 = args;
-    var command: []const []const u8 = &.{};
-    for (args, 0..) |a, i| if (std.mem.eql(u8, a, "--")) {
-        rest = args[0..i];
-        command = args[i + 1 ..];
-        break;
-    };
+    const line = try sshLine(gpa, args, why);
     var identities: std.ArrayList([]const u8) = .empty;
-    var machine_args: std.ArrayList([]const u8) = .empty;
-    var no_agent = false;
-    var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        if (std.mem.eql(u8, rest[i], "--no-agent")) {
-            no_agent = true;
-            continue;
-        }
-        if (std.mem.eql(u8, rest[i], "--identity") or
-            std.mem.startsWith(u8, rest[i], "--identity="))
-        {
-            const flag, const value = try flagValue(rest, &i, why);
-            _ = flag;
-            const path = Dir.cwd().realPathFileAlloc(io, value, gpa) catch
-                return why.refuse("{s}: cannot read identity path", .{value});
-            try identities.append(gpa, path);
-        } else try machine_args.append(gpa, rest[i]);
-    }
+    for (line.identities) |value| try identities.append(
+        gpa,
+        Dir.cwd().realPathFileAlloc(io, value, gpa) catch
+            return why.refuse("{s}: cannot read identity path", .{value}),
+    );
     const explicit_identities = identities.items.len > 0;
-    if (no_agent and explicit_identities)
-        return why.refuse("--no-agent cannot be combined with --identity", .{});
-    const target = try sshTarget(gpa, machine_args.items, why);
-    rest = target.args;
     // One word that names no machine is most likely a command: say how.
-    if (command.len == 0 and rest.len == 1 and !std.mem.startsWith(u8, rest[0], "-")) {
+    if (line.command.len == 0 and line.machine.len == 1 and
+        !std.mem.startsWith(u8, line.machine[0], "-"))
+    {
         if (Dir.cwd().access(
             io,
-            try machineDir(gpa, rest[0]),
+            try machineDir(gpa, line.machine[0]),
             .{},
         )) |_| {} else |_| return why.refuse(
             "no machine {s}; a command goes after --: howl ssh -- {s}",
-            .{ rest[0], rest[0] },
+            .{ line.machine[0], line.machine[0] },
         );
     }
-    const name, const on = try machineArgs(io, gpa, rest, why);
-    const user = target.user orelse blk: {
-        const local = try @import("keys.zig").currentUserName(io, gpa, why);
+    const name, const on = try machineArgs(io, gpa, line.machine, why);
+    const user = line.user orelse blk: {
+        const local = try keys.currentUserName(io, gpa, why);
         if (!sshUser(local))
             return why.refuse("cannot determine local user; specify USER@NAME", .{});
         break :blk local;
@@ -98,84 +78,50 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         try lima.sshIdentity(io, gpa, name, user)
     else
         null;
-    if (!no_agent and !explicit_identities and lima_identity == null and !dev_access)
-        try identities.appendSlice(gpa, try @import("keys.zig").securityIdentities(io, gpa));
-    const managed_agent = identities.items.len > 0;
-    // The guest keeps its host key in /data, so trust it on first use and
-    // pin it by name in the machine's directory, not by an address another
-    // machine may get later. Developer and ordinary sshd use distinct host
-    // keys, so their aliases are distinct too. delete removes both.
-    var pinned: std.ArrayList([]const u8) = .empty;
-    const alias = try sshAlias(gpa, name, dev_access);
-    const known_hosts = try gpa.print("{s}/known_hosts", .{dir});
-    try pinned.appendSlice(gpa, &.{
-        "-o",
-        if (managed_agent)
-            "StrictHostKeyChecking=yes"
-        else
-            "StrictHostKeyChecking=accept-new",
-        "-o",
-        try gpa.print("UserKnownHostsFile={s}", .{known_hosts}),
-        "-o",
-        try gpa.print("HostKeyAlias={s}", .{alias}),
-        "-o",
-        "LogLevel=ERROR",
-    });
-    if (managed_agent) try pinned.appendSlice(gpa, &.{
-        "-F",                             "/dev/null",
-        "-S",                             "none",
-        "-A",                             "-o",
-        "IdentityAgent=SSH_AUTH_SOCK",    "-o",
-        "IdentityFile=none",              "-o",
-        "GlobalKnownHostsFile=/dev/null",
-    }) else try pinned.append(gpa, "-a");
-    if (!explicit_identities and dev_marker != null and
-        !std.mem.eql(u8, dev_marker.?, "custom\n"))
-    {
-        try pinned.appendSlice(gpa, &.{
-            "-i", try @import("keys.zig").devPrivatePath(io, gpa),
-            "-o", "IdentitiesOnly=yes",
-        });
-    }
-    var argv: std.ArrayList([]const u8) = .empty;
+    if (!line.no_agent and !explicit_identities and lima_identity == null and !dev_access)
+        if (howl.environ.get("HOME")) |home| try identities.appendSlice(
+            gpa,
+            try keys.securityIdentities(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" })),
+        );
+    var login: Login = .{
+        .user = user,
+        .host = "127.0.0.1",
+        .alias = try sshAlias(gpa, name, dev_access),
+        .known_hosts = try gpa.print("{s}/known_hosts", .{dir}),
+        .agent = identities.items.len > 0,
+        .command = line.command,
+    };
+    if (!explicit_identities and dev_marker != null and !std.mem.eql(u8, dev_marker.?, "custom\n"))
+        login.dev_key = try keys.devPrivatePath(io, gpa);
     if (on == .qemu) {
         if (qemu.running(
             io,
             gpa,
             dir,
         ) == null) return why.refuse("no machine {s} running under QEMU", .{name});
-        const port = qemu.record(
+        login.port = qemu.record(
             io,
             gpa,
             dir,
             "ssh",
         ) orelse return why.refuse("{s}: no ssh port on record", .{name});
-        try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
-        try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, try gpa.print("{s}@127.0.0.1", .{user}));
     } else if (on == .bhyve) {
         if (!try bhyve.exists(
             io,
             gpa,
             name,
         )) return why.refuse("no machine {s} running under bhyve", .{name});
-        const host = qemu.record(io, gpa, dir, "host") orelse "127.0.0.1";
-        if (!howl.isIp4(host)) return why.refuse("{s}: invalid bhyve address on record", .{name});
+        login.host = qemu.record(io, gpa, dir, "host") orelse "127.0.0.1";
+        if (!howl.isIp4(login.host))
+            return why.refuse("{s}: invalid bhyve address on record", .{name});
         const port = qemu.record(io, gpa, dir, "ssh") orelse
             return why.refuse("{s}: no SSH address on record; recreate it with this howl", .{name});
         const number = std.fmt.parseInt(u16, port, 10) catch 0;
         if (number == 0) return why.refuse("{s}: no SSH listener on record", .{name});
-        try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
-        try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, host }));
+        login.port = port;
     } else if (on == .firecracker) {
-        try argv.append(gpa, "ssh");
-        if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
-        try argv.appendSlice(gpa, pinned.items);
-        try argv.append(
-            gpa,
-            try gpa.print("{s}@{s}", .{ user, (try firecracker.net(gpa, name)).guest }),
-        );
+        if (dev_access) login.port = "2222";
+        login.host = (try firecracker.net(gpa, name)).guest;
     } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
         // A machine Lima manages has no vzNAT lease of its own: one under its
@@ -200,51 +146,139 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         else
             limaAddress(managed, lima.addressOf(io, gpa, name));
         // Lima's NoCloud account accepts its own key, not necessarily ~/.ssh's.
-        if (lima_identity) |identity| {
-            try pinned.appendSlice(gpa, &.{ "-i", identity });
-        }
-        const port = lima.sshPort(io, gpa, name);
+        login.lima_key = lima_identity;
         if (addr) |a| {
-            try argv.append(gpa, "ssh");
-            if (dev_access) try argv.appendSlice(gpa, &.{ "-p", "2222" });
-            try argv.appendSlice(gpa, pinned.items);
-            try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, a }));
-        } else if (port) |p| {
-            try argv.appendSlice(gpa, &.{ "ssh", "-p", p });
-            try argv.appendSlice(gpa, pinned.items);
-            try argv.append(gpa, try gpa.print("{s}@127.0.0.1", .{user}));
+            if (dev_access) login.port = "2222";
+            login.host = a;
         } else {
-            return why.refuse("{s}: no SSH address available", .{name});
+            login.port = lima.sshPort(io, gpa, name) orelse
+                return why.refuse("{s}: no SSH address available", .{name});
         }
     } else if (on == .gcp) {
         const place = try gcp.place(io, gpa, why);
         if (try gcp.formOf(io, gpa, place, name, why) == null)
             return why.refuse("no machine {s} in GCP zone {s}", .{ name, place.zone });
         try gcp.ensureSshReachable(io, gpa, place, name, why);
-        const host = gcp.address(io, gpa, place, name) orelse
+        login.host = gcp.address(io, gpa, place, name) orelse
             return why.refuse("{s}: no external SSH address in GCP", .{name});
-        try argv.append(gpa, "ssh");
-        try argv.appendSlice(gpa, pinned.items);
-        try argv.append(gpa, try gpa.print("{s}@{s}", .{ user, host }));
     } else return why.refuse(
         "ssh reaches machines here (qemu, firecracker, lima, bhyve, gcp); {t}'s address is in " ++
             "create's summary",
         .{on},
     );
-    try argv.appendSlice(gpa, command);
-    if (managed_agent) return @import("ssh-agent.zig").start(
+    const argv = try sshArgv(gpa, login);
+    if (login.agent) return @import("ssh-agent.zig").start(
         io,
         gpa,
-        known_hosts,
-        alias,
+        login.known_hosts,
+        login.alias,
         user,
         identities.items,
-        argv.items,
-        command.len,
+        argv,
+        line.command.len,
         why,
     );
-    const err = std.process.replace(io, .{ .argv = argv.items });
-    return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
+    const err = std.process.replace(io, .{ .argv = argv });
+    return why.refuse("{s}: {s}", .{ argv[0], @errorName(err) });
+}
+
+/// SshLine is howl ssh's line: what names the machine, the account, the
+/// identities given, and the command after --.
+const SshLine = struct {
+    machine: []const []const u8,
+    user: ?[]const u8 = null,
+    identities: []const []const u8 = &.{},
+    no_agent: bool = false,
+    command: []const []const u8 = &.{},
+};
+
+/// sshLine separates USER@NAME before machineArgs resolves NAME's engine and
+/// directory. Words after -- are the command, never a target.
+fn sshLine(gpa: Allocator, args: []const []const u8, why: *Why) !SshLine {
+    var line: SshLine = .{ .machine = &.{} };
+    var rest = args;
+    for (args, 0..) |a, i| if (std.mem.eql(u8, a, "--")) {
+        rest = args[0..i];
+        line.command = args[i + 1 ..];
+        break;
+    };
+    var identities: std.ArrayList([]const u8) = .empty;
+    var machine: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.eql(u8, a, "--no-agent")) {
+            line.no_agent = true;
+        } else if (std.mem.eql(u8, a, "--identity") or std.mem.startsWith(u8, a, "--identity=")) {
+            _, const value = try flagValue(rest, &i, why);
+            try identities.append(gpa, value);
+        } else if (std.mem.eql(u8, a, "--on") and i + 1 < rest.len) {
+            try machine.appendSlice(gpa, rest[i .. i + 2]);
+            i += 1;
+        } else if (a.len > 0 and a[0] != '-' and std.mem.findScalar(u8, a, '@') != null) {
+            const at = std.mem.findScalar(u8, a, '@').?;
+            if (line.user != null or !sshUser(a[0..at]) or !isMachineName(a[at + 1 ..]))
+                return why.refuse("{s}: expected USER@NAME", .{a});
+            line.user = a[0..at];
+            try machine.append(gpa, a[at + 1 ..]);
+        } else try machine.append(gpa, a);
+    }
+    if (line.no_agent and identities.items.len > 0)
+        return why.refuse("--no-agent cannot be combined with --identity", .{});
+    line.machine = machine.items;
+    line.identities = identities.items;
+    return line;
+}
+
+/// Login is where and how ssh logs in, once sshTo has found the machine.
+const Login = struct {
+    user: []const u8,
+    host: []const u8,
+    port: ?[]const u8 = null,
+    /// alias names the host key pinned in known_hosts. Developer and
+    /// ordinary sshd keep distinct host keys, so their aliases differ too.
+    alias: []const u8,
+    known_hosts: []const u8,
+    /// agent: a dedicated agent offers the selected identities, and nothing
+    /// else does.
+    agent: bool = false,
+    /// dev_key is howl's developer key; lima_key, Lima's NoCloud identity.
+    dev_key: ?[]const u8 = null,
+    lima_key: ?[]const u8 = null,
+    command: []const []const u8 = &.{},
+};
+
+/// sshArgv is ssh's argv for l. The guest keeps its host key in /data, so
+/// first use trusts it and pins it by name in the machine's directory, not
+/// by an address another machine may get later; delete removes both pins.
+/// A dedicated agent requires the pin, and ignores every other config and key.
+fn sshArgv(gpa: Allocator, l: Login) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(gpa, "ssh");
+    if (l.port) |p| try argv.appendSlice(gpa, &.{ "-p", p });
+    try argv.appendSlice(gpa, &.{
+        "-o",
+        if (l.agent) "StrictHostKeyChecking=yes" else "StrictHostKeyChecking=accept-new",
+        "-o",
+        try gpa.print("UserKnownHostsFile={s}", .{l.known_hosts}),
+        "-o",
+        try gpa.print("HostKeyAlias={s}", .{l.alias}),
+        "-o",
+        "LogLevel=ERROR",
+    });
+    if (l.agent) try argv.appendSlice(gpa, &.{
+        "-F",                             "/dev/null",
+        "-S",                             "none",
+        "-A",                             "-o",
+        "IdentityAgent=SSH_AUTH_SOCK",    "-o",
+        "IdentityFile=none",              "-o",
+        "GlobalKnownHostsFile=/dev/null",
+    }) else try argv.append(gpa, "-a");
+    if (l.dev_key) |key| try argv.appendSlice(gpa, &.{ "-i", key, "-o", "IdentitiesOnly=yes" });
+    if (l.lima_key) |key| try argv.appendSlice(gpa, &.{ "-i", key });
+    try argv.append(gpa, try gpa.print("{s}@{s}", .{ l.user, l.host }));
+    try argv.appendSlice(gpa, l.command);
+    return argv.items;
 }
 
 fn sshAlias(gpa: Allocator, name: []const u8, developer: bool) ![]const u8 {
@@ -276,30 +310,6 @@ test "Lima SSH uses a current developer address and ignores managed leases" {
     try testing.expectEqualStrings("192.168.64.40", try devAddress("192.168.64.40", &why));
     try testing.expectError(error.Refused, devAddress(null, &why));
     try testing.expectError(error.Refused, devAddress("-oProxyCommand=bad", &why));
-}
-
-/// Separate USER@NAME before machineArgs resolves NAME's engine and directory.
-fn sshTarget(gpa: Allocator, args: []const []const u8, why: *Why) !struct {
-    args: []const []const u8,
-    user: ?[]const u8,
-} {
-    const out = try gpa.dupe([]const u8, args);
-    var user: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        if (std.mem.eql(u8, out[i], "--on")) {
-            i += 1;
-            continue;
-        }
-        if (std.mem.startsWith(u8, out[i], "-")) continue;
-        if (std.mem.findScalar(u8, out[i], '@')) |at| {
-            if (user != null or !sshUser(out[i][0..at]) or !isMachineName(out[i][at + 1 ..]))
-                return why.refuse("{s}: expected USER@NAME", .{out[i]});
-            user = out[i][0..at];
-            out[i] = out[i][at + 1 ..];
-        }
-    }
-    return .{ .args = out, .user = user };
 }
 
 fn sshUser(user: []const u8) bool {
@@ -579,4 +589,116 @@ test "developer and ordinary SSH host keys have distinct aliases" {
     defer a.free(developer);
     try testing.expectEqualStrings("edge", ordinary);
     try testing.expectEqualStrings("edge-dev", developer);
+}
+
+test "ssh lines separate the account, the identities and the command" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const root = try sshLine(gpa, &.{ "root@werewolf-run", "--", "id", "-u" }, &why);
+    try testing.expectEqualStrings("root", root.user.?);
+    try testing.expectEqualStrings("werewolf-run", try std.mem.join(gpa, " ", root.machine));
+    try testing.expectEqualStrings("id -u", try std.mem.join(gpa, " ", root.command));
+    // A command's own USER@HOST is the command's, not a second target.
+    const alice = try sshLine(
+        gpa,
+        &.{ "--on=lima", "alice@werewolf-run", "--", "echo", "root@other" },
+        &why,
+    );
+    try testing.expectEqualStrings("alice", alice.user.?);
+    try testing.expectEqualStrings(
+        "--on=lima werewolf-run",
+        try std.mem.join(gpa, " ", alice.machine),
+    );
+    try testing.expectEqualStrings("echo root@other", try std.mem.join(gpa, " ", alice.command));
+    const on = try sshLine(gpa, &.{ "--on", "gcp", "root@werewolf-run" }, &why);
+    try testing.expectEqualStrings("--on gcp werewolf-run", try std.mem.join(gpa, " ", on.machine));
+    const named = try sshLine(
+        gpa,
+        &.{ "alice@werewolf-run", "--identity", "admin key", "--identity=second;key" },
+        &why,
+    );
+    try testing.expectEqualStrings(
+        "admin key|second;key",
+        try std.mem.join(gpa, "|", named.identities),
+    );
+    try testing.expectEqualStrings("werewolf-run", try std.mem.join(gpa, " ", named.machine));
+    const plain = try sshLine(gpa, &.{"--no-agent"}, &why);
+    try testing.expect(plain.no_agent and plain.user == null and plain.machine.len == 0);
+    for ([_][]const []const u8{
+        &.{"@werewolf-run"},
+        &.{"root@"},
+        &.{"root@@werewolf-run"},
+        &.{"root@../werewolf-run"},
+        &.{ "root@werewolf-run", "alice@werewolf-run" },
+        &.{"--identity"},
+        &.{ "--no-agent", "--identity", "key" },
+    }) |line| try testing.expectError(error.Refused, sshLine(gpa, line, &why));
+}
+
+test "ssh pins the host key by name and offers only the identities chosen" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const pin = "-o UserKnownHostsFile=build/machines/werewolf-run/known_hosts " ++
+        "-o HostKeyAlias=werewolf-run";
+    const run_login: Login = .{
+        .user = "alice",
+        .host = "127.0.0.1",
+        .port = "60022",
+        .alias = "werewolf-run",
+        .known_hosts = "build/machines/werewolf-run/known_hosts",
+    };
+    // Lima's forwarded port, with its NoCloud identity.
+    var lima_login = run_login;
+    lima_login.lima_key = "/test/lima-key";
+    try testing.expectEqualStrings(
+        "ssh -p 60022 -o StrictHostKeyChecking=accept-new " ++ pin ++
+            " -o LogLevel=ERROR -a -i /test/lima-key alice@127.0.0.1",
+        try std.mem.join(gpa, " ", try sshArgv(gpa, lima_login)),
+    );
+    // Root, with a command and no identity of howl's choosing.
+    var root = run_login;
+    root.user = "root";
+    root.command = &.{ "id", "-u" };
+    try testing.expectEqualStrings(
+        "ssh -p 60022 -o StrictHostKeyChecking=accept-new " ++ pin ++
+            " -o LogLevel=ERROR -a root@127.0.0.1 id -u",
+        try std.mem.join(gpa, " ", try sshArgv(gpa, root)),
+    );
+    // Developer SSH: its own listener, host key and howl's key.
+    try testing.expectEqualStrings(
+        "ssh -p 2222 -o StrictHostKeyChecking=accept-new " ++
+            "-o UserKnownHostsFile=build/machines/werewolf-run/known_hosts " ++
+            "-o HostKeyAlias=werewolf-run-dev -o LogLevel=ERROR -a " ++
+            "-i /keys/dev/ssh-ed25519 -o IdentitiesOnly=yes alice@192.168.64.40",
+        try std.mem.join(gpa, " ", try sshArgv(gpa, .{
+            .user = "alice",
+            .host = "192.168.64.40",
+            .port = "2222",
+            .alias = try sshAlias(gpa, "werewolf-run", true),
+            .known_hosts = "build/machines/werewolf-run/known_hosts",
+            .dev_key = "/keys/dev/ssh-ed25519",
+        })),
+    );
+    // A dedicated agent: the pin must exist, and no config, file or other
+    // agent offers a key.
+    try testing.expectEqualStrings(
+        "ssh -o StrictHostKeyChecking=yes " ++ pin ++ " -o LogLevel=ERROR -F /dev/null " ++
+            "-S none -A -o IdentityAgent=SSH_AUTH_SOCK -o IdentityFile=none " ++
+            "-o GlobalKnownHostsFile=/dev/null alice@203.0.113.20 printf literal;command",
+        try std.mem.join(gpa, " ", try sshArgv(gpa, .{
+            .user = "alice",
+            .host = "203.0.113.20",
+            .alias = "werewolf-run",
+            .known_hosts = "build/machines/werewolf-run/known_hosts",
+            .agent = true,
+            .command = &.{ "printf", "literal;command" },
+        })),
+    );
+}
+
+test {
+    _ = @import("ssh-agent.zig");
 }

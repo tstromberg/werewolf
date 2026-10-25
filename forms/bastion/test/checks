@@ -1,7 +1,0 @@
-# The bastion's check form (make check-bastion), on the bastion, with two
-# users, check (127.0.0.1:22) and narrow (127.0.0.2:22), their keys in the
-# image: each key held to its own user's destinations, and the bastion's
-# PermitOpen every user's.
-ok  bastion-private  [ "$(stat -c '%U:%a' /data/svc/sshd/host-key)" = bastion:600 ] && [ "$(stat -c '%u:%a' /etc/ssh/bastion/authorized_keys)" = 0:644 ]
-ok  bastion-user     p=$(cat /run/svc/sshd/sshd.pid); u=$(id -u bastion); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  bastion-users    [ "$(grep -c '^restrict,port-forwarding,permitopen="127.0.0.[12]:22" sk-ssh-ed25519@openssh.com ' /etc/ssh/bastion/authorized_keys)" = 2 ] && grep -qx 'PermitOpen 127.0.0.1:22 127.0.0.2:22' /etc/ssh/bastion/permit-open

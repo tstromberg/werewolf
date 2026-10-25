@@ -53,8 +53,17 @@ suites:
       - name: valkey-tcp-roundtrip
         steps:
           - exec:
-              argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', set, integration,
-                     {run: true}]
+              argv:
+                - /usr/bin/valkey-cli
+                - --raw
+                - -e
+                - -h
+                - 127.0.0.1
+                - -p
+                - '6379'
+                - set
+                - integration
+                - run: true
               env:
                 VALKEYCLI_AUTH:
                   fixture: password

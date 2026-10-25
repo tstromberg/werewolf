@@ -1,0 +1,26 @@
+version: 1
+legacy: true
+suites:
+  - name: sshd-shell
+    policy:
+      run: [/usr/bin/sh]
+    cases:
+      - name: sshd-mksh-login
+        steps:
+          - file: /usr/share/werewolf/etc/passwd
+            expect:
+              body:
+                contains: 'root:x:0:0:root:/root:/bin/mksh'
+          - exec:
+              argv: [/usr/bin/sh, -c, 'case "$KSH_VERSION" in *MIRBSD*) printf mksh ;; *) exit 1 ;; esac']
+            expect:
+              exit: 0
+              stdout: mksh
+      - name: sshd-no-busybox
+        steps:
+          - file: /usr/bin/busybox
+            expect:
+              exists: false
+          - file: /usr/bin/su
+            expect:
+              exists: false

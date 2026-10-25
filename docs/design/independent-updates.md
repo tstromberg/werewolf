@@ -111,10 +111,10 @@ stale other-slot manifests, foreign and partly enrolled TPMs, and a service's re
 
 ## Reliability Considerations
 
-Release promotion requires the CI test `test/check-independent-updates` on each target:
-it builds A, B and C with disposable keys, boots a guest from A's public image with only
-a static file server reachable, and watches the guest's own updater install B, then C,
-on schedule, asserting running index, floor and channel after each boot. It exercises
-skipped releases, key rotation, offline boot, wrong signatures and channels, failed
-trials, operator rollback, retired replay and a power cut at every durable step, keeping
-disk and TPM; on QEMU/swtpm, then GCP, AWS and Azure.
+Release promotion requires the CI test `test/check-independent-updates.zig` on each
+target: it builds A, B and C with disposable keys, boots a guest from A's public image
+with only a static file server reachable, and watches the guest's own updater install
+B, then C, on schedule, asserting running index, floor and channel after each boot. It
+exercises skipped releases, key rotation, offline boot, wrong signatures and channels,
+failed trials, operator rollback, retired replay and a power cut at every durable step,
+keeping disk and TPM; on QEMU/swtpm, then GCP, AWS and Azure.

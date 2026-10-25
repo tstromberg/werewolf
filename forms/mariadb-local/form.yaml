@@ -1,4 +1,4 @@
-# mariadb-local: prod, with MariaDB 12.3, the long-term release, for the
+# mariadb-local: prod, with MariaDB's newest stable release, for the
 # machine's own services. It answers on a UNIX socket in /run/svc/mariadb
 # and nothing else: no TCP port, and the form declares none. mariadb-tcp
 # is this server with port 3306 open. Its data is in /data/svc/mariadb.
@@ -6,12 +6,15 @@
 # each start mariadb-init makes the data if there is none, as
 # mariadb-install-db would, and applies the SQL a form brings in
 # /usr/share/werewolf-mariadb. Local users log in as their system users
-# (unix_socket). The major version is the package's name: a new one is a
-# new form. See forms/mariadb-local/README.md.
+# (unix_socket). The mariadb package follows MariaDB's stable releases;
+# mariadb-init upgrades the data to each new series with mariadb-upgrade.
+# See forms/mariadb-local/README.md.
 base: prod
 
 packages:
-  - mariadb-12.3
+  - mariadb
+  # mariadb-upgrade runs MariaDB's client to upgrade the system tables.
+  - mariadb-client
 
 # The interpreters its scripts name, which nothing here runs: mariadb-init
 # does mariadb-install-db's work, and mariadbd-safe, mytop and the
@@ -21,25 +24,18 @@ prune:
   - usr/bin/perl
   - usr/bin/perl5.44.0
 
-paths:
-  # PAM's password helper, setgid shadow, arrives through MariaDB's PAM
-  # plugin's library. Nothing here authenticates with a password.
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
-
-# The check speaks SQL with MariaDB's own client.
-dev:
-  - mariadb-12.3-client
-
 services:
     # MariaDB, as its own user, for local clients over its UNIX socket
     # alone. mariadb-init makes the data on the first start, streams
-    # /run/werewolf/import/*.sql into that first database, and applies the
-    # image's SQL before each start, through the server in bootstrap mode.
+    # /run/werewolf/import/*.sql into that first database, upgrades the data
+    # when the server is of a newer series, and applies the image's SQL
+    # before each start, through the server in bootstrap mode.
   mariadb:
     exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
     before: /usr/lib/werewolf/mariadb-init
+    # mariadb-init's upgrade, and the client and checker it runs. Without the
+    # exec promise, mariadbd itself can run none of them.
+    run: /usr/bin/mariadb-upgrade /usr/bin/mariadb /usr/bin/mariadb-check
     user: mariadb
     # aio: InnoDB's reads and writes, by Linux native AIO. It reaches no
     # network: there is no inet promise.

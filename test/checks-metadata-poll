@@ -1,5 +1,5 @@
 # prod on GCP, whose metadata server first holds a good config and then,
-# from the second request, one naming a person (test/metadata, people):
+# from the second request, one naming a person (test/metadata.zig, people):
 # the cloud-metadata service polls every minute and makes the account.
 
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -qE 'want up|^fail'

@@ -4,7 +4,8 @@ suites:
     source: driver.zig
     mode: prepare
     user: root
-    policy: {pledge: stdio rpath wpath}
+    policy:
+      pledge: stdio rpath wpath
     cases:
       seed: [cron-fixture-clean]
       verify: [cron-fixture-clean]
@@ -24,7 +25,8 @@ suites:
     source: driver.zig
     mode: audit
     user: root
-    policy: {pledge: stdio rpath}
+    policy:
+      pledge: stdio rpath
     cases:
       seed: [cron-pledged]
       verify: [cron-pledged]
@@ -35,7 +37,8 @@ suites:
           - service: cron
             expect:
               user: supercronic
-              uid: {min: 65536}
+              uid:
+                min: 65536
               capabilities: []
               no_new_privileges: true
               seccomp: filter
@@ -56,4 +59,5 @@ suites:
               body:
                 matches: 'sh-shim: refused: unquoted .* is shell syntax'
           - file: /data/svc/test-cron-jobs/shell-ran
-            expect: {exists: false}
+            expect:
+              exists: false

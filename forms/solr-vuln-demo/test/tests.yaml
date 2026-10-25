@@ -97,6 +97,4 @@ suites:
           - file: /etc/sv/solr/service
             expect:
               body:
-                matches: '(^|
-
-                  )exec /usr/bin/java '
+                matches: "(^|\n)exec /usr/bin/java "

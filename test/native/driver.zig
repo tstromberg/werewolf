@@ -5,6 +5,8 @@ pub const fetch = @import("fetch.zig");
 pub const exec = @import("exec.zig");
 pub const system = @import("system.zig");
 pub const udp = @import("udp.zig");
+pub const amqp = @import("amqp.zig");
+pub const bson = @import("bson.zig");
 
 pub const Run = struct {
     run: []const u8,
@@ -52,6 +54,54 @@ pub fn deadline(io: Io, seconds: i64) Io.Timeout {
         .raw = .fromSeconds(seconds),
         .clock = .awake,
     } }).toDeadline(io);
+}
+
+/// Call function with args, failing with error.Timeout once seconds pass.
+pub fn within(
+    io: Io,
+    seconds: i64,
+    comptime function: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(function)),
+) anyerror!Payload(@TypeOf(function)) {
+    const Event = union(enum) {
+        done: anyerror!Payload(@TypeOf(function)),
+        timeout: Io.Cancelable!void,
+    };
+    var buffer: [2]Event = undefined;
+    var events: Io.Select(Event) = .init(io, &buffer);
+    defer events.cancelDiscard();
+    try events.concurrent(.done, function, args);
+    try events.concurrent(.timeout, Io.sleep, .{ io, Io.Duration.fromSeconds(seconds), .awake });
+    return switch (try events.await()) {
+        .done => |result| result,
+        .timeout => |result| {
+            try result;
+            return error.Timeout;
+        },
+    };
+}
+
+fn Payload(comptime Function: type) type {
+    return @typeInfo(@typeInfo(Function).@"fn".return_type.?).error_union.payload;
+}
+
+test "within returns the call's result or times out" {
+    const io = std.testing.io;
+    const Calls = struct {
+        fn quick(n: u8) !u8 {
+            return n + 1;
+        }
+        fn stuck(i: Io) !u8 {
+            try i.sleep(.fromSeconds(60), .awake);
+            return 0;
+        }
+        fn broken() !u8 {
+            return error.Broken;
+        }
+    };
+    try std.testing.expectEqual(@as(u8, 2), try within(io, 5, Calls.quick, .{1}));
+    try std.testing.expectError(error.Timeout, within(io, 1, Calls.stuck, .{io}));
+    try std.testing.expectError(error.Broken, within(io, 5, Calls.broken, .{}));
 }
 
 /// procfs reports size zero. Stream it rather than trusting stat's size.

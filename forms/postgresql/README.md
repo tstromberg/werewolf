@@ -1,8 +1,8 @@
 # PostgreSQL - Hardened VM
 
 A database for the other services on this machine:
-[PostgreSQL](https://www.postgresql.org), latest stable release, on a UNIX socket. The form's manifest is
-[form.yaml](form.yaml).
+[PostgreSQL](https://www.postgresql.org), latest stable release, on a UNIX socket. The
+form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/postgresql/index.html).
@@ -65,7 +65,7 @@ every start.
   rows multiply. `--import` runs once.
 - Packages follow the latest stable PostgreSQL release, including new major versions.
 - This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger uses
-  `/bin/ash`. A form replacing the PostgreSQL service must keep its explicit initdb,
+  `/bin/mksh`. A form replacing the PostgreSQL service must keep its explicit initdb,
   sh-shim and locale run paths.
 
 ## Size

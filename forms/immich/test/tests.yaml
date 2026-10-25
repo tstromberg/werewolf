@@ -162,8 +162,8 @@ suites:
             expect:
               status: 200
               json:
-                ? ''
-                : count: 1
+                '':
+                  count: 1
                 /0/email: admin@example.com
   - name: immich-upload
     source: driver.zig

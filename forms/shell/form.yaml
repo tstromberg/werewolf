@@ -1,0 +1,9 @@
+# shell: a standalone MirBSD Korn Shell, also installed as /bin/sh.
+# No listener or service execution allowance: consumers declare their own.
+base: minimal
+
+packages:
+  - mksh
+
+weaknesses:
+  programs-no-shell: mksh provides an interactive shell and /bin/sh

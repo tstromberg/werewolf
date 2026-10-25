@@ -31,14 +31,15 @@ pub fn kernelPackage(s: []const u8) ?Kernel {
 }
 
 /// kernelVersion parses linux-werewolf-7.2.11-r1, linux-virt-6.18.55-r0 or
-/// 6.18.55 as {7, 2, 11}, {6, 18, 55} or {6, 18, 55}.
+/// 6.18.55 as {7, 2, 11}, {6, 18, 55} or {6, 18, 55}. A mainline release,
+/// linux-werewolf-7.3-r7, is 7.3.0.
 pub fn kernelVersion(s: []const u8) ?[3]u32 {
     var v = if (kernelPackage(s)) |k| k.version else s;
     if (std.mem.findScalar(u8, v, '-')) |i| v = v[0..i];
     var out: [3]u32 = .{ 0, 0, 0 };
     var it = std.mem.splitScalar(u8, v, '.');
-    for (&out) |*part| {
-        const field = it.next() orelse return null;
+    for (&out, 0..) |*part, i| {
+        const field = it.next() orelse if (i == 2) break else return null;
         // Check digits ourselves: parseInt would also take "+" and "_".
         if (field.len == 0 or field.len > 9) return null;
         for (field) |c| if (!std.ascii.isDigit(c)) return null;
@@ -148,7 +149,9 @@ test kernelVersion {
     try testing.expectEqual([3]u32{ 7, 2, 11 }, kernelVersion("linux-werewolf-7.2.11-r1").?);
     try testing.expectEqual([3]u32{ 6, 18, 55 }, kernelVersion("linux-virt-6.18.55-r0").?);
     try testing.expectEqual([3]u32{ 6, 18, 42 }, kernelVersion("6.18.42").?);
-    try testing.expectEqual(null, kernelVersion("6.18"));
+    try testing.expectEqual([3]u32{ 7, 3, 0 }, kernelVersion("linux-werewolf-7.3-r7").?);
+    try testing.expectEqual([3]u32{ 6, 18, 0 }, kernelVersion("6.18").?);
+    try testing.expectEqual(null, kernelVersion("6"));
     try testing.expectEqual(null, kernelVersion("6.18."));
     try testing.expectEqual(null, kernelVersion("6.18.x"));
     try testing.expectEqual(null, kernelVersion("6.18.+5"));

@@ -1,0 +1,152 @@
+version: 1
+# These run on test/bastion-form's form, the bastion with two users: check
+# (127.0.0.1:22) and narrow (127.0.0.2:22), their keys in the image
+# (make check-bastion).
+suites:
+  - name: bastion
+    cases:
+      # The host key is the bastion's alone; the users' keys are the image's.
+      - name: bastion-private
+        steps:
+          - file: /data/svc/sshd/host-key
+            await: 60s
+            expect:
+              type: file
+              uid: bastion
+              mode: '600'
+          - file: /etc/ssh/bastion/authorized_keys
+            expect:
+              type: file
+              uid: 0
+              mode: '644'
+      - name: bastion-user
+        steps:
+          - service: sshd
+            await: 60s
+            expect:
+              user: bastion
+              uid:
+                min: 65536
+              no_new_privileges: true
+      # Each key is held to its own user's destinations, and the bastion's
+      # PermitOpen lists every user's.
+      - name: bastion-users
+        steps:
+          - file: /etc/ssh/bastion/authorized_keys
+            expect:
+              body:
+                matches: "^restrict,port-forwarding,permitopen=\"127[.]0[.]0[.]1:22\" sk-ssh-ed25519@openssh[.]com [^ \n]+ check\n"
+          - file: /etc/ssh/bastion/authorized_keys
+            expect:
+              body:
+                matches: "\nrestrict,port-forwarding,permitopen=\"127[.]0[.]0[.]2:22\" sk-ssh-ed25519@openssh[.]com [^ \n]+ narrow\n$"
+                occurrences:
+                  "\n": 2
+          - file: /etc/ssh/bastion/permit-open
+            expect:
+              body: "PermitOpen 127.0.0.1:22 127.0.0.2:22\n"
+host:
+  # From the host, as an operator: check's security key reaches 127.0.0.1:22
+  # through the bastion, and nothing else of it. Each refusal comes after
+  # sshd let check in, so a machine that never answered refuses nothing.
+  # The one failed login is last: sshd holds it against its source.
+  - name: bastion-ssh
+    cases:
+      - name: bastion-permitted-destination
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              forward: 127.0.0.1:22
+            await: 60s
+            expect:
+              status: 0
+              stdout:
+                contains: SSH-2.0-OpenSSH
+      # The host key the bastion offered before the reboot is the one it
+      # offers after: /data keeps it.
+      - name: bastion-host-key-kept
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              forward: 127.0.0.1:22
+              same_host_key: true
+            expect:
+              status: 0
+              stdout:
+                contains: SSH-2.0-OpenSSH
+      - name: bastion-no-session
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains_all:
+                  - Authenticated to
+                  - open failed
+      - name: bastion-no-destination
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              forward: 127.0.0.3:22
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains_all:
+                  - Authenticated to
+                  - administratively prohibited
+      - name: bastion-not-anothers-destination
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              forward: 127.0.0.2:22
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains_all:
+                  - Authenticated to
+                  - administratively prohibited
+      - name: bastion-no-remote
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              remote_forward: true
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains_all:
+                  - Authenticated to
+                  - forwarding failed
+      - name: bastion-pq-required
+        steps:
+          - ssh:
+              user: bastion
+              key: security
+              kex: curve25519-sha256
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: no matching key exchange method
+      # The bastion takes security keys alone: check's key file is refused,
+      # and publickey is the only method it offers.
+      - name: bastion-security-keys-only
+        steps:
+          - ssh:
+              user: bastion
+              key: file
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: Permission denied (publickey)

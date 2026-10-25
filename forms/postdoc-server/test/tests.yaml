@@ -135,6 +135,16 @@ suites:
           - file: /run/svc/postdoc/api-token
             expect:
               readable: false
+  - name: postdoc-tools
+    source: tools.zig
+    user: postdoc
+    mode: tools
+    policy:
+      pledge: stdio rpath wpath proc exec
+      run: [/usr/bin/rizin, /usr/bin/innoextract, /usr/bin/upx]
+    cases:
+      seed: [postdoc-tools-mdwe, postdoc-rizin-executable, postdoc-innoextract-executable, postdoc-upx-executable]
+      verify: [postdoc-tools-mdwe, postdoc-rizin-executable, postdoc-innoextract-executable, postdoc-upx-executable]
   - name: postdoc-audit
     source: driver.zig
     user: root

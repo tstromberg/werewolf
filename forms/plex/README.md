@@ -113,7 +113,7 @@ token for preference reads and rejects anonymous requests. This deliberately inv
 account token cannot create a library, so the suite does **not** prove account
 registration, library management, metadata fetching or client playback. Those need a
 real account test, deferred for now. The exploratory namespace playback fixture is
-compatibility evidence only. `test/check-plex-import` exercises the import lifecycle in
+compatibility evidence only. `make check-plex-import` exercises the import lifecycle in
 a disposable protected Plex VM. Production IPE/verified-boot client playback remains
 unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can be exercised
 with `IPE=1` and the signed kernel inputs described in the testing guide. The

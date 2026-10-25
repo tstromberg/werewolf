@@ -1,16 +1,17 @@
 #!/bin/sh
 # bastion-form CHECK FORM_TOOL PROVIDER writes CHECK/bastion-check, a form
 # on the bastion naming two users, as an operator makes one (make
-# check-bastion). check, whose key is root's security key in test/boot, may
-# reach 127.0.0.1:22. narrow may reach 127.0.0.2:22, which check must not
-# (forms/bastion/test/checks). Their keys are made here, to be baked in.
+# check-bastion). check, whose key is the run's security key, may reach
+# 127.0.0.1:22. narrow may reach 127.0.0.2:22, which check must not
+# (forms/bastion/test/tests.yaml). Their keys are made here, to be baked
+# in: CHECK/bastion-check-key and -sk-key are the native run's.
 set -eu
 check=$1 form_tool=$2 provider=$3
 dir=$check/bastion-check
 mkdir -p "$check" && rm -rf "$dir" && mkdir -p "$dir/test"
 test/keys "$dir" "$provider"
 test/keys "$check/bastion-narrow" "$provider"
-cp forms/bastion/test/checks "$dir/test/checks"
+cp forms/bastion/test/tests.yaml "$dir/test/tests.yaml"
 {
 	echo '# make check-bastion: the bastion, with two users.'
 	echo 'base: bastion'

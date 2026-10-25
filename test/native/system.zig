@@ -363,7 +363,11 @@ pub fn connectRules(a: Allocator, raw: []const u8, uid: u32) !Json {
         if (!std.mem.eql(u8, words.next() orelse continue, "connect")) continue;
         const who = words.next() orelse return error.NetworkPolicy;
         const all = std.mem.eql(u8, who, "all");
-        const owner = if (all) 0 else try std.fmt.parseInt(u32, who, 10);
+        // An owner is a uid, or people's FIRST-LAST, as fence reads it (lib/dns.zig Uids).
+        const dash = std.mem.findScalar(u8, who, '-');
+        const first = if (all) 0 else try std.fmt.parseInt(u32, who[0 .. dash orelse who.len], 10);
+        const last = if (dash) |d| try std.fmt.parseInt(u32, who[d + 1 ..], 10) else first;
+        if (first > last or last == std.math.maxInt(u32)) return error.NetworkPolicy;
         const protocol = words.next() orelse return error.NetworkPolicy;
         const icmp = std.mem.eql(u8, protocol, "icmp");
         const tcp = std.mem.eql(u8, protocol, "tcp");
@@ -383,7 +387,7 @@ pub fn connectRules(a: Allocator, raw: []const u8, uid: u32) !Json {
             } else if (!std.mem.eql(u8, s, "public")) return error.NetworkPolicy;
         }
         if (words.next() != null) return error.NetworkPolicy;
-        if (!all and owner != uid) continue;
+        if (!all and (uid < first or uid > last)) continue;
         const rule = if (icmp) "icmp" else try a.print("{s}/{s}{s}{s}", .{
             protocol, port, if (scope == null) "" else " ", scope orelse "",
         });
@@ -423,8 +427,25 @@ test "connect rules match whole UIDs and include global grants without losing sc
         "connect 123 tcp 80 public junk", "connect all tcp any",
         "connect 123 udp any",            "connect 123 icmp public",
         "connect 123 tcp 80 lan",         "connect all udp 53 lan",
-        "connect 123 sctp 80",
+        "connect 123 sctp 80",            "connect 60000-500 tcp 22",
+        "connect 1-4294967295 tcp 22",    "connect 1- tcp 22",
     }) |bad| {
         if (connectRules(a, bad, 123)) |_| return error.MalformedPolicyAccepted else |_| {}
     }
+}
+
+test "connect rules take people's uid ranges, as composed for ssh-su" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "connect 2078179856 tcp 443\nconnect 500-60000 tcp 22 loopback\n" ++
+        "connect 65536-1073741823 tcp 22 loopback\n";
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try connectRules(a, raw, 2078179856)).array.items.len,
+    );
+    const person = try connectRules(a, raw, 1000);
+    try std.testing.expectEqual(@as(usize, 1), person.array.items.len);
+    try std.testing.expectEqualStrings("tcp/22 loopback", person.array.items[0].string);
+    try std.testing.expectEqual(@as(usize, 0), (try connectRules(a, raw, 60001)).array.items.len);
 }

@@ -1,5 +1,0 @@
-ok  langflow-editor i=0; until wget -q -T 10 -O - http://127.0.0.1:7860/ | grep -q -i langflow; do i=$((i + 1)); [ $i -lt 120 ] || exit 1; sleep 1; done
-ok  langflow-services wget -q -T 10 -O - http://127.0.0.1:7860/health_check | grep -q '"status":"ok"'
-ok  langflow-api wget -q -T 10 -O - http://127.0.0.1:7860/openapi.json | grep -q '/api/v1/flows/'
-ok  langflow-direct-python grep -q '^exec /usr/lib/langflow/bin/python ' /etc/sv/langflow/service && ! grep -q '^run /bin/sh' /etc/sv/langflow/service
-ok  langflow-state test -s /data/svc/langflow/langflow.db

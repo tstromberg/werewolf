@@ -70,14 +70,14 @@ it is read; the expected hash comes from stage0, so this rests on the boot chain
 ([verified-boot.md](design/verified-boot.md)). Writable mounts refuse execution, setuid
 bits and, outside device filesystems, device files. Fence permits execution beneath
 `/usr` and `/oci`; leash narrows each service further. The image has no setuid or setgid
-file, and init drops the capabilities for loading kernel code, reaching hardware,
-tracing and making device nodes. Memory-Deny-Write-Execute refuses a mapping both
-writable and executable in every process, unless the form allows `jit`; a memory file
-(`memfd`) escapes it and the mount flags once mapped, so only such a form may promise
-it. None of this makes an interpreter's input trustworthy: a runtime can run a script
-from writable storage. Images built with [IPE](design/ipe.md) hold native executables
-and mappings to one verified filesystem named by a signed policy; IPE does not
-authenticate scripts either.
+file, as the build and the updater clear those bits whatever a package ships, and init
+drops the capabilities for loading kernel code, reaching hardware, tracing and making
+device nodes. Memory-Deny-Write-Execute refuses a mapping both writable and executable
+in every process, unless the form allows `jit`; a memory file (`memfd`) escapes it and
+the mount flags once mapped, so only such a form may promise it. None of this makes an
+interpreter's input trustworthy: a runtime can run a script from writable storage.
+Images built with [IPE](design/ipe.md) hold native executables and mappings to one
+verified filesystem named by a signed policy; IPE does not authenticate scripts either.
 
 Address randomization covers the kernel and every program's code, data, stack and heap.
 werewolf's programs are static PIEs; the build refuses an executable stack, or a program
@@ -147,7 +147,7 @@ them, so back that directory up.
 One profile provides all three, so for now they go together. Without them a running
 machine keeps its seal, fence and verified root: root still cannot run a program the
 image lacks, but can choose what boots next. `--dev` makes a local development image:
-busybox-full, root SSH through a Howl-managed Ed25519 key, optional seal learning
+mksh, BusyBox tools, root SSH through a Howl-managed Ed25519 key, optional seal learning
 (refused calls logged, not blocked) and, with `werewolf.debug=1`, a root console shell
 without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/` and is passed by
 `howl ssh root@NAME`; it is separate from the keys used by playground. With both the

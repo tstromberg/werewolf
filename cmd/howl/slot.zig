@@ -516,7 +516,7 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     // The root directory itself, first: without an entry for it,
     // mkfs.erofs gives / the builder's uid and mode 0777, which sshd's
     // StrictModes rightly refuses keys under. Then, if the image takes the
-    // sh shim, /bin/sh as a link to it, which a package's sh, busybox's,
+    // sh shim, /bin/sh as a link to it, which a package's sh, mksh's,
     // or a form's replaces (cmd/sh-shim/README.md).
     const mtree = try b.path("{s}/root.mtree", .{out});
     const head = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n";
@@ -531,11 +531,16 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         .data = if (try takes(b, "sh-shim")) head ++ sh else head,
     });
     const root_tar = try b.path("{s}/root.tar", .{out});
+    // Appending, bsdtar writes in the format it finds in the archive: plain
+    // ustar if nothing before needed more, which has no room for a long path
+    // or link and skips it with a warning, exiting 0 (an OCI image's pnpm
+    // links, for one). Every write names paxr, so every name fits.
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(
-        b.gpa,
-        &.{ "bsdtar", "-cf", root_tar, "--uid", "0", "--gid", "0", "--numeric-owner" },
-    );
+    try argv.appendSlice(b.gpa, &.{
+        "bsdtar", "-cf",             root_tar, "--format",
+        "paxr",   "--uid",           "0",      "--gid",
+        "0",      "--numeric-owner",
+    });
     var f: forms.Failure = .{};
     const pruned = compose.prune(b.gpa, b.chain, &f) catch |err| switch (err) {
         error.Form => return b.steps.fail(f.text),
@@ -576,9 +581,22 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         const from_programs = try b.path("@{s}", .{programs});
         for (roots.items) |name| {
             const into = try b.path(",^usr/,oci/{s}/usr/,", .{name});
-            try b.run(&.{ "bsdtar", "-rf", root_tar, "-s", into, from_programs }, .{});
+            try b.run(
+                &.{ "bsdtar", "-rf", root_tar, "--format", "paxr", "-s", into, from_programs },
+                .{},
+            );
         }
         try Dir.cwd().deleteFile(b.io, programs);
+    }
+    // No program runs with more than its caller's privilege, whatever a
+    // package ships (lib/image.zig).
+    {
+        const file = try Dir.cwd().openFile(b.io, root_tar, .{ .mode = .read_write });
+        defer file.close(b.io);
+        for (try image.stripSetid(b.gpa, b.io, file)) |s| try b.steps.note(
+            "/{s} loses its setuid and setgid bits: mode {o:0>4} to {o:0>4}",
+            .{ mem.cutPrefix(u8, s.name, "./") orelse s.name, s.mode, s.mode & ~@as(u32, 0o6000) },
+        );
     }
     try checkPrograms(b, root_tar);
     Dir.cwd().deleteFile(b.io, target) catch {};

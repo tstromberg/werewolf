@@ -1,15 +1,23 @@
 #!/bin/sh
-# forms/sftpgo/test/config DIR: the sftpgo form's config for make check, in DIR: one
-# user, check, with the key make check made for the run (DIR's sibling
-# FORM-key.pub, which test/boot logs in with), allowed everything in a
-# directory of its own.
+# forms/sftpgo/test/config DIR: the sftpgo form's config for its checks, in
+# DIR: one user, check, allowed everything in a directory of its own, by
+# the run's key file (DIR's sibling FORM-key.pub, which the host suite
+# logs in with, tools/native-ssh.zig). Without that key, as under howl test
+# --iterate, check gets one made here, and its private half is thrown away.
 set -eu
 d=$1/sftpgo
 mkdir -p "$d"
 umask 077
-key=$(cat "${1%-config}-key.pub")
+key=${1%-config}-key.pub
+if [ ! -e "$key" ]; then
+	rm -f "$d/key" "$d/key.pub"
+	ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f "$d/key"
+	rm "$d/key"
+	key=$d/key.pub
+fi
 cat >"$d/users.json" <<JSON
 {"users": [{"username": "check", "status": 1, "home_dir": "/data/svc/sftpgo/users/check",
-  "public_keys": ["$key"],
+  "public_keys": ["$(cat "$key")"],
   "permissions": {"/": ["list", "download", "upload", "overwrite", "delete", "rename", "create_dirs"]}}]}
 JSON
+rm -f "$d/key.pub"

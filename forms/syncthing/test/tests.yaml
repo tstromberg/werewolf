@@ -54,24 +54,20 @@ suites:
                   <autoUpgradeIntervalH>0<: 1
                   <relaysEnabled>true<: 1
                   <globalAnnounceEnabled>false<: 1
-                  <listenAddress>tcp://0.0.0.0:22000<: 1
-                  <listenAddress>quic://0.0.0.0:22000<: 1
-                  <listenAddress>dynamic+https://relays.syncthing.net/endpoint<: 1
+                  '<listenAddress>tcp://0.0.0.0:22000<': 1
+                  '<listenAddress>quic://0.0.0.0:22000<': 1
+                  '<listenAddress>dynamic+https://relays.syncthing.net/endpoint<': 1
                   <listenAddress>: 3
       - name: st-gui-loopback
         steps:
           - file: /usr/share/werewolf/net
             expect:
               body:
-                contains: 'listen tcp 8384 loopback
-
-                  '
+                contains: "listen tcp 8384 loopback\n"
           - file: /usr/share/werewolf/net
             expect:
               body:
-                contains: 'listen tcp 22000
-
-                  '
+                contains: "listen tcp 22000\n"
           - listeners: tcp
             expect:
               contains:

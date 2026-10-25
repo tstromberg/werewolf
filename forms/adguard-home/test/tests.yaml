@@ -196,17 +196,13 @@ suites:
               stdout: "0.0.0.0\n"
             timeout: 5s
             await: 120s
+  # With the server down, a process bound to its port cannot send as it.
   - name: agh-source-port
-    source: driver.zig
-    mode: squatter
-    user: root
     policy:
-      pledge: stdio rpath wpath proc inet unix connect exec
       run:
         - /usr/bin/sv
         - /usr/bin/drill
     cases:
-      seed:
-        - agh-squatter
-      verify:
-        - agh-squatter
+      - name: agh-squatter
+        steps:
+          - squat: adguard-home

@@ -7,9 +7,7 @@
 pub const tiers_pub = @embedFile("release/tiers.pub");
 pub const advisories = @embedFile("release/advisories");
 pub const enroll_boot = @embedFile("tools/enroll-boot");
-pub const build_helper = @embedFile("tools/build-helper");
 pub const build_helper_template = @embedFile("boot/build-helper.yaml");
-pub const native_firmware = @embedFile("tools/native-firmware");
 pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
 /// microsoft_uefi_cas sign other vendors' loaders; Azure's UEFI CA
 /// template trusts them and howl revokes them (boot/microsoft/README.md).
@@ -18,10 +16,6 @@ pub const microsoft_uefi_cas = [_][]const u8{
     @embedFile("boot/microsoft/microsoft-uefi-ca-2023.der"),
     @embedFile("boot/microsoft/microsoft-option-rom-uefi-ca-2023.der"),
 };
-pub const local_tpm = @embedFile("tools/local-tpm");
-pub const bhyve_network = @embedFile("tools/bhyve-network");
-pub const owner_control = @embedFile("tools/owner-control");
-pub const boot_download = @embedFile("tools/boot-download");
 pub const protected_trust = @embedFile("release/protected/trust.json");
 pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");
 pub const protected_image_certificate = @embedFile("release/protected/image.crt");
@@ -55,8 +49,6 @@ pub const boot = [_]struct { path: []const u8, data: []const u8 }{
 
 /// Pinned security builders are available even when howl runs without its checkout.
 pub const secure_sources = [_]struct { path: []const u8, data: []const u8 }{
-    .{ .path = "local-prerequisites", .data = @embedFile("tools/local-prerequisites") },
-    .{ .path = "build-helper", .data = build_helper },
     .{ .path = "boot/build-helper.yaml", .data = build_helper_template },
     .{ .path = "boot/kernel-build", .data = @embedFile("boot/kernel-build") },
     .{ .path = "tools/test-kernel", .data = @embedFile("tools/test-kernel") },

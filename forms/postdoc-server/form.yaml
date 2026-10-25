@@ -14,22 +14,29 @@ with: [cloudflared, sshd]
 
 packages:
   - postdoc
+  # Native analysis and unpacking tools used by postdoc's engines.
+  - rizin
+  - innoextract
+  - upx
+  # Standalone clients for operator diagnostics and published API checks.
+  - wget
+  - grep
   # What it links, from Wolfi. libc and libm come with the base.
   - libgcc
   - libstdc++
 
 # yara-x, beneath cleave, compiles its rules to WebAssembly and wasmtime
-# compiles that to machine code as the server starts.
+# compiles that to machine code as the server starts. Its helper programs
+# enter narrower leashes, which restore Memory-Deny-Write-Execute.
 allow: [jit]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   kernel-write-xor-execute: wasmtime compiles the server's rules to machine code as it runs (allow jit)
-  network-no-login: sshd, by security key, is how operators reach the server; busybox-full brings telnetd too, which nothing starts
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
-  programs-no-shell: busybox-full's shell, for those who log in
+  network-no-login: sshd, by security key, provides operator access
+  programs-no-downloaders: wget supports local API and tunnel diagnostics
+  programs-no-shell: mksh provides operator shells and /bin/sh
 
 # make check's, for this form alone (forms/README.md). Online: the server
 # downloads its rules and model before it answers. They take about
@@ -46,7 +53,9 @@ services:
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/2000 loopback]
     connect: [udp/7844 tcp/7844 tcp/443 tcp/80 tcp/49999]
-    lookup: "*"
+    lookup:
+      - "*"
+      - "*.argotunnel.com A AAAA TXT SRV"
     secret: TUNNEL_TOKEN /run/config/cloudflared/token
     memory: 256
     nofile: 4096
@@ -67,7 +76,18 @@ services:
   postdoc:
     exec: /usr/bin/postdoc serve --token-file /run/svc/postdoc/api-token
     user: postdoc
-    pledge: stdio rpath wpath inet unix netlink connect listen proc memfd
+    pledge: stdio rpath wpath inet unix netlink connect listen proc memfd exec landlock seccomp
+    run: /usr/bin/rizin /usr/bin/innoextract /usr/bin/upx
+    narrow:
+      - /usr/bin/rizin pledge stdio rpath wpath proc
+      - /usr/bin/rizin read /data/svc/postdoc
+      - /usr/bin/rizin write /data/svc/postdoc
+      - /usr/bin/innoextract pledge stdio rpath wpath proc
+      - /usr/bin/innoextract read /data/svc/postdoc
+      - /usr/bin/innoextract write /data/svc/postdoc
+      - /usr/bin/upx pledge stdio rpath wpath proc
+      - /usr/bin/upx read /data/svc/postdoc
+      - /usr/bin/upx write /data/svc/postdoc
     listen: [tcp/49999 loopback]
     connect:
       - tcp/443 tcp/80 tcp/8081
@@ -84,5 +104,6 @@ services:
       - XDG_DATA_HOME=/data/svc/postdoc
       - XDG_CACHE_HOME=/data/svc/postdoc/cache
       - TMPDIR=/data/svc/postdoc
+      - PATH=/etc/sv/postdoc/narrow:/usr/bin
       - SCAN_IDLE_WORKER_SLOTS=0
       - SCAN_NO_UPDATE_CHECK=1

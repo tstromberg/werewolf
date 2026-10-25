@@ -78,21 +78,25 @@ services:
   # Overleaf's compiler and the nginx that serves its PDFs, started by
   # clsi-start as _oci-clsi in a copy of the image of its own: TeX runs
   # what its users write, so it shares no user, file or secret with
-  # Overleaf's services. TeX reads only its project and TeX's own files,
-  # writes only beneath it, and runs only TeX Live's restricted helpers
-  # (shell_escape p): never what a document names. Of the image it may run
-  # nginx, TeX Live and the programs TeX and latexmk start (perl, sh, qpdf,
-  # pdftocairo). It reaches Overleaf's file stores, for a project's files,
-  # and nothing else.
+  # Overleaf's services. Each compile runs on a leash of its own,
+  # clsi-confine's: TeX reads only its project, TeX's own files and a
+  # cache of that project's own, writes only beneath them, connects
+  # nowhere, and runs only TeX Live's restricted helpers (shell_escape p):
+  # never what a document names. Of the image it may run nginx, TeX Live
+  # and the programs TeX and latexmk start (perl, sh, qpdf, pdftocairo).
+  # It reaches Overleaf's file stores, for a project's files, and nothing
+  # else.
   clsi:
     image: docker.io/sharelatex/sharelatex@sha256:d2c20ae595d64f61dca224864b90a5594fb71df0c20c014c2dcaae595f2de7d8
     exec: /usr/bin/node /werewolf/clsi-start.mjs
-    pledge: stdio rpath wpath inet unix connect listen proc exec sendfile
+    # landlock: clsi-confine leashes each compile further.
+    pledge: stdio rpath wpath inet unix connect listen proc exec sendfile landlock
     # CLSI's load agents also listen on loopback, at their upstream fixed ports.
     listen: [tcp/3013 tcp/3048 tcp/3049 tcp/8080 loopback]
     connect: [tcp/3009 tcp/3100]
     write: /var/lib/overleaf
     run:
+      - /usr/lib/werewolf/clsi-confine
       - /usr/sbin/nginx
       - /usr/bin/perl /usr/bin/env /usr/bin/dash /usr/bin/qpdf /usr/bin/pdftocairo
       - /usr/local/texlive/2026/bin/x86_64-linux/

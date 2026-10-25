@@ -354,16 +354,16 @@ suites:
               stderr:
                 contains: Can't contact LDAP server
   - name: openldap-privacy
-    source: driver.zig
-    mode: privacy
-    user: root
-    policy:
-      pledge: stdio rpath
-      read:
-        - /run/svc/openldap
-        - /run/config/openldap/admin-password
+    fixtures:
+      admin: /run/config/openldap/admin-password
     cases:
-      seed:
-        - ldap-secret-copies
-      verify:
-        - ldap-secret-copies
+      - name: ldap-secret-copies
+        steps:
+          - tree: /run/svc/openldap
+            expect:
+              files:
+                min: 1
+                max: 128
+              content:
+                absent:
+                  fixture: admin

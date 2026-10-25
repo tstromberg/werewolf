@@ -402,8 +402,10 @@ fn answering(io: Io, a: Allocator, http: bool) !void {
     var client = if (http) try driver.fetch.Client.init(a) else null;
     defer if (client) |*c| c.deinit();
     for (ports) |port| {
-        if (!std.mem.eql(u8, port.protocol, "tcp") or port.port == 22) continue;
-        if (http and (port.port == 443 or port.loopback)) continue;
+        // Public ports only, as a client would reach them: a loopback listener
+        // may open only while it has work, as n8n's task runner does.
+        if (!std.mem.eql(u8, port.protocol, "tcp") or port.port == 22 or port.loopback) continue;
+        if (http and port.port == 443) continue;
         // Cold application setup may finish after its supervisor reports up.
         const until = Io.Clock.awake.now(io).addDuration(.fromSeconds(120));
         while (true) {

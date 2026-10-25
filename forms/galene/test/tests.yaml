@@ -55,8 +55,7 @@ suites:
             expect:
               status: 200
               json:
-                ? ''
-                : []
+                '': []
       - name: galene-hashed
         steps:
           - file: /run/svc/galene/operator-password

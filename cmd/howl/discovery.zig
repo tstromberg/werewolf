@@ -43,16 +43,13 @@ fn description(gpa: Allocator, text: []const u8, name: []const u8) !Description 
     return .{ .guide = try gpa.print("{s}forms/{s}/form.yaml", .{ repository, name }) };
 }
 
-fn checkout(io: Io, gpa: Allocator, why: *howl.Why) ![]Row {
-    var dir = Io.Dir.cwd().openDir(io, "forms", .{ .iterate = true }) catch
+/// checkout returns a row per form and architecture under root's forms/,
+/// described from root's docs/forms-catalog.md, else howl's copy of it.
+fn checkout(io: Io, gpa: Allocator, root: Io.Dir, why: *howl.Why) ![]Row {
+    var dir = root.openDir(io, "forms", .{ .iterate = true }) catch
         return why.refuse("no ./forms; use --build from a werewolf checkout root", .{});
     defer dir.close(io);
-    const text = Io.Dir.cwd().readFileAlloc(
-        io,
-        "docs/forms-catalog.md",
-        gpa,
-        .limited(1 << 20),
-    ) catch
+    const text = root.readFileAlloc(io, "docs/forms-catalog.md", gpa, .limited(1 << 20)) catch
         files.forms_catalog;
     var rows: std.ArrayList(Row) = .empty;
     var it = dir.iterate();
@@ -61,7 +58,7 @@ fn checkout(io: Io, gpa: Allocator, why: *howl.Why) ![]Row {
         dir.access(io, try gpa.print("{s}/form.yaml", .{entry.name}), .{}) catch continue;
         const name = try gpa.dupe(u8, entry.name);
         var failure: forms.Failure = .{};
-        const chain = forms.chain(io, gpa, Io.Dir.cwd(), name, &failure) catch |err| switch (err) {
+        const chain = forms.chain(io, gpa, root, name, &failure) catch |err| switch (err) {
             error.Form => return why.refuse("{s}", .{failure.text}),
             else => return err,
         };
@@ -126,10 +123,15 @@ fn published(io: Io, gpa: Allocator, base: []const u8, why: *howl.Why) ![]Row {
         "cannot fetch the published form catalog: {s}\nUse howl forms --build from a checkout.",
         .{mem.trim(u8, fetched.stderr, "\r\n ")},
     );
+    return verified(gpa, fetched.stdout);
+}
+
+/// verified returns the rows of a catalog werewolf's image key signed.
+fn verified(gpa: Allocator, text: []const u8) ![]Row {
     const head = try std.json.parseFromSliceLeaky(struct {
         manifest: []const u8,
         signature: []const u8,
-    }, gpa, fetched.stdout, .{});
+    }, gpa, text, .{});
     if (head.signature.len != 512 and head.signature.len != 768 and head.signature.len != 1024)
         return error.BadCatalogSignature;
     const signature = try gpa.alloc(u8, head.signature.len / 2);
@@ -148,45 +150,83 @@ fn printable(text: []const u8) bool {
     return true;
 }
 
-pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
-    var query: ?[]const u8 = null;
-    var arch: ?howl.Arch = null;
-    var local = false;
-    var remote = false;
-    var json = false;
+/// Query is howl forms' line: a form's name or a search, an architecture,
+/// the source and the format.
+const Query = struct {
+    word: ?[]const u8 = null,
+    arch: ?howl.Arch = null,
+    local: bool = false,
+    remote: bool = false,
+    json: bool = false,
+    help: bool = false,
+};
+
+fn parse(args: []const []const u8, why: *howl.Why) !Query {
+    var q: Query = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-            howl.say(io, "{s}", .{syntax});
-            return;
+            return .{ .help = true };
         } else if (mem.eql(u8, arg, "--build")) {
-            local = true;
+            q.local = true;
         } else if (mem.eql(u8, arg, "--published")) {
-            remote = true;
+            q.remote = true;
         } else if (mem.eql(u8, arg, "--json")) {
-            json = true;
+            q.json = true;
         } else if (arg.len > 0 and arg[0] == '-') {
             const flag, const value = try howl.flagValue(args, &i, why);
             if (!mem.eql(u8, flag, "--arch")) return why.refuse("{s}\n{s}", .{ flag, syntax });
-            if (arch != null) return why.refuse("--arch given twice", .{});
-            arch = howl.archName(value) orelse return why.refuse(howl.arch_refusal, .{value});
+            if (q.arch != null) return why.refuse("--arch given twice", .{});
+            q.arch = howl.archName(value) orelse return why.refuse(howl.arch_refusal, .{value});
         } else {
-            if (query != null) return why.refuse(
+            if (q.word != null) return why.refuse(
                 "give one form name or search term\n{s}",
                 .{syntax},
             );
-            query = arg;
+            q.word = arg;
         }
     }
-    if (local and remote) return why.refuse("--build and --published conflict", .{});
+    if (q.local and q.remote) return why.refuse("--build and --published conflict", .{});
+    return q;
+}
+
+pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
+    const q = try parse(args, why);
+    if (q.help) {
+        howl.say(io, "{s}", .{syntax});
+        return;
+    }
     const have_checkout = if (Io.Dir.cwd().access(io, "forms", .{})) |_| true else |_| false;
-    local = local or (!remote and have_checkout);
+    const local = q.local or (!q.remote and have_checkout);
     const base = try mirror(gpa);
-    const all = if (local) try checkout(io, gpa, why) else try published(io, gpa, base, why);
+    const all = if (local)
+        try checkout(io, gpa, Io.Dir.cwd(), why)
+    else
+        try published(io, gpa, base, why);
+    const found = try select(gpa, all, q, local, why);
+    var out = Io.File.stdout().writerStreaming(io, &.{});
+    const w = &out.interface;
+    if (q.json) {
+        try w.writeAll(try std.json.Stringify.valueAlloc(gpa, .{
+            .source = if (local) "checkout" else "published",
+            .forms = found.rows,
+        }, .{ .whitespace = .indent_2 }));
+        return w.writeByte('\n');
+    }
+    try show(w, gpa, found, local, base);
+}
+
+/// Found is what a query selected, sorted, and whether it named one form.
+const Found = struct { rows: []Row, exact: bool };
+
+/// select returns all's rows q asks for. A word naming a form selects it;
+/// any other word searches names and descriptions. It refuses a catalog row
+/// that could drive a terminal or point anywhere but werewolf's repository.
+fn select(gpa: Allocator, all: []const Row, q: Query, local: bool, why: *howl.Why) !Found {
     var selected: std.ArrayList(Row) = .empty;
-    const exact = if (query) |q| for (all) |row| {
-        if (mem.eql(u8, row.form, q)) break true;
+    const exact = if (q.word) |word| for (all) |row| {
+        if (mem.eql(u8, row.form, word)) break true;
     } else false else false;
     for (all) |row| {
         if (!forms.isName(row.form) or !printable(row.summary) or !printable(row.status) or
@@ -196,20 +236,20 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
             return error.BadCatalogEntry;
         if (row.latest) |latest| if (!printable(latest.object) or !printable(latest.serial))
             return error.BadCatalogEntry;
-        if (arch != null and arch.? != row.arch) continue;
-        if (query) |q| {
+        if (q.arch != null and q.arch.? != row.arch) continue;
+        if (q.word) |word| {
             if (exact) {
-                if (!mem.eql(u8, row.form, q)) continue;
-            } else if (std.ascii.findIgnoreCase(row.form, q) == null and
-                std.ascii.findIgnoreCase(row.summary, q) == null) continue;
+                if (!mem.eql(u8, row.form, word)) continue;
+            } else if (std.ascii.findIgnoreCase(row.form, word) == null and
+                std.ascii.findIgnoreCase(row.summary, word) == null) continue;
         }
         if (!exact and mem.eql(u8, row.status, "unsupported architecture")) continue;
         try selected.append(gpa, row);
     }
     if (selected.items.len == 0) {
-        if (exact and arch != null) return why.refuse(
+        if (exact and q.arch != null) return why.refuse(
             "{s} has no {t} form; use howl forms {s} for supported architectures",
-            .{ query.?, arch.?, query.? },
+            .{ q.word.?, q.arch.?, q.word.? },
         );
         return why.refuse("no forms match; use howl forms to browse", .{});
     }
@@ -221,22 +261,18 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
             return mem.order(u8, a.provider, b.provider) == .lt;
         }
     }.less);
-    var out = Io.File.stdout().writerStreaming(io, &.{});
-    const w = &out.interface;
-    if (json) {
-        try w.writeAll(try std.json.Stringify.valueAlloc(gpa, .{
-            .source = if (local) "checkout" else "published",
-            .forms = selected.items,
-        }, .{ .whitespace = .indent_2 }));
-        return w.writeByte('\n');
-    }
+    return .{ .rows = selected.items, .exact = exact };
+}
+
+/// show writes found as a table, or one form's setup and commands.
+fn show(w: *Io.Writer, gpa: Allocator, found: Found, local: bool, base: []const u8) !void {
     try w.print("Forms from {s}\n", .{if (local) "this checkout" else "the signed image catalog"});
-    if (exact) {
-        const row = selected.items[0];
+    if (found.exact) {
+        const row = found.rows[0];
         try w.print("\n{s}\n{s}\nSetup: {s}\nImages: {s}/{s}/index.html\n", .{
             row.form, row.summary, row.guide, base, row.form,
         });
-        for (selected.items) |item| {
+        for (found.rows) |item| {
             if (local) {
                 try w.print("  {t}: {s}\n", .{ item.arch, item.status });
                 continue;
@@ -262,13 +298,13 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         "\nFORM                     ARCHITECTURES       PUBLISHED           DESCRIPTION\n",
     );
     var previous: []const u8 = "";
-    for (selected.items) |row| {
+    for (found.rows) |row| {
         if (mem.eql(u8, previous, row.form)) continue;
         previous = row.form;
         var arches: Io.Writer.Allocating = .init(gpa);
         var images: Io.Writer.Allocating = .init(gpa);
         var seen: std.EnumSet(howl.Arch) = .empty;
-        for (selected.items) |item| if (mem.eql(u8, item.form, row.form)) {
+        for (found.rows) |item| if (mem.eql(u8, item.form, row.form)) {
             if (!seen.contains(item.arch)) {
                 seen.insert(item.arch);
                 if (arches.written().len > 0) try arches.writer.writeByte(',');
@@ -312,4 +348,94 @@ test "form descriptions preserve setup guide links" {
     );
     try std.testing.expectEqualStrings("A web server.", info.summary);
     try std.testing.expectEqualStrings(repository ++ "forms/caddy/README.md", info.guide);
+}
+
+const testing = std.testing;
+
+test "howl forms takes one word, an architecture and one source" {
+    var why: howl.Why = .{};
+    const q = try parse(&.{ "web", "--arch=arm64", "--build", "--json" }, &why);
+    try testing.expectEqualStrings("web", q.word.?);
+    try testing.expect(q.arch.? == .aarch64 and q.local and q.json and !q.remote);
+    try testing.expect((try parse(&.{ "--help", "--unknown" }, &why)).help);
+    for ([_][]const []const u8{
+        &.{ "--published", "--build" },
+        &.{"--unknown"},
+        &.{ "one", "two" },
+        &.{ "--arch", "riscv64" },
+        &.{ "--arch", "arm64", "--arch", "x86_64" },
+    }) |args| try testing.expectError(error.Refused, parse(args, &why));
+}
+
+test "a checkout's forms, by name, search and architecture" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][2][]const u8{
+        .{ "minimal", "archs: [aarch64, x86_64]\n" },
+        .{ "web", "base: minimal\n" },
+        .{ "intel-only", "base: minimal\narchs: [x86_64]\n" },
+    }) |form| {
+        try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
+        try tmp.dir.writeFile(io, .{
+            .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}),
+            .data = form[1],
+        });
+    }
+    try tmp.dir.createDirPath(io, "docs");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/forms-catalog.md",
+        .data = "| [web](../forms/web/README.md) | A searchable web server. |\n",
+    });
+    var why: howl.Why = .{};
+    const rows = try checkout(io, gpa, tmp.dir, &why);
+    var names: Io.Writer.Allocating = .init(gpa);
+    for ([_]struct { Query, []const u8 }{
+        .{ .{}, "intel-only/x86_64 minimal/aarch64 minimal/x86_64 web/aarch64 web/x86_64 " },
+        .{ .{ .arch = .aarch64 }, "minimal/aarch64 web/aarch64 " },
+        .{ .{ .word = "searchable" }, "web/aarch64 web/x86_64 " },
+        .{ .{ .word = "web" }, "web/aarch64 web/x86_64 " },
+    }) |case| {
+        names.clearRetainingCapacity();
+        for ((try select(gpa, rows, case[0], true, &why)).rows) |row|
+            try names.writer.print("{s}/{t} ", .{ row.form, row.arch });
+        try testing.expectEqualStrings(case[1], names.written());
+    }
+    try testing.expectError(
+        error.Refused,
+        select(gpa, rows, .{ .word = "intel-only", .arch = .aarch64 }, true, &why),
+    );
+    try testing.expect(mem.find(u8, why.text, "has no aarch64 form") != null);
+    try testing.expectError(error.Refused, select(gpa, rows, .{ .word = "missing" }, true, &why));
+    var text: Io.Writer.Allocating = .init(gpa);
+    try show(&text.writer, gpa, try select(gpa, rows, .{ .word = "web" }, true, &why), true, "");
+    for ([_][]const u8{
+        "howl run --build --with web\n",
+        "howl test --with web\n",
+        "howl pack --build --with web -h\n",
+        "Setup: " ++ repository ++ "forms/web/README.md\n",
+    }) |line| try testing.expect(mem.find(u8, text.written(), line) != null);
+    try tmp.dir.createDirPath(io, "outside");
+    var outside = try tmp.dir.openDir(io, "outside", .{});
+    defer outside.close(io);
+    try testing.expectError(error.Refused, checkout(io, gpa, outside, &why));
+    try testing.expect(mem.find(u8, why.text, "no ./forms") != null);
+}
+
+test "a catalog must carry werewolf's signature" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    try testing.expectError(
+        error.BadCatalogSignature,
+        verified(gpa, "{\"manifest\":\"{}\",\"signature\":\"00\"}"),
+    );
+    const zeros: [512]u8 = @splat('0');
+    try testing.expectError(
+        error.BadSignature,
+        verified(gpa, "{\"manifest\":\"{}\",\"signature\":\"" ++ zeros ++ "\"}"),
+    );
 }

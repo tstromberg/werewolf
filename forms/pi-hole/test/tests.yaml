@@ -64,17 +64,23 @@ suites:
       - name: ph-minimal-curl
         steps:
           - file: /oci/pi-hole/usr/lib/werewolf-pihole/curl
-            expect: {type: file}
+            expect:
+              type: file
           - file: /oci/pi-hole/usr/bin/curl
-            expect: {exists: false}
+            expect:
+              exists: false
           - file: /oci/pi-hole/usr/bin/git
-            expect: {exists: false}
+            expect:
+              exists: false
           - file: /oci/pi-hole/usr/lib/libcurl.so.4
-            expect: {exists: false}
+            expect:
+              exists: false
           - file: /oci/pi-hole/usr/lib/libbrotlidec.so.1
-            expect: {exists: false}
+            expect:
+              exists: false
           - file: /oci/pi-hole/usr/lib/libbrotlicommon.so.1
-            expect: {exists: false}
+            expect:
+              exists: false
           - file: /etc/sv/pi-hole/service
             expect:
               body:
@@ -137,17 +143,13 @@ suites:
               stdout: "0.0.0.0\n"
             timeout: 5s
             await: 90s
+  # With the server down, a process bound to its port cannot send as it.
   - name: ph-source-port
-    source: driver.zig
-    mode: squatter
-    user: root
     policy:
-      pledge: stdio rpath wpath proc inet unix connect exec
       run:
         - /usr/bin/sv
         - /usr/bin/drill
     cases:
-      seed:
-        - ph-squatter
-      verify:
-        - ph-squatter
+      - name: ph-squatter
+        steps:
+          - squat: pi-hole

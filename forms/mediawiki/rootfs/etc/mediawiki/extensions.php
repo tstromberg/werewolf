@@ -7,7 +7,8 @@
  * Left out, as each runs a program or reaches another server: Math
  * (Wikimedia's renderer), SyntaxHighlight (pygmentize), Scribunto (a Lua
  * program), PdfHandler (Ghostscript), SpamBlacklist (Wikimedia's lists);
- * and Echo and those on it, as the form sends no mail.
+ * and Echo and those on it, as the form sends no mail. Interwiki is in
+ * MediaWiki 1.46's core.
  */
 return [
 	'skins' => [ 'Vector', 'MonoBook', 'Timeless' ],
@@ -18,7 +19,6 @@ return [
 		'CodeEditor',
 		'ImageMap',
 		'InputBox',
-		'Interwiki',
 		'MultimediaViewer',
 		'Nuke',
 		'OATHAuth',

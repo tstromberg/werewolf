@@ -113,8 +113,8 @@ fuzzed in the same files: malformed messages (trailing data, compression
 loops, counts past the buffer, wrong questions), round trips, grant parsing
 and label-boundary matching, IPC frames as untrusted, and what screening
 keeps, with tunnels' and real services' names. `make check-unwound` runs the
-real fence and unwound in namespaces against a fixture resolver: allow, deny,
-aliases, TCP fallback, forgeries, resolver change, label forgery, screening (a
-poller, a slow tunnel past its budget, data-shaped names, silence not kept),
-the cache's TTLs, negative answers, merging and eviction, and upstream death.
+real fence and unwound against a fixture resolver (`test/unwound/cases.yaml`):
+allow, deny, aliases, TCP fallback, forgeries, resolver change, label forgery,
+screening (a poller, a slow tunnel past its budget, data-shaped names, silence
+not kept), the cache's TTLs, negative answers, merging, eviction, upstream death.
 `make test` runs the seeds; `make fuzz-unwound` runs each target for longer.

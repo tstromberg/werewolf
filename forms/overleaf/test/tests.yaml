@@ -1,0 +1,176 @@
+version: 1
+# Ten Node services, MongoDB and TeX start slowly, slower still emulated.
+timeout: 1800s
+suites:
+  # Nothing restarts Overleaf until it has migrated, made the administrator
+  # and answers through Caddy, whose own CA signs for localhost.
+  - name: overleaf-ready
+    readiness: true
+    cases:
+      - name: overleaf-starting
+        steps:
+          - file: /data/svc/caddy/pki/authorities/local/root.crt
+            await: 600s
+            expect:
+              type: file
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            await: 1200s
+            expect:
+              status: 200
+  - name: overleaf
+    fixtures:
+      password: /run/config/overleaf/admin-password
+    cases:
+      - name: overleaf-up
+        steps:
+          - fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            await: 340s
+            expect:
+              status: 200
+      # history-v1 names no host when it listens; loopback.cjs gives it
+      # 127.0.0.1, as the form declares, and no other address.
+      - name: overleaf-history-loopback
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 3100
+            await: 120s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 3100
+      # Compiles are apart: clsi runs as a user of its own, and the secrets
+      # Overleaf's services share are theirs alone.
+      - name: overleaf-apart
+        steps:
+          - service: overleaf
+            expect:
+              user: _oci-overleaf
+          - service: clsi
+            expect:
+              user: _oci-clsi
+          - file: /data/svc/overleaf/var/lib/overleaf/secrets.json
+            expect:
+              type: file
+              uid: _oci-overleaf
+              mode: '600'
+          - file: /data/svc/overleaf
+            expect:
+              type: directory
+              mode: '700'
+          # A sealed process's environment is unreadable: leash builds clsi's
+          # from this file, to which clsi-start adds no secret.
+          - file: /etc/sv/clsi/service
+            expect:
+              body:
+                not_matches: "\n(config|secret) "
+                contains_none: [SECRET, PASSWORD, MONGO]
+      # The administrator is the config's: it signs in and reaches the admin pages.
+      - name: overleaf-admin
+        steps:
+          - name: form
+            fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+          # Overleaf answers a login in JSON only to who asks; others it redirects.
+          - fetch:
+              url: https://localhost/login
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+              headers:
+                Accept: application/json
+                X-Csrf-Token:
+                  step: form
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status: 200
+              json:
+                /redir:
+                  type: string
+          - fetch:
+              url: https://localhost/admin
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+      # Nobody claims the machine: /launchpad sends a stranger to sign in and
+      # makes no administrator, and nobody signs up.
+      - name: overleaf-no-claim
+        steps:
+          - fetch:
+              url: https://localhost/launchpad
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: stranger
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: '^(https://localhost)?/login$'
+          - name: form
+            fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: stranger
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/launchpad/register_admin
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: stranger
+              headers:
+                X-Csrf-Token:
+                  step: form
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                email: evil@example.com
+                password: werewolf-evil-pass-1
+            expect:
+              status:
+                min: 300
+          - fetch:
+              url: https://localhost/register
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: stranger
+              headers:
+                X-Csrf-Token:
+                  step: form
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                email: evil@example.com
+                password: werewolf-evil-pass-1
+            expect:
+              status: 404
+          - fetch:
+              url: https://localhost/login
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: stranger
+              headers:
+                Accept: application/json
+                X-Csrf-Token:
+                  step: form
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                email: evil@example.com
+                password: werewolf-evil-pass-1
+            expect:
+              status: 401
+              json:
+                /message/type: error
+              body:
+                absent: redir

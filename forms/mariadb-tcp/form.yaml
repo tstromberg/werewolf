@@ -15,6 +15,7 @@ services:
   mariadb:
     exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
     before: /usr/lib/werewolf/mariadb-init
+    run: /usr/bin/mariadb-upgrade /usr/bin/mariadb /usr/bin/mariadb-check
     user: mariadb
     pledge: stdio rpath wpath unix inet listen proc aio
     listen: [tcp/3306]

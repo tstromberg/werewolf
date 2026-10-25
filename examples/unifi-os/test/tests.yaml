@@ -1,0 +1,199 @@
+version: 1
+# Core and Network start slowly; every wait below has its own bound.
+timeout: 1200s
+suites:
+  - name: unifi-stores-ready
+    source: driver.zig
+    mode: ready
+    readiness: true
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    fixtures:
+      password: /run/config/rabbitmq/password
+    cases:
+      seed: [unifi-stores-ready]
+      verify: [unifi-stores-ready]
+  - name: unifi-ready
+    readiness: true
+    cases:
+      - name: unifi-core-ready
+        steps:
+          - fetch:
+              url: http://127.0.0.1:11081/api/system
+            await: 300s
+            expect:
+              status: 200
+      - name: unifi-network-ready
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8081/status
+            await: 300s
+            expect:
+              status: 200
+              json:
+                /meta/rc: ok
+                /meta/server_running: true
+                /meta/db_running: true
+                /meta/db_connected: true
+                /meta/db_repairing: false
+                /meta/db_importing: false
+  - name: unifi-stores
+    source: driver.zig
+    mode: stores
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    fixtures:
+      password: /run/config/rabbitmq/password
+    cases:
+      seed: [unifi-mongodb, unifi-rabbitmq, unifi-rabbitmq-no-guest]
+      verify: [unifi-mongodb-kept, unifi-rabbitmq-kept, unifi-rabbitmq-no-guest]
+  # Root drivers connect and open files in a child holding the tested
+  # account's credentials, so the kernel and SO_PEERCRED decide.
+  - name: unifi-dbus
+    source: driver.zig
+    mode: dbus
+    user: root
+    policy:
+      pledge: stdio rpath unix proc
+      connect: [/data/share/unifi/bus/system_bus_socket]
+    cases:
+      seed:
+        - unifi-service-state
+        - unifi-no-service-control
+        - unifi-no-other-units
+        - unifi-dbus-identity
+        - unifi-dbus-peer
+      verify:
+        - unifi-service-state
+        - unifi-no-service-control
+        - unifi-no-other-units
+        - unifi-dbus-identity
+        - unifi-dbus-peer
+  - name: unifi-nginx
+    source: driver.zig
+    mode: nginx
+    user: root
+    policy:
+      pledge: stdio rpath wpath unix proc
+      read: [/data/share/unifi/config/http/upstream-uos.conf]
+      connect: [/data/share/unifi/reload/nginx.sock]
+    cases:
+      seed:
+        - unifi-nginx-reload
+        - unifi-nginx-invalid-config
+        - unifi-nginx-commands-denied
+        - unifi-nginx-peer
+        - unifi-nginx-private
+      verify:
+        - unifi-nginx-reload
+        - unifi-nginx-commands-denied
+        - unifi-nginx-peer
+        - unifi-nginx-private
+  - name: unifi-network
+    source: driver.zig
+    mode: network
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed: [unifi-internal-listeners]
+      verify: [unifi-internal-listeners]
+  - name: unifi-web
+    source: driver.zig
+    mode: web
+    user: root
+    policy:
+      pledge: stdio rpath inet
+    cases:
+      seed: [unifi-core-stable, unifi-console]
+      verify: [unifi-console]
+  - name: unifi-identity
+    source: driver.zig
+    mode: identity
+    user: root
+    policy:
+      pledge: stdio rpath wpath
+      read: [/data/svc/unifi-core/unifi-core/uuid, /data/share/unifi/config/tls/unifi-core.crt]
+    cases:
+      seed: [unifi-persistence-record]
+      verify: [unifi-identity-kept]
+  - name: unifi
+    cases:
+      - name: unifi-dbus-private
+        steps:
+          - file: /data/share/unifi/bus/system_bus_socket
+            await: 60s
+            expect:
+              type: socket
+              mode: '660'
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 11090
+      - name: unifi-bus-parent-private
+        steps:
+          - file: /data/share/unifi
+            expect:
+              type: directory
+              mode: '2750'
+          - file: /data/svc/unifi-core
+            expect:
+              type: directory
+              mode: '700'
+      - name: unifi-dbus-user
+        steps:
+          - service: unifi-systemd
+            await: 60s
+            expect:
+              user: unifi-systemd
+              uid:
+                min: 1
+              capabilities: []
+              no_new_privileges: true
+      - name: unifi-http
+        steps:
+          - fetch:
+              url: http://127.0.0.1/
+            await: 60s
+            expect:
+              status: 200
+              body:
+                matches: "window\\.UNIFI_OS_MANIFEST[^\n]*UOSSERVER"
+      - name: unifi-nginx-user
+        steps:
+          - file: /etc/sv/nginx/service
+            expect:
+              type: file
+          - file: /etc/sv/unifi-nginx
+            expect:
+              exists: false
+          - service: nginx
+            await: 60s
+            expect:
+              user: nginx
+              capabilities: [net_bind_service]
+              no_new_privileges: true
+      # unifi-identity records and compares the UUID and certificate.
+      - name: unifi-identity-files
+        steps:
+          - file: /data/svc/unifi-core/unifi-core/uuid
+            await: 60s
+            expect:
+              type: file
+              mode: '600'
+              body:
+                matches: '^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+          - file: /data/share/unifi/config/tls/unifi-core.crt
+            expect:
+              body:
+                contains: '-----BEGIN CERTIFICATE-----'
+          - file: /data/share/unifi/config/tls/unifi-core.key
+            expect:
+              mode:
+                matches: '0$'
+          - file: /data/share/unifi/config/tls/unifi-core-direct.key
+            expect:
+              mode:
+                matches: '0$'

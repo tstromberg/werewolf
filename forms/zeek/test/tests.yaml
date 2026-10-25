@@ -8,8 +8,10 @@ suites:
         steps:
           - file: /data/svc/zeek/reporter.log
             expect:
-              size: {min: 1}
-              body: {contains: werewolf-zeek}
+              size:
+                min: 1
+              body:
+                contains: werewolf-zeek
             await: 90s
   - name: zeek
     cases:
@@ -18,7 +20,8 @@ suites:
           - service: zeek
             expect:
               user: _oci-zeek
-              uid: {min: 65536}
+              uid:
+                min: 65536
               capabilities: [net_raw, net_admin]
               bounding_capabilities: [net_raw, net_admin]
               no_new_privileges: true
@@ -32,8 +35,10 @@ suites:
         steps:
           - file: /data/svc/zeek/reporter.log
             expect:
-              size: {min: 1}
-              body: {contains: werewolf-zeek}
+              size:
+                min: 1
+              body:
+                contains: werewolf-zeek
             await: 90s
   - name: zeek-traffic
     source: driver.zig

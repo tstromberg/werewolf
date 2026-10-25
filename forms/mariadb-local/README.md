@@ -1,7 +1,7 @@
 # MariaDB local - Hardened VM
 
-A database for the other services on this machine: [MariaDB](https://mariadb.org) 12.3,
-the long-term release, on a UNIX socket. The form's manifest is [form.yaml](form.yaml).
+A database for the other services on this machine: [MariaDB](https://mariadb.org)'s
+newest stable release, on a UNIX socket. The form's manifest is [form.yaml](form.yaml).
 The same server on a reachable port is [mariadb-tcp](../mariadb-tcp/README.md).
 
 [Images, test status and download
@@ -64,5 +64,6 @@ every start.
   names a system user on this machine.
 - The image's SQL files run on every start. An `INSERT` needs a key and `INSERT IGNORE`,
   or the rows multiply. `--import` runs once.
-- There is no replication. `mariadb-upgrade` is not run. Stay on 12.3. A new major
-  version is a new form.
+- There is no replication. A new MariaDB series upgrades the data in place, with
+  `mariadb-upgrade`, on its first start. An older release refuses data a newer one
+  upgraded, so falling back past an upgrade needs a backup.

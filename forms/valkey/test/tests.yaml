@@ -63,8 +63,15 @@ suites:
       - name: valkey-works
         steps:
           - exec:
-              argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, set,
-                     werewolf, {run: true}]
+              argv:
+                - /usr/bin/valkey-cli
+                - --raw
+                - -e
+                - -s
+                - /run/svc/valkey/valkey.sock
+                - set
+                - werewolf
+                - run: true
             expect:
               exit: 0
               stdout: "OK\n"

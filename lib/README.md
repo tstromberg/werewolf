@@ -105,8 +105,10 @@ kernel config's rules, which the build checks the `linux-werewolf`
 package's `boot/config-*` against (`configMisses`); the program check,
 which refuses a root holding an executable stack or a program at a fixed
 address, where ASLR cannot move its code (`judgeElf`), but for those
-`elf_exceptions` names with a reason; and mkfs.erofs's options and the
-version check that refuses one before 1.9, which writes empty files from a tar. See
+`elf_exceptions` names with a reason; the strip of every setuid and setgid
+bit from a root's tar, whatever a package ships (`stripSetid`, which the
+updater does to its tree); and mkfs.erofs's options and the version check
+that refuses one before 1.9, which writes empty files from a tar. See
 [docs/design/howl-build.md](../docs/design/howl-build.md).
 
 ## cmdline
@@ -150,10 +152,12 @@ route to it.
 Reads a form (`forms/NAME/form.yaml`), resolves its chain
 of `base` and `with` forms, and merges what they give apko by the rules of
 apko's deprecated `include:`. Used by tools/form.zig, howl and slot-update.
-It parses a strict YAML subset (block maps and lists, scalars with adjacent
-plain continuations, `[a, b]`, comments) and refuses anchors, tags, block
-scalars and inline maps by line. See
-[forms/README.md](../forms/README.md).
+It parses a strict YAML subset with yaml.zig (block maps and lists, scalars
+with adjacent plain continuations, `[a, b]`, comments) and refuses anchors,
+tags, block scalars and inline maps by line. See
+[forms/README.md](../forms/README.md). yaml.zig's plan dialect, for tests.yaml
+on the build host only, also takes quoted and JSON Pointer keys, `\n` `\t` `\r`
+escapes, `|` blocks and `[a, b]` over several lines.
 
 ## compose
 
@@ -305,6 +309,33 @@ that logs every refused exec (a missing shell, a dropped program, a path
 Landlock denies) and locks audit until reboot; posture checks the lock.
 With no audit daemon the kernel prints records to its rate-limited log,
 and never blocks a process on a full queue.
+
+## boot-download
+
+Fetches protected boot bundles for howl and the release tools. `validate`
+refuses a request before the network: an HTTPS mirror without credentials or
+query, a published form and werewolf's channel for it. `download` fetches the
+signature, then boot.json, has the caller's `Admission` authenticate the head,
+checks `freshness` against the channel's floor, fetches the artifacts the head
+names into a cache keyed by digest, has `Admission` verify the bundle, and
+writes the floor last, atomically. A channel's state is named by what it
+trusts, never the mirror, as the Python downloader named it. `Https` is the
+transport: HTTPS only, each redirect checked, identity encoding, bounded size
+and time, and the head's digest. `versions` lists complete GitHub releases.
+`describe` turns its errors into refusals. howl admits in-process
+(cmd/howl/download.zig); a tool can admit with `howl _boot-image head|verify`.
+
+## security-inputs
+
+Builds and caches a protected image's local inputs on a trusted host: an IPE
+test kernel trusting a policy certificate, and the measured EFI stub. Each is
+`cached` by the `fingerprint` of its own inputs, names and bytes, so a change
+to one keeps the other; `valid` rejects tampered, linked or incomplete outputs.
+Builders see public sources only: `melange` stages them and passes no signing
+environment. `identity` keeps the policy signer and never rotates a lost one;
+`prepareHelper` makes the Mac's isolated Lima builder exist and run. Commands
+run through a `Runner`, so howl shows its progress and tests stand in for the
+tools; `Plain` runs them with the process's output.
 
 ## hostkey
 

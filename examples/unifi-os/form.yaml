@@ -10,12 +10,10 @@ weaknesses:
   kernel-write-xor-execute: UniFi's Java and Node runtimes, PostgreSQL and Erlang use JIT compilation
   updates-enabled: Automatic updates are disabled for this unreleased integration experiment
 
-dev: [curl]
-
 check:
   memory: 8192
   # Guest and console-group listeners activate only after setup. Explicit
-  # protocol checks in test/checks establish application readiness.
+  # protocol checks in test/tests.yaml establish application readiness.
   skip: [answering, http-answering]
 
 services:

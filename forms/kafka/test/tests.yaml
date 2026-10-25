@@ -190,14 +190,17 @@ suites:
               type: file
               body:
                 contains: cluster.id=
+  # Kafka's partition logs are expected; application log files are not.
   - name: kafka-logfiles
-    source: driver.zig
-    mode: logfiles
-    user: root
-    policy:
-      pledge: stdio rpath
     cases:
-      seed:
-        - kafka-console-logs
-      verify:
-        - kafka-console-logs
+      - name: kafka-console-logs
+        steps:
+          - tree:
+              roots:
+                - /data/svc/kafka
+                - /run/svc/kafka
+              allow:
+                - '^log/[^/]+-[0-9]+/'
+            expect:
+              name:
+                not_matches: '\.log$'
