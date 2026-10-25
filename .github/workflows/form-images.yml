@@ -305,7 +305,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-          for package in python@3.14 swtpm qemu lima osslsigncode zstd; do
+          for package in python@3.14 gnupg swtpm qemu lima osslsigncode zstd; do
             brew list --versions "$package" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install "$package"
           done
           echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"

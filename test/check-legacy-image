@@ -35,10 +35,10 @@ def check(directory, output):
     excuses = subprocess.check_output(['build/host/form', 'excuses', form], text=True)
     known = [line.split()[0] for line in excuses.splitlines() if line.strip()]
     # QEMU restricts external traffic in these exact-image smoke boots. Root's
-    # assigned-DNS probe depends on a responding upstream DNS server; the form's
-    # integration suite tests its network policy with its own live fixtures.
-    known = ['?network-root-dns-assigned' if name == 'network-root-dns-assigned' else name
-             for name in known]
+    # assigned-DNS and external HTTPS probes need responding upstreams; the
+    # form's integration suite tests network policy with its own live fixtures.
+    upstream = {'network-root-dns-assigned', 'network-root-https-arbitrary'}
+    known = ['?' + name if name in upstream else name for name in known]
     # Direct boot has no EFI variables, so the Secure Boot probe is skipped.
     known += ['?boot-secure-boot', 'boot-rollback-protected', 'boot-ipe-enforced']
     env = dict(os.environ, POSTURE_KNOWN=' '.join(known))
