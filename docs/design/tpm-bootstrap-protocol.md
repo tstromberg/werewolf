@@ -2,15 +2,12 @@
 
 ## Summary
 
-`lib/tpm-bootstrap.zig` implements native attestation, credential wrapping and
-authenticated capsules; the signed VM agent completes enrollment and explicit recovery.
-Provider deployment remains gated.
+`lib/tpm-bootstrap.zig` supplies native attestation and authenticated credentials; the
+signed agent enrolls and recovers TPMs. Provider deployment remains gated.
 
-## Background
-
-The [cloud enrollment design](cloud-tpm-enrollment.md) requires authenticated TPM
-identity and code. `tools/tpm-bootstrap.zig` is a host codec and test probe, kept out
-of workload images, with no Secure Boot, cloud endpoint or recovery of its own.
+The [cloud enrollment design](cloud-tpm-enrollment.md) authenticates TPMs and code.
+`tools/tpm-bootstrap.zig` is host-only, without Secure Boot, cloud endpoints or
+recovery.
 
 ## Goals
 
@@ -27,10 +24,9 @@ of workload images, with no Secure Boot, cloud endpoint or recovery of its own.
 
 ### Challenge and attestation
 
-Before the challenge, the host may send the public eight-byte `WWHELLO1` frame to
-repeat `WWREADY1` if a serial console opened after boot missed it. The bootstrap accepts
-at most eight such knocks, only before the challenge. They never restart attestation,
-capsule activation or enrollment; replay and incomplete-state admission still precede
+The public eight-byte `WWHELLO1` frame requests `WWREADY1` after a late console
+attachment. Accept at most eight knocks before challenge; they never restart
+attestation, activation or enrollment. Replay and incomplete-state checks still precede
 readiness.
 
 The challenge is four 32-byte values, all nonzero: machine nonce, signed factory digest,
@@ -61,10 +57,10 @@ public EK, so GCM alone cannot authenticate the publisher.
 ### Provisioning
 
 `Boot.receive` combines publisher verification, template checks, activation and capsule
-authentication; the activation primitive is private, so no caller can skip the
-signature gate. Freshness checks, before key creation and again before activation,
-reject owner/lockout auth, Werewolf NV indices and hierarchy policy overrides. Provision
-the signed factory pair, protect reset paths and verify the NV anchor; return only the
+authentication; the activation primitive is private, so no caller can skip the signature
+gate. Freshness checks, before key creation and again before activation, reject
+owner/lockout auth, Werewolf NV indices and hierarchy policy overrides. Provision the
+signed factory pair, protect reset paths and verify the NV anchor; return only the
 public anchor and wipe plaintext credentials and buffers. The agent reboots before any
 workload starts. Partial provisioning needs [recovery](tpm-enrollment-recovery.md),
 which authenticates the original reset credentials and rejects written indices.
@@ -84,8 +80,8 @@ the kernel-named `werewolf.enroll` virtio port, found with strict bounds, it emi
 context, whose machine and factory must match immutable trust and whose PCR the
 measurement; the agent answers with its proof frame, takes `WWCAPS01` (a big-endian u16
 length, at most 952 bytes), wipes secrets, reads the anchor back, sends `WWDONE01` with
-the public anchor and reboots. There is no shell, filesystem handover, network daemon
-or guest reset. `make IPE=1 check-tpm-bootstrap-guest` exercises the signed image and
+the public anchor and reboots. There is no shell, filesystem handover, network daemon or
+guest reset. `make IPE=1 check-tpm-bootstrap-guest` exercises the signed image and
 firmware refusal gates; provider transport, normal-factory selection and provider
 lifecycle validation remain open.
 
@@ -107,19 +103,17 @@ Strict TPM templates, publisher signatures and a separate signed-bootstrap integ
 
 ## Alternatives Considered
 
-TPM encryption alone lets an attacker choose reset credentials; password-enabled AKs
-bypass the measured activation policy; plaintext metadata and guest-persisted
-credentials expose reset authority.
+TPM encryption permits attacker-chosen reset keys; password-enabled AKs bypass measured
+activation. Plaintext metadata and guest-persisted credentials expose reset authority.
 
 ## Security Considerations
 
-Signing keys and durable reset custody stay with the publisher. Provider deployment must
-select the verified normal factory image after bootstrap, which an offline probe on
-caller-provided files cannot establish: never expose the probe as a workload service or
-deploy on simulator success alone.
+Signing keys and durable reset custody stay with the publisher. Deployment must select
+the verified factory after bootstrap; an offline probe cannot prove that. Never expose
+the probe as a workload service or deploy on simulator success alone.
 
 ## Reliability Considerations
 
-Preserve recovery material before provisioning and refuse uncertain partial enrollment.
-Retirement tests remain mandatory; commit and operator rollback do not change the
-authorized pair. Provider boot, recovery and TPM power loss are validated apart.
+Preserve recovery material; refuse uncertain partial enrollment. Retirement tests remain
+mandatory; commit and rollback retain the authorized pair. Validate provider boot,
+recovery and TPM power loss separately.

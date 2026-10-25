@@ -95,23 +95,58 @@ test "sync and retained retry require the signed form's explicit support" {
     const profile: Profile = .{
         .spec = .{ .form = "database", .arch = .aarch64 },
         .managed = false,
-        .configuration = .{ .form = "database", .interface = .{ .files = &.{}, .settings = &.{} }, .ports = &.{}, .dhcp = false, .ssh = .disabled, .lima_managed = false, .imports = &.{"init"} },
+        .configuration = .{
+            .form = "database",
+            .interface = .{ .files = &.{}, .settings = &.{} },
+            .ports = &.{},
+            .dhcp = false,
+            .ssh = .disabled,
+            .lima_managed = false,
+            .imports = &.{"init"},
+        },
     };
-    try Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/authority/profile.json", .{dir}), .data = try std.json.Stringify.valueAlloc(a, profile, .{}) });
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try a.print("{s}/authority/profile.json", .{dir}),
+            .data = try std.json.Stringify.valueAlloc(a, profile, .{}),
+        },
+    );
     var why: howl.Why = .{};
     var closed = profile.configuration.?;
     closed.imports = &.{};
     try t.expectError(error.Refused, requireImport(closed, .init, &why));
     try t.expectError(error.Refused, requireImport(closed, .sync, &why));
-    try t.expectError(error.Refused, importData(io, a, &.{ name, "nonexistent-source" }, .sync, &why));
+    try t.expectError(
+        error.Refused,
+        importData(io, a, &.{ name, "nonexistent-source" }, .sync, &why),
+    );
     const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const record: import_disk.Record = .{ .id = id, .digest = id, .mode = .sync, .sha256 = id, .bytes = 1 };
+    const record: import_disk.Record = .{
+        .id = id,
+        .digest = id,
+        .mode = .sync,
+        .sha256 = id,
+        .bytes = 1,
+    };
     const history = try a.print("{s}/imports/{s}", .{ dir, id });
     try Dir.cwd().createDirPath(io, history);
-    try Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/record.json", .{history}), .data = try std.json.Stringify.valueAlloc(a, record, .{}) });
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try a.print("{s}/record.json", .{history}),
+            .data = try std.json.Stringify.valueAlloc(a, record, .{}),
+        },
+    );
     try t.expectError(error.Refused, importData(io, a, &.{ name, "--retry", id }, .init, &why));
-    try t.expectError(error.Refused, importData(io, a, &.{ name, "--retry", "../../escape" }, .init, &why));
-    try t.expectError(error.FileNotFound, Dir.cwd().access(io, try a.print("{s}/import.json", .{dir}), .{}));
+    try t.expectError(
+        error.Refused,
+        importData(io, a, &.{ name, "--retry", "../../escape" }, .init, &why),
+    );
+    try t.expectError(
+        error.FileNotFound,
+        Dir.cwd().access(io, try a.print("{s}/import.json", .{dir}), .{}),
+    );
 }
 
 /// Stage immutable data for the next cold start. A running VM retains its
@@ -1320,7 +1355,11 @@ pub fn create(
     if (o.import_dir) |source| {
         const request = o.boot_image orelse return error.MissingBootImage;
         const manifest = try @import("boot-image.zig").admitHead(io, gpa, request, arch);
-        try requireImport(manifest.configuration orelse return error.MissingBootConfiguration, .init, why);
+        try requireImport(
+            manifest.configuration orelse return error.MissingBootConfiguration,
+            .init,
+            why,
+        );
         // Validate and snapshot before enrolling a new guest. A repeat may
         // reuse the same input, but never replace an existing import implicitly.
         try import_disk.write(io, gpa, source, at, why);

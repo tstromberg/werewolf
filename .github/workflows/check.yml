@@ -35,7 +35,8 @@ jobs:
         run: make -j"$(nproc)" test
       - name: Updater construction and coordinator isolation
         run: |
-          make FORM=minimal DEV=1 image
+          # Installer/broker fixtures use direct boot; protected boots run in ipe.yml.
+          make FORM=minimal DEV=1 DISABLE=secureboot,tpm,ipe image
           make FORM=minimal DEV=1 check-updater-installer check-mount-broker LINUX_TEST_RUNNER=sudo
       - name: DNS permissions, DHCP renewal, HTTPS and LAN discovery
         run: make check-dns DNS_TEST_RUNNER=sudo
@@ -143,7 +144,7 @@ jobs:
             ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} test/ci-forms ${{ matrix.group }}
           else
             jobs=$(test/ci-vm-jobs)
-            make -k -j"$jobs" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+            make -k -j"$jobs" DISABLE=secureboot,tpm,ipe PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
           fi
       # integrity saves the Zig cache, when this week's has no entry for
       # these sources yet: every check job compiles the same programs, and
@@ -268,7 +269,7 @@ jobs:
           ARCH=aarch64 SHARD='' test/ci-forms all
           jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs platform boots at once"
-          make -k -j"$jobs" check-platform
+          make -k -j"$jobs" DISABLE=secureboot,tpm,ipe check-platform
       # arm64's only job saves its melange packages, as the check job's
       # forms jobs do x86_64's: saved even when a check fails.
       - name: Save melange packages

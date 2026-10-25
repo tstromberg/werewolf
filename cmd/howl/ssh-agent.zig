@@ -23,12 +23,22 @@ pub fn start(
         // first use can establish that pin without a separate --no-agent run.
         var first: std.ArrayList([]const u8) = .empty;
         try first.appendSlice(gpa, &.{
-            "ssh",                             "-o",                      "BatchMode=yes",           "-o",                        "IdentityAgent=none",
-            "-o",                              "PubkeyAuthentication=no", "-o",                      "PasswordAuthentication=no", "-o",
-            "KbdInteractiveAuthentication=no", "-o",                      "GSSAPIAuthentication=no",
+            "ssh",                             "-o",
+            "BatchMode=yes",                   "-o",
+            "IdentityAgent=none",              "-o",
+            "PubkeyAuthentication=no",         "-o",
+            "PasswordAuthentication=no",       "-o",
+            "KbdInteractiveAuthentication=no", "-o",
+            "GSSAPIAuthentication=no",
         });
         const target_args = ssh[1 .. ssh.len - command_len];
-        for (target_args) |arg| try first.append(gpa, if (std.mem.eql(u8, arg, "StrictHostKeyChecking=yes")) "StrictHostKeyChecking=accept-new" else arg);
+        for (target_args) |arg| try first.append(
+            gpa,
+            if (std.mem.eql(u8, arg, "StrictHostKeyChecking=yes"))
+                "StrictHostKeyChecking=accept-new"
+            else
+                arg,
+        );
         _ = try std.process.run(gpa, io, .{ .argv = first.items });
         if (!try hasPin(io, gpa, known_hosts, alias)) return why.refuse(
             "{s}: could not establish a host key pin; check that the machine is reachable",

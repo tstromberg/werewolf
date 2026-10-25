@@ -129,11 +129,11 @@ which releases may boot, and IPE runs only native code from the verified root. `
 Lima and QEMU needs for now ([cli](design/cli.md)). Nothing disables them by default: a
 build refuses an image that would lack a protection `--disable` does not name, and says
 how to give it. Make builds also default to no disabled protections; legacy test images
-require an explicit command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment
-value is refused. The command line names what
-the machine lacks (`werewolf.disable`), and posture and the login message say so. The
-keys a build signs with live in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in
-`build/`: a machine takes only updates signed with them, so back that directory up.
+require an explicit command-line `DISABLE=secureboot,tpm,ipe`, and an inherited
+environment value is refused. The command line names what the machine lacks
+(`werewolf.disable`), and posture and the login message say so. The keys a build signs
+with live in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`: a machine
+takes only updates signed with them, so back that directory up.
 
 | Disabled | What that allows |
 | --- | --- |

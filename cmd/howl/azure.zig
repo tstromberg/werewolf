@@ -264,7 +264,11 @@ pub fn ensureImageWithAuthority(
     var digest = try images.sha256(io, disk);
     const owner = if (authority) |cert| blk: {
         const path = try gpa.print("{s}/owner.der", .{work});
-        try howl.run(io, why, &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path });
+        try howl.run(
+            io,
+            why,
+            &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path },
+        );
         const bytes = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
         const owner_key = try @import("tpm").firmware.certificateKey(bytes);
         const code_key = try @import("tpm").firmware.certificateKey(der);
@@ -415,7 +419,12 @@ fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
     return galleryEnrolledWithAuthority(gpa, text, der, der);
 }
 
-fn galleryEnrolledWithAuthority(gpa: Allocator, text: []const u8, der: []const u8, owner: []const u8) !bool {
+fn galleryEnrolledWithAuthority(
+    gpa: Allocator,
+    text: []const u8,
+    der: []const u8,
+    owner: []const u8,
+) !bool {
     const Key = struct { type: []const u8, value: []const []const u8 };
     const Record = struct {
         signatureTemplateNames: []const []const u8,
@@ -837,7 +846,9 @@ test "gallery preserves separate firmware owner and code-signing trust" {
     const body = try galleryVersionWithAuthority(gpa, "westus2", "/disks/bootstrap", code, owner);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer parsed.deinit();
-    const uefi = parsed.value.object.get("properties").?.object.get("securityProfile").?.object.get("uefiSettings").?;
+    const uefi = parsed.value.object.get(
+        "properties",
+    ).?.object.get("securityProfile").?.object.get("uefiSettings").?;
     const text = try std.json.Stringify.valueAlloc(gpa, uefi, .{});
     try testing.expect(try galleryEnrolledWithAuthority(gpa, text, code, owner));
     try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, owner, code));

@@ -428,7 +428,11 @@ pub fn bootstrapCertificate(
             const path = try gpa.print("{s}/verify-bootstrap.conf", .{work});
             defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
             try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, item[0], path });
-            if (!std.mem.eql(u8, try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024)), item[1]))
+            if (!std.mem.eql(
+                u8,
+                try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024)),
+                item[1],
+            ))
                 return error.BadBootstrapImage;
         }
         try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, "::/EFI/Linux/bootstrap.efi", binary });

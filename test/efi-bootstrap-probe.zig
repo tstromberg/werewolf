@@ -18,7 +18,11 @@ const Tcg2 = extern struct {
 
 fn say(comptime format: []const u8, args: anytype) void {
     var text: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&text, "efi-bootstrap-probe: " ++ format ++ "\r\n", args) catch return;
+    const line = std.mem.print(
+        &text,
+        "efi-bootstrap-probe: " ++ format ++ "\r\n",
+        args,
+    ) catch return;
     if (efi.system_table.con_out) |console| {
         var wide: [513:0]u16 = @splat(0);
         for (line, 0..) |byte, i| wide[i] = byte;
@@ -63,8 +67,11 @@ fn run() !void {
     try keyVariable("PK", &global);
     try keyVariable("KEK", &global);
     const database: efi.Guid = .{
-        .time_low = 0xd719b2cb, .time_mid = 0x3d3a, .time_high_and_version = 0x4596,
-        .clock_seq_high_and_reserved = 0xa3, .clock_seq_low = 0xbc,
+        .time_low = 0xd719b2cb,
+        .time_mid = 0x3d3a,
+        .time_high_and_version = 0x4596,
+        .clock_seq_high_and_reserved = 0xa3,
+        .clock_seq_low = 0xbc,
         .node = .{ 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f },
     };
     try keyVariable("db", &database);
@@ -78,10 +85,19 @@ fn run() !void {
         });
     } else say("TCG2 protocol absent", .{});
     acpi();
-    const loaded = (try boot.handleProtocol(efi.protocol.LoadedImage, efi.handle)) orelse return error.NoLoadedImage;
+    const loaded = (try boot.handleProtocol(
+        efi.protocol.LoadedImage,
+        efi.handle,
+    )) orelse return error.NoLoadedImage;
     const device = loaded.device_handle orelse return error.NoBootDevice;
-    const source = (try boot.handleProtocol(efi.protocol.DevicePath, device)) orelse return error.NoBootPath;
-    const target = try source.createFileDevicePath(efi.pool_allocator, std.unicode.utf8ToUtf16LeStringLiteral("\\EFI\\Linux\\bootstrap.efi"));
+    const source = (try boot.handleProtocol(
+        efi.protocol.DevicePath,
+        device,
+    )) orelse return error.NoBootPath;
+    const target = try source.createFileDevicePath(
+        efi.pool_allocator,
+        std.unicode.utf8ToUtf16LeStringLiteral("\\EFI\\Linux\\bootstrap.efi"),
+    );
     say("loading fixed signed bootstrap", .{});
     const image = boot.loadImage(false, efi.handle, .{ .device_path = target }) catch |err| {
         say("LoadImage: {s}", .{@errorName(err)});
@@ -106,7 +122,11 @@ fn keyVariable(comptime name: []const u8, guid: *const efi.Guid) !void {
     if (size[0] > 65536) return error.OversizePublicVariable;
     const buffer = try efi.pool_allocator.alloc(u8, size[0]);
     defer efi.pool_allocator.free(buffer);
-    const value = try runtime.getVariable(wide, guid, buffer) orelse return error.VariableDisappeared;
+    const value = try runtime.getVariable(
+        wide,
+        guid,
+        buffer,
+    ) orelse return error.VariableDisappeared;
     say(name ++ " bytes={d} attributes={x}", .{ value[0].len, @as(u32, @bitCast(value[1])) });
     var remaining = value[0];
     while (remaining.len != 0) {
@@ -149,7 +169,10 @@ fn acpi() void {
                     data[36], data[40], data[41], data[43], integer(u64, data, 44), data[58],
                 });
             if (std.mem.eql(u8, data[0..4], "TPM2") and length >= 52)
-                say("TPM2 control={x} start-method={d}", .{ integer(u64, data, 40), integer(u32, data, 48) });
+                say(
+                    "TPM2 control={x} start-method={d}",
+                    .{ integer(u64, data, 40), integer(u32, data, 48) },
+                );
         }
     }
 }

@@ -25,8 +25,12 @@ const Manifest = struct {
 /// The ordinary cloud gate remains closed. This entry point launches only
 /// an isolated signed enrollment image, whose PID 1 refuses workload handover.
 pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *howl.Why) !void {
-    if ((args.len != 4 and args.len != 5) or (!std.mem.eql(u8, args[0], "gcp") and !std.mem.eql(u8, args[0], "aws") and !std.mem.eql(u8, args[0], "azure")))
-        return why.refuse("_cloud-bootstrap gcp|aws|azure NAME IMAGE-DIRECTORY OWNER-CERT [SIZE]", .{});
+    if ((args.len != 4 and args.len != 5) or (!std.mem.eql(u8, args[0], "gcp") and
+        !std.mem.eql(u8, args[0], "aws") and !std.mem.eql(u8, args[0], "azure")))
+        return why.refuse(
+            "_cloud-bootstrap gcp|aws|azure NAME IMAGE-DIRECTORY OWNER-CERT [SIZE]",
+            .{},
+        );
     const amazon = std.mem.eql(u8, args[0], "aws");
     const microsoft = std.mem.eql(u8, args[0], "azure");
     const size: ?[]const u8 = if (args.len == 5) args[4] else null;
@@ -71,7 +75,11 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
         const path = try gpa.print("{s}/loader.efi", .{source});
         const content = try read(io, gpa, path, 16 << 20);
         std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
-        if (!std.mem.eql(u8, &digest, &try @import("enrollment.zig").hex(expected))) return error.BadBootstrapImage;
+        if (!std.mem.eql(
+            u8,
+            &digest,
+            &try @import("enrollment.zig").hex(expected),
+        )) return error.BadBootstrapImage;
         try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", certificate, "-in", path });
         break :blk path;
     } else null;
@@ -104,12 +112,28 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     const loader = if (arch == .aarch64) "::/EFI/BOOT/BOOTAA64.EFI" else "::/EFI/BOOT/BOOTX64.EFI";
     try howl.run(io, why, &.{ "mcopy", "-i", esp, manager orelse binary, loader });
     if (manager != null) {
-        try howl.run(io, why, &.{ "mmd", "-i", esp, "::/EFI/Linux", "::/loader", "::/loader/entries" });
+        try howl.run(
+            io,
+            why,
+            &.{ "mmd", "-i", esp, "::/EFI/Linux", "::/loader", "::/loader/entries" },
+        );
         try howl.run(io, why, &.{ "mcopy", "-i", esp, binary, "::/EFI/Linux/bootstrap.efi" });
         const config = try gpa.print("{s}/bootstrap-loader.conf", .{directory});
         const entry = try gpa.print("{s}/bootstrap-entry.conf", .{directory});
-        try howl.writePrivate(io, gpa, config, @import("secureboot.zig").bootstrap_loader_config, why);
-        try howl.writePrivate(io, gpa, entry, @import("secureboot.zig").bootstrap_loader_entry, why);
+        try howl.writePrivate(
+            io,
+            gpa,
+            config,
+            @import("secureboot.zig").bootstrap_loader_config,
+            why,
+        );
+        try howl.writePrivate(
+            io,
+            gpa,
+            entry,
+            @import("secureboot.zig").bootstrap_loader_entry,
+            why,
+        );
         try howl.run(io, why, &.{ "mcopy", "-i", esp, config, "::/loader/loader.conf" });
         try howl.run(io, why, &.{ "mcopy", "-i", esp, entry, "::/loader/entries/bootstrap.conf" });
     }
@@ -124,7 +148,18 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "raw", "-O", "qcow2", disk, qcow });
     if (microsoft) {
         const place = try azure.place(io, gpa, why);
-        const image = try azure.ensureImageWithAuthority(io, gpa, place, "tpm-bootstrap", arch, qcow, directory, args[3], .bootstrap, why);
+        const image = try azure.ensureImageWithAuthority(
+            io,
+            gpa,
+            place,
+            "tpm-bootstrap",
+            arch,
+            qcow,
+            directory,
+            args[3],
+            .bootstrap,
+            why,
+        );
         try howl.writePrivate(io, gpa, try gpa.print("{s}/image", .{directory}), image, why);
         try howl.writePrivate(io, gpa, try gpa.print("{s}/engine", .{directory}), "azure", why);
         const config = try gpa.print("{s}/config.tar", .{directory});
@@ -135,14 +170,39 @@ pub fn command(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *h
     }
     if (amazon) {
         const place = try aws.place(io, gpa, why);
-        const image = try aws.ensureImageWithAuthority(io, gpa, place, "tpm-bootstrap", arch, qcow, directory, args[3], .bootstrap, why);
+        const image = try aws.ensureImageWithAuthority(
+            io,
+            gpa,
+            place,
+            "tpm-bootstrap",
+            arch,
+            qcow,
+            directory,
+            args[3],
+            .bootstrap,
+            why,
+        );
         try howl.writePrivate(io, gpa, try gpa.print("{s}/image", .{directory}), image, why);
         try howl.writePrivate(io, gpa, try gpa.print("{s}/engine", .{directory}), "aws", why);
         const config = try gpa.print("{s}/config.b64", .{directory});
         try howl.writePrivate(io, gpa, config, "", why);
-        const id = try aws.create(io, gpa, place, name, "tpm-bootstrap", arch, size, image, config, why);
+        const id = try aws.create(
+            io,
+            gpa,
+            place,
+            name,
+            "tpm-bootstrap",
+            arch,
+            size,
+            image,
+            config,
+            why,
+        );
         try howl.writePrivate(io, gpa, try gpa.print("{s}/instance", .{directory}), id, why);
-        try Io.File.stdout().writeStreamingAll(io, try gpa.print("{s}\t{s}\t{s}\n", .{ name, image, id }));
+        try Io.File.stdout().writeStreamingAll(
+            io,
+            try gpa.print("{s}\t{s}\t{s}\n", .{ name, image, id }),
+        );
         return;
     }
     const place = try gcp.place(io, gpa, why);
@@ -213,7 +273,8 @@ pub fn workload(io: Io, gpa: std.mem.Allocator, args: []const []const u8, why: *
     const arch = howl.archName(
         verified.manifest.image.arch,
     ) orelse return error.UnsupportedHostArch;
-    const definition = verified.manifest.configuration orelse return error.MissingDeploymentDefinition;
+    const definition = verified.manifest.configuration orelse
+        return error.MissingDeploymentDefinition;
     const owner = try std.process.run(gpa, io, .{
         .argv = &.{ "openssl", "x509", "-in", args[4], "-pubkey", "-noout" },
         .stdout_limit = .limited(1024),

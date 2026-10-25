@@ -23,8 +23,8 @@ declared weakness, red `FAIL` for an unexpected one, rows cut to the terminal's 
 no colour with `NO_COLOR` or `TERM=dumb`. Text shows `source = value, want expectation`
 for a failure, at most two rows an item; `--json` keeps all of `source`, `expected`,
 `observed` and `comparison`. `--verbose` streams phases, timings and walk progress to
-stderr. A check this run's confinement stops, as a root SSH session's (netlink, the
-TPM, leashing, the attacks' lock), takes boot's result from `/run/werewolf/posture.json`,
+stderr. A check this run's confinement stops, as a root SSH session's (netlink, the TPM,
+leashing, the attacks' lock), takes boot's result from `/run/werewolf/posture.json`,
 named `(cached)`, `"cached": true`; `--no-cache` skips it. Boot's holds the TPM's state.
 
 ## Goals

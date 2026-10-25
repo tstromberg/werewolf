@@ -2,8 +2,8 @@
 
 ## Summary
 
-Howl builds and runs machines ([design](../../docs/design/cli.md)).
-Each combines a [form](../../docs/forms.md), image and init configuration.
+Howl builds and runs machines ([design](../../docs/design/cli.md)). Each combines a
+[form](../../docs/forms.md), image and init configuration.
 
 ## Background
 
@@ -27,21 +27,18 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 ## Goals
 
 - One command from form to running machine; pack and the machine make the same checks.
-- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl`
-  (`~/.local/share/howl`).
+- Records in `build/machines/NAME`; keys in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`).
 
-## Non-Goals
-
-- Managing cloud accounts, IAM or cloud networks.
+Cloud accounts, IAM and network management remain the operator's responsibility.
 
 ## Detailed design
 
 **Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
 Path forms are never updated.
 
-**Config tar.** Services declare flags with `config`, `setting` and `render`;
-`pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
-The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`; `pack -h`
+lists all flags. FILE flags read paths or stdin; guests validate values. The tar is
+sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
 **Engines.** Protected defaults are Lima (macOS) and QEMU (Linux). Missing tools fail.
 Other providers and `--dev` require [disabling
@@ -61,48 +58,30 @@ architecture, 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-bhyve's ARM64 runtime remains experimental; its TAP soak hit a virtio TX panic.
-See [live tests](../../docs/testing-live.md#bhyve) for networking and runtime limits.
+bhyve's ARM64 runtime remains experimental; its TAP soak hit a virtio TX panic. See
+[live tests](../../docs/testing-live.md#bhyve) for networking and runtime limits.
 
 Local engines and Proxmox attach the tar read-only; clouds take base64 user data, and
 their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once, and
 delete keeps the image. Cloud ports start closed; `--allow-from me|CIDR` opens the
-form's ports at creation, and `howl ssh` opens only GCP TCP 22 to this host when
-needed.
+form's ports at creation, and `howl ssh` opens only GCP TCP 22 to this host when needed.
 
-**SSH.** `howl ssh` and `howl ssh NAME` log in as your local username, including
-on GCP. `run` and `create` default to `--add-current-user=auto`: when `users`
-is absent, an SSH-enabled form gets your local account and the public keys in
-`~/.ssh` its SSH policy accepts. `--add-current-user=yes` adds it alongside
-configured users; an existing account declaration wins. `no` disables the addition.
-An explicit empty `users` map or config file disables `auto`. Lima keeps its
-NoCloud account for all modes; developer SSH keeps its root-only login.
-The generated account has no implicit `admin` grant. `pack --on TARGET` uses
-the same default; `pack` without a target adds the account only with `yes`.
-Use `howl ssh root@NAME` for root, including `root@werewolf-run` for the unnamed
-run machine. `howl
-ssh USER@NAME -- COMMAND...` selects another account. Connections to Lima's NoCloud
-account also offer Lima's identity key. A missing account or failed login does not fall
-back to root. Developer SSH only accepts root, so use `root@NAME` for a `--dev` VM.
-Local FIDO keys enter a dedicated, destination-constrained 20-hour agent;
-`--identity KEY` selects keys, `--no-agent` skips forwarding. First use pins
-the host key with an authentication-free SSH handshake. GCP opens TCP 22 to
-the current public IP when no Howl SSH firewall rule exists. See
-[su](../../forms/ssh-su/README.md).
+**SSH.** Howl selects the configured account, accepted keys and pinned host key. See
+[Howl SSH connections](../../docs/design/howl-ssh.md) for account defaults, developer
+SSH, agent forwarding and cloud firewall behavior.
 
 **Second create.** The machine keeps its disk and takes the new config. Protected
 machines admit a repeated `--import DIR` only when it matches the selected init
-snapshot; use `howl import NAME DIR` to select new initial data, or
-`howl sync NAME DIR` to add and replace files without deleting destination-only
-data. The form must support the requested mode. Both commands can stage while the
-VM runs; application waits for the next full stop/start through Howl. A guest
-reboot alone does not switch the disk. Initial import refuses a populated
-destination. These commands currently support protected local Lima and QEMU;
-cloud attachment is unavailable. See [data import](../../docs/design/data-import.md)
-for recovery and durability guarantees.
+snapshot; use `howl import NAME DIR` to select new initial data, or `howl sync NAME DIR`
+to add and replace files without deleting destination-only data. The form must support
+the requested mode. Both commands can stage while the VM runs; application waits for the
+next full stop/start through Howl. A guest reboot alone does not switch the disk.
+Initial import refuses a populated destination. These commands currently support
+protected local Lima and QEMU; cloud attachment is unavailable. See [data
+import](../../docs/design/data-import.md) for recovery and durability guarantees.
 
-`howl run` reuses matching protected inputs and resumes a stopped VM; changed
-inputs replace it. Progress goes to stderr and the machine record to stdout.
+`howl run` reuses matching protected inputs and resumes a stopped VM; changed inputs
+replace it. Progress goes to stderr and the machine record to stdout.
 
 ## Drawbacks
 

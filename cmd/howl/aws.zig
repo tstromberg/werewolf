@@ -137,14 +137,30 @@ pub fn ensureImageWithAuthority(
 ) ![]const u8 {
     const cert = if (kind == .bootstrap) blk: {
         if (authority == null) return error.MissingBootstrapAuthority;
-        break :blk try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
+        break :blk try @import("secureboot.zig").bootstrapCertificate(
+            io,
+            gpa,
+            disk,
+            work,
+            arch,
+            why,
+        );
     } else try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     var digest = try images.sha256(io, disk);
     if (authority) |owner| {
         const path = try gpa.print("{s}/owner.der", .{work});
-        try howl.run(io, why, &.{ "openssl", "x509", "-in", owner, "-outform", "DER", "-out", path });
+        try howl.run(
+            io,
+            why,
+            &.{ "openssl", "x509", "-in", owner, "-outform", "DER", "-out", path },
+        );
         const der = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
-        const code = try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/boot.der", .{work}), gpa, .limited(4096));
+        const code = try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/boot.der", .{work}),
+            gpa,
+            .limited(4096),
+        );
         const owner_key = try @import("tpm").firmware.certificateKey(der);
         const code_key = try @import("tpm").firmware.certificateKey(code);
         if (std.mem.eql(u8, owner_key.modulus, code_key.modulus)) return error.SharedBootAuthority;
@@ -162,14 +178,25 @@ pub fn ensureImageWithAuthority(
     const template = try gpa.print("{s}/build-helper.yaml", .{work});
     try Dir.cwd().writeFile(io, .{ .sub_path = setup, .data = @import("files").build_helper });
     defer Dir.cwd().deleteFile(io, setup) catch {};
-    try Dir.cwd().writeFile(io, .{ .sub_path = template, .data = @import("files").build_helper_template });
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = template, .data = @import("files").build_helper_template },
+    );
     defer Dir.cwd().deleteFile(io, template) catch {};
     try howl.run(io, why, &.{
-        "env",                                                      try gpa.print("WEREWOLF_HELPER_SETUP={s}", .{setup}),
-        try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}), "sh",
-        helper,                                                     @tagName(arch),
-        cert,                                                       work,
-        "aws",                                                      authority orelse cert,
+        "env",
+        try gpa.print(
+            "WEREWOLF_HELPER_SETUP={s}",
+            .{setup},
+        ),
+        try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}),
+        "sh",
+        helper,
+        @tagName(arch),
+        cert,
+        work,
+        "aws",
+        authority orelse cert,
     });
     const name = try images.name(gpa, form, arch, &digest);
     if (ask(io, gpa, p, &.{

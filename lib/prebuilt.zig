@@ -387,7 +387,10 @@ test rebuiltFrom {
         rebuiltFrom("glibc=2.44-r18 wolfi-origin:glibc-2.44:2.44-r8 so:libc.so.6=6").?,
     );
     try testing.expectEqual(null, rebuiltFrom("so:libc.so.6=6 cmd:ldconfig=2.44-r8"));
-    try testing.expectEqualStrings("python-3.15:3.15.1-r0", rebuiltFrom("upstream-origin:python-3.15:3.15.1-r0").?);
+    try testing.expectEqualStrings(
+        "python-3.15:3.15.1-r0",
+        rebuiltFrom("upstream-origin:python-3.15:3.15.1-r0").?,
+    );
     try testing.expectEqual(null, rebuiltFrom("wolfi-origin:glibc-2.44 wolfi-origin::1"));
 }
 

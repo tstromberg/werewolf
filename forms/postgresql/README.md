@@ -1,8 +1,8 @@
 # PostgreSQL - Hardened VM
 
 A database for the other services on this machine:
-[PostgreSQL](https://www.postgresql.org), latest stable release, on a UNIX socket. The form's manifest is
-[form.yaml](form.yaml).
+[PostgreSQL](https://www.postgresql.org), latest stable release, on a UNIX socket. The
+form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/postgresql/index.html).
