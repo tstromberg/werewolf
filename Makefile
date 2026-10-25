@@ -32,7 +32,7 @@ HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
 FORM_TOOL = build/host/form
-FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig lib/people.zig
+FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/yaml.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig lib/people.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
 compose_modules = --dep allow --dep form --dep seal --dep service --dep package --dep people -M$(1)=lib/compose.zig -Mpackage=lib/package.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
@@ -44,7 +44,7 @@ FORM_REF := $(FORM)
 override FORM := $(notdir $(patsubst %/,%,$(FORM)))
 # These goals need no form tool, and install-deps runs before there is a Zig.
 FORMLESS = install-deps install uninstall howl $(HOWL) clean help \
-	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint doc-fix
+	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint doc-fix code-lint
 ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
 FORM_ASK = :
 else
@@ -135,7 +135,7 @@ LOCK = build/lock
 FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev)$(if $(PUBLISHED),-published).lock.json
 BOOT_LOCKS = $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 LOCKS = $(FORM_LOCK) $(BOOT_LOCKS)
-DEV_PACKAGES = busybox-full $(call form_list,dev)
+DEV_PACKAGES = busybox-full mksh $(call form_list,dev)
 FORM_APKO = $(BUILD)/form/$(FORM)$(if $(DEV),-dev).yaml
 # apko_retry COMMAND retries after 15, 30 and 45 s: the package server refuses bursts (HTTP 403).
 APKO_NETWORK = status code (403|408|429|5[0-9][0-9])|connection reset|i/o timeout|TLS handshake|deadline exceeded|unexpected EOF|failed to fetch
@@ -194,10 +194,35 @@ LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package --dep allow --dep people -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
-	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig
-ZIG_MODULES = --dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
+	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
+	--dep prebuilt --dep update-policy -Mboot-download=lib/boot-download.zig -Msecurity-inputs=lib/security-inputs.zig \
+	--dep form -Mtest-plan=test/native/plan.zig
+ZIG_MODULES =--dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
+	--dep boot-download --dep security-inputs --dep test-plan \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
+# A host-side test in Zig also takes test/host as module host (test/host/README.md):
+# zig test $(call HOST_ZIG_MODULES,FILE) tests it, and $(call host_test,FILE) ARGS runs it.
+HOST_ZIG_MODULES = --dep host $(call ZIG_MODULES,$(1)) -Mhost=test/host/host.zig
+host_test = zig run -O ReleaseSafe $(call HOST_ZIG_MODULES,$(1)) --
+# Host-side programs that scripts, workflows and release tools run: test/NAME.zig is build/host/NAME.
+HOST_PROGRAMS = cloud-console cloud-posture azure-security ssh-su metadata ipe-boot \
+	check-legacy-image check-public-image check-protected-qemu check-published-lifecycle check-published-run \
+	check-independent-updates
+$(addprefix build/host/,$(HOST_PROGRAMS)): build/host/%: test/%.zig test/published.zig test/postdoc.zig $(wildcard test/host/*.zig test/host/*.yaml lib/*.zig)
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
+# The published-image checks share test/published.zig, imported by path.
+build/host/check-public-image build/host/check-protected-qemu build/host/check-published-lifecycle build/host/check-published-run \
+	build/host/check-legacy-image: test/published.zig
+# Host-side checks' own tests, in make test: they import host and the lib modules.
+HOST_TESTS = test/metadata.zig test/check-dist.zig test/check-legacy-image.zig test/check-secureboot.zig \
+	test/check-provider-ab.zig test/ab-fixture.zig test/check-bhyve-secureboot.zig test/check-bhyve-lifecycle.zig \
+	test/check-lima-secureboot.zig test/check-plex-import.zig test/gcp-metadata.zig \
+	test/build-traced-stub.zig test/trace-stub.zig test/check-image-updater.zig \
+	test/check-independent-updates.zig test/check-people-persist.zig forms/vuln-demo/test/appliance.zig \
+	test/check-published-run.zig test/check-published-lifecycle.zig test/check-public-image.zig \
+	test/check-protected-qemu.zig
 
 # Every guest binary is a static PIE, so ASLR moves its code and data, not only its
 # stack and heap; howl refuses a root with a fixed-address program (lib/image.zig).
@@ -272,8 +297,9 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
-	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
-	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/form.zig lib/yaml.zig test/native/plan.zig test/native/steps.zig test/native/host.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
+	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig \
+	lib/boot-download.zig lib/security-inputs.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -292,33 +318,42 @@ $(TEST_SK): tools/test-sk.zig
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
-_test/ci-forms: ; python3 test/ci-forms-test
-	python3 test/check-dispatch
-_test/cloud-console: ; python3 test/cloud-console --test
-	python3 test/cloud-checks
-	python3 test/cloud-posture --test
-	python3 test/consumer-trust
-	python3 test/check-host-keys
+_test/ci-forms: ; zig test test/ci-forms.zig
+# CI's check jobs check forms one at a time with it (test/ci-forms.zig).
+build/host/ci-forms: test/ci-forms.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -Mroot=$< -femit-bin=$@
+_test/cloud-console: build/host/cloud-console build/host/azure-security build/host/cloud-posture
+	zig test $(call HOST_ZIG_MODULES,test/cloud-posture.zig)
+	$(call host_test,test/cloud-checks.zig)
+	$(call host_test,test/check-host-keys.zig)
+$(addprefix _test/,$(HOST_TESTS)): _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/probes:
 	@mkdir -p build/test-probes
 	zig test -lc test/native/match.zig test/native/regex.c
 	zig test -lc test/native/probes.zig test/native/regex.c
+	zig test -lc test/native/tree.zig test/native/regex.c
+	zig test -lc test/native/tcp.zig test/native/regex.c
+	zig test test/native/write.zig
+	zig test test/native/process.zig
 	zig test test/native/udp.zig
+	zig test -lc test/native/regex.c $(call HOST_ZIG_MODULES,test/native-host.zig)
 	zig test test/native/driver.zig
 	zig test --dep test-driver -Mroot=test/native/stage.zig -Mtest-driver=test/native/driver.zig
-	zig test --dep test-driver -Mroot=forms/openldap/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/nats/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/zeek/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/suricata/test/driver.zig -Mtest-driver=test/native/driver.zig
-	zig test --dep test-driver -Mroot=forms/ruby-example/test/driver.zig -Mtest-driver=test/native/driver.zig
-	zig test forms/mongodb/test/bson.zig
+	zig test test/native/bson.zig
+	zig test test/native/amqp.zig
+	zig test --dep test-driver -Mroot=forms/rabbitmq/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=examples/unifi-os/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/haproxy/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/opencanary/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/headscale/test/driver.zig -Mtest-driver=test/native/driver.zig
@@ -326,7 +361,6 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/mastodon/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/home-assistant/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/wordpress/test/driver.zig -Mtest-driver=test/native/driver.zig
-	zig test -lc --dep test-driver -Mroot=forms/opensearch/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/mediawiki/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/bugsink/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/cron/test/driver.zig -Mtest-driver=test/native/driver.zig
@@ -334,48 +368,52 @@ _test/probes:
 	zig test --dep test-driver -Mroot=forms/mox/test/smtp.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/minecraft/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/mox/test/submit.zig -Mtest-driver=test/native/driver.zig
-	zig test -lc --dep test-driver -Mroot=forms/galene/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/galene/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/greenbone/test/web.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/moodle/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/langflow/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
-	HOWL_PROBE_TEST_BINARY=$(CURDIR)/build/test-probes/host python3 test/probe-tests
+	$(call host_test,test/probe-tests.zig) build/test-probes/host
 
-_test/form-coverage: ; python3 test/form-coverage --probes
-_test/bhyve-network: ; python3 test/check-bhyve-network
-_test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
+FORM_COVERAGE = build/host/form-coverage
+$(FORM_COVERAGE): tools/form-coverage.zig test/native/plan.zig test/native/steps.zig test/native/host.zig lib/form.zig lib/yaml.zig
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
+# make form-coverage lists each form's integration cases (docs/testing.md).
+.PHONY: form-coverage
+form-coverage: $(FORM_COVERAGE)
+	@$(FORM_COVERAGE) --list
+_test/form-coverage: $(FORM_COVERAGE)
+	$(FORM_COVERAGE) --probes
+_test/bhyve-runtime: ; zig test tools/bhyve-arm64/runtime.zig
 _test/package-consumers: build/host/form
-	python3 test/package-consumers
-_test/release-signing:
-	python3 test/release-signing
-	python3 test/native-firmware
-_test/azure-security: ; python3 test/azure-security --test
+	$(call host_test,test/package-consumers.zig)
+_test/release-signing: _test/tools/release/release.zig
+_test/azure-security: ; zig test test/azure-security.zig
 _test/provider-ab: _test/bhyve-runtime
-	python3 test/ab_checks.py
-	python3 test/ab-provider-tests
+	zig test --test-filter evidence --test-filter provider $(call ZIG_MODULES,test/host/host.zig)
 _test/local-prerequisites: $(HOWL)
-	python3 test/local-prerequisites
-	python3 test/lima-state $(HOWL)
-	python3 test/build-helper
-_test/tpm-floor: build/host/tpm-floor
-	python3 test/check-tpm-floor build/host/tpm-floor
-_test/boot-images: $(HOWL) build/host/form
-	python3 test/boot-images $(HOWL)
-	python3 test/boot-download $(HOWL)
-	python3 test/protected-release
-	python3 test/protected-publication
-	python3 test/protected-export
-	python3 test/protected-inputs
-	python3 test/form-images
-	python3 test/legacy-images
-	python3 test/owner-control $(HOWL)
-	python3 test/publishing-health
+	$(call host_test,test/lima-state.zig) $(HOWL)
+_test/tpm-floor: build/host/tpm-floor test/check-tpm-floor.zig
+	$(call host_test,test/check-tpm-floor.zig) build/host/tpm-floor
+_test/boot-images: $(HOWL) build/host/form _test/tools/release/release.zig
+	$(call host_test,test/owner-control.zig) $(HOWL)
+# build/host/release builds, signs and publishes images (tools/release/README.md).
+RELEASE_TOOL = build/host/release
+RELEASE_MODULES = -lc $(call ZIG_MODULES,tools/release/release.zig)
+$(RELEASE_TOOL): $(wildcard tools/release/*.zig lib/*.zig)
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(RELEASE_MODULES) -femit-bin=$$t && mv -f $$t $@
+_test/tools/release/release.zig: ; zig test $(RELEASE_MODULES)
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
+_test/lib/boot-download.zig: ; zig test --dep prebuilt --dep update-policy --dep host -Mroot=lib/boot-download.zig \
+	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig \
+	-Mupdate-policy=lib/update-policy.zig -Mhost=test/host/host.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig
@@ -389,7 +427,7 @@ check-tpm-floor: _test/tpm-floor
 # Unrelated machines install from a public image, take their own TPMs, and update
 # from a static channel with no host help (docs/design/independent-updates.md).
 check-independent-updates: $(HOWL)
-	python3 test/check-independent-updates $(HOWL) $(BUILD)/check/independent-updates $(PROVIDER)
+	$(call host_test,test/check-independent-updates.zig) $(HOWL) $(BUILD)/check/independent-updates $(PROVIDER)
 
 _test/lib/form.zig: ; zig test --dep allow --dep sshd -Mroot=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig -Msettings=lib/settings.zig
 _test/lib/sshd.zig: ; zig test --dep settings -Mroot=lib/sshd.zig -Msettings=lib/settings.zig
@@ -401,6 +439,10 @@ _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
+# host's tests read its YAML tables with lib/form.zig, which host itself does not import.
+_test/test/host/host.zig: ; zig test $(call ZIG_MODULES,test/host/host.zig)
+_test/test/howl/run.zig: ; zig test $(call ZIG_MODULES,test/howl/run.zig)
+_test/test/native/plan.zig _test/tools/native-tests.zig _test/tools/form-coverage.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
 _test/%.zig: ; zig test $*.zig
 
 SYSLOG_PROBE = $(BUILD)/syslog-init
@@ -417,25 +459,20 @@ fuzz-syslog:
 	done
 
 check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SYSLOG_PROBE)
-	@test -r $(BUILD)/vmlinuz || $(HOWL_BUILD) image
-	python3 test/check-syslog --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
+	@test -r $(BUILD)/vmlinuz || $(MAKE) --no-print-directory DISABLE=$(CHECK_DISABLE) image
+	$(call host_test,test/check-syslog.zig) --arch $(ARCH) --kernel $(BUILD)/vmlinuz \
 		--daemon $(call program_bin,syslogd) --probe $(SYSLOG_PROBE) \
 		--leash $(call program_bin,leash) --work $(BUILD)/check/syslog \
 		$(if $(SYSLOG_MODULES),--modules $(SYSLOG_MODULES))
 
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
-	@python3 test/howl-protections $(HOWL)
-	@python3 test/howl-make-protections
-	@python3 test/howl-test $(HOWL)
-	@python3 test/howl-ssh $(HOWL)
-	@python3 test/howl-current-user $(HOWL)
-	@python3 test/howl-forms $(HOWL)
-	@python3 test/native-tests-regression
+	@$(call host_test,test/howl/run.zig) $(HOWL) test/howl/cases.yaml protections make forms ssh current-user
+	@$(call host_test,test/native-tests-regression.zig) $(HOWL)
 	@zig test test/native/driver.zig
 	@zig test --dep test-driver -Mroot=forms/greenbone/test/driver.zig -Mtest-driver=test/native/driver.zig
 _test/howl-lock: $(HOWL)
-	@python3 test/howl-lock $(HOWL)
+	@$(call host_test,test/howl/run.zig) $(HOWL) test/howl/cases.yaml lock
 
 posture: $(POSTURE_BIN)
 ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
@@ -507,7 +544,7 @@ list-forms:
 RELEASE_FORMS = $(shell $(FORM_ASK) released)
 DIST_DIRECT_FORMS = minimal
 DIST = dist
-RELEASE_SOURCES = Makefile forms boot cmd lib tools release/image.pub release/tiers.pub release/advisories release/packages.pub release/boot.crt release/with-boot-key
+RELEASE_SOURCES = Makefile forms boot cmd lib tools release/image.pub release/tiers.pub release/advisories release/packages.pub release/boot.crt
 # Releases take werewolf's programs from its repository, so a newly published program is an input.
 RELEASE_LOCKS = $(addprefix $(LOCK)/,$(addsuffix -published.lock.json,$(RELEASE_FORMS)) kernel.lock.json boot.lock.json)
 # The inputs are a digest of the sources' bytes and exec bits, and every package's URL.
@@ -551,7 +588,7 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
-NATIVE_TEST_FORMS := $(filter $(FORMS_FOR_ARCH),$(sort $(patsubst forms/%/test/native.json,%,$(wildcard forms/*/test/native.json)) $(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
+NATIVE_TEST_FORMS := $(filter-out bastion,$(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # A check boots directly: no firmware or TPM, and IPE only under IPE=1.
 CHECK_DISABLE = secureboot,tpm$(if $(IPE),,$(comma)ipe)
@@ -619,7 +656,7 @@ $(IPE_PROBE): test/ipe-init.zig lib/ipe.zig lib/dm.zig lib/verity.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep dm --dep verity --dep ipe \
 		-Mroot=$< -Mdm=lib/dm.zig -Mverity=lib/verity.zig -Mipe=lib/ipe.zig -femit-bin=$@
-check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE)
+check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE) build/host/ipe-boot
 	@[ "$(IPE)" = 1 ] || { echo "check-ipe: set IPE=1 and the kernel, key and certificate paths" >&2; exit 1; }
 	$(CHECK_MAKE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root image
 	$(CHECK_MAKE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root _check-ipe
@@ -630,7 +667,8 @@ _check-ipe:
 check-image-updater: $(HOWL)
 	@[ "$(IPE)" = 1 ] || { echo "check-image-updater: set IPE=1 and its kernel/key/certificate" >&2; exit 1; }
 	@$(CHECK_ENV) ARCH=$(ARCH) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
-		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-image-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci
+		IPE_CERT=$(WEREWOLF_IPE_CRT) $(call host_test,test/check-image-updater.zig) \
+		$(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci
 
 # Continuous EFI update: the new UKI and external root must agree under IPE.
 IPE_UPDATE_SECUREBOOT ?= 1
@@ -638,7 +676,13 @@ check-image-updater-uki: $(HOWL)
 	@[ "$(IPE)" = 1 ] || { echo "check-image-updater-uki: set IPE=1 and its kernel/key/certificate" >&2; exit 1; }
 	@$(CHECK_ENV) ARCH=$(ARCH) IPE_UPDATE_BOOT=efi IPE_UPDATE_SECUREBOOT=$(IPE_UPDATE_SECUREBOOT) \
 		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
-		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
+		IPE_CERT=$(WEREWOLF_IPE_CRT) $(call host_test,test/check-image-updater.zig) \
+		$(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
+# The shipping vuln-demo image built in VULN_DEMO_BUILD, probed over forwarded ports.
+VULN_DEMO_BUILD ?= build/vuln-demo-check
+.PHONY: check-vuln-demo-appliance
+check-vuln-demo-appliance: $(HOWL)
+	$(call host_test,forms/vuln-demo/test/appliance.zig) --build $(VULN_DEMO_BUILD)
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static check-people check-people-persist $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check-platform: check-integrity check-cloud check-persist check-syslog
@@ -678,27 +722,60 @@ _check-legacy-%: | _check-shared
 .PHONY: check-native-tests _check-native-tests
 .PHONY: check-plex-import
 check-plex-import: $(HOWL)
-	test/check-plex-import $(HOWL)
-check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS))
-$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS)): check-native-tests-%: $(HOWL)
-	@python3 test/native-tests describe $* $(ARCH) >/dev/null
-	@$(call built,$*-baseline,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
-	PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) python3 test/native-tests prepare $* $(ARCH)
-	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= DISABLE=$(CHECK_DISABLE) image)
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$*$(if $(IPE),-ipe) \
-		TEST_OUT=$(BUILD)/native-test-$*$(if $(IPE),-ipe) python3 test/native-tests compare $* $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$*/native-test-$* DEV= DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$* _check-native-tests
-_check-native-tests:
-	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(NATIVE_FORM)$(if $(IPE),-ipe) \
-		python3 test/native-tests run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
+	$(call host_test,test/check-plex-import.zig) $(HOWL)
+# native-host runs a native run's host suites (test/native/host.zig) with the
+# guest's matchers, and so their regex shim.
+NATIVE_HOST = build/host/native-host
+$(NATIVE_HOST): test/native-host.zig test/native/match.zig test/native/regex.c $(wildcard test/host/*.zig lib/*.zig)
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe -lc test/native/regex.c $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
+NATIVE_TESTS = build/host/native-tests
+$(NATIVE_TESTS): tools/native-tests.zig tools/native-iterate.zig tools/native-compare.zig tools/native-ssh.zig \
+	test/native/plan.zig test/native/steps.zig test/native/host.zig lib/form.zig lib/yaml.zig
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
+# An example's native tests name its directory, as FORM may.
+NATIVE_TEST_EXAMPLES := $(patsubst examples/%/test/tests.yaml,%,$(wildcard examples/*/test/tests.yaml))
+native_ref = $(if $(filter $(1),$(NATIVE_TEST_EXAMPLES)),examples/$(1),$(1))
+check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(filter bastion,$(FORMS_FOR_ARCH)))
+# native_check NAME,REF,VARIABLES builds REF's production image and its native
+# test image, compares them, and boots the test image with VARIABLES.
+define native_check
+	@$(NATIVE_TESTS) describe $(2) $(ARCH) >/dev/null
+	@$(call built,$(1)-baseline,$(MAKE) --no-print-directory FORM=$(2) DEV= DISABLE=$(CHECK_DISABLE) image)
+	PRODUCTION_OUT=$(BUILD)/$(1)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
+	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) image)
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(1)$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(3) _check-native-tests
+endef
+$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
+	$(call native_check,$*,$(call native_ref,$*))
+# bastion's checks run on test/bastion-form's form, the bastion with two
+# users, whose keys it makes beside it: its host suites log in with them.
+check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
+	@test/bastion-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
+	$(call native_check,bastion-check,$(CHECK)/bastion-check,NATIVE_SSH_PORT=$(call check_port,24200,bastion) NATIVE_SSH_KEYS=$(CHECK)/bastion-check)
+check-bastion: check-native-tests-bastion
+# A run's host suites log in through its own forwarded port (tools/native-ssh.zig).
+NATIVE_SSH_PORT ?= $(call check_port,24200,$(notdir $(NATIVE_FORM)))
+_check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(TEST_SK) build/host/ssh-su
+	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(notdir $(NATIVE_FORM))$(if $(IPE),-ipe) \
+		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
+		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
 # Shared checks run natively; retained form checks still run during migration.
 $(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
-	@case "$$(python3 test/native-tests describe $* $(ARCH))" in \
-		'{"legacy": false}') ;; \
-		'{"legacy": true}') $(MAKE) --no-print-directory _check-legacy-$* ;; \
+	@case "$$($(NATIVE_TESTS) describe $* $(ARCH))" in \
+		native) ;; \
+		legacy) $(MAKE) --no-print-directory _check-legacy-$* ;; \
 		*) echo 'native-tests: could not resolve remaining legacy coverage' >&2; exit 1 ;; \
 	esac
+
+# howl test --iterate reuses one SSH VM per form (docs/testing-native.md).
+.PHONY: $(addprefix iterate-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES))
+$(addprefix iterate-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): iterate-%: $(NATIVE_TESTS)
+	@$(NATIVE_TESTS) iterate '$(ITERATE_HOWL)' $(call native_ref,$*) $(ARCH) $(ITERATE) $(PHASE) $(DRIVER)
 
 # Test the actual application-carrier form with code in its verified image,
 # as well as its ordinary boot without code. A separate name avoids sharing
@@ -711,21 +788,21 @@ $(addprefix check-app-,$(APP_CHECK_FORMS)): check-app-%: | _check-shared
 # Each form's ports get their own host ports, so forms boot in parallel.
 check_port = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(2)' | cut -d: -f1 | awk '{ print $(1) + $$1 }')
 # A honeypot may offer an SSH banner on 22 without operator logins.
-CHECK_SSH := $(if $(and $(filter sshd bastion gitea sftpgo,$(CHAIN)),$(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF)))),$(call check_port,22200,$(FORM)))
+CHECK_SSH := $(if $(and $(filter sshd,$(CHAIN)),$(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF)))),$(call check_port,22200,$(FORM)))
 CHECK_WEB_PORT := $(call form_check,web)
 CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
 CHECK_SKIP ?= $(call form_check,skip)
 CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
 # The forms booted again on the disks they left (docs/testing.md).
-AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba paperless mongodb rabbitmq
+AGAIN_FORMS ?= minimal sshd prod-ssh vaultwarden demo samba paperless mongodb rabbitmq
 ifeq ($(AGAIN_FORMS),all)
 override AGAIN_FORMS := $(FORMS)
 endif
-_check-form: $(HOWL) $(TEST_SK)
+_check-form: $(HOWL) $(TEST_SK) build/host/cloud-console build/host/ssh-su
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) SKIP='$(CHECK_SKIP)' \
 		CHECK_NAME='$(CHECK_NAME)' FORM_CHECKS='$(FORM_CHECKS)' \
 		AGAIN=$(filter $(AGAIN_FORMS),$(FORM)) SSH_PORT=$(CHECK_SSH) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
-		KEPT_KEYS=$(CHECK_KEPT_KEYS) GITEA_PORT=$(CHECK_WEB) test/check-form \
+		test/check-form \
 		$(subst user$(,)id=n0,user$(,)id=n0$(CHECK_FWD),$(CHECK_QEMU))
 
 check-adhoc: $(HOWL) | _check-shared
@@ -737,15 +814,27 @@ check-adhoc: $(HOWL) | _check-shared
 
 # Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
 # People uses 22199, below the forms' ports, so check-cloud and check-forms can run together.
-check-bastion check-people: check-%: $(HOWL) $(TEST_SK) | _check-shared
-	@test/$*-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
-	@$(call built,$*,$(CHECK_MAKE) FORM=$(CHECK)/$*-check image)
-	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(if $(filter bastion,$*),$(call check_port,22200,bastion),22199) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
+check-people: $(HOWL) $(TEST_SK) | _check-shared
+	@test/people-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
+	@$(call built,people,$(CHECK_MAKE) FORM=$(CHECK)/people-check image)
+	@$(CHECK_MAKE) FORM=$(CHECK)/people-check CHECK_SSH=22199 _check-form
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-shellfree
 _check-shellfree:
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
+
+# A Linux check runs as root in private namespaces (test/host/netns.zig), so
+# it is a static program for the machine it tests; CHECK_LINK adds libraries.
+$(BUILD)/check-%: test/check-%.zig $(wildcard test/unwound/* test/dns/* test/host/*.zig lib/*.zig)
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call HOST_ZIG_MODULES,$<) \
+		$(CHECK_LINK) -femit-bin=$@
+# The age checks seed and read the store through the age writer's SQLite.
+$(BUILD)/check-unwound $(BUILD)/check-unwound-age-authority $(BUILD)/check-unwound-age-mount: \
+	CHECK_LINK = -lc build/$(ARCH)/unwound-age-sqlite.o
+$(BUILD)/check-unwound $(BUILD)/check-unwound-age-authority $(BUILD)/check-unwound-age-mount: \
+	build/$(ARCH)/unwound-age-sqlite.o
 
 # The Linux kernel, private namespaces and a local DNS/TLS/DHCP fixture; no internet.
 $(BUILD)/dns-policy: test/dns-policy.zig $(wildcard lib/*.zig)
@@ -755,9 +844,12 @@ $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
 		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm --dep sandbox -Mposture=cmd/posture/posture.zig -femit-bin=$@
-check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress
-	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
-	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
+check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress \
+	$(BUILD)/check-dns $(BUILD)/check-lan
+	$(DNS_TEST_RUNNER) $(BUILD)/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
+	$(DNS_TEST_RUNNER) $(BUILD)/check-lan $(call program_bin,fence)
+# make test reads check-dns's and check-unwound's cases, which need no Linux.
+_test/test/check-dns.zig _test/test/unwound/lab.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 
 $(BUILD)/updater-installer-test: cmd/slot-update/installer.zig lib/sandbox.zig lib/seal.zig
 	$(zig_check)
@@ -776,10 +868,10 @@ check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordi
 .PHONY: check-mount-broker check-privilege-boundaries
 $(BUILD)/mount-broker-test: cmd/mount-broker/mount-broker.zig $(wildcard lib/*.zig)
 	zig test -target $(ARCH)-linux-musl --test-no-exec -femit-bin=$@ $(call ZIG_MODULES,cmd/mount-broker/mount-broker.zig)
-check-mount-broker: $(call program_bin,mount-broker) $(BUILD)/mount-broker-test
-	$(LINUX_TEST_RUNNER) unshare --mount --fork sh -ec 'mount --make-rprivate /; mount -t tmpfs tmpfs /run; mkdir /run/runit; python3 test/check-mount-broker "$$1" "$$2"' fixture $(call program_bin,mount-broker) $(BUILD)/mount-broker-test
+check-mount-broker: $(call program_bin,mount-broker) $(BUILD)/mount-broker-test $(BUILD)/check-mount-broker
+	$(LINUX_TEST_RUNNER) $(BUILD)/check-mount-broker $(call program_bin,mount-broker) $(BUILD)/mount-broker-test
 check-privilege-boundaries: $(HOWL)
-	python3 test/check-privilege-boundaries $(HOWL)
+	$(call host_test,test/check-privilege-boundaries.zig) $(HOWL)
 
 BROKER_FUZZ_RUNS ?= 50000
 .PHONY: fuzz-broker
@@ -788,18 +880,19 @@ fuzz-broker:
 	zig build --build-file test/broker-fuzz/build.zig --fuzz=$(BROKER_FUZZ_RUNS) --summary all
 	@test ! -e test/broker-fuzz/.zig-cache/f/crash || { echo 'broker parser fuzz crash'; exit 1; }
 
-check-lan: $(call program_bin,fence)
-	$(DNS_TEST_RUNNER) python3 test/check-lan $(call program_bin,fence)
+check-lan: $(call program_bin,fence) $(BUILD)/check-lan
+	$(DNS_TEST_RUNNER) $(BUILD)/check-lan $(call program_bin,fence)
 
 # check-unwound runs the real fence and unwound against a fixture resolver
 # in private namespaces, as root, on Linux (cmd/unwound/README.md).
-.PHONY: check-unwound check-unwound-age check-unwound-age-live check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels fuzz-unwound
+.PHONY: check-unwound check-unwound-age check-unwound-age-live check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels check-unwound-caddy fuzz-unwound
 
 # The age writer is statically linked with a hash-pinned SQLite amalgamation.
 # This host test exercises the real schema before the writer joins unwound.
 UNWOUND_SQLITE = out/third-party/sqlite-3540100
-$(UNWOUND_SQLITE)/sqlite3.c: tools/checkout-unwound-sqlite
-	python3 tools/checkout-unwound-sqlite
+$(UNWOUND_SQLITE)/sqlite3.c: tools/checkout-unwound-sqlite.zig
+	$(zig_check)
+	zig run -O ReleaseSafe $<
 build/$(ARCH)/unwound-age-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
 	@mkdir -p $(dir $@)
 	zig cc -target $(ARCH)-linux-musl -O2 -fPIC -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=0 -c $< -o $@
@@ -816,7 +909,7 @@ build/host/unwound-sqlite.o: $(UNWOUND_SQLITE)/sqlite3.c
 check-unwound-age-store: build/host/unwound-sqlite.o
 	zig test -lc cmd/unwound/age_db.zig $<
 	zig test -lc cmd/unwound/age_evidence.zig $<
-	python3 test/check-unwound-age-db
+	zig run -O ReleaseSafe -lc $(call HOST_ZIG_MODULES,test/check-unwound-age-db.zig) $< -- cmd/unwound/age.sql
 
 _test/cmd/unwound/age_evidence.zig: build/host/unwound-sqlite.o
 	zig test -lc cmd/unwound/age_evidence.zig $<
@@ -825,40 +918,42 @@ _test/cmd/unwound-age/unwound-age.zig: build/host/unwound-sqlite.o
 	zig test -lc $(call ZIG_MODULES,cmd/unwound/age_authority.zig) $<
 
 .PHONY: check-unwound-age-mount
-check-unwound-age-mount:
-	$(DNS_TEST_RUNNER) python3 test/check-unwound-age-mount
+check-unwound-age-mount: $(BUILD)/check-unwound-age-mount
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-age-mount
 
 .PHONY: check-unwound-age-authority
-check-unwound-age-authority: $(call program_bin,unwound-age)
-	$(DNS_TEST_RUNNER) python3 test/check-unwound-age-authority $(call program_bin,unwound-age)
+check-unwound-age-authority: $(call program_bin,unwound-age) $(BUILD)/check-unwound-age-authority
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-age-authority $(call program_bin,unwound-age)
 
-check-unwound: $(call program_bin,fence) $(call program_bin,unwound)
-	$(DNS_TEST_RUNNER) python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound)
-
-check-unwound-age: $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
-	$(DNS_TEST_RUNNER) env AGE_TEST=1 python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
-check-unwound-age-live: $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
-	$(DNS_TEST_RUNNER) env AGE_LIVE_TEST=1 python3 test/check-unwound $(call program_bin,fence) $(call program_bin,unwound) $(call program_bin,unwound-age)
+UNWOUND_CHECK = $(call program_bin,fence) $(call program_bin,unwound)
+check-unwound: $(UNWOUND_CHECK) $(BUILD)/check-unwound
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound $(UNWOUND_CHECK)
+check-unwound-age: $(UNWOUND_CHECK) $(call program_bin,unwound-age) $(BUILD)/check-unwound
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound $(UNWOUND_CHECK) $(call program_bin,unwound-age)
+check-unwound-age-live: $(UNWOUND_CHECK) $(call program_bin,unwound-age) $(BUILD)/check-unwound
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound --live $(UNWOUND_CHECK) $(call program_bin,unwound-age)
 # Lab check with a freshly signed local TLSA zone and a deliberately invalid
 # signature. Requires named, unbound and BIND's dnssec tools in unwound-lab.
-check-unwound-dnssec: $(call program_bin,fence) $(call program_bin,unwound)
-	$(DNS_TEST_RUNNER) python3 test/check-unwound-dnssec $(call program_bin,fence) $(call program_bin,unwound)
+check-unwound-dnssec: $(UNWOUND_CHECK) $(BUILD)/check-unwound-dnssec
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-dnssec $(UNWOUND_CHECK)
 MOX_DNSSEC_BIN ?= $(BUILD)/mox/melange/usr/bin/mox
-check-unwound-dnssec-mox: $(call program_bin,fence) $(call program_bin,unwound)
+check-unwound-dnssec-mox: $(UNWOUND_CHECK) $(BUILD)/check-unwound-dnssec
 	@test -x "$(MOX_DNSSEC_BIN)" || { echo "build Mox or set MOX_DNSSEC_BIN" >&2; exit 1; }
-	$(DNS_TEST_RUNNER) python3 test/check-unwound-dnssec $(call program_bin,fence) \
-		$(call program_bin,unwound) $(MOX_DNSSEC_BIN)
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-dnssec $(UNWOUND_CHECK) $(MOX_DNSSEC_BIN)
 # Optional lab check: real iodine, dns2tcp and shellack clients against their
 # local servers, first directly and then through the screened resolver.
 SHELLACK ?= $(HOME)/src/shellack
-check-unwound-tunnels: $(call program_bin,fence) $(call program_bin,unwound)
+check-unwound-tunnels: $(UNWOUND_CHECK) $(BUILD)/check-unwound-tunnels
 	@test -f "$(SHELLACK)/shellack.sh" || { echo "set SHELLACK to a shellack checkout" >&2; exit 1; }
-	mkdir -p $(BUILD)
 	cd "$(SHELLACK)" && GOOS=linux GOARCH=$(if $(filter aarch64,$(ARCH)),arm64,amd64) \
 		go build -o "$(CURDIR)/$(BUILD)/shellack-server" ./cmd/server
-	$(DNS_TEST_RUNNER) python3 $(CURDIR)/test/check-unwound-tunnels \
-		$(CURDIR)/$(call program_bin,fence) $(CURDIR)/$(call program_bin,unwound) \
-		$(CURDIR)/$(BUILD)/shellack-server "$(SHELLACK)/shellack.sh"
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-tunnels $(UNWOUND_CHECK) \
+		$(BUILD)/shellack-server "$(SHELLACK)/shellack.sh"
+# Lab check: Caddy's ACME lookup under a form's composed policy, as
+# CADDY_POLICY=build/ARCH/caddy/.../net CADDY_DOMAIN=example.com.
+check-unwound-caddy: $(UNWOUND_CHECK) $(BUILD)/check-unwound-caddy
+	@test -f "$(CADDY_POLICY)" && test -n "$(CADDY_DOMAIN)" || { echo "set CADDY_POLICY and CADDY_DOMAIN" >&2; exit 1; }
+	$(DNS_TEST_RUNNER) $(BUILD)/check-unwound-caddy $(UNWOUND_CHECK) $(CADDY_POLICY) $(CADDY_DOMAIN)
 UNWOUND_FUZZ_RUNS ?= 1000000
 fuzz-unwound:
 	@# zig build --fuzz succeeds even when a target crashes; the input it
@@ -895,7 +990,7 @@ check-secureboot: $(HOWL)
 		-subj /CN=werewolf-secureboot-check -days 30 -out $(CHECK)/sb.crt 2>/dev/null
 	@$(MAKE) --no-print-directory FORM=prod ARCH=$(ARCH) _check-secureboot
 check-lima-secureboot: check-secureboot
-	python3 test/check-lima-secureboot $(CHECK)/secureboot/release/prod-$(ARCH)-disk.qcow2 \
+	$(call host_test,test/check-lima-secureboot.zig) $(CHECK)/secureboot/release/prod-$(ARCH)-disk.qcow2 \
 		$(CHECK)/secureboot/enrolled $(CHECK)/lima-secureboot
 # check-firecracker builds for x86_64 here and boots on FIRECRACKER_HOST
 # (default galadriel) through a cross-compiled howl, so the host needs no
@@ -905,9 +1000,9 @@ FIRECRACKER_HOST ?= galadriel
 FC_FORM = build/adhoc/check-fc
 POSTURE_KNOWN_X64 := $(shell awk -v b='*' -v a=x86_64 '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known) \
 	network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell network-ssh-security-keys
-check-firecracker: | _check-shared
+check-firecracker: build/host/cloud-console | _check-shared
 	@rm -rf $(FC_FORM) && $(HOWL) form --build --with sshd --sshd.pubkey-accepted-algorithms ssh-ed25519 -o $(FC_FORM)/
-	@$(call built,firecracker,$(MAKE) --no-print-directory ARCH=x86_64 FORM=$(FC_FORM) DEV= programs disk)
+	@$(call built,firecracker,$(MAKE) --no-print-directory ARCH=x86_64 FORM=$(FC_FORM) DEV= DISABLE=$(CHECK_DISABLE) programs disk)
 	@mkdir -p $(CHECK) build/x86_64/tools
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,cmd/howl/howl.zig) -femit-bin=build/x86_64/tools/howl
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(FORM_TOOL_MODULES) -femit-bin=build/x86_64/tools/form
@@ -918,16 +1013,16 @@ _check-lease _check-nodata _check-static _check-verity _check-slot _check-deadma
 	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
 _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
-		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt test/check-secureboot \
+		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt $(call host_test,test/check-secureboot.zig) \
 		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
 		-m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci
-_check-metadata:
+_check-metadata: build/host/metadata
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
 
 .PHONY: check-people-persist _check-people-persist
 _check-people-persist:
-	@$(CHECK_ENV) python3 test/check-people-persist $(CHECK_QEMU)
+	@$(CHECK_ENV) $(call host_test,test/check-people-persist.zig) $(CHECK_QEMU)
 
 # Each run copies x86_64's UEFI variables, sparing the template; splash-time=0 skips edk2's 5 s wait.
 UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
@@ -959,7 +1054,7 @@ _check-dist:
 	@$(UEFI_ENV) DIST=$(DIST) HOWL=$(HOWL) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) \
 		CONSOLE=$(wildcard $(FORM_DIR)/test/console) \
 		POSTURE_KNOWN="$(filter-out boot-ipe-enforced,$(POSTURE_KNOWN))" \
-		test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
+		$(call host_test,test/check-dist.zig) qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
 		-nographic -smp 2 -m $(or $(call form_check,memory),2048) -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 
@@ -983,7 +1078,7 @@ _check-persist:
 		-drive file=$(CHECK)/persist.img,format=raw,if=virtio
 
 check-gcp-metadata: $(HOWL) $(TEST_SK)
-	@python3 test/gcp-metadata $(HOWL) $(CURDIR)/$(TEST_SK) $(ARCH)
+	@$(call host_test,test/gcp-metadata.zig) $(HOWL) $(CURDIR)/$(TEST_SK) $(ARCH)
 
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
@@ -1001,10 +1096,15 @@ check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp chec
 	@$(MAKE) --no-print-directory AB_PROVIDER=$* _check-provider-ab
 check-bhyve-secureboot: $(HOWL)
 	@test -n "$(AB_FIXTURE)" || { echo 'set AB_FIXTURE to a signed x86_64 fixture.json' >&2; exit 1; }
-	@CHECK=$(CHECK) python3 test/check-bhyve-secureboot $(HOWL) $(AB_FIXTURE)
+	@CHECK=$(CHECK) $(call host_test,test/check-bhyve-secureboot.zig) $(HOWL) $(AB_FIXTURE)
 _check-provider-ab: $(HOWL)
 	@CHECK=$(CHECK) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) IPE_CERT=$(WEREWOLF_IPE_CRT) \
-		python3 test/check-provider-ab $(HOWL) $(AB_PROVIDER) $(ARCH)
+		$(call host_test,test/check-provider-ab.zig) $(HOWL) $(AB_PROVIDER) $(ARCH)
+# ARGS is check-bhyve-lifecycle's HOST ARCH DISK.zst KEY [tap|slirp] [SECONDS] (docs/testing-live.md),
+# and build-traced-stub's --output FILE [--helper NAME] [--sync-arm-cache] [--firmware-kernel-loader].
+.PHONY: check-bhyve-lifecycle build-traced-stub
+check-bhyve-lifecycle build-traced-stub:
+	$(call host_test,test/$@.zig) $(ARGS)
 
 build/x86_64/tools/howl-linux: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
@@ -1022,7 +1122,7 @@ examples:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example local $$f || status=1; done; exit $$status
 examples-gcp:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example gcp $$f || status=1; done; exit $$status
-_check-cloud: $(HOWL) $(TEST_SK)
+_check-cloud: $(HOWL) $(TEST_SK) build/host/cloud-console build/host/azure-security build/host/cloud-posture
 	@mkdir -p $(CHECK)
 	@runner=$$(mktemp '$(CHECK)/cloud-$(CLOUD).XXXXXXXX') && \
 		trap 'rm -f "$$runner"' EXIT && cp test/cloud "$$runner" && chmod 700 "$$runner" && \
@@ -1059,14 +1159,36 @@ help:
 	@sed -n '2,/^$$/s/^# \{0,1\}//p' Makefile
 
 # BEGIN: lint-install .
-LINTERS := yamllint-lint zig-lint doc-lint
+LINTERS := yamllint-lint zig-lint doc-lint code-lint
 FIXERS := zig-fix doc-fix
 .PHONY: lint _lint fix $(LINTERS) $(FIXERS)
 lint: _lint
 _lint:
-	@$(MAKE) --no-print-directory -k -j3 $(LINTERS)
+	@$(MAKE) --no-print-directory -k -j4 $(LINTERS)
 fix:
 	@status=0; for t in $(FIXERS); do $(MAKE) $$t || status=1; done; exit $$status
+
+# What builds, tests and releases werewolf is Zig (CONTRIBUTING.md). Python and Go
+# are only what a form runs; WORKLOAD_CODE names them. code-lint refuses any
+# other Python or Go file, Python script, or Python a build step writes inline.
+# Each needs its language: the example apps; onnx's checks drive Python's own
+# onnxruntime and ctypes, which nothing but Python can; opencanary's and
+# paperless's sitecustomize patch those apps' interpreters as they start; and
+# vuln-console is the vuln-demo form's Go helper.
+WORKLOAD_CODE = examples/go/main.go forms/python-example/rootfs/usr/lib/app/main.py \
+	forms/webshell-example/rootfs/usr/lib/app/webshell.py forms/onnx/rootfs/usr/lib/onnx/check.py \
+	forms/onnx/rootfs/usr/lib/libffi-static/check.py \
+	forms/opencanary/rootfs/oci/opencanary/opencanary/sitecustomize.py \
+	forms/paperless/rootfs/usr/lib/paperless/lib/python3.13/site-packages/sitecustomize.py \
+	$(wildcard forms/vuln-demo/melange/*.go) forms/vuln-demo/melange/go.mod forms/vuln-demo/melange/go.sum
+code-lint:
+	@cd $(LINT_ROOT) && bad=$$( { git ls-files -co --exclude-standard -- '*.py' '*.pyc' '*.go' '*go.mod' '*go.sum'; \
+		git grep --untracked -lE '^#!.*python' -- ':!docs'; } | sort -u | while read -r f; do \
+		[ -e "$$f" ] && case " $(WORKLOAD_CODE) " in (*" $$f "*) ;; (*) echo "$$f" ;; esac; done; \
+		git grep --untracked -nE 'python[0-9.]* +(-[A-Za-z]+ +)*(-c|-)( |$$)|python[0-9.]* +[a-z]+/' -- \
+		Makefile .github tools test release boot ':!*.md'); \
+	[ -z "$$bad" ] || { echo 'code-lint: first-party Python or Go; write it in Zig (CONTRIBUTING.md):' >&2; \
+		printf '%s\n' "$$bad" | sed 's/^/  /' >&2; exit 1; }
 LINT_ROOT := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
 YAMLLINT_VERSION ?= 1.37.1

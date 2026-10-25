@@ -151,7 +151,9 @@ suites:
                 min: 1
       - name: solr-private-listener
         steps:
-          - listeners: {protocol: tcp, port: 8983}
+          - listeners:
+              protocol: tcp
+              port: 8983
             expect:
               equals:
                 - protocol: tcp

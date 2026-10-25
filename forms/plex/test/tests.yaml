@@ -47,7 +47,8 @@ suites:
               url: https://localhost/:/prefs
               ca: /data/svc/caddy/pki/authorities/local/root.crt
               headers:
-                X-Plex-Token: {fixture: plex-token}
+                X-Plex-Token:
+                  fixture: plex-token
             expect:
               status: 200
               body:
@@ -119,7 +120,8 @@ suites:
           - exec:
               argv: [/usr/lib/werewolf/plex-transcode, client, -version]
             expect:
-              exit: {not_equals: 0}
+              exit:
+                not_equals: 0
               stderr:
                 contains: '"event":"refused"'
   - name: plex-transcoder
@@ -152,7 +154,8 @@ suites:
           - exec:
               argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, '/data/svc/plex/Plex Media Server/Preferences.xml', -f, 'null', '-']
             expect:
-              exit: {not_equals: 0}
+              exit:
+                not_equals: 0
               stderr:
                 contains: Permission denied
       - name: plex-h264-output-readable-by-server
@@ -165,19 +168,22 @@ suites:
             expect:
               type: file
               readable: true
-              size: {min: 1}
+              size:
+                min: 1
       - name: plex-transcoder-network-denied
         steps:
           - exec:
               argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, 'http://127.0.0.1:32400/identity', -f, 'null', '-']
             expect:
-              exit: {not_equals: 0}
+              exit:
+                not_equals: 0
       - name: plex-transcoder-media-readonly
         steps:
           - exec:
               argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /data/svc/plex-media/evil.ts]
             expect:
-              exit: {not_equals: 0}
+              exit:
+                not_equals: 0
               stderr:
                 contains: Permission denied
       - name: plex-transcoder-codecs-readonly
@@ -185,7 +191,8 @@ suites:
           - exec:
               argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /usr/lib/plexmediaserver/Codecs/evil.so]
             expect:
-              exit: {not_equals: 0}
+              exit:
+                not_equals: 0
       - name: plex-transcoder-survives-refusals
         steps:
           - exec:

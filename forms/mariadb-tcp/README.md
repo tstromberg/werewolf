@@ -1,6 +1,6 @@
 # MariaDB TCP - Hardened VM
 
-[MariaDB](https://mariadb.org) 12.3 on TCP port 3306:
+[MariaDB](https://mariadb.org)'s newest stable release on TCP port 3306:
 [mariadb-local](../mariadb-local/README.md) with a reachable listener. The form's
 manifest is [form.yaml](form.yaml).
 
@@ -64,8 +64,9 @@ account, so it belongs on that form.
   such account until the SQL creates one.
 - The image's SQL files run on every start. An `INSERT` needs a key and `INSERT IGNORE`,
   or the rows multiply. `--import` runs once.
-- There is no replication. `mariadb-upgrade` is not run. Stay on 12.3. A new major
-  version is a new form.
+- There is no replication. A new MariaDB series upgrades the data in place, with
+  `mariadb-upgrade`, on its first start. An older release refuses data a newer one
+  upgraded, so falling back past an upgrade needs a backup.
 
 ### Network Exposure
 

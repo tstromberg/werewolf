@@ -23,7 +23,7 @@ cp "$IPE_PROBE" "$dir/extra/init"
 	--exclude init "@$dir/stage0.cpio"
 "$TAR" -cf "$dir/probe-extra.cpio" --format newc --uid 0 --gid 0 "@$dir/extra.tar"
 cat "$dir/probe.cpio" "$dir/probe-extra.cpio" | zstd -1 -q -c >"$dir/probe.zst"
-test/ipe-boot "$dir/probe.log" "$@" -kernel "$KERNEL" -initrd "$dir/probe.zst" \
+build/host/ipe-boot "$dir/probe.log" "$@" -kernel "$KERNEL" -initrd "$dir/probe.zst" \
 	-append "$CMDLINE audit=1 loglevel=7" \
 	-drive "file=$OUT/slot/root.erofs,format=raw,if=none,id=trusted,readonly=on" -device virtio-blk-pci,drive=trusted \
 	-drive "file=$dir/other.erofs,format=raw,if=none,id=other,readonly=on" -device virtio-blk-pci,drive=other

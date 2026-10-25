@@ -1,6 +1,6 @@
 version: 1
 packages:
-  - mariadb-12.3-client
+  - mariadb-client
 suites:
   - name: wordpress-mariadb-ready
     readiness: true

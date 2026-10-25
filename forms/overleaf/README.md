@@ -14,6 +14,9 @@ instructions](https://dist.werewolf-linux.org/boot/v1/overleaf/index.html).
 
 - `\write18` can run only TeX Live's restricted helpers, not a command a document names.
 
+- Each compile reads only its own project, TeX's files and a TeX cache of its own, and
+  connects nowhere ([clsi-confine](cmd/clsi-confine/README.md)).
+
 ### Weaknesses
 
 - Node compiles as it runs. That is named in `form.yaml`.
@@ -62,8 +65,9 @@ site after this machine is up.
   database or the session secret.
 - TeX Live is `scheme-basic`, with no `tlmgr`. A document that needs another package
   fails to compile.
-- Compiles share one user, as upstream's Community Edition does. Give accounts to people
-  you would trust with each other's drafts.
+- Compiles share one user, as upstream's Community Edition does, each held to its own
+  project; word counts and SyncTeX are not. Give accounts to people you would trust with
+  each other's drafts.
 - Deleted projects are kept. Upstream's deletion cron stays off.
 - The image is about 3 GB, twice, plus MongoDB. The first boot is slow.
 

@@ -1,5 +1,0 @@
-ok  n8n-ui wget -q -T 10 -O - http://127.0.0.1:5678/ | grep -q -i n8n
-ok  n8n-health wget -q -T 10 -O - http://127.0.0.1:5678/healthz | grep -q ok
-ok  n8n-settings wget -q -T 10 -O - http://127.0.0.1:5678/rest/settings | grep -q data
-ok  n8n-native-runtime grep -q '^exec /usr/bin/node ' /etc/sv/n8n/service
-ok  n8n-database test -s /data/svc/n8n/.n8n/database.sqlite

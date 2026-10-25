@@ -54,7 +54,7 @@ boot must have a fresh boot id, the expected signed root hash, read-only dm-veri
 enforcing IPE; where the firmware enforces, SecureBoot=1 and SetupMode=0. Logs and
 `phases.json` are under `CHECK/provider-ab-PROVIDER`, and only what the test made is
 removed. `AB_FIXTURE` reuses a fixture of the same architecture and mode, `IPE_KERNEL`
-an existing kernel archive ([test/check-provider-ab](../test/check-provider-ab),
+an existing kernel archive ([test/check-provider-ab.zig](../test/check-provider-ab.zig),
 [design/provider-ab-tests.md](design/provider-ab-tests.md)).
 
 | Target | Mode | Needs |
@@ -88,7 +88,7 @@ cloud targets make billable resources: use test credentials.
 Each release channel has one TPM counter, its floor, and a release boots only if its
 index reaches it ([design/independent-updates.md](design/independent-updates.md)). `make
 check-tpm-floor`, also part of `make test` as `_test/tpm-floor`, runs
-[test/check-tpm-floor](../test/check-tpm-floor) against swtpm with
+[test/check-tpm-floor.zig](../test/check-tpm-floor.zig) against swtpm with
 `build/host/tpm-floor`, which drives lib/tpm.zig's code as stage0 and the mount broker
 do. A fresh TPM must enroll at the release's index, and an enrollment cut after each
 step must complete on the next boot. Then raw commands play guest root: undefining,
@@ -103,26 +103,28 @@ the handle must be refused.
 `howl run --build` is the protected path: an arm64 Lima QEMU guest on macOS, protected
 QEMU on Linux ([design/secure-local-deployment.md](design/secure-local-deployment.md)).
 `make check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
-[test/check-independent-updates](../test/check-independent-updates): `howl create
---build` makes release A (index 1) of a channel the test serves as static HTTPS files
-under a private CA, and boots it under Secure Boot, IPE and a fresh TPM, which it must
-enroll at floor 1. A root session must not open the TPM, and IPE must refuse code
-outside the verified root. The machine's own updater then installs B and C from the
-channel; operator rollback to the retained release, a power cut before and after the
-floor's increment, a restored disk holding retired A (stage0 must refuse it, the TPM
-kept) and a failed trial that falls back with the floor unchanged follow. No host
-service but the file server takes part.
-[test/check-published-lifecycle](../test/check-published-lifecycle) runs the
-production-signed playground bundles under isolated enrollments with no source tree or
-vendor keys, and emits publication gates only when every check passes.
+[test/check-independent-updates.zig](../test/check-independent-updates.zig): `howl
+create --build` makes release A (index 1) of a channel the test serves as static
+HTTPS files under a private CA, and boots it under Secure Boot, IPE and a fresh TPM,
+which it must enroll at floor 1. A root session must not open the TPM, and IPE must
+refuse code outside the verified root. The machine's own updater then installs B and
+C from the channel; operator rollback to the retained release, a power cut before and
+after the floor's increment, a restored disk holding retired A (stage0 must refuse
+it, the TPM kept) and a failed trial that falls back with the floor unchanged follow.
+No host service but the file server takes part.
+[test/check-published-lifecycle](../test/check-published-lifecycle.zig) runs one
+production-signed candidate through a consumer's own download, with no source tree or
+vendor keys, and emits publication gates only when every check passes and so did this
+check's evidence, made on disposable keys from the same tree.
 
 The host-side pieces have suites of their own, run by `make test` and
 [protected-images.yml](../.github/workflows/protected-images.yml):
-`test/local-prerequisites` (cache tampering, incomplete publication, signer custody,
-kernel and stub invalidation, interrupted builds), `test/boot-images` and
-`test/boot-download` (admission: foreign and altered signatures, weak profiles,
-unknown fields, release identity, size bounds, torn heads, replay, equivocation), and
-`test/protected-release` and `test/protected-publication` (signing custody, ordered
+lib/security-inputs.zig's tests (cache tampering, incomplete publication, signer
+custody, kernel and stub invalidation, interrupted builds), the tests of
+cmd/howl/boot-image.zig, cmd/howl/download.zig and lib/boot-download.zig (admission:
+foreign and altered signatures, weak profiles, unknown fields, release identity, size
+bounds, HTTPS bounds and redirects, torn heads, replay, equivocation), and
+tools/release's tests (`make _test/tools/release/release.zig`: signing custody, ordered
 uploads, interruption recovery, immutable collisions, release floors, an index that
 does not advance). Candidate CI has no publication permission
 ([design/protected-downloads.md](design/protected-downloads.md)).

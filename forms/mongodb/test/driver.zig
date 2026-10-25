@@ -1,7 +1,7 @@
 //! Fixed MongoDB OP_MSG probes; no Python or database shell in the test image.
 const std = @import("std");
 const driver = @import("test-driver");
-const bson = @import("bson.zig");
+const bson = driver.bson;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const database = "werewolf_check";
@@ -103,46 +103,5 @@ fn success(reply: []const u8) !bool {
 }
 fn command(io: Io, a: Allocator, value: anytype) ![]const u8 {
     const json = try std.json.Stringify.valueAlloc(a, value, .{});
-    const doc = try bson.encode(a, json);
-    const Event = union(enum) { reply: anyerror![]const u8, timeout: Io.Cancelable!void };
-    var buffer: [2]Event = undefined;
-    var events: Io.Select(Event) = .init(io, &buffer);
-    defer events.cancelDiscard();
-    try events.concurrent(.reply, exchange, .{ io, a, doc });
-    try events.concurrent(.timeout, sleep, .{io});
-    return switch (try events.await()) {
-        .reply => |result| try result,
-        .timeout => |result| {
-            try result;
-            return error.Timeout;
-        },
-    };
-}
-fn sleep(io: Io) Io.Cancelable!void {
-    try io.sleep(.fromSeconds(5), .awake);
-}
-fn exchange(io: Io, a: Allocator, doc: []const u8) ![]const u8 {
-    const address: Io.net.IpAddress = .{ .ip4 = .loopback(27017) };
-    const stream = try address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
-    var header: [21]u8 = @splat(0);
-    std.mem.writeInt(u32, header[0..4], @intCast(header.len + doc.len), .little);
-    std.mem.writeInt(u32, header[4..8], 1, .little);
-    std.mem.writeInt(u32, header[12..16], 2013, .little);
-    var buffer: [1024]u8 = undefined;
-    var writer = stream.writer(io, &buffer);
-    try writer.interface.writeAll(&header);
-    try writer.interface.writeAll(doc);
-    try writer.interface.flush();
-    var reader = stream.reader(io, &buffer);
-    try reader.interface.readSliceAll(header[0..16]);
-    const n = std.mem.readInt(u32, header[0..4], .little);
-    if (n < 26 or n > 1 << 20 or std.mem.readInt(u32, header[8..12], .little) != 1 or
-        std.mem.readInt(u32, header[12..16], .little) != 2013) return error.ResponseHeader;
-    const payload = try a.alloc(u8, n - 16);
-    try reader.interface.readSliceAll(payload);
-    if (std.mem.readInt(u32, payload[0..4], .little) != 0 or payload[4] != 0)
-        return error.ResponseSections;
-    _ = try bson.require(payload[5..], "ok");
-    return payload[5..];
+    return driver.within(io, 5, bson.exchange, .{ io, a, try bson.encode(a, json) });
 }

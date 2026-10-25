@@ -20,7 +20,7 @@ and client checks dominate. Native ports duplicate HTTP code; failures lack diag
 - Replacing VM orchestration, production acceptance or specialized protocol clients.
 
 ## Detailed design
-`forms/FORM/test/tests.yaml` replaces `native.json`; the host validates it and emits
+`forms/FORM/test/tests.yaml` replaced `native.json`; the host validates it and emits
 the existing launch plan and typed JSON. Reject duplicate keys, unknown fields,
 tags, aliases, ambiguous scalars and unresolved references. The guest parses no YAML.
 Suites select users, groups and policies for the root runner. A top-level `timeout`
@@ -74,7 +74,8 @@ concurrency, malformed/fragmented packets and security attacks needing custom fi
 Host drivers retain SSH/SFTP/Git, config rotation, power cuts and protected updates.
 Console checks and app fixtures share the result contract; test empty carriers too.
 
-Track every case in `test/form-coverage`; custom code does not count toward 80%.
+Track every case in `test/form-probe-baseline.yaml`; custom code does not count toward
+80%.
 Delete legacy dispatch after full parity on both architectures and reboot.
 
 ## Drawbacks

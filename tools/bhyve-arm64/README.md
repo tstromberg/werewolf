@@ -7,12 +7,13 @@ its half-hour TAP soak failed after about 12 minutes and 286 verified transfers
 is unresolved. Secure Boot and TPM were off; do not treat A/B success as production
 qualification. See [current validation](../../docs/testing-live.md#bhyve).
 
-Run `python3 tools/bhyve-arm64/build OUTPUT --packages PACKAGE_CACHE` on native
-FreeBSD 15.1-RELEASE-p5 ARM64. OUTPUT must not exist. The recipe pins FreeBSD and
-U-Boot commits, the upstream RTC patch, the FreeBSD bhyve board port, and the
-hashes of all privately extracted build packages. It requires installed `git`,
-`python3`, `gmake`, and the base compiler; their versions are recorded in the
-output manifest. This is a repeatable source/dependency recipe, not a claim of
+Run `zig run tools/bhyve-arm64/runtime.zig -- OUTPUT --packages PACKAGE_CACHE` on
+native FreeBSD 15.1-RELEASE-p5 ARM64. OUTPUT must not exist. The recipe pins FreeBSD
+and U-Boot commits, the upstream RTC patch, the FreeBSD bhyve board port, and the
+hashes of all privately extracted build packages; it writes both patches into OUTPUT
+and applies them from there. It requires installed `zig`, `git`, `gmake`, the base
+compiler and `python3`, which U-Boot's build runs; their versions are recorded in
+the output manifest. This is a repeatable source/dependency recipe, not a claim of
 bit-identical output across different host toolchains.
 Build time and the patched U-Boot version string are fixed so source archives
 and Git checkouts do not introduce metadata-only binary differences.
@@ -44,7 +45,7 @@ an existing-machine record around the prebuilt signed fixture so the host does
 not rebuild it. The test still requires verified root, IPE, a correct clock and
 all recovery phases. The direct launch mode remains available for isolation.
 
-`test/check-bhyve-lifecycle` forwards both runtime overrides and checks guest time.
+`test/check-bhyve-lifecycle.zig` forwards both runtime overrides and checks guest time.
 Its duration argument controls sustained checksum-verified 64 MiB transfers;
 use `1800` for a half-hour soak, followed by three reboots, stop/start, and an
 offline filesystem check. It uses a separate disposable disk, not the A/B disk.

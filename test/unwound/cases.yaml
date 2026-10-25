@@ -1,0 +1,897 @@
+# The questions test/check-unwound.zig and test/check-unwound-dnssec.zig ask
+# unwound, behind the real fence, and what each answer must be. The checks
+# run the phases in their own order, between the steps that change the
+# machine (a DHCP domain, the resolvers, a restart); see those programs.
+#
+# A case asks name, of type (default A), as uid, over UDP unless tcp is true,
+# of 127.0.0.53 unless server names another; bind picks its source address,
+# socket_uid has that uid open the socket first, timeout is in seconds.
+# It expects only what it names: rcode; answers, an address for each A
+# record and the type of any other; error, the errno a refused socket got
+# (timeout for none); ad and tc, the reply's flags; rdata, each record's
+# data in hex; within, milliseconds at most; sender_uid, who sent it.
+#
+# The fixture resolver's names are in test/unwound/fixture.zig. Its users:
+# 54 is unwound's upstream; 2001 has exact grants, 2002 a screened *, 2003
+# an unfiltered *, 2004 explicit callback grants, 2005 is a DNS server.
+
+grants:
+  - why: unwound's upstream user reaches the resolver
+    uid: 54
+    name: api.example.test
+    server: 10.53.0.2
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: granted A
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: AD from an untrusted upstream escaped
+    uid: 2001
+    name: api.example.test
+    ad: false
+  - why: granted A over TCP, in any case
+    uid: 2001
+    name: API.Example.Test
+    tcp: true
+    rcode: noerror
+    answers: [192.0.2.10]
+
+types:
+  - why: still answering after TCP closes
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: granted AAAA
+    uid: 2001
+    name: api.example.test
+    type: AAAA
+    rcode: noerror
+    answers: [AAAA]
+  - why: TXT not granted
+    uid: 2001
+    name: api.example.test
+    type: TXT
+    rcode: refused
+    answers: []
+  - why: name not granted
+    uid: 2001
+    name: denied.example.test
+    rcode: refused
+    answers: []
+  - why: system domain absent
+    uid: 2001
+    name: host.corp.lan.test
+    rcode: refused
+    answers: []
+
+# With corp.lan.test from DHCP.
+dhcp-domain:
+  - why: DHCP domain shared with a DNS-enabled service
+    uid: 2001
+    name: host.corp.lan.test
+    rcode: nxdomain
+    answers: []
+  - why: system domain apex
+    uid: 2001
+    name: corp.lan.test
+    rcode: nxdomain
+    answers: []
+  - why: system domain supports DNS types
+    uid: 2001
+    name: host.corp.lan.test
+    type: TXT
+    rcode: nxdomain
+    answers: []
+  - why: system domain label boundary
+    uid: 2001
+    name: host.corp.lan.test.evil
+    rcode: refused
+    answers: []
+  - why: system domain still screened
+    uid: 2001
+    name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.corp.lan.test
+    rcode: refused
+    answers: []
+
+# With config.lan.test from the configuration as well.
+config-domain:
+  - why: config domain overrides DHCP
+    uid: 2001
+    name: host.corp.lan.test
+    rcode: refused
+    answers: []
+  - why: config FQDN domain
+    uid: 2001
+    name: host.config.lan.test
+    rcode: nxdomain
+    answers: []
+
+dhcp-restored:
+  - why: DHCP domain restored
+    uid: 2001
+    name: host.corp.lan.test
+    rcode: nxdomain
+    answers: []
+
+names:
+  - why: domain revoked
+    uid: 2001
+    name: host.corp.lan.test
+    rcode: refused
+    answers: []
+  # *.NAME: below it, never NAME.
+  - why: subtree grant
+    uid: 2001
+    name: x.cdn.example.test
+    rcode: noerror
+    answers: [192.0.2.11]
+  - why: subtree grant excludes its apex
+    uid: 2001
+    name: cdn.example.test
+    rcode: refused
+    answers: []
+  # An alias's target must be granted too.
+  - why: granted alias target
+    uid: 2001
+    name: alias-ok.example.test
+    rcode: noerror
+    answers: [CNAME, 192.0.2.12]
+  - why: alias to an ungranted name
+    uid: 2001
+    name: alias-bad.example.test
+    rcode: refused
+    answers: []
+  # Too large for UDP: truncated, then whole over TCP, asked upstream over TCP.
+  - why: large answer truncated over UDP
+    uid: 2001
+    name: big.example.test
+    type: TXT
+    rcode: noerror
+    tc: true
+    answers: []
+  - why: large answer over TCP
+    uid: 2001
+    name: big.example.test
+    type: TXT
+    tcp: true
+    rcode: noerror
+    answers: [TXT, TXT, TXT]
+  - why: forgeries ignored
+    uid: 2001
+    name: spoof.example.test
+    rcode: noerror
+    answers: [192.0.2.14]
+  - why: silence is SERVFAIL, in two tries of a second
+    uid: 2001
+    name: slow.example.test
+    rcode: servfail
+    within: 4000
+  # A screened * resolves names shaped like names, and keeps little of their
+  # answers: up to four public addresses, the question's own, no aliases.
+  - why: screened *
+    uid: 2002
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: a documentation address dropped
+    uid: 2002
+    name: api.example.test
+    type: AAAA
+    rcode: noerror
+    answers: []
+  - why: TXT not granted, screened or not
+    uid: 2002
+    name: api.example.test
+    type: TXT
+    rcode: refused
+    answers: []
+  - why: four public addresses, no alias
+    uid: 2002
+    name: screened.example.test
+    rcode: noerror
+    answers: [192.0.2.20, 192.0.2.21, 192.0.2.22, 192.0.2.23]
+  - why: private and loopback addresses dropped
+    uid: 2002
+    name: rebind.example.test
+    rcode: noerror
+    answers: []
+
+# Shared callbacks and IP prefixes, refused locally to the screened user for
+# A and AAAA over UDP and TCP, before any upstream or age request.
+endpoints:
+  - httpbin.org
+  - token.oastify.com
+  - token.interactsh.com
+  - token.canarytokens.com
+  - webhook.site
+  - capture.requestbin.com
+  - app.ngrok-free.app
+  - app.trycloudflare.com
+  - jsonkeeper.com
+  - 127.0.0.1.203-0-113-1.sslip.io
+  - 192-0-2-1.attacker.example
+  - 8.8.8.8.attacker.example
+  - 2001-db8--1.attacker.example
+  - 7f000001.attacker.example
+
+callbacks:
+  - why: canonical endpoint
+    uid: 2002
+    name: ToKeN.OaStIfY.CoM.
+    tcp: true
+    rcode: refused
+    answers: []
+  - why: callback alias refused
+    uid: 2002
+    name: callback-alias.example.test
+    rcode: refused
+    answers: []
+  - why: IP prefix alias refused
+    uid: 2002
+    name: prefix-alias.example.test
+    tcp: true
+    rcode: refused
+    answers: []
+  - why: direct CNAME endpoint refused
+    uid: 2003
+    name: callback-alias.example.test
+    type: CNAME
+    tcp: true
+    rcode: refused
+    answers: []
+  - why: named CNAME target allowed
+    uid: 2002
+    name: callback-alias.example.test
+    type: CNAME
+    rcode: noerror
+    answers: [CNAME]
+  - why: named cached CNAME allowed
+    uid: 2002
+    name: callback-alias.example.test
+    type: CNAME
+    tcp: true
+    rcode: noerror
+    answers: [CNAME]
+
+# With oastify.com from DHCP: DHCP cannot exempt a callback domain.
+assigned-callback:
+  - why: assigned endpoint refused
+    uid: 2001
+    name: assigned.oastify.com
+    rcode: refused
+    answers: []
+
+# Explicit grants can, and their results fill no other service's cache.
+explicit-endpoints:
+  - why: explicit endpoint grant
+    uid: 2004
+    name: httpbin.org
+    rcode: noerror
+    answers: [192.0.2.70]
+  - why: explicit subtree grant
+    uid: 2004
+    name: allowed.ngrok.app
+    rcode: noerror
+    answers: [192.0.2.71]
+  - why: named alias target allowed
+    uid: 2004
+    name: alias-to-allowed.example.test
+    rcode: noerror
+    answers: [CNAME, 192.0.2.50]
+  - why: named cached alias allowed
+    uid: 2004
+    name: alias-to-allowed.example.test
+    tcp: true
+    rcode: noerror
+    answers: [CNAME, 192.0.2.50]
+  - why: another service still denied
+    uid: 2002
+    name: httpbin.org
+    rcode: refused
+    answers: []
+  - why: another service's subtree still denied
+    uid: 2002
+    name: allowed.ngrok.app
+    rcode: refused
+    answers: []
+  - why: an unfiltered wildcard still needs a named endpoint grant
+    uid: 2003
+    name: httpbin.org
+    rcode: refused
+    answers: []
+
+# Names shaped like data never leave.
+tunnels:
+  - why: a name shaped like data
+    uid: 2002
+    name: 9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test
+    rcode: refused
+    answers: []
+  - why: seven labels
+    uid: 2002
+    name: a.b.c.d.e.tunnel.test
+    rcode: refused
+    answers: []
+
+# After 32 new names of the tunnel's site within the hour, which resolve.
+budget:
+  - why: past the budget
+    uid: 2002
+    name: n32.tunnel.test
+    rcode: refused
+    answers: []
+  - why: a name already asked about
+    uid: 2002
+    name: n0.tunnel.test
+    rcode: nxdomain
+    answers: []
+
+# Silence is not kept: whether a name fails is not the resolver's to say.
+silence:
+  - why: silence, screened
+    uid: 2002
+    name: slow.example.test
+    rcode: servfail
+    answers: []
+  - why: silence, screened, asked again
+    uid: 2002
+    name: slow.example.test
+    rcode: servfail
+    answers: []
+
+# Unfiltered grants all unwound forwards, never ANY or AXFR. A DNS server's
+# own lookups still use unwound; its DNS transport may reach a server.
+unfiltered:
+  - why: unfiltered *
+    uid: 2003
+    name: open.example.test
+    rcode: noerror
+    answers: [192.0.2.15]
+  - why: NXDOMAIN passes
+    uid: 2003
+    name: nowhere.example.test
+    rcode: nxdomain
+    answers: []
+  - why: ANY refused
+    uid: 2003
+    name: open.example.test
+    type: ANY
+    rcode: refused
+    answers: []
+  - why: AXFR refused
+    uid: 2003
+    name: open.example.test
+    type: AXFR
+    tcp: true
+    rcode: refused
+    answers: []
+  - why: DNS service local lookup
+    uid: 2005
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: DNS service direct upstream
+    uid: 2005
+    name: api.example.test
+    server: 10.53.0.2
+    rcode: noerror
+    answers: [192.0.2.10]
+
+# Answers are kept, per service, as long as they say; failures are not.
+cache:
+  - why: a granted answer
+    uid: 2001
+    name: cached.example.test
+    rcode: noerror
+    answers: [192.0.2.16]
+
+# A second later: kept, with less time left.
+cache-kept:
+  - why: a kept answer
+    uid: 2001
+    name: cached.example.test
+    rcode: noerror
+    answers: [192.0.2.16]
+  - why: another service's own answer
+    uid: 2003
+    name: cached.example.test
+    rcode: noerror
+    answers: [192.0.2.16]
+
+short:
+  - why: a TTL of a second
+    uid: 2001
+    name: short.example.test
+    rcode: noerror
+    answers: [192.0.2.30]
+  - why: kept within its second
+    uid: 2001
+    name: short.example.test
+    rcode: noerror
+    answers: [192.0.2.30]
+
+# A second later.
+short-expired:
+  - why: asked again once it expired
+    uid: 2001
+    name: short.example.test
+    rcode: noerror
+    answers: [192.0.2.30]
+
+negative:
+  - why: a TTL of 0
+    uid: 2001
+    name: zero.example.test
+    rcode: noerror
+    answers: [192.0.2.31]
+  - why: a TTL of 0, again
+    uid: 2001
+    name: zero.example.test
+    rcode: noerror
+    answers: [192.0.2.31]
+  - why: NXDOMAIN with an SOA
+    uid: 2001
+    name: gone.example.test
+    rcode: nxdomain
+    answers: []
+  - why: NXDOMAIN with an SOA, again
+    uid: 2001
+    name: gone.example.test
+    rcode: nxdomain
+    answers: []
+  - why: NXDOMAIN without an SOA, again
+    uid: 2003
+    name: nowhere.example.test
+    rcode: nxdomain
+    answers: []
+
+# Only granted users reach unwound, each from its own label; only unwound's
+# upstream user and the DNS service reach a resolver, or any port 53.
+labels:
+  - why: still answering after bad input
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: an ungranted user
+    uid: 2006
+    name: api.example.test
+    error: ACCES
+  - why: root, ungranted
+    uid: 0
+    name: api.example.test
+    error: ACCES
+  - why: a forged label
+    uid: 2002
+    name: api.example.test
+    bind: 127.53.0.1
+    error: ACCES
+  - why: an unlabeled source
+    uid: 2001
+    name: api.example.test
+    bind: 127.0.0.1
+    error: ACCES
+  - why: its own label, bound
+    uid: 2001
+    name: api.example.test
+    bind: 127.53.0.1
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: an unfiltered user asks the resolver itself
+    uid: 2003
+    name: api.example.test
+    server: 10.53.0.2
+    timeout: 1
+    error: ACCES
+  - why: an unfiltered user asks another server
+    uid: 2003
+    name: api.example.test
+    server: 192.0.2.1
+    timeout: 1
+    error: ACCES
+  - why: root asks the resolver itself
+    uid: 0
+    name: api.example.test
+    server: 10.53.0.2
+    timeout: 1
+    error: ACCES
+  - why: root asks another server
+    uid: 0
+    name: api.example.test
+    server: 192.0.2.1
+    timeout: 1
+    error: ACCES
+
+# With no resolvers, a kept answer is still given; anything else fails, at once.
+no-upstream:
+  - why: a kept answer, with no upstream
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+  - why: no upstream fails closed
+    uid: 2001
+    name: y.cdn.example.test
+    rcode: servfail
+    answers: []
+
+upstream-restored:
+  - why: upstream restored
+    uid: 2001
+    name: y.cdn.example.test
+    rcode: nxdomain
+    answers: []
+
+# Once the upstream side died and unwound restarted.
+restarted:
+  - why: restarted after upstream exit
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+    answers: [192.0.2.10]
+
+# With the syslog socket gone.
+log-removed:
+  - why: a disconnected logger does not stop DNS
+    uid: 2003
+    name: audit-disconnected.example.test
+    rcode: nxdomain
+    answers: []
+
+# Names that must never reach the resolver: denied, tunnels, and every
+# endpoint but httpbin.org, which only the explicit grant forwards.
+never-asked:
+  - denied.example.test
+  - cdn.example.test
+  - n32.tunnel.test
+  - a.b.c.d.e.tunnel.test
+  - 9b7e01c7da2a5d06c3a1f4e2b8d90c13ab.tunnel.test
+  - assigned.oastify.com
+  - evil.example.net
+
+# Every decision is audited: who, what, why and the rule. Each entry here and
+# in age-audit must match at least one query event, field by field.
+audit:
+  - uid: 2001
+    name: denied.example.test
+    decision: deny
+    why: no_grant
+  - uid: 2003
+    name: race.example.test
+    why: unanswered
+    detail: tcp_failed
+  - uid: 2001
+    name: api.example.test
+    type: A
+    decision: allow
+    rcode: noerror
+    rule: 3
+  - uid: 2001
+    name: host.corp.lan.test
+    decision: allow
+    why: system_domain
+  - uid: 2001
+    name: alias-bad.example.test
+    decision: deny
+    why: alias
+    alias: evil.example.net
+  - uid: 2002
+    name: poll.example.test
+    decision: allow
+    why: screened
+    rule: 10
+  - uid: 2002
+    name: poll.example.test
+    decision: allow
+    why: screened
+    cached: true
+    rule: 10
+  - uid: 2001
+    name: cached.example.test
+    why: granted
+    cached: true
+  # Every question that gets no answer, or less of one, says why.
+  - uid: 2002
+    name: n32.tunnel.test
+    decision: deny
+    why: budget
+    detail: new_names
+    rule: 10
+  - uid: 2002
+    name: a.b.c.d.e.tunnel.test
+    decision: deny
+    why: tunnel
+    detail: many_labels
+  - uid: 2002
+    name: screened.example.test
+    why: screened
+    dropped_nonpublic: 2
+    dropped_room: 1
+  - uid: 2002
+    name: rebind.example.test
+    why: screened
+    answers: 0
+    dropped_nonpublic: 2
+  - uid: 2002
+    name: httpbin.org
+    decision: deny
+    why: endpoint
+    detail: callback_domain
+  - uid: 2002
+    name: 192-0-2-1.attacker.example
+    decision: deny
+    why: endpoint
+    detail: ip_prefix
+  - uid: 2002
+    name: callback-alias.example.test
+    decision: deny
+    why: alias
+    alias: token.oastify.com
+  - uid: 2002
+    name: prefix-alias.example.test
+    decision: deny
+    why: alias
+    alias: 192-0-2-1.attacker.example
+  - uid: 2002
+    name: slow.example.test
+    decision: allow
+    why: unanswered
+    detail: timeout
+    rcode: servfail
+  - uid: 2001
+    name: y.cdn.example.test
+    why: unanswered
+    detail: no_resolvers
+  - uid: 2003
+    type: "255"
+    decision: deny
+    why: unsupported
+  - uid: 2001
+    why: malformed
+    detail: format
+  - uid: 2001
+    why: malformed
+    detail: response
+
+# check-unwound with an age writer, enforcing: a cached mature domain, a
+# young one and an unknown one.
+age:
+  - why: an exact grant needs no age
+    uid: 2001
+    name: api.example.test
+    rcode: noerror
+  - why: an exact grant's alias needs no age
+    uid: 2001
+    name: alias-ok.example.test
+    rcode: noerror
+  - why: a mature domain
+    uid: 2002
+    name: open.example.com
+    rcode: nxdomain
+  - why: a young domain
+    uid: 2002
+    name: young.com
+    rcode: refused
+  - why: an alias within a mature domain
+    uid: 2002
+    name: local-alias.example.com
+    rcode: noerror
+  - why: an alias into a young domain
+    uid: 2002
+    name: cross-alias.example.com
+    rcode: refused
+  - why: an explicit grant's alias into a young domain
+    uid: 2002
+    name: explicit-alias.example.test
+    rcode: refused
+  - why: an explicit grant's alias into a young domain, over TCP
+    uid: 2002
+    name: explicit-alias.example.test
+    tcp: true
+    rcode: refused
+  - why: an unknown domain
+    uid: 2002
+    name: unknown.example.net
+    rcode: refused
+
+age-audit:
+  - name: unknown.example.net
+    why: age
+    detail: unknown
+
+# With assigned.test from DHCP, exempt from age.
+age-assigned:
+  - why: an assigned name, exactly granted
+    uid: 2001
+    name: host.assigned.test
+    rcode: nxdomain
+  - why: an assigned name, screened
+    uid: 2002
+    name: host.assigned.test
+    rcode: nxdomain
+  - why: an assigned name's alias into a young domain
+    uid: 2002
+    name: assigned-alias.assigned.test
+    tcp: true
+    rcode: refused
+  - why: an exact grant's alias into the assigned domain
+    uid: 2001
+    name: revoked-alias.example.test
+    rcode: noerror
+  - why: a screened alias into the assigned domain
+    uid: 2002
+    name: revoked-alias.example.test
+    rcode: noerror
+
+# Once the domain is revoked, its cached aliases are refused.
+age-revoked:
+  - why: an exact grant's alias into a revoked domain
+    uid: 2001
+    name: revoked-alias.example.test
+    tcp: true
+    rcode: refused
+  - why: a screened alias into a revoked domain
+    uid: 2002
+    name: revoked-alias.example.test
+    tcp: true
+    rcode: refused
+
+# check-unwound with a live age writer against fixture RDAP and crt.sh.
+age-live:
+  - why: RDAP evidence, still fresh
+    uid: 2002
+    name: expires.com
+    timeout: 15
+    answers: [192.0.2.60]
+  - why: RDAP evidence, still fresh, over TCP
+    uid: 2002
+    name: expires.com
+    tcp: true
+    timeout: 15
+    answers: [192.0.2.60]
+  # CT history alone never makes a domain mature, however old it is.
+  - why: CT history alone
+    uid: 2002
+    name: ctexpires.com
+    timeout: 15
+    rcode: refused
+  - why: CT history alone, over TCP
+    uid: 2002
+    name: ctexpires.com
+    tcp: true
+    timeout: 15
+    rcode: refused
+  # A socket handed to another user is judged by the sender, not its maker.
+  - why: an exact-grant user is refused an unknown domain
+    uid: 2001
+    name: handoff.com
+    timeout: 15
+    rcode: refused
+  - why: a screened user's socket sent by another
+    uid: 2001
+    socket_uid: 2002
+    name: handoff.com
+    timeout: 15
+    rcode: nxdomain
+    sender_uid: 2001
+  - why: an exact-grant user is refused an unknown domain, over TCP
+    uid: 2001
+    name: handofftcp.com
+    tcp: true
+    timeout: 15
+    rcode: refused
+  - why: a screened user's TCP socket sent by another
+    uid: 2001
+    socket_uid: 2002
+    name: handofftcp.com
+    tcp: true
+    timeout: 15
+    rcode: nxdomain
+    sender_uid: 2001
+  - why: RDAP proves a domain mature
+    uid: 2002
+    name: a.mature.com
+    timeout: 15
+    rcode: nxdomain
+  - why: a mature domain, cached
+    uid: 2002
+    name: b.mature.com
+    timeout: 15
+    rcode: nxdomain
+  - why: RDAP says young
+    uid: 2002
+    name: young.com
+    timeout: 15
+    rcode: refused
+  - why: an RDAP outage with old CT history
+    uid: 2002
+    name: outage.com
+    timeout: 15
+    rcode: refused
+  - why: RDAP names another domain
+    uid: 2002
+    name: invalid.com
+    timeout: 15
+    rcode: refused
+  - why: an RDAP redirect
+    uid: 2002
+    name: redirect.com
+    timeout: 15
+    rcode: refused
+  - why: an RDAP server that fails TLS validation
+    uid: 2002
+    name: invalidtls.org
+    timeout: 15
+    rcode: refused
+
+# After the evidence expires, with the answers still cached.
+age-live-expired:
+  - why: expired RDAP evidence
+    uid: 2002
+    name: expires.com
+    tcp: true
+    timeout: 15
+    rcode: refused
+  - why: expired CT history
+    uid: 2002
+    name: ctexpires.com
+    tcp: true
+    timeout: 15
+    rcode: refused
+
+# A stalled registry is refused at the fetch deadline, before unwound's own.
+age-live-stalled:
+  - why: a stalled registry
+    uid: 2002
+    name: timeout.com
+    timeout: 13
+    rcode: refused
+
+age-live-restarted:
+  - why: a mature domain after a restart
+    uid: 2002
+    name: c.mature.com
+    timeout: 15
+    rcode: nxdomain
+
+# check-unwound-dnssec: a freshly signed zone behind Unbound, validating.
+dnssec:
+  - why: a validated TLSA answer
+    uid: 2001
+    name: _25._tcp.mail.signed.test
+    type: TLSA
+    rcode: noerror
+    ad: true
+    rdata: [030101a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5]
+  - why: a validated TLSA answer, cached
+    uid: 2001
+    name: _25._tcp.mail.signed.test
+    type: TLSA
+    ad: true
+    rdata: [030101a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5]
+  - why: a screened answer carries no AD
+    uid: 2002
+    name: _25._tcp.mail.signed.test
+    type: TLSA
+    rcode: noerror
+    ad: false
+  - why: a broken signature
+    uid: 2001
+    name: bad.signed.test
+    rcode: servfail
+    ad: false
+  - why: a validated address
+    uid: 2001
+    name: mail.signed.test
+    rcode: noerror
+    ad: true
+
+dnssec-root:
+  - why: root reaches no resolver
+    uid: 0
+    name: _25._tcp.mail.signed.test
+    type: TLSA
+    error: ACCES

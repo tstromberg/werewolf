@@ -81,33 +81,17 @@ pub fn prepareNetwork(
         try downNetwork(io, gpa, at, null);
         return .{ .mode = .slirp };
     }
-    const result = networkHelper(io, gpa, "up", at, bridge) catch |err| switch (err) {
-        error.FileNotFound => return why.refuse(
-            "bhyve TAP needs python3: pkg install python3",
-            .{},
-        ),
-        else => return err,
-    };
-    if (result.term != .exited or result.term.exited != 0)
-        return why.refuse("TAP setup failed: {s}", .{std.mem.trim(u8, result.stderr, " \n")});
-    return std.json.parseFromSliceLeaky(Network, gpa, result.stdout, .{});
-}
-
-fn networkHelper(
-    io: Io,
-    gpa: Allocator,
-    operation: []const u8,
-    at: []const u8,
-    argument: ?[]const u8,
-) !std.process.RunResult {
-    var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(gpa, &.{ "python3", "-c", @import("files").bhyve_network, operation, at });
-    if (argument) |value| try args.append(gpa, value);
-    return std.process.run(
-        gpa,
-        io,
-        .{ .argv = args.items, .stdout_limit = .limited(8192), .stderr_limit = .limited(8192) },
+    var host = io;
+    var said: howl.Why = .{};
+    const r = up: {
+        var taps = Taps.open(io, gpa, hostIfconfig(&host), at, &said) catch |err| break :up err;
+        defer taps.close();
+        break :up taps.up(bridge);
+    } catch |err| return why.refuse(
+        "TAP setup failed: {s}",
+        .{if (err == error.Refused) said.text else @errorName(err)},
     );
+    return .{ .mode = .tap, .tap = r.tap, .bridge = r.bridge, .owner = r.owner };
 }
 
 /// An old supervisor may remove only the TAP it started, not its successor's.
@@ -120,11 +104,291 @@ pub fn downNetwork(io: Io, gpa: Allocator, at: []const u8, owner: ?[]const u8) !
         error.FileNotFound => return,
         else => return err,
     };
-    const result = try networkHelper(io, gpa, "down", at, owner);
-    if (result.term != .exited or result.term.exited != 0) {
-        howl.say(io, "TAP cleanup failed: {s}", .{std.mem.trim(u8, result.stderr, " \n")});
+    var host = io;
+    var said: howl.Why = .{};
+    const done = down: {
+        var taps = Taps.open(io, gpa, hostIfconfig(&host), at, &said) catch |err| break :down err;
+        defer taps.close();
+        break :down taps.down(owner);
+    };
+    done catch |err| {
+        howl.say(io, "TAP cleanup failed: {s}", .{
+            if (err == error.Refused) said.text else @errorName(err),
+        });
         return error.BhyveNetworkCleanupFailed;
+    };
+}
+
+/// Ifconfig runs ifconfig with args. A change alters the host's network;
+/// with missing, an interface that does not exist is null, not a refusal.
+const Ifconfig = struct {
+    context: *anyopaque,
+    run: *const fn (
+        context: *anyopaque,
+        gpa: Allocator,
+        args: []const []const u8,
+        change: bool,
+        missing: bool,
+        why: *howl.Why,
+    ) anyerror!?[]const u8,
+};
+
+fn hostIfconfig(io: *Io) Ifconfig {
+    return .{ .context = io, .run = runIfconfig };
+}
+
+/// runIfconfig runs /sbin/ifconfig, a change as root through doas or sudo.
+fn runIfconfig(
+    context: *anyopaque,
+    gpa: Allocator,
+    args: []const []const u8,
+    change: bool,
+    missing: bool,
+    why: *howl.Why,
+) !?[]const u8 {
+    const io: *const Io = @ptrCast(@alignCast(context));
+    const root: []const []const u8 = if (change)
+        asRoot(io.*) catch return why.refuse("TAP setup needs root, doas or sudo", .{})
+    else
+        &.{};
+    const result = try std.process.run(gpa, io.*, .{
+        .argv = try std.mem.concat(gpa, []const u8, &.{ root, &.{"/sbin/ifconfig"}, args }),
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(8192),
+    });
+    if (result.term == .exited and result.term.exited == 0) return result.stdout;
+    if (missing and std.mem.find(u8, result.stderr, "does not exist") != null) return null;
+    const said = std.mem.trim(u8, result.stderr, &std.ascii.whitespace);
+    return why.refuse("{s}", .{if (said.len == 0) "ifconfig failed" else said});
+}
+
+/// Record is bhyve-network.json: the TAP howl made for one machine, the
+/// bridge it joined, and the owner token in the TAP's description.
+const Record = struct {
+    mode: []const u8,
+    tap: []const u8,
+    bridge: []const u8,
+    owner: []const u8,
+};
+
+/// Taps owns one machine directory's TAP on an existing bridge, holding
+/// its lock; it never creates a bridge or reconfigures the host network.
+const Taps = struct {
+    io: Io,
+    gpa: Allocator,
+    ifconfig: Ifconfig,
+    why: *howl.Why,
+    dir: []const u8,
+    /// prefix begins every owner token for dir: another directory's TAPs
+    /// are never this one's.
+    prefix: []const u8,
+    guard: Io.File,
+
+    fn open(io: Io, gpa: Allocator, ifconfig: Ifconfig, at: []const u8, why: *howl.Why) !Taps {
+        const dir = try Dir.cwd().realPathFileAlloc(io, at, gpa);
+        const guard = try Dir.cwd().createFile(io, try gpa.print(
+            "{s}/bhyve-network.lock",
+            .{dir},
+        ), .{
+            .truncate = false,
+            .permissions = .fromMode(0o600),
+        });
+        errdefer guard.close(io);
+        try guard.lock(io, .exclusive);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(dir, &digest, .{});
+        return .{
+            .io = io,
+            .gpa = gpa,
+            .ifconfig = ifconfig,
+            .why = why,
+            .dir = dir,
+            .prefix = try gpa.print("howl:{s}:", .{std.fmt.bytesToHex(digest, .lower)[0..20]}),
+            .guard = guard,
+        };
     }
+
+    fn close(t: *Taps) void {
+        t.guard.unlock(t.io);
+        t.guard.close(t.io);
+    }
+
+    fn ask(t: *const Taps, change: bool, args: []const []const u8) ![]const u8 {
+        return (try t.ifconfig.run(t.ifconfig.context, t.gpa, args, change, false, t.why)).?;
+    }
+
+    /// probe is the interface's ifconfig output, or null if it does not exist.
+    fn probe(t: *const Taps, name: []const u8) !?[]const u8 {
+        return t.ifconfig.run(t.ifconfig.context, t.gpa, &.{name}, false, true, t.why);
+    }
+
+    fn path(t: *const Taps) ![]const u8 {
+        return t.gpa.print("{s}/bhyve-network.json", .{t.dir});
+    }
+
+    fn load(t: *const Taps) !?Record {
+        const text = Dir.cwd().readFileAlloc(t.io, try t.path(), t.gpa, .limited(8192)) catch |err|
+            switch (err) {
+                error.FileNotFound => return null,
+                else => return err,
+            };
+        const r = std.json.parseFromSliceLeaky(Record, t.gpa, text, .{}) catch return t.invalid();
+        const token = std.mem.cutPrefix(u8, r.owner, t.prefix) orelse return t.invalid();
+        if (!std.mem.eql(u8, r.mode, "tap") or !isTap(r.tap) or !interface(r.bridge) or
+            token.len != 32) return t.invalid();
+        for (token) |c| if (!std.ascii.isDigit(c) and (c < 'a' or c > 'f')) return t.invalid();
+        return r;
+    }
+
+    fn invalid(t: *const Taps) error{Refused} {
+        return t.why.refuse(
+            "invalid bhyve TAP ownership record; inspect it before changing networking",
+            .{},
+        );
+    }
+
+    /// bridge is wanted if it is an existing bridge, else the one bridge.
+    fn bridge(t: *const Taps, wanted: ?[]const u8) ![]const u8 {
+        var names = std.mem.tokenizeAny(
+            u8,
+            try t.ask(false, &.{ "-g", "bridge" }),
+            &std.ascii.whitespace,
+        );
+        if (wanted) |w| {
+            while (names.next()) |name| if (interface(w) and std.mem.eql(u8, name, w)) return w;
+            return t.why.refuse("not an existing bridge: {s}", .{w});
+        }
+        const only = names.next();
+        if (only == null or names.next() != null) return t.why.refuse(
+            "TAP needs one existing bridge; choose --bridge NAME, or use --network slirp " ++
+                "(no bridge is created automatically)",
+            .{},
+        );
+        return only.?;
+    }
+
+    /// down destroys the recorded TAP and forgets it, unless expected names
+    /// another owner. It refuses a TAP that is not this machine's.
+    fn down(t: *const Taps, expected: ?[]const u8) !void {
+        const r = try t.load() orelse return;
+        if (expected) |owner| if (!std.mem.eql(u8, owner, r.owner)) return;
+        if (try t.probe(r.tap)) |current| {
+            if (!std.mem.eql(u8, description(current) orelse "", r.owner))
+                return t.why.refuse("{s}: not this VM's TAP; leaving it untouched", .{r.tap});
+            _ = try t.ask(true, &.{ r.tap, "destroy" });
+        }
+        Dir.cwd().deleteFile(t.io, try t.path()) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    /// up joins this machine's TAP to the bridge: the recorded one again if
+    /// it is still there, else a new one whose description is a new owner.
+    fn up(t: *const Taps, wanted: ?[]const u8) !Record {
+        const selected = try t.bridge(wanted);
+        if (try t.load()) |previous| {
+            const current = try t.probe(previous.tap);
+            if (current) |text| if (!std.mem.eql(u8, description(text) orelse "", previous.owner))
+                return t.why.refuse(
+                    "{s}: not this VM's TAP; leaving it untouched",
+                    .{previous.tap},
+                );
+            if (current != null and std.mem.eql(u8, selected, previous.bridge)) {
+                // An operator may have detached it, or taken it down.
+                if (!member(try t.ask(false, &.{selected}), previous.tap))
+                    _ = try t.ask(true, &.{ selected, "addm", previous.tap });
+                _ = try t.ask(true, &.{ previous.tap, "up" });
+                return previous;
+            }
+            try t.down(null);
+        }
+        const tap = std.mem.trim(u8, try t.ask(true, &.{ "tap", "create" }), &std.ascii.whitespace);
+        if (!isTap(tap)) return t.why.refuse(
+            "ifconfig returned an unexpected new TAP name: {s}",
+            .{tap},
+        );
+        // This call made the TAP, so a failure destroys it; no other is touched.
+        errdefer {
+            var ignored: howl.Why = .{};
+            _ = t.ifconfig.run(
+                t.ifconfig.context,
+                t.gpa,
+                &.{ tap, "destroy" },
+                true,
+                false,
+                &ignored,
+            ) catch null;
+        }
+        var token: [16]u8 = undefined;
+        try t.io.randomSecure(&token);
+        const r: Record = .{
+            .mode = "tap",
+            .tap = tap,
+            .bridge = selected,
+            .owner = try t.gpa.print("{s}{s}", .{ t.prefix, &std.fmt.bytesToHex(token, .lower) }),
+        };
+        _ = try t.ask(true, &.{ tap, "description", r.owner, "up" });
+        _ = try t.ask(true, &.{ selected, "addm", tap });
+        try t.save(r);
+        return r;
+    }
+
+    /// save writes the record durably, mode 0600, replacing any before it.
+    fn save(t: *const Taps, r: Record) !void {
+        var nonce: [8]u8 = undefined;
+        try t.io.randomSecure(&nonce);
+        const temporary = try t.gpa.print("{s}/.bhyve-network-{x}", .{ t.dir, &nonce });
+        defer Dir.cwd().deleteFile(t.io, temporary) catch {};
+        {
+            const out = try Dir.cwd().createFile(t.io, temporary, .{
+                .exclusive = true,
+                .permissions = .fromMode(0o600),
+            });
+            defer out.close(t.io);
+            try out.writeStreamingAll(t.io, try std.json.Stringify.valueAlloc(t.gpa, r, .{}));
+            try out.sync(t.io);
+        }
+        try Dir.rename(Dir.cwd(), temporary, Dir.cwd(), try t.path(), t.io);
+    }
+};
+
+/// interface is a name ifconfig takes as one interface and no option.
+fn interface(name: []const u8) bool {
+    if (name.len == 0 or name.len > 15 or !std.ascii.isAlphabetic(name[0])) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "_.-", c) == null)
+        return false;
+    return true;
+}
+
+fn isTap(name: []const u8) bool {
+    const number = std.mem.cutPrefix(u8, name, "tap") orelse return false;
+    if (number.len == 0) return false;
+    for (number) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+fn description(text: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line|
+        if (std.mem.cutPrefix(
+            u8,
+            std.mem.trim(u8, line, &std.ascii.whitespace),
+            "description: ",
+        )) |d|
+            return d;
+    return null;
+}
+
+/// member reports whether a bridge's ifconfig output lists name.
+fn member(text: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, &std.ascii.whitespace);
+        if (!std.mem.eql(u8, words.next() orelse continue, "member:")) continue;
+        if (std.mem.eql(u8, words.next() orelse continue, name)) return true;
+    }
+    return false;
 }
 
 fn networkOwner(io: Io, gpa: Allocator, at: []const u8) !?[]const u8 {
@@ -683,4 +947,292 @@ test "bhyve TAP reads explicit static addresses, not SLIRP defaults" {
         &.{.{ .path = "network", .data = "werewolf.ip=not-an-ip", .from = "test" }},
     );
     try testing.expectError(error.BadNetwork, staticAddress(gpa, invalid));
+}
+
+/// FakeHost is a host's interfaces, bridges and members, which ifconfig
+/// reads and changes; it records every call and whether it was a change.
+const FakeHost = struct {
+    gpa: Allocator,
+    /// interfaces maps each interface to its description.
+    interfaces: std.StringArrayHashMapUnmanaged(?[]const u8) = .empty,
+    /// bridges maps each bridge to its members.
+    bridges: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)) = .empty,
+    calls: std.ArrayList(struct { args: []const u8, change: bool }) = .empty,
+    fail_attach: bool = false,
+
+    fn init(gpa: Allocator) !FakeHost {
+        var f: FakeHost = .{ .gpa = gpa };
+        try f.interfaces.put(gpa, "re0bridge", null);
+        try f.bridges.put(gpa, "re0bridge", .empty);
+        try f.bridges.getPtr("re0bridge").?.put(gpa, "re0", {});
+        return f;
+    }
+
+    fn ifconfig(f: *FakeHost) Ifconfig {
+        return .{ .context = f, .run = run };
+    }
+
+    fn members(f: *FakeHost, name: []const u8) []const []const u8 {
+        return f.bridges.getPtr(name).?.keys();
+    }
+
+    fn changes(f: *const FakeHost) usize {
+        var n: usize = 0;
+        for (f.calls.items) |c| n += @intFromBool(c.change);
+        return n;
+    }
+
+    fn count(f: *const FakeHost, line: []const u8) usize {
+        var n: usize = 0;
+        for (f.calls.items) |c| n += @intFromBool(std.mem.eql(u8, c.args, line));
+        return n;
+    }
+
+    fn run(
+        context: *anyopaque,
+        gpa: Allocator,
+        args: []const []const u8,
+        change: bool,
+        missing: bool,
+        why: *howl.Why,
+    ) !?[]const u8 {
+        const f: *FakeHost = @ptrCast(@alignCast(context));
+        const line = try std.mem.join(f.gpa, " ", args);
+        try f.calls.append(f.gpa, .{ .args = line, .change = change });
+        if (std.mem.eql(
+            u8,
+            line,
+            "-g bridge",
+        )) return try std.mem.join(gpa, "\n", f.bridges.keys());
+        if (std.mem.eql(u8, line, "tap create")) {
+            try testing.expect(!f.interfaces.contains("tap0"));
+            try f.interfaces.put(f.gpa, "tap0", null);
+            return "tap0\n";
+        }
+        const name = args[0];
+        if (args.len == 1) {
+            const known = f.interfaces.get(name) orelse
+                return if (missing) null else why.refuse("missing interface", .{});
+            var text: std.ArrayList(u8) = .empty;
+            try text.print(gpa, "{s}: flags=UP\n", .{name});
+            if (known) |d| try text.print(gpa, "\tdescription: {s}\n", .{d});
+            if (f.bridges.getPtr(name)) |set| for (set.keys()) |m|
+                try text.print(gpa, "\tmember: {s} flags=UP\n", .{m});
+            return text.items;
+        }
+        if (std.mem.eql(u8, args[1], "description")) {
+            try f.interfaces.put(f.gpa, name, try f.gpa.dupe(u8, args[2]));
+        } else if (std.mem.eql(u8, args[1], "addm")) {
+            if (f.fail_attach) return why.refuse("bridge attach failed", .{});
+            const set = f.bridges.getPtr(name).?;
+            try testing.expect(!set.contains(args[2]));
+            try set.put(f.gpa, try f.gpa.dupe(u8, args[2]), {});
+        } else if (std.mem.eql(u8, args[1], "destroy")) {
+            try testing.expect(f.interfaces.orderedRemove(name));
+            for (f.bridges.values()) |*set| _ = set.orderedRemove(name);
+        } else if (!std.mem.eql(u8, args[1], "up")) {
+            std.debug.print("unexpected network mutation: {s}\n", .{line});
+            return error.UnexpectedMutation;
+        }
+        try testing.expect(change);
+        return "";
+    }
+};
+
+/// TapTest is one test's fake host and machine directory, whose TAP it owns.
+const TapTest = struct {
+    arena: std.heap.ArenaAllocator,
+    tmp: testing.TmpDir,
+    host: FakeHost,
+    why: howl.Why = .{},
+    taps: Taps,
+
+    fn init(t: *TapTest) !void {
+        t.arena = .init(testing.allocator);
+        t.tmp = testing.tmpDir(.{});
+        const gpa = t.arena.allocator();
+        t.host = try .init(gpa);
+        t.why = .{};
+        const dir = try t.tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+        t.taps = try .open(testing.io, gpa, t.host.ifconfig(), dir, &t.why);
+    }
+
+    fn deinit(t: *TapTest) void {
+        t.taps.close();
+        t.tmp.cleanup();
+        t.arena.deinit();
+    }
+
+    fn refused(t: *TapTest, result: anytype, reason: []const u8) !void {
+        try testing.expectError(error.Refused, result);
+        try testing.expect(std.mem.find(u8, t.why.text, reason) != null);
+    }
+
+    fn write(t: *TapTest, text: []const u8) !void {
+        try t.tmp.dir.writeFile(testing.io, .{ .sub_path = "bhyve-network.json", .data = text });
+    }
+};
+
+fn expectRecord(want: Record, got: ?Record) !void {
+    const g = got orelse return error.MissingRecord;
+    inline for (.{ "mode", "tap", "bridge", "owner" }) |field|
+        try testing.expectEqualStrings(@field(want, field), @field(g, field));
+}
+
+test "bhyve TAP: one existing bridge is selected and the owned TAP removed" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const r = try t.taps.up(null);
+    try testing.expectEqualStrings("re0bridge", r.bridge);
+    try testing.expectEqualStrings("re0 tap0", try std.mem.join(
+        t.arena.allocator(),
+        " ",
+        t.host.members("re0bridge"),
+    ));
+    try expectRecord(r, try t.taps.load());
+    const st = try t.tmp.dir.statFile(testing.io, "bhyve-network.json", .{});
+    try testing.expectEqual(0o600, st.permissions.toMode() & 0o777);
+    try t.taps.down(r.owner);
+    try testing.expectEqual(1, t.host.interfaces.count());
+    try testing.expectEqual(null, t.host.interfaces.get("re0bridge").?);
+    try testing.expectEqual(1, t.host.members("re0bridge").len);
+    try testing.expectEqualStrings("re0", t.host.members("re0bridge")[0]);
+    try testing.expectEqual(null, try t.taps.load());
+}
+
+test "bhyve TAP: reuse neither recreates the TAP nor adds an existing member" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const r = try t.taps.up(null);
+    try expectRecord(r, try t.taps.up(null));
+    try testing.expectEqual(1, t.host.count("tap create"));
+}
+
+test "bhyve TAP: reuse restores a detached membership" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const r = try t.taps.up(null);
+    try testing.expect(t.host.bridges.getPtr("re0bridge").?.orderedRemove(r.tap));
+    try expectRecord(r, try t.taps.up(null));
+    try testing.expect(t.host.bridges.getPtr("re0bridge").?.contains(r.tap));
+}
+
+test "bhyve TAP: an ambiguous or absent bridge refuses before any change" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const gpa = t.arena.allocator();
+    for ([_][]const []const u8{ &.{}, &.{ "bridge0", "bridge1" } }) |names| {
+        t.host.bridges = .empty;
+        for (names) |name| try t.host.bridges.put(gpa, name, .empty);
+        t.host.calls.clearRetainingCapacity();
+        try t.refused(t.taps.up(null), "--bridge");
+        try testing.expectEqual(0, t.host.changes());
+    }
+}
+
+test "bhyve TAP: an explicit bridge resolves ambiguity; invalid names refuse" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const gpa = t.arena.allocator();
+    try t.host.interfaces.put(gpa, "bridge1", null);
+    try t.host.bridges.put(gpa, "bridge1", .empty);
+    try testing.expectEqualStrings("bridge1", (try t.taps.up("bridge1")).bridge);
+    try t.taps.down(null);
+    for ([_][]const u8{
+        "missing",
+        "-a",
+        "re0bridge,slirp",
+        "re0bridge;bad",
+        &@as([16]u8, @splat('a')),
+    }) |bad| {
+        t.host.calls.clearRetainingCapacity();
+        try t.refused(t.taps.up(bad), "not an existing bridge");
+        try testing.expectEqual(0, t.host.changes());
+    }
+}
+
+test "bhyve TAP: a failed attach rolls back only the new TAP" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    t.host.fail_attach = true;
+    try t.refused(t.taps.up(null), "attach failed");
+    try testing.expectEqual(1, t.host.interfaces.count());
+    try testing.expect(t.host.interfaces.contains("re0bridge"));
+    try testing.expectEqual(null, try t.taps.load());
+}
+
+test "bhyve TAP: a foreign interface is neither adopted nor destroyed" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const r = try t.taps.up(null);
+    try t.host.interfaces.put(t.arena.allocator(), r.tap, "another owner");
+    try t.refused(t.taps.up(null), "not this VM");
+    try t.refused(t.taps.down(null), "not this VM");
+    try testing.expectEqualStrings("another owner", t.host.interfaces.get(r.tap).?.?);
+    try testing.expect(try t.taps.load() != null);
+}
+
+test "bhyve TAP: an old supervisor cannot remove its successor's" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const old = try t.taps.up(null);
+    try t.taps.down(old.owner);
+    const new = try t.taps.up(null);
+    try testing.expect(!std.mem.eql(u8, old.owner, new.owner));
+    try t.taps.down(old.owner);
+    try expectRecord(new, try t.taps.load());
+    try testing.expect(t.host.interfaces.contains(new.tap));
+}
+
+test "bhyve TAP: an interface missing after a reboot is safe" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const r = try t.taps.up(null);
+    _ = t.host.interfaces.orderedRemove(r.tap);
+    _ = t.host.bridges.getPtr("re0bridge").?.orderedRemove(r.tap);
+    const new = try t.taps.up(null);
+    try testing.expect(!std.mem.eql(u8, r.owner, new.owner));
+    _ = t.host.interfaces.orderedRemove(new.tap);
+    try t.taps.down(null);
+    try testing.expectEqual(null, try t.taps.load());
+}
+
+test "bhyve TAP: a malformed record or another directory's refuses" {
+    var t: TapTest = undefined;
+    try t.init();
+    defer t.deinit();
+    const gpa = t.arena.allocator();
+    const r = try t.taps.up(null);
+    for ([_][]const u8{
+        "[]",
+        try std.json.Stringify.valueAlloc(gpa, Record{
+            .mode = r.mode,
+            .tap = "re0",
+            .bridge = r.bridge,
+            .owner = r.owner,
+        }, .{}),
+        try std.json.Stringify.valueAlloc(gpa, Record{
+            .mode = r.mode,
+            .tap = r.tap,
+            .bridge = r.bridge,
+            .owner = "howl:other:00",
+        }, .{}),
+        try gpa.print(
+            "{{\"mode\":\"tap\",\"tap\":\"{s}\",\"bridge\":null,\"owner\":\"{s}\"}}",
+            .{ r.tap, r.owner },
+        ),
+    }) |bad| {
+        try t.write(bad);
+        try t.refused(t.taps.down(null), "invalid bhyve TAP ownership record");
+    }
+    try testing.expect(t.host.interfaces.contains("tap0"));
 }

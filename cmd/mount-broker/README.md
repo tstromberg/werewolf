@@ -43,9 +43,8 @@ No path-based filesystem choices or unassigned callers; identity uses `lib/cmdli
 - **Update reboot**: on `updater`, `reboot` sets two root-owned runit flags opened
   before confinement and wakes PID 1. Seccomp permits only those descriptors, modes and
   signal; the updater needs no filesystem override or signal capability.
-- **Shutdown**: on `stage`, `shutdown` unmounts `/data` (or makes it read-only if busy),
-  removes its LUKS mapping, and remounts `/boot` read-only (flushing its journal) and
-  unmounts it.
+- **Shutdown**: on `stage`, `shutdown` unmounts `/data` (read-only if busy), removes its
+  LUKS mapping, and remounts `/boot` read-only, flushing its journal, then unmounts it.
 - **Finding**: each block device's first bytes are read and identified (ext4, FAT), and
   the UUID or serial compared. If two devices match, as a clone or snapshot beside the
   real disk would, it refuses.
@@ -69,8 +68,7 @@ No path-based filesystem choices or unassigned callers; identity uses `lib/cmdli
 
 ## Alternatives Considered
 
-- Let callers mount: each needs CAP_SYS_ADMIN and must stay outside fence; the broker
-  centralizes it.
+- Let callers mount: each would need CAP_SYS_ADMIN, outside fence.
 - A listening socket in `/run` with `/proc` caller checks: vulnerable to `/proc` races
   and requires extra privileges to inspect callers. Inherited socketpairs need neither.
 
@@ -91,10 +89,9 @@ No path-based filesystem choices or unassigned callers; identity uses `lib/cmdli
 
 - **Never exits** once listening: without it no slot can be kept, and the machine falls
   back to the slot that last worked. A failing `poll` pauses 100 ms before retrying.
-- **Stalled clients** cannot block replies to other roles. Sends, including owner
-  descriptor replies, are nonblocking. A failed send closes that role's channel;
-  an empty packet or EOF also closes it. Replies are never silently dropped while
-  retaining a channel. `make check-mount-broker` exercises the real confined broker
-  in a private Linux mount namespace, including reply-queue saturation.
+- **Stalled clients** cannot block replies to other roles: every send, owner descriptor
+  replies included, is nonblocking. A failed send, an empty packet or EOF closes that
+  role's channel; no reply is dropped while a channel is kept. `make check-mount-broker`
+  runs the real confined broker in a private mount namespace, saturating its replies.
 - **Tested**: `check-slot`, `check-updater`, `check-independent-updates`, protected A/B
   lifecycles and every shutdown.

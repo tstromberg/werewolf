@@ -28,6 +28,7 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
     var extra: std.ArrayList([]const u8) = .empty;
     if (b.spec.dev and b.spec.dev_shell) {
         try extra.append(b.gpa, "busybox-full");
+        try extra.append(b.gpa, "mksh");
         for (b.chain) |c| for (try c.items(b.gpa, "dev")) |item| {
             var it = mem.tokenizeAny(u8, item, " \t");
             while (it.next()) |pkg| try extra.append(b.gpa, pkg);

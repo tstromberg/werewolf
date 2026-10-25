@@ -33,9 +33,9 @@ busybox `sh` in every image. Removing it matters because:
 
 ## Non-Goals
 
-- **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry
-  busybox-full; runtime forms (`python`, `node`, `php`, `jre`) carry their
-  interpreter. Each names the failure in `weaknesses:` (forms/README.md).
+- **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry mksh through the
+  `shell` form; runtime forms (`python`, `node`, `php`, `jre`) carry their interpreter.
+  Each names the failure in `weaknesses:` (forms/README.md).
 - An interpreter inside a program (nginx's njs); other binaries, such as init's `blkid`.
 
 ## Detailed design
@@ -65,7 +65,7 @@ by templating at boot. `forms/nginx` is the worked example.
 program directories and checks each `/etc/sv/*/run` is ELF
 ([docs/posture.md](../posture.md)). A `system(3)` call fails on the check
 boot; PostgreSQL setup uses sh-shim with explicit executable declarations. `DEV=1` adds
-busybox-full for debugging and test/checks, and `make dist` refuses it.
+mksh and BusyBox tools for debugging and test/checks, and `make dist` refuses it.
 
 **Open.** init could stay PID 1 for life and read the power button; runit
 as PID 1 with Zig stages was the first step. postdoc asked leash for a

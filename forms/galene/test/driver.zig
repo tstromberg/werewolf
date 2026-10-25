@@ -2,17 +2,12 @@
 const std = @import("std");
 const driver = @import("test-driver");
 const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const Json = std.json.Value;
-const Handle = *anyopaque;
-const Frame = extern struct { age: c_int, flags: c_int, offset: i64, bytesleft: i64, len: usize };
-const Api = struct {
-    curl_easy_init: *const fn () callconv(.c) ?Handle,
-    curl_easy_cleanup: *const fn (Handle) callconv(.c) void,
-    curl_easy_setopt: *const fn (Handle, c_int, ...) callconv(.c) c_int,
-    curl_easy_perform: *const fn (Handle) callconv(.c) c_int,
-    curl_ws_send: *const fn (Handle, [*]const u8, usize, *usize, i64, c_uint) callconv(.c) c_int,
-    curl_ws_recv: *const fn (Handle, [*]u8, usize, *usize, *?*const Frame) callconv(.c) c_int,
-};
+const tls = std.crypto.tls;
+
+const ca = "/data/svc/caddy/pki/authorities/local/root.crt";
+const max_message = 1 << 20;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -45,13 +40,43 @@ pub fn main(init: std.process.Init) !void {
         try driver.system.read(io, a, "/run/config/galene/operator-password")
     else
         "guess";
-    var ws = try Socket.init();
-    defer ws.deinit();
-    const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
-    try ws.send(io, try a.print(
+    try driver.within(io, 30, join, .{ io, a, ctx.run, allowed, password });
+    try ctx.result(io, args[1], if (allowed) "galene-join" else "galene-join-refused", true);
+}
+
+/// join connects to https://localhost/ws, verified by Caddy's local CA, and
+/// asks to join the lecture group as ada or mallory.
+fn join(io: Io, a: Allocator, run: []const u8, allowed: bool, password: []const u8) !void {
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 443);
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var stream_reader = stream.reader(io, try a.alloc(u8, tls.Client.min_buffer_len));
+    var stream_writer = stream.writer(io, try a.alloc(u8, tls.Client.min_buffer_len));
+    const now = Io.Clock.real.now(io);
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    try bundle.addCertsFromFilePathAbsolute(a, io, now, ca);
+    var lock: Io.RwLock = .init;
+    var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+    io.random(&entropy);
+    var client = try tls.Client.init(&stream_reader.interface, &stream_writer.interface, .{
+        .host = .{ .explicit = "localhost" },
+        .ca = .{ .bundle = .{ .gpa = a, .io = io, .lock = &lock, .bundle = &bundle } },
+        .read_buffer = try a.alloc(u8, tls.Client.min_buffer_len + 8192),
+        .write_buffer = try a.alloc(u8, tls.Client.min_buffer_len),
+        .entropy = &entropy,
+        .realtime_now = now,
+    });
+    const ws: Socket = .{
+        .io = io,
+        .r = &client.reader,
+        .w = &client.writer,
+        .raw = &stream_writer.interface,
+    };
+    try ws.open();
+    try ws.send(.text, try a.print(
         "{{\"type\":\"handshake\",\"version\":[\"2\"],\"id\":\"{s}\"}}",
-        .{ctx.run},
-    ), deadline);
+        .{run},
+    ));
     var message: Io.Writer.Allocating = .init(a);
     defer message.deinit();
     try std.json.Stringify.value(.{
@@ -61,18 +86,14 @@ pub fn main(init: std.process.Init) !void {
         .username = if (allowed) "ada" else "mallory",
         .password = password,
     }, .{}, &message.writer);
-    try ws.send(io, message.writer.buffered(), deadline);
+    try ws.send(.text, message.writer.buffered());
     for (0..64) |_| {
-        const data = try ws.receive(io, deadline);
-        const value = try std.json.parseFromSliceLeaky(Json, a, data, .{});
+        const value = try std.json.parseFromSliceLeaky(Json, a, try ws.receive(a), .{});
         if (field(value, "type", "ping")) {
-            try ws.send(io, "{\"type\":\"pong\"}", deadline);
+            try ws.send(.text, "{\"type\":\"pong\"}");
             continue;
         }
-        if (!field(value, "type", "joined")) continue;
-        try joined(value, allowed);
-        try ctx.result(io, args[1], if (allowed) "galene-join" else "galene-join-refused", true);
-        return;
+        if (field(value, "type", "joined")) return joined(value, allowed);
     }
     return error.JoinNotObserved;
 }
@@ -99,98 +120,145 @@ fn joined(value: Json, allowed: bool) !void {
     if (!field(value, "value", "not authorised")) return error.WrongRefusal;
 }
 
-// libcurl owns TLS, upgrade validation, masks, control frames and wire framing.
+/// Socket is the client side of a WebSocket (RFC 6455): it masks every frame
+/// it sends, answers pings, and takes only text, which may come in fragments.
 const Socket = struct {
-    lib: std.DynLib,
-    api: Api,
-    handle: Handle,
-    buffer: [16384]u8 = undefined,
+    io: Io,
+    r: *Io.Reader,
+    w: *Io.Writer,
+    /// raw is the stream's own writer, flushed after w's when TLS sits between.
+    raw: ?*Io.Writer = null,
 
-    fn init() !Socket {
-        var lib = try std.DynLib.open("libcurl.so.4");
-        errdefer lib.close();
-        var api: Api = undefined;
-        inline for (@typeInfo(
-            Api,
-        ).@"struct".field_names, @typeInfo(Api).@"struct".field_types) |name, T|
-            @field(api, name) = lib.lookup(T, name) orelse return error.CurlSymbol;
-        const handle = api.curl_easy_init() orelse return error.CurlInit;
-        errdefer api.curl_easy_cleanup(handle);
-        try check(api.curl_easy_setopt(handle, 10002, @as([*:0]const u8, "wss://localhost/ws")));
-        try check(api.curl_easy_setopt(handle, 10004, @as([*:0]const u8, ""))); // no proxy env
-        try check(api.curl_easy_setopt(
-            handle,
-            10065,
-            @as([*:0]const u8, "/data/svc/caddy/pki/authorities/local/root.crt"),
-        ));
-        try check(api.curl_easy_setopt(handle, 52, @as(c_long, 0))); // no redirects
-        try check(api.curl_easy_setopt(handle, 99, @as(c_long, 1))); // no signals
-        try check(api.curl_easy_setopt(handle, 156, @as(c_long, 10000))); // request timeout
-        try check(api.curl_easy_setopt(handle, 141, @as(c_long, 2))); // CONNECT_ONLY WebSocket
-        try check(api.curl_easy_perform(handle));
-        return .{ .lib = lib, .api = api, .handle = handle };
-    }
+    const Opcode = enum(u4) { continuation = 0, text = 1, close = 8, ping = 9, pong = 10, _ };
 
-    fn deinit(ws: *Socket) void {
-        ws.api.curl_easy_cleanup(ws.handle);
-        ws.lib.close();
-    }
-
-    fn send(ws: *Socket, io: Io, message: []const u8, deadline: Io.Timestamp) !void {
-        var offset: usize = 0;
-        while (offset < message.len) {
-            if (Io.Clock.awake.now(io).compare(.gte, deadline)) return error.WebSocketTimeout;
-            var sent: usize = 0;
-            const rc = ws.api.curl_ws_send(
-                ws.handle,
-                message[offset..].ptr,
-                message.len - offset,
-                &sent,
-                0,
-                1,
-            );
-            if (rc != 81) try check(rc); // CURLE_AGAIN
-            if (sent > message.len - offset) return error.WebSocketLength;
-            offset += sent;
-            if (offset < message.len) try pause(io, deadline);
+    /// open upgrades the connection with GET /ws and checks the server's
+    /// Sec-WebSocket-Accept.
+    fn open(ws: Socket) !void {
+        var nonce: [16]u8 = undefined;
+        ws.io.random(&nonce);
+        var key: [24]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&key, &nonce);
+        try ws.w.print("GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\nSec-WebSocket-Key: {s}\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n\r\n", .{&key});
+        try ws.flush();
+        const status = try ws.r.takeDelimiterInclusive('\n');
+        if (!std.mem.startsWith(u8, status, "HTTP/1.1 101 ")) {
+            std.debug.print("test-galene: upgrade answered {s}", .{status});
+            return error.WebSocketUpgrade;
         }
-    }
-
-    fn receive(ws: *Socket, io: Io, deadline: Io.Timestamp) ![]const u8 {
-        var used: usize = 0;
+        const want = accept(&key);
+        var accepted = false;
         while (true) {
-            if (Io.Clock.awake.now(io).compare(.gte, deadline)) return error.WebSocketTimeout;
-            var count: usize = 0;
-            var metadata: ?*const Frame = null;
-            var chunk: [4096]u8 = undefined;
-            const rc = ws.api.curl_ws_recv(ws.handle, &chunk, chunk.len, &count, &metadata);
-            if (rc == 81) {
-                try pause(io, deadline);
-                continue;
-            }
-            try check(rc);
-            const frame = metadata orelse return error.WebSocketMetadata;
-            if (frame.flags & (16 | 64) != 0) continue; // automatic ping/pong
-            if (frame.flags & 1 == 0) return error.WebSocketTextExpected;
-            if (count > chunk.len or count > ws.buffer.len - used) return error.WebSocketTooLarge;
-            @memcpy(ws.buffer[used..][0..count], chunk[0..count]);
-            used += count;
-            if (frame.bytesleft == 0 and frame.flags & 4 == 0) return ws.buffer[0..used];
-            if (Io.Clock.awake.now(io).compare(.gte, deadline)) return error.WebSocketTimeout;
+            const line = std.mem.trimEnd(u8, try ws.r.takeDelimiterInclusive('\n'), "\r\n");
+            if (line.len == 0) break;
+            const colon = std.mem.findScalar(u8, line, ':') orelse return error.WebSocketHeader;
+            if (std.ascii.eqlIgnoreCase(line[0..colon], "sec-websocket-accept"))
+                accepted = std.mem.eql(u8, std.mem.trim(u8, line[colon + 1 ..], " \t"), &want);
         }
+        if (!accepted) return error.WebSocketAccept;
+    }
+
+    fn send(ws: Socket, opcode: Opcode, payload: []const u8) !void {
+        try ws.w.writeByte(0x80 | @as(u8, @backingInt(opcode)));
+        if (payload.len < 126) {
+            try ws.w.writeByte(0x80 | @as(u8, @intCast(payload.len)));
+        } else if (payload.len <= std.math.maxInt(u16)) {
+            try ws.w.writeByte(0x80 | 126);
+            try ws.w.writeInt(u16, @intCast(payload.len), .big);
+        } else {
+            try ws.w.writeByte(0x80 | 127);
+            try ws.w.writeInt(u64, payload.len, .big);
+        }
+        var mask: [4]u8 = undefined;
+        ws.io.random(&mask);
+        try ws.w.writeAll(&mask);
+        for (payload, 0..) |b, i| try ws.w.writeByte(b ^ mask[i % 4]);
+        try ws.flush();
+    }
+
+    /// receive returns the next text message.
+    fn receive(ws: Socket, a: Allocator) ![]const u8 {
+        var message: std.ArrayList(u8) = .empty;
+        var started = false;
+        while (true) {
+            const head = try ws.r.takeArray(2);
+            const fin = head[0] & 0x80 != 0;
+            const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(head[0]))));
+            // No extensions were offered, and a server never masks.
+            if (head[0] & 0x70 != 0 or head[1] & 0x80 != 0) return error.WebSocketFrame;
+            const len: u64 = switch (head[1] & 0x7f) {
+                126 => try ws.r.takeInt(u16, .big),
+                127 => try ws.r.takeInt(u64, .big),
+                else => |n| n,
+            };
+            if (@backingInt(opcode) >= 8 and (!fin or len > 125)) return error.WebSocketFrame;
+            if (len > max_message - message.items.len) return error.WebSocketTooLarge;
+            const payload = try a.alloc(u8, @intCast(len));
+            try ws.r.readSliceAll(payload);
+            switch (opcode) {
+                .ping => try ws.send(.pong, payload),
+                .pong => {},
+                .close => return error.WebSocketClosed,
+                .text, .continuation => {
+                    if ((opcode == .text) == started) return error.WebSocketFrame;
+                    started = true;
+                    try message.appendSlice(a, payload);
+                    if (fin) return message.items;
+                },
+                else => return error.WebSocketTextExpected,
+            }
+        }
+    }
+
+    fn flush(ws: Socket) !void {
+        try ws.w.flush();
+        if (ws.raw) |raw| try raw.flush();
     }
 };
 
-fn check(rc: c_int) !void {
-    if (rc != 0) {
-        std.debug.print("test-galene: libcurl error {d}\n", .{rc});
-        return error.WebSocketTransport;
-    }
+/// accept is the Sec-WebSocket-Accept a server must answer key with.
+fn accept(key: []const u8) [28]u8 {
+    var sha = std.crypto.hash.Sha1.init(.{});
+    sha.update(key);
+    sha.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    var out: [28]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&out, &sha.finalResult());
+    return out;
 }
 
-fn pause(io: Io, deadline: Io.Timestamp) !void {
-    if (Io.Clock.awake.now(io).compare(.gte, deadline)) return error.WebSocketTimeout;
-    try io.sleep(.fromMilliseconds(10), .awake);
+test "accept matches RFC 6455's example" {
+    try std.testing.expectEqualStrings(
+        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        &accept("dGhlIHNhbXBsZSBub25jZQ=="),
+    );
+}
+
+test "receive answers a ping and joins a fragmented text message" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var r: Io.Reader = .fixed("\x89\x02hi" ++ "\x01\x03{\"a" ++ "\x80\x05\":1}." ++ "\x82\x00");
+    var out: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&out);
+    const ws: Socket = .{ .io = std.testing.io, .r = &r, .w = &w };
+    try std.testing.expectEqualStrings("{\"a\":1}.", try ws.receive(arena.allocator()));
+    const pong = w.buffered();
+    try std.testing.expectEqual(@as(usize, 2 + 4 + 2), pong.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0x8a, 0x82 }, pong[0..2]);
+    for (pong[6..], "hi", 0..) |b, want, i| try std.testing.expectEqual(want, b ^ pong[2 + i % 4]);
+    try std.testing.expectError(error.WebSocketTextExpected, ws.receive(arena.allocator()));
+}
+
+test "receive refuses masked, oversized-control and stray continuation frames" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var out: [64]u8 = undefined;
+    for ([_][]const u8{ "\x81\x80\x00\x00\x00\x00", "\x09\x00", "\x80\x00", "\xc1\x00" }) |frames| {
+        var r: Io.Reader = .fixed(frames);
+        var w: Io.Writer = .fixed(&out);
+        const ws: Socket = .{ .io = std.testing.io, .r = &r, .w = &w };
+        try std.testing.expectError(error.WebSocketFrame, ws.receive(arena.allocator()));
+    }
 }
 
 test "join proves the requested group, operator identity and exact refusal" {

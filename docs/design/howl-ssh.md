@@ -19,4 +19,3 @@ Local FIDO keys enter a dedicated, destination-constrained 20-hour agent;
 the host key with an authentication-free SSH handshake. GCP opens TCP 22 to
 the current public IP when no Howl SSH firewall rule exists. See
 [su](../../forms/ssh-su/README.md).
-

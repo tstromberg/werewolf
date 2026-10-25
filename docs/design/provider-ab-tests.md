@@ -24,7 +24,7 @@ their signed manifests before the operator can authenticate a rollback.
 
 - Treating unsupported firmware as a passing Secure Boot test.
 - Publishing test images or private signers to a public update service.
-- The TPM floor, which `test/check-independent-updates` tests.
+- The TPM floor, which `test/check-independent-updates.zig` tests.
 
 ## Detailed design
 

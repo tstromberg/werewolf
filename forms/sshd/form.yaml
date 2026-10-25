@@ -2,10 +2,12 @@
 # and its policy (etc/ssh/sshd_config.d/werewolf.conf).
 base: minimal
 
+with: [shell]
+
 packages:
   - openssh-server
   - openssh-sftp-server   # scp and `limactl copy`
-  - busybox-full          # a shell for those who log in, and its tools
+  - coreutils             # operator file tools and SSH-backed su's mkdir
 
 # OpenSSH requires its privilege-separation account even though the service
 # itself starts as root. Other forms do not need it.
@@ -27,10 +29,8 @@ allow: [pty]
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
-  programs-no-shell: busybox-full's shell, for those who log in
+  network-no-login: sshd, by security key, provides operator access
+  programs-no-shell: mksh provides operator shells and /bin/sh
 
 services:
   sshd:

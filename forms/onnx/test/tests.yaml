@@ -1,29 +1,79 @@
 version: 1
 packages: []
 suites:
+  # Fixed CPU inference checks under a leashed non-root identity.
   - name: test-onnx
-    source: driver.zig
-    mode: inference
     user: nobody
-    cases:
-      seed:
-        - python-version
-        - cpu-provider
-        - inference
-        - invalid-shape
-        - unknown-input
-      verify:
-        - python-version
-        - cpu-provider
-        - inference
-        - invalid-shape
-        - unknown-input
     memory: 256
     allow:
       - python:native
     policy:
       pledge: stdio rpath wpath proc exec
-      read: []
-      connect: []
       run:
         - /usr/bin/python3.15
+    cases:
+      - name: python-version
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/python3.15
+                - -B
+                - /usr/lib/onnx/check.py
+                - version
+            timeout: 30s
+            expect:
+              exit: 0
+              stdout:
+                contains: 'onnx-version: ok'
+      - name: cpu-provider
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/python3.15
+                - -B
+                - /usr/lib/onnx/check.py
+                - providers
+            timeout: 30s
+            expect:
+              exit: 0
+              stdout:
+                contains: 'onnx-providers: ok'
+      - name: inference
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/python3.15
+                - -B
+                - /usr/lib/onnx/check.py
+                - inference
+            timeout: 30s
+            expect:
+              exit: 0
+              stdout:
+                contains: 'onnx-inference: ok'
+      - name: invalid-shape
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/python3.15
+                - -B
+                - /usr/lib/onnx/check.py
+                - shape
+            timeout: 30s
+            expect:
+              exit: 0
+              stdout:
+                contains: 'onnx-shape: ok'
+      - name: unknown-input
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/python3.15
+                - -B
+                - /usr/lib/onnx/check.py
+                - input
+            timeout: 30s
+            expect:
+              exit: 0
+              stdout:
+                contains: 'onnx-input: ok'

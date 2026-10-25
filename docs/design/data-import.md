@@ -7,11 +7,10 @@ executable packages, or TPM authority. The operator selects a local source; Howl
 snapshots it into a separate, read-only ext4 disk. Init mounts it at
 `/run/werewolf/import`. A confined application importer decides how to use it.
 
-```sh
-howl create movies --with plex --build --config ./config --import ./media
-howl import movies ./media
-howl sync movies ./media
-```
+The standalone commands serve protected local Lima and QEMU machines. They stage data
+for the next **cold start through Howl**, even while the VM runs (its QEMU keeps the
+open, immutable disk, and a guest reboot changes nothing), and never stop it. Only the
+latest selection is attached; this is not a queue of jobs.
 
 `create --import` and `import` request **init**: initialize an empty application
 destination. `sync` adds files and replaces changed files, preserving files found only
@@ -36,14 +35,12 @@ ownership preservation, and rsync-compatible filters are outside this version.
 
 ## Host snapshot and publication
 
-The machine directory is private (0700). Howl copies regular files recursively into a
-private scratch directory outside the source. Files are normalized to 0644 and
-directories to 0755. It copies bytes, rather than preserving hard links, source
-ownership, ACLs, extended attributes, or executable bits. Hidden files are included;
-there are no implicit filters or ignore-file rules. Symlinks, special files and set-id
-entries are refused. The names `.werewolf-import`, `.werewolf-import-state`,
-`.werewolf-import-part`, `import-failed`, and `lost+found` are reserved and refused in
-source data.
+The machine directory is private (0700). Howl copies the source's regular files, hidden
+ones included, into private scratch outside it: bytes only, 0644 (directories 0755),
+with no hard links, ownership, ACLs, extended attributes, executable bits or implicit
+filters. Symlinks, special files, set-id entries and the reserved names
+(`.werewolf-import`, `.werewolf-import-state`, `.werewolf-import-part`, `import-failed`,
+`lost+found`) are refused.
 
 Each traversal opens child directories without following links. Regular files are opened
 with `O_NOFOLLOW|O_NONBLOCK` and checked after opening; exchanging a file for a FIFO
@@ -71,15 +68,11 @@ failed or repeated build never truncates an existing artifact. An ordinary repea
 cannot implicitly select different input. Explicit import/sync commands create new
 batches. `--retry` reselects the original batch without rebuilding it.
 
-Previous snapshots are retained for recovery. Before attachment, Howl requires an
-ordinary image file with the recorded length and digest. Missing, truncated, substituted
-or corrupt selected images are errors, not optional empty imports. A crash during
-selection can leave the old or new complete selection; neither image is deleted.
-Interrupted host staging can leave private scratch directories, which are never
-attached. Targets must stay on one filesystem; a cross-filesystem rename fails without a
-copy-and-truncate fallback. Snapshot and history storage can be large: staging and
-filesystem construction require space in addition to the source and guest data. There is
-no automatic history collection in this version.
+Previous snapshots stay for recovery. Howl attaches only an ordinary file of the
+recorded length and digest: anything else is an error, never an empty import. A crash
+leaves the old or the new complete selection and deletes no image; interrupted staging
+leaves only private scratch, never attached. A cross-filesystem rename fails, never
+copying. Snapshots need space beyond the source and guest data; none are collected yet.
 
 The protected lifecycle uses the machine's existing lock to serialize selection with
 create/start. Selection changes application input only. It does not rebuild or re-sign a

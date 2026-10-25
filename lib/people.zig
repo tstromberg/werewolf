@@ -178,7 +178,7 @@ pub fn applyReserved(
                 !(try idInUseNumber(gpa, group.items, nc.id)))
             {
                 try ensureRecord(gpa, &records, .nocloud, nc.name, nc.id);
-                try appendAccount(gpa, &passwd, &group, &shadow, nc.name, nc.id, "/bin/ash", false);
+                try appendAccount(gpa, &passwd, &group, &shadow, nc.name, nc.id, shell, false);
                 try keys.append(gpa, .{ .name = nc.name, .text = nc.keys, .id = nc.id });
                 active_nocloud = nc.name;
             } else try refused.append(gpa, "NoCloud name or UID is already reserved");
@@ -843,11 +843,16 @@ test "NoCloud cannot change a reserved name's UID or take a people name" {
         base,
         &.{},
         "",
-        "/bin/ash",
+        "/bin/mksh",
         .{ .name = "lima", .id = 1000, .keys = "" },
         true,
     );
     try testing.expectEqualStrings("lima", first.nocloud_name);
+    try testing.expect(mem.find(
+        u8,
+        first.passwd,
+        "lima:x:1000:1000::/data/home/lima:/bin/mksh\n",
+    ) != null);
     const changed = try applyReserved(
         gpa,
         base,

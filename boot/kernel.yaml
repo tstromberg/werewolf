@@ -2,13 +2,16 @@
 # (docs/design/custom-kernel.md), built by werewolf-linux/kernel-build. The
 # build keeps boot/vmlinuz-werewolf and its config; the kernel has no modules.
 # werewolf's key, beside the forms' in BUILD/keys, signs its repository.
+# The floor is the oldest kernel lib/image.zig's config checks accept (7.3-r7
+# added CONFIG_SERIAL_8250_PCI). Raise it with them: a changed config makes
+# every kernel lock resolve again, where an unchanged one keeps a stale kernel.
 contents:
   repositories:
     - https://dist.werewolf-linux.org/apk/kernel
   keyring:
     - ../keys/werewolf-packages.rsa.pub
   packages:
-    - linux-werewolf
+    - linux-werewolf>=7.3-r7
 
 archs:
   - aarch64

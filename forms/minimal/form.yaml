@@ -4,8 +4,8 @@
 # and Alpine whether anything in this image has a newer version, and if so
 # builds the other slot on the machine, boots it once, and keeps it only if
 # it commits; a form's `updates: off` leaves that out. Listens on nothing,
-# and has no shell: forms that log people in add busybox-full, as does any
-# form built with DEV=1. Every other form includes this one.
+# and has no shell: forms that log people in add mksh through the shell
+# form. DEV=1 adds mksh and BusyBox tools. Every other form includes this one.
 #
 # Hardened Wolfi replacements share one signed feed (glibc and the runtimes);
 # applications Wolfi does not ship, or ships unfit for a form, another

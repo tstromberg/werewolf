@@ -32,7 +32,7 @@ general test tools to make that edit loop faster.
 
 `howl test --with FORM --iterate` creates a deterministic, disposable QEMU machine for
 the host architecture. It generates a form over the production form containing only
-immutable driver paths and service descriptors from `test/native.json`, then uses the
+immutable driver paths and service descriptors from `test/tests.yaml`, then uses the
 existing developer SSH listener and managed key, with `--dev=ssh` instead of `--dev`.
 This profile adds no BusyBox or form-specific developer tools. Root's command adapter
 is `sh-shim`; it accepts one executable and arguments, without shell syntax or scripts.

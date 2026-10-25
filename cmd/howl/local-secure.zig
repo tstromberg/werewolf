@@ -12,6 +12,7 @@ const secureboot = @import("secureboot.zig");
 const progress = @import("progress.zig");
 const qemu = @import("qemu.zig");
 const bhyve = @import("bhyve.zig");
+const swtpm = @import("swtpm.zig");
 const booting = @import("boot.zig");
 const import_disk = @import("import.zig");
 const bundle = @import("boot-image.zig");
@@ -306,7 +307,7 @@ pub fn resumeDownload(
 pub const Built = struct { spec: native.Spec, stub: []const u8 };
 
 /// localBundle builds o's form into a protected bundle in out, as
-/// release/build-protected builds werewolf's: Secure Boot, the TPM floor and
+/// `release build-protected` builds werewolf's: Secure Boot, the TPM floor and
 /// IPE, for provider, following channel at index, signed with the user's own
 /// keys (howl.dataDir). It carries no key of a machine, so a machine enrolls
 /// it as it would a download.
@@ -436,7 +437,7 @@ fn admit(
 }
 
 /// bundleArgs are a protected image's kernel arguments on provider, as
-/// release/build-protected gives werewolf's: Lima's guest has a fixed
+/// `release build-protected` gives werewolf's: Lima's guest has a fixed
 /// address on its host network; QEMU's asks DHCP.
 fn bundleArgs(provider: howl.Platform, arch: howl.Arch) []const []const u8 {
     if (provider == .lima) return &.{
@@ -1037,7 +1038,7 @@ pub fn create(
                     try bhyve.stopProtected(io, gpa, name, at);
                 } else {
                     _ = try qemu.stop(io, gpa, dir);
-                    try tpmService(io, gpa, at, "stop");
+                    try swtpm.stop(io, gpa, try tpm(io, gpa, at));
                 }
                 try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), tar, why);
             }
@@ -1260,57 +1261,30 @@ fn serial(io: Io, gpa: Allocator) ![]const u8 {
     return gpa.print("{f}", .{@import("update-policy").Serial{ .secs = @intCast(seconds) }});
 }
 
-fn sockets(gpa: Allocator, at: []const u8) ![]const u8 {
+/// tpm is the TPM supervisor of the machine at at. Its socket directory is
+/// named by the machine's path, short enough for QEMU's and bhyve's sockets.
+fn tpm(io: Io, gpa: Allocator, at: []const u8) !swtpm.Service {
+    const absolute = if (std.fs.path.isAbsolute(at))
+        at
+    else
+        try gpa.print("{s}/{s}", .{ try std.process.currentPathAlloc(io, gpa), at });
     var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(at, &hash, .{});
-    return gpa.print("/tmp/ww-tpm-{x}", .{hash[0..12]});
-}
-
-fn tpmService(io: Io, gpa: Allocator, at: []const u8, operation: []const u8) !void {
-    const script = try gpa.print("{s}/authority/local-tpm", .{at});
-    const helper = @import("files").local_tpm;
-    const previous = try Dir.cwd().readFileAlloc(io, script, gpa, .limited(128 << 10));
-    if (!std.mem.eql(u8, helper, previous)) {
-        var why: howl.Why = .{};
-        try howl.writePrivate(io, gpa, script, helper, &why);
-    }
-    const result = try std.process.run(gpa, io, .{ .argv = &.{
-        "python3",
-        script,
-        operation,
-        try gpa.print("{s}/authority", .{at}),
-        try sockets(gpa, at),
-        if (Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/authority/profile.json", .{at}),
-            gpa,
-            .limited(64 << 10),
-        )) |data|
-            @tagName((try parseProfile(gpa, data)).provider)
-        else |err| if (err == error.FileNotFound) "qemu" else return err,
-    } });
-    if (result.term != .exited or result.term.exited != 0) return error.TpmServiceFailed;
-}
-
-test "TPM service upgrades an existing helper without creating enrolled state" {
-    const t = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(t.io, "authority", .default_dir);
-    try tmp.dir.writeFile(t.io, .{
-        .sub_path = "authority/local-tpm",
-        .data = "raise RuntimeError('obsolete helper')\n",
-    });
-    const path = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
-    try tpmService(t.io, gpa, path, "stop");
-    try t.expectEqualStrings(
-        @import("files").local_tpm,
-        try tmp.dir.readFileAlloc(t.io, "authority/local-tpm", gpa, .limited(128 << 10)),
-    );
-    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "authority/swtpm", .{}));
+    std.crypto.hash.sha2.Sha256.hash(absolute, &hash, .{});
+    const backend: swtpm.Backend = if (Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/authority/profile.json", .{absolute}),
+        gpa,
+        .limited(64 << 10),
+    )) |data| switch ((try parseProfile(gpa, data)).provider) {
+        .qemu => .qemu,
+        .bhyve => .bhyve,
+        else => return error.BadTpmBackend,
+    } else |err| if (err == error.FileNotFound) .qemu else return err;
+    return .{
+        .authority = try gpa.print("{s}/authority", .{absolute}),
+        .sockets = try gpa.print("/tmp/ww-tpm-{x}", .{hash[0..12]}),
+        .backend = backend,
+    };
 }
 
 pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
@@ -1320,24 +1294,22 @@ pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
 }
 
 pub fn stopTpmAt(io: Io, gpa: Allocator, at: []const u8) !void {
+    // A TPM that never ran has no supervisor lock; Lima keeps its own TPM.
     Dir.cwd().access(
         io,
-        try gpa.print("{s}/authority/local-tpm", .{at}),
+        try gpa.print("{s}/authority/tpm-service.lock", .{at}),
         .{},
     ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    const absolute = if (std.fs.path.isAbsolute(at))
-        at
-    else
-        try gpa.print("{s}/{s}", .{ try std.process.currentPathAlloc(io, gpa), at });
-    try tpmService(io, gpa, absolute, "stop");
+    try swtpm.stop(io, gpa, try tpm(io, gpa, at));
 }
 
 pub fn restartTpmAt(io: Io, gpa: Allocator, at: []const u8) !void {
-    try tpmService(io, gpa, at, "stop");
-    try tpmService(io, gpa, at, "start");
+    const service = try tpm(io, gpa, at);
+    try swtpm.stop(io, gpa, service);
+    try swtpm.start(io, gpa, service);
 }
 
 fn startBhyve(
@@ -1381,7 +1353,7 @@ fn startBhyve(
     ), try gpa.print("{s}/config.tar", .{at}), .{ .slirp = fwds }, null, .{
         .code = try gpa.print("{s}/code.fd", .{at}),
         .vars = try gpa.print("{s}/vars.fd", .{at}),
-        .tpm_socket = try gpa.print("{s}/data.sock", .{try sockets(gpa, at)}),
+        .tpm_socket = try gpa.print("{s}/data.sock", .{(try tpm(io, gpa, at)).sockets}),
     });
     const launch = try std.mem.concat(
         gpa,
@@ -1429,9 +1401,10 @@ fn startQemu(
     const spec = profile.spec;
     // A new QEMU must not inherit an old emulator's in-flight connections.
     // Its enrolled NV state survives the supervisor restart.
-    try tpmService(io, gpa, at, "stop");
-    try tpmService(io, gpa, at, "start");
-    errdefer tpmService(io, gpa, at, "stop") catch {};
+    const service = try tpm(io, gpa, at);
+    try swtpm.stop(io, gpa, service);
+    try swtpm.start(io, gpa, service);
+    errdefer swtpm.stop(io, gpa, service) catch {};
     const ssh = try qemu.freePort(io, 2222);
     const web = try qemu.freePort(io, 8080);
     try howl.writePrivate(
@@ -1458,7 +1431,7 @@ fn startQemu(
         .ssh_port = ssh,
         .web_port = web,
         .guest_web = guest_web,
-        .tpm_socket = try gpa.print("{s}/tpm.sock", .{try sockets(gpa, at)}),
+        .tpm_socket = try gpa.print("{s}/tpm.sock", .{service.sockets}),
         .owner = true,
         .import_disk = try import_disk.existing(io, gpa, at),
     }, qemu.accel(io));
@@ -1620,11 +1593,7 @@ fn provisionInstance(
 ) !void {
     const tar_path = try gpa.print("{s}/config.tar", .{at});
     try howl.writePrivate(io, gpa, tar_path, configured, why);
-    if (profile.provider != .lima) return bundle.durable(
-        io,
-        try gpa.print("{s}/authority/local-tpm", .{at}),
-        @import("files").local_tpm,
-    );
+    if (profile.provider != .lima) return;
     const config_disk = try gpa.print("{s}-config", .{name});
     // Match the unprotected path: limactl delete leaves detached config disks.
     _ = try steps.exec(&.{.{ .argv = &.{ "limactl", "disk", "delete", config_disk } }}, .{});

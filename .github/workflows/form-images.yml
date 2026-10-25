@@ -1,4 +1,4 @@
-# The one image pipeline. Only minimal, prod-ssh and playground are built twice,
+# The one image pipeline. The forms in release/images.yaml are built twice,
 # with explicit secure-boot and legacy-boot profiles. Secure targets retain
 # every protection and exact-bundle lifecycle gates; compatibility targets
 # boot their exact disk and direct image without Secure Boot or TPM.
@@ -33,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Publish the three selected images (base/all) or the recovery target
+        description: Publish the selected images (base/all) or the recovery target
         type: choice
         options:
           - base
@@ -56,7 +56,6 @@ concurrency:
 
 env:
   FORM_IMAGES_TARGET: ${{ inputs.target || (github.event_name == 'schedule' && 'all' || 'base') }}
-  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   plan:
@@ -72,14 +71,15 @@ jobs:
       - name: Check the shared CLI, signing and publication machinery
         run: |
           sudo test/ci-setup
-          make -j2 _test/cmd/howl/howl.zig _test/boot-images _test/release-signing _test/howl-smoke _test/howl-lock
+          make -j2 _test/cmd/howl/howl.zig _test/boot-images _test/release-signing _test/howl-smoke _test/howl-lock \
+            build/host/release
       - id: matrix
         env:
           ARM64_KVM_RUNNER: ${{ vars.WEREWOLF_ARM64_KVM_RUNNER }}
           LIMA_RUNNER: ${{ vars.WEREWOLF_LIMA_RUNNER }}
         run: |
-          echo "value=$(python3 release/form-images matrix)" >>"$GITHUB_OUTPUT"
-          echo "gates=$(python3 release/form-images gates)" >>"$GITHUB_OUTPUT"
+          echo "value=$(build/host/release form-images matrix)" >>"$GITHUB_OUTPUT"
+          echo "gates=$(build/host/release form-images gates)" >>"$GITHUB_OUTPUT"
 
   resolve:
     needs: plan
@@ -95,14 +95,14 @@ jobs:
           persist-credentials: false
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - run: make howl build/host/form
+      - run: make howl build/host/form build/host/release
       - name: Resolve package, OCI, recipe environment and source inputs
         env:
           ARCH: ${{ matrix.arch }}
           FORM_IMAGES_SHARD: ${{ matrix.shard }}
           FORM_IMAGES_SHARDS: ${{ matrix.shards }}
           FORM_IMAGES_FORCE: ${{ inputs.force && '1' || '0' }}
-        run: python3 release/form-images resolve "$ARCH" "$FORM_IMAGES_SHARD" "$FORM_IMAGES_SHARDS" snapshot
+        run: build/host/release form-images resolve "$ARCH" "$FORM_IMAGES_SHARD" "$FORM_IMAGES_SHARDS" snapshot
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
@@ -131,14 +131,14 @@ jobs:
           path: snapshot
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - run: make howl
+      - run: make howl build/host/release
       # No compiled-kernel or form output cache is restored: the copies must
       # independently produce identical bytes, including PE and slot signatures.
       - name: Build every changed form for each provider with host-only signing
         env:
           WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
           WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
-        run: python3 release/with-protected-keys python3 release/form-images build snapshot candidates
+        run: build/host/release with-protected-keys build/host/release form-images build snapshot candidates
       # Candidates are public. The signature that admits a bundle is made
       # only by the gate job, and published only after its gates pass.
       # Forms without gates leave only descriptors and digests to compare.
@@ -180,7 +180,7 @@ jobs:
           path: copies
       - name: Install pinned tools
         run: sudo test/ci-setup
-      - run: make howl
+      - run: make howl build/host/release build/host/form-coverage
       - name: Require byte-identical builds and passing tests for this form and architecture
         env:
           ARCH: ${{ matrix.arch }}
@@ -188,7 +188,7 @@ jobs:
         run: |
           mkdir -p lifecycle
           cp snapshot/plan.json lifecycle/plan.json
-          python3 release/form-images check snapshot \
+          build/host/release form-images check snapshot \
             "copies/images-$ARCH-$FORM_IMAGES_SHARD-1" "copies/images-$ARCH-$FORM_IMAGES_SHARD-2" verified lifecycle
       # Evidence and inventories for every form; bundles only for the forms
       # the lifecycle gates, which alone can be published.
@@ -233,9 +233,9 @@ jobs:
           name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}
           path: snapshot
       - run: sudo test/ci-setup
-      - run: make howl
+      - run: make howl build/host/release
       - name: Build compatibility images from the shared package snapshot
-        run: python3 release/legacy-images build snapshot legacy-candidates
+        run: build/host/release legacy-images build snapshot legacy-candidates
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -264,10 +264,10 @@ jobs:
           pattern: legacy-${{ matrix.arch }}-${{ matrix.shard }}-*
           path: copies
       - run: sudo test/ci-setup
-      - run: make howl build/host/form
+      - run: make howl build/host/form build/host/release build/host/form-coverage build/host/check-legacy-image
       - name: Compare builds, run integration tests and boot exact legacy images
         run: |
-          python3 release/legacy-images check snapshot \
+          build/host/release legacy-images check snapshot \
             copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-1 \
             copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-2 legacy-verified
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -305,32 +305,39 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-          for package in python@3.14 gnupg swtpm qemu lima osslsigncode zstd; do
+          for package in gnupg swtpm qemu lima osslsigncode zstd; do
             brew list --versions "$package" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install "$package"
           done
           echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"
-          echo "$(brew --prefix python@3.14)/libexec/bin" >>"$GITHUB_PATH"
       - name: Install pinned runtime and host tools
         if: runner.environment == 'github-hosted'
         run: sudo test/ci-setup
       - name: Build native host admission tool
-        run: make howl
-      # The candidate follows its signed public channel. Prove this tree's A/B
-      # updates separately, with disposable authority and no production secrets.
-      - name: Prove independent updates, rollback and TPM-floor recovery
+        run: make howl build/host/release build/host/check-published-lifecycle build/host/check-independent-updates build/host/test-sk.so
+      # A candidate's own updater follows the public mirror its signature names,
+      # so its updates cannot run before publication. This tree's can, on keys
+      # made for this step alone: a test IPE certificate, a kernel that trusts it,
+      # and the boot key howl makes in a fresh data directory. No protected key
+      # is in this step's environment; the gate reads its evidence.
+      - name: Prove updates, rollback and recovery on disposable keys
         run: |
           keys="$RUNNER_TEMP/update-check"
           mkdir -p "$keys"
-          # howl manages a fresh IPE identity and matching test kernel here;
-          # it also prepares the stock Melange builder when running on macOS.
-          XDG_DATA_HOME="$keys/data" \
-            python3 test/check-independent-updates build/host/howl updates "$PROVIDER"
-      - name: Gate each form's exact production downloads and A/B recovery
+          openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 2 \
+            -subj /CN=werewolf-update-check -keyout "$keys/policy.key" -out "$keys/policy.crt"
+          chmod 600 "$keys/policy.key"
+          make WEREWOLF_IPE_CRT="$keys/policy.crt" ipe-kernel
+          workload=playground
+          case ",$FORMS," in *,postdoc-server,*) workload=postdoc-server ;; esac
+          XDG_DATA_HOME="$keys/data" WEREWOLF_IPE_KEY="$keys/policy.key" WEREWOLF_IPE_CRT="$keys/policy.crt" \
+            WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$ARCH/rootfs.tar" \
+            build/host/check-independent-updates build/host/howl updates "$PROVIDER" "$workload"
+      - name: Gate each form's exact candidate where it boots
         env:
           WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
           WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
         run: |
-          python3 release/with-protected-keys python3 release/form-images gate lifecycle gated \
+          build/host/release with-protected-keys build/host/release form-images gate lifecycle gated \
             --provider "$PROVIDER" --arch "$ARCH" --forms "$FORMS" --updates updates
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
@@ -346,7 +353,6 @@ jobs:
           name: lifecycle-evidence-${{ matrix.provider }}-${{ matrix.arch }}-${{ matrix.shard }}
           path: |
             build/lifecycle/**/*.log
-            build/lifecycle/**/evidence.jsonl
             build/lifecycle/**/result.json
             build/lifecycle/**/storage-fault.json
             updates/*.log
@@ -382,7 +388,7 @@ jobs:
       - name: Install pinned host admission tools
         run: |
           sudo test/ci-setup
-          make howl build/host/form
+          make howl build/host/form build/host/release
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: inputs-*
@@ -407,12 +413,12 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          python3 release/with-protected-keys python3 release/form-images export \
+          build/host/release with-protected-keys build/host/release form-images export \
             snapshots verified gated release-assets exported.json --legacy-verified legacy-verified
       - name: Create the GitHub release as a draft
         id: github
         if: steps.export.outputs.targets != '0'
-        run: python3 release/github-protected exported.json
+        run: build/host/release github-protected exported.json
       - name: Attest every release asset
         if: steps.github.outcome == 'success'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
@@ -426,7 +432,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           FORM_IMAGES_GATES: ${{ needs.plan.outputs.gates }}
-        run: python3 release/with-protected-keys python3 release/form-images publish snapshots verified exported.json
+        run: build/host/release with-protected-keys build/host/release form-images publish snapshots verified exported.json
       # A form failing elsewhere fails this job, not the release of these.
       - name: Publish the GitHub release after exact public R2 parity passes
         if: always() && steps.github.outcome == 'success' && steps.publish.outputs.released == 'true'
@@ -451,11 +457,11 @@ jobs:
       - name: Install consumer tools
         if: runner.environment == 'github-hosted'
         run: sudo test/ci-setup
-      - run: make howl
+      - run: make howl build/host/check-public-image
       - name: Discover and boot the exact newly published images from public R2
         env:
           PUBLIC_TARGETS: ${{ toJSON(matrix.targets) }}
-        run: python3 test/check-public-image build/host/howl "$PUBLIC_TARGETS" build/public-downloads
+        run: build/host/check-public-image build/host/howl "$PUBLIC_TARGETS" build/public-downloads
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

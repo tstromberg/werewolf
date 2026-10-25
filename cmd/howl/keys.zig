@@ -29,22 +29,11 @@ pub fn addCurrentUser(
     entries: []const howl.Entry,
     why: *howl.Why,
 ) ![]const howl.Entry {
-    if (o.add_current_user == .no or o.on == .lima or
-        (o.on == null and o.add_current_user == .auto)) return entries;
-    if (o.dev) {
-        if (o.add_current_user == .yes)
-            return why.refuse(
-                "--add-current-user=yes requires normal SSH; developer SSH only accepts root",
-                .{},
-            );
-        return entries;
-    }
     const users_index: ?usize = for (entries, 0..) |entry, n| {
         if (mem.eql(u8, entry.path, "users")) break n;
     } else null;
-    if (o.add_current_user == .auto and
-        (iface.people_defined or iface.people.len > 0 or users_index != null)) return entries;
-
+    const declared = iface.people_defined or iface.people.len > 0 or users_index != null;
+    if (!try wantsCurrentUser(o, declared, why)) return entries;
     const key_files = if (@import("boot-config.zig").forForm(o.form)) |definition| blk: {
         if (definition.ssh == .disabled) {
             if (o.add_current_user == .yes) return why.refuse("{s} does not run SSH", .{o.form});
@@ -60,10 +49,58 @@ pub fn addCurrentUser(
         break :blk try forms.takesKeyFiles(gpa, chain);
     };
     const name = try currentUserName(io, gpa, why);
+    const found: ?[]const []const u8 = if (howl.environ.get("HOME")) |home|
+        (try usable(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" }), key_files)).lines
+    else
+        null;
+    const existing = if (users_index) |n| entries[n].data else "";
+    const users = try withCurrentUser(gpa, o, existing, name, found, key_files, why) orelse
+        return entries;
+    var result: std.ArrayList(howl.Entry) = .empty;
+    try result.appendSlice(gpa, entries);
+    const entry: howl.Entry = .{ .path = "users", .data = users, .from = "--add-current-user" };
+    if (users_index) |n| result.items[n] = entry else try result.append(gpa, entry);
+    mem.sortUnstable(howl.Entry, result.items, {}, struct {
+        fn less(_: void, a: howl.Entry, b: howl.Entry) bool {
+            return mem.lessThan(u8, a.path, b.path);
+        }
+    }.less);
+    return result.items;
+}
+
+/// wantsCurrentUser decides, before howl asks who is running it, whether
+/// o's machine may get that person's account. auto adds one only for a
+/// target and where no account is declared; developer SSH is root's alone.
+fn wantsCurrentUser(o: howl.Options, declared: bool, why: *howl.Why) !bool {
+    if (o.add_current_user == .no or o.on == .lima or
+        (o.on == null and o.add_current_user == .auto)) return false;
+    if (o.dev) {
+        if (o.add_current_user == .yes) return why.refuse(
+            "--add-current-user=yes requires normal SSH; developer SSH only accepts root",
+            .{},
+        );
+        return false;
+    }
+    return o.add_current_user == .yes or !declared;
+}
+
+/// withCurrentUser returns the users file existing with an account for name
+/// holding found, the public keys the form's sshd takes from ~/.ssh (null
+/// without HOME), or null to leave the file as it is: root, a declared
+/// account, or under auto no key. yes refuses where auto gives up.
+fn withCurrentUser(
+    gpa: Allocator,
+    o: howl.Options,
+    existing: []const u8,
+    name: []const u8,
+    found: ?[]const []const u8,
+    key_files: bool,
+    why: *howl.Why,
+) !?[]const u8 {
     if (mem.eql(u8, name, "root")) {
         if (o.add_current_user == .yes)
             return why.refuse("root is not a standard user; declare a named account in users", .{});
-        return entries;
+        return null;
     }
     if (!@import("people").isName(name))
         return why.refuse(
@@ -71,24 +108,19 @@ pub fn addCurrentUser(
                 "--add-current-user=no",
             .{name},
         );
-    const existing = if (users_index) |n| entries[n].data else "";
     var lines = mem.splitScalar(u8, existing, '\n');
     while (lines.next()) |line| {
         var words = mem.tokenizeAny(u8, line, " \t\r");
-        if (mem.eql(u8, words.next() orelse continue, name)) return entries;
+        if (mem.eql(u8, words.next() orelse continue, name)) return null;
     }
-    const home = howl.environ.get("HOME") orelse return why.refuse(
-        "HOME is unset; cannot find local SSH keys",
-        .{},
-    );
-    const found = try usable(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" }), key_files);
-    if (found.lines.len == 0) {
+    const keys = found orelse return why.refuse("HOME is unset; cannot find local SSH keys", .{});
+    if (keys.len == 0) {
         if (o.add_current_user == .yes)
             return why.refuse("{s}: no local public SSH keys accepted by {s}", .{ name, o.form });
-        return entries;
+        return null;
     }
-    const public = try gpa.alloc([]const u8, found.lines.len);
-    for (found.lines, public) |line, *key| key.* = mem.trimEnd(u8, line, "\n");
+    const public = try gpa.alloc([]const u8, keys.len);
+    for (keys, public) |line, *key| key.* = mem.trimEnd(u8, line, "\n");
     var reason: []const u8 = "";
     sshd.peopleKeys(
         gpa,
@@ -103,20 +135,7 @@ pub fn addCurrentUser(
     try text.appendSlice(gpa, existing);
     if (existing.len > 0 and existing[existing.len - 1] != '\n') try text.append(gpa, '\n');
     for (public) |key| try text.print(gpa, "{s} {s}\n", .{ name, key });
-    var result: std.ArrayList(howl.Entry) = .empty;
-    try result.appendSlice(gpa, entries);
-    const entry: howl.Entry = .{
-        .path = "users",
-        .data = text.items,
-        .from = "--add-current-user",
-    };
-    if (users_index) |n| result.items[n] = entry else try result.append(gpa, entry);
-    mem.sortUnstable(howl.Entry, result.items, {}, struct {
-        fn less(_: void, a: howl.Entry, b: howl.Entry) bool {
-            return mem.lessThan(u8, a.path, b.path);
-        }
-    }.less);
-    return result.items;
+    return text.items;
 }
 
 /// devPrivatePath is the private key Howl uses for local developer VMs.
@@ -224,11 +243,11 @@ pub fn offerFor(
 /// Usable is the public keys found: each one's line, and its file's name.
 const Usable = struct { lines: []const []const u8, files: []const []const u8 };
 
-/// Only local FIDO credentials enter the automatically forwarded agent.
-/// Public keys without their private credential stub cannot be loaded.
-pub fn securityIdentities(io: Io, gpa: Allocator) ![]const []const u8 {
-    const home = howl.environ.get("HOME") orelse return &.{};
-    const dir = try std.fs.path.join(gpa, &.{ home, ".ssh" });
+/// securityIdentities returns the private keys in dir whose public halves
+/// are security keys: only local FIDO credentials enter the automatically
+/// forwarded agent. A public key without its private credential stub cannot
+/// be loaded.
+pub fn securityIdentities(io: Io, gpa: Allocator, dir: []const u8) ![]const []const u8 {
     const found = try usable(io, gpa, dir, false);
     var paths: std.ArrayList([]const u8) = .empty;
     for (found.files) |public| {
@@ -293,4 +312,143 @@ test takes {
     try testing.expect(takes(file, true));
     try testing.expect(!takes("sk-ssh-ed25519@openssh.com", true));
     try testing.expect(!takes("ssh-dss AAAA", true));
+}
+
+const security_key = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture";
+const software_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture";
+
+test "the local account goes only where a machine's login can use it" {
+    var why: howl.Why = .{};
+    // auto adds it on every target but Lima, which provisions its own login.
+    for ([_]howl.Platform{ .qemu, .firecracker, .bhyve, .proxmox, .gcp, .aws, .azure }) |on|
+        try testing.expect(try wantsCurrentUser(.{ .on = on }, false, &why));
+    for ([_]@FieldType(howl.Options, "add_current_user"){ .auto, .yes, .no }) |mode|
+        try testing.expect(!try wantsCurrentUser(
+            .{ .on = .lima, .add_current_user = mode },
+            false,
+            &why,
+        ));
+    try testing.expect(!try wantsCurrentUser(
+        .{ .on = .qemu, .add_current_user = .no },
+        false,
+        &why,
+    ));
+    // pack without a target adds it only when asked.
+    try testing.expect(!try wantsCurrentUser(.{}, false, &why));
+    try testing.expect(try wantsCurrentUser(.{ .add_current_user = .yes }, false, &why));
+    // A declared account, even an empty users map, disables auto, not yes.
+    try testing.expect(!try wantsCurrentUser(.{ .on = .qemu }, true, &why));
+    try testing.expect(try wantsCurrentUser(
+        .{ .on = .qemu, .add_current_user = .yes },
+        true,
+        &why,
+    ));
+    try testing.expect(!try wantsCurrentUser(.{ .on = .qemu, .dev = true }, false, &why));
+    try testing.expectError(error.Refused, wantsCurrentUser(
+        .{ .on = .qemu, .dev = true, .add_current_user = .yes },
+        false,
+        &why,
+    ));
+}
+
+test "the local account takes the keys found, beside the accounts declared" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: howl.Why = .{};
+    const auto: howl.Options = .{ .form = "playground", .on = .qemu };
+    var yes = auto;
+    yes.add_current_user = .yes;
+    const both: []const []const u8 = &.{ security_key ++ "\n", software_key ++ "\n" };
+    const added = "alice " ++ security_key ++ "\nalice " ++ software_key ++ "\n";
+    try testing.expectEqualStrings(
+        added,
+        (try withCurrentUser(gpa, auto, "", "alice", both, true, &why)).?,
+    );
+    // No account is generated with an implicit admin grant.
+    try testing.expect(mem.find(u8, added, "admin") == null);
+    const bob = "bob " ++ security_key;
+    try testing.expectEqualStrings(
+        bob ++ "\n" ++ added,
+        (try withCurrentUser(gpa, yes, bob, "alice", both, true, &why)).?,
+    );
+    // An account declared under the local name wins, with or without keys.
+    try testing.expect(try withCurrentUser(gpa, yes, "alice\n", "alice", both, true, &why) == null);
+    try testing.expect(try withCurrentUser(gpa, auto, "alice", "alice", null, true, &why) == null);
+    // Root is no standard user; yes says so.
+    try testing.expect(try withCurrentUser(gpa, auto, "", "root", both, true, &why) == null);
+    try testing.expectError(error.Refused, withCurrentUser(gpa, yes, "", "root", both, true, &why));
+    try testing.expectError(
+        error.Refused,
+        withCurrentUser(gpa, auto, "", "Alice", both, true, &why),
+    );
+    try testing.expectError(
+        error.Refused,
+        withCurrentUser(gpa, auto, "", "alice", null, true, &why),
+    );
+    // No key the form's sshd takes: auto gives up, yes refuses.
+    try testing.expect(try withCurrentUser(gpa, auto, "", "alice", &.{}, false, &why) == null);
+    try testing.expectError(
+        error.Refused,
+        withCurrentUser(gpa, yes, "", "alice", &.{}, false, &why),
+    );
+    try testing.expect(mem.find(u8, why.text, "no local public SSH keys") != null);
+    // A key file where only security keys are taken is refused, not added.
+    try testing.expectError(
+        error.Refused,
+        withCurrentUser(gpa, auto, "", "alice", both, false, &why),
+    );
+}
+
+test "local keys follow the form's policy, and the agent takes only FIDO credentials" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][2][]const u8{
+        .{ "fido", security_key },
+        .{ "software", software_key },
+        .{ "orphan", "sk-ecdsa-sha2-nistp256@openssh.com AAAA orphan" },
+    }) |key| {
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}.pub", .{key[0]}), .data = key[1] },
+        );
+        if (!mem.eql(u8, key[0], "orphan"))
+            try tmp.dir.writeFile(io, .{ .sub_path = key[0], .data = "private stub" });
+    }
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const fido = try usable(io, gpa, dir, false);
+    try testing.expectEqualStrings("fido.pub orphan.pub", try mem.join(gpa, " ", fido.files));
+    const all = try usable(io, gpa, dir, true);
+    try testing.expectEqualStrings(
+        "fido.pub orphan.pub software.pub",
+        try mem.join(gpa, " ", all.files),
+    );
+    try testing.expectEqualStrings(security_key ++ "\n", all.lines[0]);
+    const agent = try securityIdentities(io, gpa, dir);
+    try testing.expectEqual(1, agent.len);
+    try testing.expectEqualStrings(try std.fs.path.join(gpa, &.{ dir, "fido" }), agent[0]);
+}
+
+test "--add-current-user takes auto, yes or no, once" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: howl.Why = .{};
+    const o = try howl.options(gpa, &.{ "playground", "--add-current-user", "yes" }, &why);
+    try testing.expectEqual(.yes, o.add_current_user);
+    try testing.expectError(
+        error.Refused,
+        howl.options(gpa, &.{ "playground", "--add-current-user=maybe" }, &why),
+    );
+    try testing.expect(mem.find(u8, why.text, "auto, yes or no") != null);
+    try testing.expectError(error.Refused, howl.options(
+        gpa,
+        &.{ "playground", "--add-current-user=auto", "--add-current-user=no" },
+        &why,
+    ));
+    try testing.expect(mem.find(u8, why.text, "given twice") != null);
 }

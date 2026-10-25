@@ -64,7 +64,8 @@ Older OCI roots retain their previous file binding until rebuilt.
 Unit tests cover declaration compilation, service opt-in, malformed and
 bounded input, duplicate grants, unchanged leases, removal, and failure
 ordering. `make check-dns` uses the real fence and DHCP binaries in
-private Linux namespaces, with local DNS, HTTPS and DHCP fixtures.
+private Linux namespaces, with local DNS, HTTPS and DHCP fixtures; its
+allow/deny cases are [test/dns/cases.yaml](../../test/dns/cases.yaml).
 It checks UDP/TCP success for UID 69, root refusal in production, alternate
 resolver refusal, HTTPS by hostname, actual sandboxed DHCP renewal, old
 resolver revocation, GCP/Azure DNS without metadata HTTP, and playground

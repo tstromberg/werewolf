@@ -128,6 +128,10 @@ $wgRunJobsAsync = false;
 $wgCookieSecure = str_starts_with( $wgServer, 'https://' );
 $wgForceHTTPS = false;
 $wgShowExceptionDetails = false;
+// MediaWiki's own faults go to php-fpm's stderr, and so the console, as
+// every service's do; a page shows only that one happened.
+$wgDebugLogGroups['exception'] = 'php://stderr';
+$wgDebugLogGroups['error'] = 'php://stderr';
 
 $wgDefaultSkin = 'vector-2022';
 $werewolfParts = require '/etc/mediawiki/extensions.php';

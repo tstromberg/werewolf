@@ -12,12 +12,13 @@ mkdir -p "$out"
 openssl x509 -in "$cert" -outform DER -out "$out/boot.der"
 guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
 vm=${WEREWOLF_BUILD_VM:-werewolf-build-26.04}
+# howl prepares the build helper and native firmware (cmd/howl/firmware.zig).
+howl=${WEREWOLF_HOWL:-$(dirname "$0")/../build/host/howl}
 helper_ready=0
 prepare_helper() {
     [ "$helper_ready" = 0 ] || return 0
-    helper=${WEREWOLF_HELPER_SETUP:-$(dirname "$0")/build-helper}
     template=${WEREWOLF_HELPER_TEMPLATE:-$(dirname "$0")/../boot/build-helper.yaml}
-    python3 "$helper" "$vm" "$template"
+    "$howl" _build-helper "$vm" "$template"
     helper_ready=1
 }
 if [ "${4:-}" = aws ]; then
@@ -43,18 +44,13 @@ fi
 native_tool=
 if { [ "$(uname -s)" = Darwin ] || [ "$arch" = aarch64 ]; } && [ -z "${WEREWOLF_BUILD_VM:-}" ] &&
     { [ -z "${SECUREBOOT_DIR:-}" ] || ! command -v virt-fw-vars >/dev/null; }; then
-    native=${WEREWOLF_FIRMWARE_SETUP:-$(dirname "$0")/native-firmware}
-    requirements=${WEREWOLF_FIRMWARE_REQUIREMENTS:-$(dirname "$0")/../boot/firmware-requirements.txt}
-    report=$out/native-firmware.json
-    python3 "$native" "$arch" "$requirements" "$report"
-    native_tool=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tool"])' "$report")
+    # One path a line: virt-fw-vars, the code, the variable template.
+    native=$("$howl" _native-firmware "$arch")
+    native_tool=$(printf '%s\n' "$native" | sed -n 1p)
     if [ -z "${SECUREBOOT_DIR:-}" ]; then
-        code=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code.fd"])' "$report")
-        vars=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["template.fd"])' "$report")
-        cp "$code" "$out/code.fd"
-        cp "$vars" "$out/template.fd"
+        cp "$(printf '%s\n' "$native" | sed -n 2p)" "$out/code.fd"
+        cp "$(printf '%s\n' "$native" | sed -n 3p)" "$out/template.fd"
     fi
-    rm -f "$report"
 fi
 source=${SECUREBOOT_DIR:-}
 if [ -n "$source" ]; then

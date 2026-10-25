@@ -22,7 +22,9 @@ suites:
               body:
                 contains: cloudflared
             await: 60s
-          - listeners: {protocol: tcp, port: 2000}
+          - listeners:
+              protocol: tcp
+              port: 2000
             expect:
               equals:
                 - protocol: tcp
@@ -35,9 +37,7 @@ suites:
             expect:
               status: 200
               body:
-                matches: '(^|
-
-                  )cloudflared_tunnel_'
+                matches: "(^|\n)cloudflared_tunnel_"
             await: 30s
           - service: cloudflared
             expect:

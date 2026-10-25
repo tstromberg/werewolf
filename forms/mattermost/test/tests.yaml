@@ -132,16 +132,11 @@ suites:
                 - postgres
                 - -d
                 - postgres
-              stdin: 'SELECT count(*) FROM pg_tables WHERE schemaname = ''mattermost''
-                AND tablename IN (''users'', ''configurations'');
-
-                '
+              stdin: "SELECT count(*) FROM pg_tables WHERE schemaname = 'mattermost' AND tablename IN ('users', 'configurations');\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'
                 PGOPTIONS: -c statement_timeout=5000
             expect:
               exit: 0
-              stdout: '2
-
-                '
+              stdout: "2\n"

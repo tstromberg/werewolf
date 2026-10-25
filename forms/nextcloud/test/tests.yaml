@@ -300,11 +300,7 @@ suites:
                 - postgres
                 - -d
                 - nextcloud
-              stdin: 'SELECT (SELECT configvalue::bigint > 0 FROM oc_appconfig WHERE appid=''core'' AND
-                configkey=''lastcron'') AND (SELECT configvalue = ''cron'' FROM oc_appconfig WHERE appid=''core''
-                AND configkey=''backgroundjobs_mode'');
-
-                '
+              stdin: "SELECT (SELECT configvalue::bigint > 0 FROM oc_appconfig WHERE appid='core' AND configkey='lastcron') AND (SELECT configvalue = 'cron' FROM oc_appconfig WHERE appid='core' AND configkey='backgroundjobs_mode');\n"
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'
@@ -314,20 +310,22 @@ suites:
               readonly: true
             expect:
               exit: 0
-              stdout: 't
-
-                '
+              stdout: "t\n"
             await: 340s
+  # A real code write as Nextcloud's account, without a setuid helper.
   - name: nextcloud-code-denied
-    source: driver.zig
-    mode: write-refused
     user: nextcloud
     policy:
       pledge: stdio rpath wpath
       read:
         - /usr/share/nextcloud
     cases:
-      seed:
-        - nc-code-write-refused
-      verify:
-        - nc-code-write-refused
+      - name: nc-code-write-refused
+        steps:
+          - write: /usr/share/nextcloud/werewolf-test-write
+            expect:
+              errno:
+                one_of:
+                  - EACCES
+                  - EPERM
+                  - EROFS

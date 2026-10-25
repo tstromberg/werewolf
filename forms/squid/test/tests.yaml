@@ -144,7 +144,9 @@ suites:
                 matches: "(^|\n)forwarded_for delete(\n|$)"
       - name: squid-listeners
         steps:
-          - listeners: {protocol: tcp, port: 3128}
+          - listeners:
+              protocol: tcp
+              port: 3128
             expect:
               equals:
                 - protocol: tcp

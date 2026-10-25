@@ -5,7 +5,8 @@ suites:
     source: platform.zig
     mode: platform
     user: root
-    policy: {pledge: stdio rpath}
+    policy:
+      pledge: stdio rpath
     cases:
       seed:
         - network
@@ -32,7 +33,8 @@ suites:
     source: platform.zig
     mode: platform
     user: root
-    policy: {pledge: stdio rpath}
+    policy:
+      pledge: stdio rpath
     cases:
       seed: [reaped]
       verify: []

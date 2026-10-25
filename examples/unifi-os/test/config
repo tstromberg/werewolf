@@ -1,7 +1,3 @@
 #!/bin/sh
 set -eu
 forms/rabbitmq/test/config "$1"
-cp "${0%/*}/dbus-probe.py" "$1/dbus-probe.py"
-cp "${0%/*}/nginx-probe.py" "$1/nginx-probe.py"
-cp "${0%/*}/persistence-probe.py" "$1/persistence-probe.py"
-cp "${0%/*}/network-probe.py" "$1/network-probe.py"

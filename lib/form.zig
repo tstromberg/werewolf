@@ -12,339 +12,18 @@ const allow = @import("allow");
 const sshd = @import("sshd");
 const lookup = @import("lookup.zig");
 
-pub const Node = union(enum) {
-    scalar: Scalar,
-    list: []const Node,
-    map: []const Entry,
+pub const yaml = @import("yaml.zig");
+pub const Node = yaml.Node;
+pub const Scalar = yaml.Scalar;
+pub const Entry = yaml.Entry;
+pub const Diagnostic = yaml.Diagnostic;
+pub const SyntaxError = yaml.SyntaxError;
+pub const write = yaml.write;
 
-    /// get returns the value under key, or null if node is not a map with it.
-    pub fn get(node: Node, key: []const u8) ?Node {
-        if (node != .map) return null;
-        for (node.map) |e| if (mem.eql(u8, e.key, key)) return e.value;
-        return null;
-    }
-};
-
-pub const Scalar = struct {
-    /// raw keeps quotes as written and folds plain continuations to spaces,
-    /// so a merged config gives apko the same value.
-    raw: []const u8,
-    /// text is the value, unquoted.
-    text: []const u8,
-};
-
-pub const Entry = struct { key: []const u8, value: Node };
-
-/// Diagnostic is the line where a parse failed, and why.
-pub const Diagnostic = struct { line: usize = 0, why: []const u8 = "" };
-
-pub const SyntaxError = error{ Syntax, OutOfMemory };
-
-const Line = struct { n: usize, indent: usize, text: []const u8 };
-
-/// parse parses text as a YAML map. An empty file is an empty map.
+/// parse parses text as a YAML map in form.yaml's dialect. An empty file is
+/// an empty map.
 pub fn parse(gpa: Allocator, text: []const u8, diag: *Diagnostic) SyntaxError!Node {
-    var lines: std.ArrayList(Line) = .empty;
-    var it = mem.splitScalar(u8, text, '\n');
-    var n: usize = 0;
-    while (it.next()) |raw| {
-        n += 1;
-        const indent = for (raw, 0..) |c, i| {
-            if (c != ' ') break i;
-        } else raw.len;
-        const body = mem.trimEnd(u8, uncomment(raw[indent..]), " \t\r");
-        if (body.len == 0) continue;
-        if (body[0] == '\t') return failAt(diag, n, "indented with a tab: indent with spaces");
-        try lines.append(gpa, .{ .n = n, .indent = indent, .text = body });
-    }
-    if (lines.items.len == 0) return .{ .map = &.{} };
-    var p: Parser = .{ .gpa = gpa, .lines = lines.items, .diag = diag };
-    if (p.lines[0].indent != 0) return p.fail(p.lines[0].n, "the first line is indented");
-    if (isItem(p.lines[0].text)) return p.fail(p.lines[0].n, "a list where the keys should be");
-    const doc = try p.map(0);
-    if (p.i < p.lines.len) return p.fail(p.lines[p.i].n, "indented less than its block");
-    return doc;
-}
-
-fn failAt(diag: *Diagnostic, n: usize, why: []const u8) error{Syntax} {
-    diag.* = .{ .line = n, .why = why };
-    return error.Syntax;
-}
-
-/// uncomment strips a comment: a # outside quotes that starts the line or
-/// follows a space. A quote opens only where a value can start.
-fn uncomment(line: []const u8) []const u8 {
-    var quote: u8 = 0;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (quote != 0) {
-            if (quote == '"' and c == '\\') {
-                i += 1;
-            } else if (c == quote) {
-                quote = 0;
-            }
-            continue;
-        }
-        const starts = i == 0 or mem.findScalar(u8, " [,", line[i - 1]) != null;
-        switch (c) {
-            '#' => if (starts) return line[0..i],
-            '"', '\'' => if (starts) {
-                quote = c;
-            },
-            else => {},
-        }
-    }
-    return line;
-}
-
-fn isItem(text: []const u8) bool {
-    return text[0] == '-' and (text.len == 1 or text[1] == ' ');
-}
-
-/// splitKey splits `key: rest` or `key:` into the key and the trimmed rest.
-/// A key is letters, digits, -, _ and ., and may start with ? (a weakness a
-/// host may or may not show).
-fn splitKey(text: []const u8) ?struct { []const u8, []const u8 } {
-    const colon = mem.findScalar(u8, text, ':') orelse return null;
-    const key = text[0..colon];
-    const word = if (key.len > 1 and key[0] == '?') key[1..] else key;
-    if (word.len == 0) return null;
-    for (word) |c|
-        if (!std.ascii.isAlphanumeric(c) and mem.findScalar(u8, "-_.", c) == null) return null;
-    const rest = text[colon + 1 ..];
-    if (rest.len > 0 and rest[0] != ' ') return null;
-    return .{ key, mem.trimStart(u8, rest, " ") };
-}
-
-const Parser = struct {
-    gpa: Allocator,
-    lines: []Line,
-    i: usize = 0,
-    diag: *Diagnostic,
-
-    fn fail(p: *Parser, n: usize, why: []const u8) error{Syntax} {
-        return failAt(p.diag, n, why);
-    }
-
-    fn map(p: *Parser, indent: usize) SyntaxError!Node {
-        var entries: std.ArrayList(Entry) = .empty;
-        while (p.i < p.lines.len) {
-            const l = p.lines[p.i];
-            if (l.indent < indent) break;
-            if (l.indent > indent) return p.fail(l.n, "indented more than the keys around it");
-            if (isItem(l.text)) return p.fail(l.n, "a list item among keys");
-            const key, const rest = splitKey(l.text) orelse return p.fail(l.n, "not `key: value`");
-            for (entries.items) |e|
-                if (mem.eql(u8, e.key, key)) return p.fail(l.n, "a key given twice");
-            p.i += 1;
-            const value = if (rest.len > 0)
-                try p.flow(rest, l.n, indent)
-            else
-                try p.nested(indent, l.n);
-            try entries.append(p.gpa, .{ .key = key, .value = value });
-        }
-        return .{ .map = entries.items };
-    }
-
-    /// nested parses the value of a key with nothing after its colon: the
-    /// block under it, or a list at the key's own indent, as YAML allows.
-    fn nested(p: *Parser, indent: usize, n: usize) SyntaxError!Node {
-        if (p.i < p.lines.len) {
-            const next = p.lines[p.i];
-            if (next.indent > indent) {
-                return if (isItem(next.text)) p.list(next.indent) else p.map(next.indent);
-            }
-            if (next.indent == indent and isItem(next.text)) return p.list(indent);
-        }
-        return p.fail(n, "a key with no value");
-    }
-
-    fn list(p: *Parser, indent: usize) SyntaxError!Node {
-        var items: std.ArrayList(Node) = .empty;
-        while (p.i < p.lines.len) {
-            const l = p.lines[p.i];
-            if (l.indent < indent) break;
-            if (l.indent > indent) return p.fail(l.n, "indented more than the items around it");
-            // A key at the list's indent ends the list; the enclosing map
-            // continues.
-            if (!isItem(l.text)) break;
-            const rest = mem.trimStart(u8, l.text[1..], " ");
-            if (rest.len == 0) return p.fail(l.n, "an empty item");
-            if (rest[0] != '"' and rest[0] != '\'' and splitKey(rest) != null) {
-                // A map item: its first key is on the item's line, the rest below.
-                const at = l.indent + (l.text.len - rest.len);
-                p.lines[p.i] = .{ .n = l.n, .indent = at, .text = rest };
-                try items.append(p.gpa, try p.map(at));
-            } else {
-                p.i += 1;
-                try items.append(p.gpa, try p.flow(rest, l.n, indent));
-            }
-        }
-        return .{ .list = items.items };
-    }
-
-    /// flow parses a value on its key's or item's line: a scalar, `[a, b]` or `{}`.
-    fn flow(p: *Parser, text: []const u8, n: usize, indent: usize) SyntaxError!Node {
-        if (mem.eql(u8, text, "{}")) return .{ .map = &.{} };
-        if (text[0] != '[') {
-            const first = try p.scalar(text, n);
-            if (text[0] == '"' or text[0] == '\'' or
-                p.i == p.lines.len or p.lines[p.i].indent <= indent)
-                return .{ .scalar = first };
-            // Plain YAML values may continue on adjacent, indented lines.
-            // Blank lines have different folding rules and are outside this subset.
-            var joined: std.ArrayList(u8) = .empty;
-            try joined.appendSlice(p.gpa, text);
-            var last = n;
-            while (p.i < p.lines.len and p.lines[p.i].indent > indent) : (p.i += 1) {
-                const next = p.lines[p.i];
-                if (next.n != last + 1 or isItem(next.text))
-                    return p.fail(next.n, "a continuation must be an adjacent plain value");
-                try joined.append(p.gpa, ' ');
-                try joined.appendSlice(p.gpa, next.text);
-                // Validate the joined value too, so nested keys cannot become text.
-                _ = try p.scalar(joined.items, next.n);
-                last = next.n;
-            }
-            return .{ .scalar = try p.scalar(joined.items, n) };
-        }
-        if (text[text.len - 1] != ']') return p.fail(n, "a list that does not end with ]");
-        const inner = mem.trim(u8, text[1 .. text.len - 1], " ");
-        var items: std.ArrayList(Node) = .empty;
-        var start: usize = 0;
-        var quote: u8 = 0;
-        var i: usize = 0;
-        while (i <= inner.len) : (i += 1) {
-            if (i < inner.len) {
-                const c = inner[i];
-                if (quote != 0) {
-                    if (quote == '"' and c == '\\') {
-                        i += 1;
-                    } else if (c == quote) {
-                        quote = 0;
-                    }
-                    continue;
-                }
-                if ((c == '"' or c == '\'') and
-                    mem.trim(u8, inner[start..i], " ").len == 0) quote = c;
-                if (c != ',') continue;
-            }
-            const item = mem.trim(u8, inner[start..@min(i, inner.len)], " ");
-            start = i + 1;
-            if (item.len == 0) {
-                if (i == inner.len and items.items.len == 0) break;
-                return p.fail(n, "an empty item in [ ]");
-            }
-            try items.append(p.gpa, .{ .scalar = try p.scalar(item, n) });
-        }
-        return .{ .list = items.items };
-    }
-
-    fn scalar(p: *Parser, text: []const u8, n: usize) SyntaxError!Scalar {
-        switch (text[0]) {
-            '"' => {
-                if (text.len < 2 or
-                    text[text.len - 1] != '"') return p.fail(n, "a \" that is not closed");
-                var out: std.ArrayList(u8) = .empty;
-                var i: usize = 1;
-                while (i < text.len - 1) : (i += 1) {
-                    var c = text[i];
-                    if (c == '"') return p.fail(n, "a \" inside a \"string\": write \\\"");
-                    if (c == '\\') {
-                        i += 1;
-                        if (i == text.len - 1) return p.fail(n, "a \\ at the end of a \"string\"");
-                        c = text[i];
-                        if (c != '"' and
-                            c != '\\') return p.fail(n, "an escape other than \\\" or \\\\");
-                    }
-                    try out.append(p.gpa, c);
-                }
-                return .{ .raw = text, .text = out.items };
-            },
-            '\'' => {
-                if (text.len < 2 or
-                    text[text.len - 1] != '\'') return p.fail(n, "a ' that is not closed");
-                const inner = text[1 .. text.len - 1];
-                var out: std.ArrayList(u8) = .empty;
-                var i: usize = 0;
-                while (i < inner.len) : (i += 1) {
-                    if (inner[i] == '\'') {
-                        if (i + 1 == inner.len or
-                            inner[i + 1] != '\'') return p.fail(
-                            n,
-                            "a ' inside a 'string': write ''",
-                        );
-                        i += 1;
-                    }
-                    try out.append(p.gpa, inner[i]);
-                }
-                return .{ .raw = text, .text = out.items };
-            },
-            '[',
-            ']',
-            '{',
-            '}',
-            '&',
-            '*',
-            '!',
-            '|',
-            '>',
-            '%',
-            '@',
-            '`',
-            ',',
-            => return p.fail(n, "a value that starts with a YAML indicator: quote it"),
-            '-', '?', ':' => if (text.len == 1 or text[1] == ' ')
-                return p.fail(n, "a value that starts with a YAML indicator: quote it"),
-            else => {},
-        }
-        if (mem.find(u8, text, ": ") != null or text[text.len - 1] == ':')
-            return p.fail(n, "a value holding `: `: quote it");
-        return .{ .raw = text, .text = text };
-    }
-};
-
-/// write writes node, a map, as block YAML, each scalar as it was written.
-pub fn write(w: *Io.Writer, node: Node) Io.Writer.Error!void {
-    try writeEntries(w, node.map, 0, false);
-}
-
-fn writeEntries(
-    w: *Io.Writer,
-    entries: []const Entry,
-    indent: usize,
-    inline_first: bool,
-) Io.Writer.Error!void {
-    for (entries, 0..) |e, i| {
-        if (!inline_first or i > 0) try w.splatByteAll(' ', indent);
-        try w.print("{s}:", .{e.key});
-        try writeValue(w, e.value, indent + 2);
-    }
-}
-
-/// writeValue writes the rest of a line after `key:` or `-`, and the block under it.
-fn writeValue(w: *Io.Writer, node: Node, indent: usize) Io.Writer.Error!void {
-    switch (node) {
-        .scalar => |s| try w.print(" {s}\n", .{s.raw}),
-        .map => |m| if (m.len == 0) try w.writeAll(" {}\n") else {
-            try w.writeAll("\n");
-            try writeEntries(w, m, indent, false);
-        },
-        .list => |l| if (l.len == 0) try w.writeAll(" []\n") else {
-            try w.writeAll("\n");
-            for (l) |item| {
-                try w.splatByteAll(' ', indent);
-                try w.writeAll("-");
-                if (item == .map and item.map.len > 0) {
-                    try w.writeAll(" ");
-                    try writeEntries(w, item.map, indent + 2, true);
-                } else {
-                    try writeValue(w, item, indent + 2);
-                }
-            }
-        },
-    }
+    return yaml.parse(gpa, text, .form, diag);
 }
 
 /// whole lists the keys a merged config takes whole from the last form
@@ -651,6 +330,21 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
+/// isRef reports whether s names a form as loadIn finds it: by name in
+/// forms/, or by a relative directory, such as a generated form's, with no
+/// empty, . or .. part, whose last part is a name.
+pub fn isRef(s: []const u8) bool {
+    if (isName(s)) return true;
+    if (s.len == 0 or s.len > 1024 or s[0] == '/') return false;
+    var parts = mem.splitScalar(u8, mem.trimEnd(u8, s, "/"), '/');
+    var last: []const u8 = "";
+    while (parts.next()) |part| {
+        if (part.len == 0 or mem.eql(u8, part, ".") or mem.eql(u8, part, "..")) return false;
+        last = part;
+    }
+    return isName(last);
+}
+
 /// isImageRef reports whether s names an image, REPO[:TAG][@sha256:HEX]:
 /// letters, digits and ._:/@- after a letter or digit, so it is one
 /// argument to crane and never one of its flags.
@@ -888,8 +582,11 @@ pub fn loadIn(
         } else if (mem.eql(u8, e.key, "paths")) {
             if (e.value != .list) return f.fail(gpa, "{s}: paths is apko's: a list", .{path});
         } else if (mem.eql(u8, e.key, "base")) {
-            if (e.value != .scalar or !isName(e.value.scalar.text))
-                return f.fail(gpa, "{s}: base is the name of a form in forms/", .{path});
+            if (e.value != .scalar or !isRef(e.value.scalar.text)) return f.fail(
+                gpa,
+                "{s}: base is a form: its name in forms/, or its directory",
+                .{path},
+            );
         } else if (mem.eql(u8, e.key, "app")) {
             // app must be absolute and must not contain "..".
             const p = if (e.value == .scalar) e.value.scalar.text else "";
@@ -1869,147 +1566,6 @@ fn testWrite(arena: Allocator, node: Node) ![]const u8 {
     return out.written();
 }
 
-test "parse: maps, lists, item maps, inline lists, comments, quotes" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const doc = try testParse(a.allocator(),
-        \\# a form
-        \\contents:
-        \\  packages:
-        \\    - runit                 # PID 1 after init
-        \\    - "a #b"
-        \\accounts:
-        \\  users:
-        \\    - username: _seal
-        \\      uid: 66
-        \\  groups:
-        \\  - groupname: _seal
-        \\with: [postgresql, 'valkey', "nginx"]
-        \\weaknesses:
-        \\  ?kernel-no-hypervisor: it runs VMs, where its host lends the hardware
-        \\paths:
-        \\  - path: /usr/bin/x
-        \\    permissions: 0o755
-        \\empty: []
-        \\
-    );
-    const pkgs = doc.get("contents").?.get("packages").?.list;
-    try testing.expectEqual(2, pkgs.len);
-    try testing.expectEqualStrings("runit", pkgs[0].scalar.text);
-    try testing.expectEqualStrings("a #b", pkgs[1].scalar.text);
-    try testing.expectEqualStrings("\"a #b\"", pkgs[1].scalar.raw);
-    const users = doc.get("accounts").?.get("users").?.list;
-    try testing.expectEqualStrings("66", users[0].get("uid").?.scalar.text);
-    try testing.expectEqualStrings(
-        "_seal",
-        doc.get("accounts").?.get("groups").?.list[0].get("groupname").?.scalar.text,
-    );
-    const with = doc.get("with").?.list;
-    try testing.expectEqual(3, with.len);
-    try testing.expectEqualStrings("valkey", with[1].scalar.text);
-    try testing.expectEqualStrings("?kernel-no-hypervisor", doc.get("weaknesses").?.map[0].key);
-    try testing.expectEqualStrings(
-        "0o755",
-        doc.get("paths").?.list[0].get("permissions").?.scalar.raw,
-    );
-    try testing.expectEqual(0, doc.get("empty").?.list.len);
-}
-
-test "parse: plain continuations preserve commands and round-trip" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const gpa = a.allocator();
-    const doc = try testParse(gpa,
-        \\services:
-        \\  web:
-        \\    exec: /usr/bin/server --port 80
-        \\      --config /etc/server.conf
-        \\    before:
-        \\      - /usr/bin/python -c
-        \\        "print('ready')"
-        \\      - /usr/bin/check
-        \\    user: web
-        \\accounts:
-        \\  users:
-        \\    - username: web
-        \\      homedir: /data/web
-        \\        directory
-        \\      uid: 1000
-    );
-    const web = doc.get("services").?.get("web").?;
-    const command = "/usr/bin/server --port 80 --config /etc/server.conf";
-    try testing.expectEqualStrings(command, web.get("exec").?.scalar.text);
-    try testing.expectEqualStrings("web", web.get("user").?.scalar.text);
-    const before = web.get("before").?.list;
-    try testing.expectEqual(2, before.len);
-    try testing.expectEqualStrings("/usr/bin/python -c \"print('ready')\"", before[0].scalar.text);
-    const users = doc.get("accounts").?.get("users").?.list;
-    try testing.expectEqualStrings("/data/web directory", users[0].get("homedir").?.scalar.text);
-    try testing.expectEqualStrings("1000", users[0].get("uid").?.scalar.text);
-    const written = try testWrite(gpa, doc);
-    const again = try testParse(gpa, written);
-    try testing.expectEqualStrings(
-        command,
-        again.get("services").?.get("web").?.get("exec").?.scalar.text,
-    );
-    try testing.expectEqualStrings(written, try testWrite(gpa, again));
-}
-
-test "parse: what apko might read otherwise is refused, with its line" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const bad = [_]struct { []const u8, usize }{
-        .{ "a: &x 1\n", 1 },
-        .{ "a: 1\nb: |\n  text\n", 2 },
-        .{ "a:\n  - b: c: d\n", 2 },
-        .{ "a:\n  - x\n   - y\n", 3 },
-        .{ "a: 1\na: 2\n", 2 },
-        .{ "a: {b: c}\n", 1 },
-        .{ "a: \"open\n", 1 },
-        .{ "a:\n", 1 },
-        .{ "- a\n", 1 },
-        .{ "a:\n\t- b\n", 2 },
-        .{ "a: [b, , c]\n", 1 },
-        .{ "a: \"\\n\"\n", 1 },
-        .{ "?: x\n", 1 },
-        .{ "a: value\n  nested: value\n", 2 },
-        .{ "a: value\n\n  continuation\n", 3 },
-        .{ "a: value\n  # comment\n  continuation\n", 3 },
-        .{ "a: \"value\"\n  continuation\n", 2 },
-        .{ "a: [value]\n  continuation\n", 2 },
-    };
-    for (bad) |b| {
-        var d: Diagnostic = .{};
-        try testing.expectError(error.Syntax, parse(a.allocator(), b[0], &d));
-        try testing.expectEqual(b[1], d.line);
-    }
-}
-
-test "write: what parse reads, it writes back the same" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const text =
-        \\contents:
-        \\  packages:
-        \\    - runit
-        \\    - "quoted: yes"
-        \\accounts:
-        \\  users:
-        \\    - username: _seal
-        \\      uid: 66
-        \\  run-as: ""
-        \\archs:
-        \\  - aarch64
-        \\environment: {}
-        \\volumes: []
-        \\
-    ;
-    try testing.expectEqualStrings(
-        text,
-        try testWrite(a.allocator(), try testParse(a.allocator(), text)),
-    );
-}
-
 test "merge: lists joined base first, maps by key, scalars and whole keys the last form's" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
@@ -2093,6 +1649,25 @@ test "recipes resolve sibling contexts and retain distro source discovery" {
     try testing.expectEqualStrings("../packages/net/zot/zot.yaml", declared[1]);
     fm.spec = try testParse(gpa, "recipes: []");
     try testing.expectEqual(0, (try fm.recipes(io, gpa, tmp.dir)).len);
+}
+
+test "a base is a form's name in forms/, or a clean relative directory" {
+    for ([_][]const u8{
+        "bastion",
+        "examples/unifi-os",
+        "build/aarch64/check/bastion-check",
+        "build/x/form/",
+    }) |s| try testing.expect(isRef(s));
+    for ([_][]const u8{
+        "",
+        "/abs/form",
+        "../form",
+        "a/../b",
+        "a//b",
+        "./form",
+        "examples/Unifi",
+        "a/b c",
+    }) |s| try testing.expect(!isRef(s));
 }
 
 test "chain: base first, each form after what it takes, itself last" {
@@ -2893,8 +2468,8 @@ test "service lookups compile for its user; dns grants are refused" {
         "net: [dns web]\nservices:\n  web:\n    exec: /web\n    user: web\n",
         "net: [lookup web a.example]\nservices:\n  web:\n    exec: /web\n    user: web\n",
         "services:\n  web:\n    exec: /web\n    user: web\n    connect: dns tcp/443\n",
-    }) |yaml| {
-        const bad = try parse(gpa, yaml, &diag);
+    }) |text| {
+        const bad = try parse(gpa, text, &diag);
         const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
         try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
     }

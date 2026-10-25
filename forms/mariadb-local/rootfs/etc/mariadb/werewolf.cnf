@@ -7,7 +7,7 @@
 datadir = /data/svc/mariadb/data
 socket = /run/svc/mariadb/mariadb.sock
 pid-file = /run/svc/mariadb/mariadb.pid
-plugin-dir = /usr/lib/mariadb-12.3/plugin
+plugin-dir = /usr/lib/mariadb/plugin
 # Its sorts and temporary tables, on disk with its data (mariadb-init makes it).
 tmpdir = /data/svc/mariadb/tmp
 skip-name-resolve

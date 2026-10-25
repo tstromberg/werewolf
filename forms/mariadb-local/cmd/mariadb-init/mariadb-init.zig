@@ -1,5 +1,6 @@
 //! mariadb-init makes MariaDB's data directory once, as mariadb-install-db
-//! would, and applies the image's SQL before each start of the server.
+//! would, upgrades it when the server is of a newer release series, and
+//! applies the image's SQL before each start of the server.
 //! See forms/mariadb-local/README.md. It also writes the server's network
 //! file: closed, unless PORT is 3306, which is mariadb-tcp.
 
@@ -20,8 +21,17 @@ const sql_dir = "/usr/share/werewolf-mariadb";
 const import_dir = "/run/werewolf/import";
 const import_failed = import_dir ++ "/import-failed";
 /// share holds MariaDB's own SQL: its system tables, help and sys schema.
-const share = "/usr/share/mariadb-12.3";
+const share = "/usr/share/mariadb";
 const mariadbd = "/usr/bin/mariadbd";
+const mariadb_upgrade = "/usr/bin/mariadb-upgrade";
+/// upgrade_info is MariaDB's record, in the data, of the release that last
+/// upgraded it. mariadb-upgrade writes it; so does mariadb-init for new data.
+const upgrade_info = "mariadb_upgrade_info";
+/// upgrade_dir holds the socket and pid file of the server mariadb-init
+/// runs to upgrade the data. That server has no grant tables, so the
+/// directory is 0700: the services that share run_dir cannot reach it.
+const upgrade_dir = run_dir ++ "/upgrade";
+const upgrade_sock = upgrade_dir ++ "/mariadb.sock";
 const defaults = "--defaults-file=/etc/mariadb/werewolf.cnf";
 /// made marks that a data directory was made. If the data is gone but the
 /// mark is not, the data was lost, and mariadb-init refuses to make an
@@ -46,6 +56,17 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     try writeNetwork(io, networkText(open));
+    // Wolfi's versioned packages provide the name mariadb too, with their
+    // own paths. Refuse one before it can upgrade the data, one way.
+    Dir.cwd().access(io, share ++ "/" ++ system[0], .{}) catch |err| {
+        say(
+            io,
+            "{s}/{s}: {s}; this is not werewolf's mariadb package",
+            .{ share, system[0], @errorName(err) },
+        );
+        return err;
+    };
+    const version = try serverVersion(io, gpa);
     var svc = try Dir.cwd().openDir(io, svc_dir, .{});
     defer svc.close(io);
     // werewolf.cnf's tmpdir, for sorts and temporary tables.
@@ -59,6 +80,25 @@ pub fn main(init: std.process.Init) !void {
         // data exists only once the bootstrap finished, so it is whole.
         // Mark it if a crash came before the mark.
         if (svc.access(io, made, .{})) |_| {} else |_| try mark(io, svc, made);
+        const recorded = svc.readFileAlloc(
+            io,
+            "data/" ++ upgrade_info,
+            gpa,
+            .limited(256),
+        ) catch |err|
+            switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+        const needed = upgradeNeeded(recorded, version) catch |err| switch (err) {
+            error.DataNewer => {
+                say(io, "the data was upgraded by MariaDB {s}, newer than this {s}; boot the " ++
+                    "release that upgraded it, or restore a backup", .{ recorded.?, version });
+                return err;
+            },
+            else => return err,
+        };
+        if (needed) try upgrade(io, recorded, version);
     } else |_| {
         if (svc.access(io, made, .{})) |_| {
             say(io, "the data in {s} is gone, though it was made here; not making it empty " ++
@@ -94,6 +134,8 @@ pub fn main(init: std.process.Init) !void {
             &.{ "--datadir=" ++ svc_dir ++ "/data.new", "--enforce-storage-engine=" },
             sql.items,
         );
+        // Made by this release, so it needs no upgrade until the next.
+        try svc.writeFile(io, .{ .sub_path = "data.new/" ++ upgrade_info, .data = version });
         if (dump.len > 0) bootstrapFiles(
             io,
             gpa,
@@ -146,6 +188,126 @@ pub fn main(init: std.process.Init) !void {
         if (names.items.len == 1) "" else "s",
         sql_dir,
     });
+}
+
+/// serverVersion is the release mariadbd reports: "mariadbd  Ver
+/// 13.0.2-MariaDB for Linux on aarch64 (MariaDB Server)" gives
+/// "13.0.2-MariaDB".
+fn serverVersion(io: Io, gpa: Allocator) ![]const u8 {
+    const r = try std.process.run(gpa, io, .{ .argv = &.{ mariadbd, "--version" } });
+    if (r.term != .exited or r.term.exited != 0) return error.ServerVersion;
+    return versionWord(r.stdout) orelse error.ServerVersion;
+}
+
+fn versionWord(text: []const u8) ?[]const u8 {
+    const at = std.mem.find(u8, text, " Ver ") orelse return null;
+    var words = std.mem.tokenizeAny(u8, text[at + 5 ..], " \n");
+    const word = words.next() orelse return null;
+    return if (series(word) != null) word else null;
+}
+
+/// series is a version's major and minor numbers, its release series.
+fn series(version: []const u8) ?[2]u32 {
+    var parts = std.mem.tokenizeAny(u8, std.mem.trim(u8, version, " \n"), ".-");
+    const major = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+    const minor = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+    return .{ major, minor };
+}
+
+/// upgradeNeeded compares the series that last upgraded the data with the
+/// server's, as MariaDB's own container entrypoint does: data without a
+/// readable record, from before mariadb-init kept one, is upgraded. Data
+/// of a newer series than the server's, after a fallback to an older
+/// release, is refused: MariaDB does not downgrade.
+fn upgradeNeeded(recorded: ?[]const u8, server: []const u8) error{ DataNewer, ServerVersion }!bool {
+    const s = series(server) orelse return error.ServerVersion;
+    const d = series(recorded orelse return true) orelse return true;
+    if (d[0] > s[0] or (d[0] == s[0] and d[1] > s[1])) return error.DataNewer;
+    return d[0] < s[0] or d[1] < s[1];
+}
+
+/// upgrade runs mariadb-upgrade on the system tables, against a server of
+/// its own with no network and no grant tables, its socket in upgrade_dir.
+/// A failure stops the start; mariadb-upgrade writes upgrade_info only
+/// once it has finished, so the next start upgrades again.
+fn upgrade(io: Io, recorded: ?[]const u8, version: []const u8) !void {
+    say(
+        io,
+        "upgrading the data from MariaDB {s} to {s}",
+        .{ recorded orelse "an unrecorded release", version },
+    );
+    var run = try Dir.cwd().openDir(io, run_dir, .{});
+    defer run.close(io);
+    // A stopped start can leave the directory, with a socket nothing serves.
+    run.deleteTree(io, "upgrade") catch {};
+    try run.createDir(io, "upgrade", .fromMode(0o700));
+    defer run.deleteTree(io, "upgrade") catch {};
+    var server = try std.process.spawn(io, .{
+        .argv = &.{
+            mariadbd,                                        defaults,
+            "--skip-networking",                             "--skip-grant-tables",
+            "--socket=" ++ upgrade_sock,
+            "--pid-file=" ++ upgrade_dir ++
+                "/mariadb.pid",
+            "--loose-innodb-buffer-pool-load-at-startup=" ++
+                "0",
+            "--loose-innodb-buffer-pool-dump-at-shutdown=0",
+        },
+        .stdin = .ignore,
+    });
+    defer server.kill(io);
+    try awaitServer(io, server.id.?);
+    var tool = try std.process.spawn(io, .{
+        .argv = &.{
+            mariadb_upgrade,
+            "--no-defaults",
+            "--upgrade-system-tables",
+            "--socket=" ++ upgrade_sock,
+        },
+        .stdin = .ignore,
+    });
+    const upgraded = try tool.wait(io);
+    _ = linux.kill(server.id.?, linux.SIG.TERM);
+    const stopped = try server.wait(io);
+    if (upgraded != .exited or upgraded.exited != 0) {
+        say(io, "{s} failed; see above", .{mariadb_upgrade});
+        return error.UpgradeFailed;
+    }
+    if (stopped != .exited or stopped.exited != 0) {
+        say(io, "the upgrading server did not stop cleanly; see above", .{});
+        return error.UpgradeFailed;
+    }
+    say(io, "upgraded the data to MariaDB {s}", .{version});
+}
+
+/// awaitServer waits for the upgrading server to answer on its socket, as
+/// long as crash recovery takes, but not past its death: an exited child
+/// stays a zombie until waited for.
+fn awaitServer(io: Io, pid: linux.pid_t) !void {
+    var path_buf: [64]u8 = undefined;
+    const stat = try std.mem.print(&path_buf, "/proc/{d}/stat", .{pid});
+    while (!answers(upgrade_sock)) {
+        var buf: [512]u8 = undefined;
+        const text = Dir.cwd().readFile(io, stat, &buf) catch "";
+        // The state follows the command name, which closes with ") ".
+        const at = std.mem.findLast(u8, text, ") ") orelse 0;
+        if (text.len < at + 3 or text[at + 2] == 'Z') {
+            say(io, "the upgrading server exited before it answered; see above", .{});
+            return error.UpgradeFailed;
+        }
+        try io.sleep(.fromMilliseconds(200), .awake);
+    }
+}
+
+/// answers is true once a server accepts connections on the socket at path.
+fn answers(path: []const u8) bool {
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(addr.path[0..path.len], path);
+    return linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) == .SUCCESS;
 }
 
 /// networkText is the include werewolf.cnf reads. open binds 0.0.0.0:3306.
@@ -309,6 +471,28 @@ fn syncSvc(io: Io) !void {
     if (e == .SUCCESS) return;
     say(io, "syncing {s}: {s}", .{ svc_dir, @tagName(e) });
     return error.SyncFailed;
+}
+
+test "the version mariadbd reports" {
+    try std.testing.expectEqualStrings("13.0.2-MariaDB", versionWord(
+        "/usr/bin/mariadbd  Ver 13.0.2-MariaDB for Linux on aarch64 (MariaDB Server)\n",
+    ).?);
+    try std.testing.expectEqual(null, versionWord("mariadbd: unknown option\n"));
+    try std.testing.expectEqual(null, versionWord("mariadbd  Ver x for Linux\n"));
+}
+
+test "upgrades follow the release series, never downgrade" {
+    // Data from before mariadb-init kept a record, or with an unreadable one.
+    try std.testing.expect(try upgradeNeeded(null, "13.0.2-MariaDB"));
+    try std.testing.expect(try upgradeNeeded("garbage", "13.0.2-MariaDB"));
+    try std.testing.expect(try upgradeNeeded("12.3.3-MariaDB", "13.0.2-MariaDB"));
+    try std.testing.expect(try upgradeNeeded("13.0.2-MariaDB", "13.1.3-MariaDB"));
+    // A point release, or the same release, needs nothing.
+    try std.testing.expect(!try upgradeNeeded("13.0.1-MariaDB", "13.0.2-MariaDB"));
+    try std.testing.expect(!try upgradeNeeded("13.0.2-MariaDB\n", "13.0.2-MariaDB"));
+    try std.testing.expectError(error.DataNewer, upgradeNeeded("13.1.1-MariaDB", "13.0.2-MariaDB"));
+    try std.testing.expectError(error.DataNewer, upgradeNeeded("14.0.0-MariaDB", "13.9.9-MariaDB"));
+    try std.testing.expectError(error.ServerVersion, upgradeNeeded(null, "unknown"));
 }
 
 test "network config stays closed until port 3306" {

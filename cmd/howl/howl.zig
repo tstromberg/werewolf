@@ -109,6 +109,9 @@ pub fn main(init: std.process.Init) void {
             _firecracker,
             _unpack,
             @"_boot-image",
+            _tpm,
+            @"_build-helper",
+            @"_native-firmware",
         },
         args[1],
     ) orelse
@@ -151,6 +154,11 @@ pub fn main(init: std.process.Init) void {
             why.refuse("_firecracker DIR", .{})
         else
             firecracker.keep(io, gpa, args[2]),
+        // Internal: a protected machine's TPM supervisor, and what
+        // tools/enroll-boot asks howl for.
+        ._tpm => @import("swtpm.zig").command(io, gpa, args[2..], &why),
+        .@"_build-helper" => @import("prerequisites.zig").helper(io, gpa, args[2..], &why),
+        .@"_native-firmware" => @import("firmware.zig").command(io, gpa, args[2..], &why),
         // Internal: form unpacks an OCI image's tar in a child with no
         // environment (oci.zig).
         ._unpack => oci.unpackMain(io, args[2..], &why),
@@ -1639,7 +1647,7 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
         if (std.mem.eql(u8, a, "--version") or std.mem.startsWith(u8, a, "--version=")) {
             if (version != null) return why.refuse("--version given twice", .{});
             _, version = try flagValue(before_disable, &i, why);
-            if (!@import("download.zig").validVersion(version.?)) return why.refuse(
+            if (!@import("boot-download").validVersion(version.?)) return why.refuse(
                 "--version takes a timestamp or base-images-SERIAL release tag; use howl versions",
                 .{},
             );
@@ -2365,6 +2373,10 @@ test {
     _ = @import("local-secure.zig");
     _ = @import("secureboot.zig");
     _ = @import("prerequisites.zig");
+    _ = @import("owner.zig");
+    _ = @import("download.zig");
+    _ = @import("swtpm.zig");
+    _ = @import("firmware.zig");
     _ = @import("apply.zig");
     _ = lima;
     _ = bhyve;

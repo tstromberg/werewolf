@@ -56,8 +56,17 @@ suites:
             expect:
               exit: 0
           - exec:
-              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
-                     backup, --tag, {run: true}, /etc/hostname, /run/werewolf/hostname]
+              argv:
+                - /usr/bin/restic
+                - --no-cache
+                - --quiet
+                - --cacert
+                - /data/svc/caddy/pki/authorities/local/root.crt
+                - backup
+                - --tag
+                - run: true
+                - /etc/hostname
+                - /run/werewolf/hostname
               env:
                 HOME: /tmp
                 RESTIC_REPOSITORY:
@@ -78,7 +87,8 @@ suites:
             expect:
               exit: 0
               json:
-                '': {count: 1}
+                '':
+                  count: 1
                 /0/tags/0:
                   run: true
           - file: /data/svc/restic-server/alice/config
@@ -121,7 +131,8 @@ suites:
             expect:
               exit: 0
               json:
-                '': {count: 1}
+                '':
+                  count: 1
                 /0/tags/0:
                   run: true
           - name: hostname
@@ -191,13 +202,21 @@ suites:
             expect:
               exit: 0
               json:
-                '': {count: 1}
+                '':
+                  count: 1
                 /0/tags/0:
                   run: true
             name: before
           - exec:
-              argv: [/usr/bin/restic, --no-cache, --quiet, --cacert, /data/svc/caddy/pki/authorities/local/root.crt,
-                     forget, {step: before, json: /0/id}]
+              argv:
+                - /usr/bin/restic
+                - --no-cache
+                - --quiet
+                - --cacert
+                - /data/svc/caddy/pki/authorities/local/root.crt
+                - forget
+                - step: before
+                  json: /0/id
               env:
                 HOME: /tmp
                 RESTIC_REPOSITORY:
@@ -220,7 +239,8 @@ suites:
             expect:
               exit: 0
               json:
-                '': {count: 1}
+                '':
+                  count: 1
                 /0/id:
                   step: before
                   json: /0/id

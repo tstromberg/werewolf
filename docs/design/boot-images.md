@@ -90,6 +90,7 @@ which releases may boot. No reset credential exists to leak into a config tar or
 ## Reliability Considerations
 
 Offline tests cover foreign and altered signatures, signed weak profiles, unknown
-fields, release identity mismatches and size bounds (`test/boot-images`). The lifecycle,
-with updates, rollback, power cuts and retired replay, is
-`test/check-independent-updates` ([testing-secure-boot.md](../testing-secure-boot.md)).
+fields, release identity mismatches and size bounds (`cmd/howl/boot-image.zig`'s tests).
+The lifecycle, with updates, rollback, power cuts and retired replay, is
+`test/check-independent-updates.zig`
+([testing-secure-boot.md](../testing-secure-boot.md)).

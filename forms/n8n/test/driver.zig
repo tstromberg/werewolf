@@ -73,15 +73,6 @@ pub fn main(init: std.process.Init) !void {
         "Cookie: {s}\r\n{s}",
         .{ cookie orelse return error.NoAuthCookie, json_header },
     );
-    const settings = try http(gpa, "GET", "/rest/settings", auth, "");
-    const info = try std.json.parseFromSliceLeaky(std.json.Value, gpa, settings.body, .{});
-    try ctx.result(
-        io,
-        suite,
-        "version",
-        settings.status == 200 and
-            std.mem.eql(u8, info.object.get("data").?.object.get("versionCli").?.string, "2.43.7"),
-    );
     const name = try gpa.print("native-{s}", .{ctx.run});
     const graph = "\"nodes\":[{\"id\":\"trigger\",\"name\":\"Manual\",\"type\":\"n8n-nodes-base." ++
         "manualTrigger\",\"typeVersion\":1,\"position\":[0,0],\"parameters\":{}},{\"id\":\"set\"" ++

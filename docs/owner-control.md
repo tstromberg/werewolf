@@ -38,7 +38,8 @@ Requests contain a correlation ID and one fixed operation, with a hash allowed o
 `try`. Oversized frames are discarded; requests select no executable or path. Status is
 guest diagnostics, not independent attestation.
 
-The QEMU lifecycle test uses this production interface on unmodified signed images.
-Its unhealthy trial receives real disk write errors after startup, must remain
-uncommitted, and must recover the retained release through the production 600-second
-deadman. The test neither edits the image nor installs a guest test agent.
+The QEMU lifecycle test uses this production interface on unmodified signed images, to
+read status and pause the updater; it neither edits the image nor installs a guest test
+agent. A candidate's own updates follow the public mirror, so failed trials are tested
+on disposable keys
+([test/check-independent-updates](../test/check-independent-updates.zig)).

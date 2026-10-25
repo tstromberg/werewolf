@@ -49,7 +49,7 @@ Host tests build real ext4 artifacts, check private permissions and content
 checksums, retain previous artifacts, reject overlap and reserved names, and
 prove failed staging or corruption cannot silently replace usable input.
 
-`test/check-plex-import` builds a disposable protected Plex fixture with
+`make check-plex-import` builds a disposable protected Plex fixture with
 operator SSH and immutable test probes. It checks actual Secure Boot, IPE,
 verified root and TPM rollback protection; read-only import mount flags; media
 ownership; refusal to map imported native code; decoding imported media through

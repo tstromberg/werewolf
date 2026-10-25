@@ -111,10 +111,10 @@ actual device commands and hierarchy reset paths, not just serial comparisons.
 
 Initial tests use disposable keys, cloned variables and local TPM state. They prove A/B
 updates, tamper, unsigned image, wrong signer and loader-option override rejection.
-`test/check-tpm-floor` attacks the counter on swtpm; `test/check-independent-updates`
-boots Lima or QEMU guests through updates, operator rollback, a power cut at the floor's
-increment and a restored retired release, which stage0 refuses. Clouds enroll the same
-way ([testing-live.md](../testing-live.md)). References:
+`test/check-tpm-floor.zig` attacks the counter on swtpm;
+`test/check-independent-updates.zig` boots guests through updates, operator rollback, a
+power cut at the floor's increment and a restored retired release, which stage0 refuses.
+Clouds enroll the same way ([testing-live.md](../testing-live.md)). References:
 [systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml), [QEMU
 variables](https://www.qemu.org/docs/master/devel/uefi-vars.html), [GCP
 enrollment](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images).

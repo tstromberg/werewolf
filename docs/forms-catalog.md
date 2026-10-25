@@ -5,8 +5,7 @@ permissions. Pick one below and follow its guide; a name links to the guide
 where one exists, else to the form's manifest. For your own application,
 start with the [language tutorials](../examples/README.md): the `-app` forms
 take your code through `--app`, the `-example` forms carry a sample, and a
-runtime form such as `python` supplies the interpreter and leaves the
-service to you ([applications.md](applications.md)).
+runtime such as `python` leaves the service to you ([applications.md](applications.md)).
 
 ## Get started
 
@@ -44,9 +43,10 @@ are listed: Overleaf's upstream image is x86_64 only.
 [workflow](../.github/workflows/form-images.yml) builds every form with every
 protection, and why only gated targets are published.
 
-`howl run` and `howl create` download a published target, today `playground`
+`howl run` and `howl create` download a published target from
+[the release list](../release/images.yaml)
 ([form-images.md](form-images.md#downloading-images)), and enroll
-its firmware; its first boot takes the TPM. For any other form, run
+its firmware; its first boot takes the TPM. For a form without a published image, run
 `howl run --build --with FORM` from the checkout and follow its guide: the
 same protections, signed with your own keys.
 
@@ -128,6 +128,7 @@ same protections, signed with your own keys.
 | [php-example](../examples/php/README.md) | A sample PHP website, with a tutorial. |
 | [pi-hole](../forms/pi-hole/README.md) | DNS filtering for a home network, with the web interface behind Caddy. |
 | [playground](../forms/playground/README.md) | The default `howl run` environment, with an interactive SSH shell and support for ordinary key files. |
+| [postdoc-server](../forms/postdoc-server/README.md) | Postdoc's analysis API behind a Cloudflare Tunnel, with native JIT and security-key SSH access. |
 | [postgresql](../forms/postgresql/README.md) | PostgreSQL for services in the same VM, accessed through a UNIX socket. |
 | [prod](../forms/prod/form.yaml) | A production starting point with DHCP, cloud metadata, persistent data and automatic updates; no application or listener. |
 | [prod-ssh](../forms/prod-ssh/form.yaml) | The production starting point with interactive SSH access using security keys. |
@@ -144,6 +145,7 @@ same protections, signed with your own keys.
 | [rust-example](../examples/rust/README.md) | A sample compiled Rust web application, with a tutorial. |
 | [samba](../forms/samba/README.md) | SMB3 file sharing, with a directory per user and encryption required. |
 | [sftpgo](../forms/sftpgo/README.md) | SFTP file transfer for configured users; no shell, FTP, WebDAV or web administration. |
+| [shell](../forms/shell/README.md) | Standalone mksh, including /bin/sh, for operator access or applications that need a shell. |
 | [sh-shim](../forms/sh-shim/form.yaml) | A helper for services that invoke `sh -c`; runs one program and its arguments, without shell syntax. |
 | [solr](../forms/solr/README.md) | Solr search and indexing on hardened OpenJDK 27, with a private API and no shell. |
 | [solr-vuln-demo](../forms/solr-vuln-demo/README.md) | Pinned Solr with vulnerable Log4j on hardened OpenJDK 27, without a shell. |

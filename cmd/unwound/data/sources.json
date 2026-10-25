@@ -12,5 +12,5 @@
     "publication": "2026-10-22T23:00:04Z",
     "services": 592
   },
-  "normalizer": "idna 3.20, UTS #46, STD3"
+  "normalizer": "tools/update-unwound-age-data.zig: RFC 3492 Punycode, STD3"
 }

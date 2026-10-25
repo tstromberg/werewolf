@@ -184,8 +184,7 @@ suites:
                 min: 1
                 max: 255
               stderr:
-                matches: 'mprotect of jit buffer: Permission denied|qemu_mprotect__osdep:
-                  mprotect failed: Permission denied'
+                matches: "mprotect of jit buffer: Permission denied|qemu_mprotect__osdep: mprotect failed: Permission denied"
             timeout: 20s
           - exec:
               argv:
@@ -209,6 +208,5 @@ suites:
                 min: 1
                 max: 255
               stderr:
-                matches: 'mprotect of jit buffer: Permission denied|qemu_mprotect__osdep:
-                  mprotect failed: Permission denied'
+                matches: "mprotect of jit buffer: Permission denied|qemu_mprotect__osdep: mprotect failed: Permission denied"
             timeout: 20s

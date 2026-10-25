@@ -340,6 +340,75 @@ pub fn isOciPath(path: []const u8) bool {
     return end > 0 and mem.startsWith(u8, staged[end..], "/rootfs/oci/");
 }
 
+/// Stripped is a file or directory whose setuid or setgid bit stripSetid
+/// removed, and its mode before.
+pub const Stripped = struct { name: []const u8, mode: u32 };
+
+/// stripSetid removes the setuid and setgid bits from every file and
+/// directory in a root's tar, in place, as the updater does to the root it
+/// builds (cmd/slot-update/slot.zig): no program runs with more than its
+/// caller's privilege, whatever a package ships, and on a nosuid mount or
+/// not. A hard link needs nothing: mkfs.erofs gives it its target's inode.
+pub fn stripSetid(gpa: Allocator, io: std.Io, file: std.Io.File) ![]Stripped {
+    var buf: [64 << 10]u8 = undefined;
+    var r = file.reader(io, &buf);
+    var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    // Hard links and device nodes come back as diagnostics, skipped.
+    var skipped: std.tar.Diagnostics = .{ .allocator = gpa };
+    defer skipped.deinit();
+    var it: std.tar.Iterator = .init(&r.interface, .{
+        .file_name_buffer = &name_buf,
+        .link_name_buffer = &link_buf,
+        .diagnostics = &skipped,
+    });
+    var stripped: std.ArrayList(Stripped) = .empty;
+    while (try it.next()) |e| {
+        if (e.kind == .sym_link or e.mode & 0o6000 == 0) continue;
+        // next has read the entry's header, which it checksummed, and
+        // nothing past it.
+        const at = r.logicalPos() - 512;
+        var h: [512]u8 = undefined;
+        if (try file.readPositionalAll(io, &h, at) != h.len) return error.TarHeader;
+        const mode = try octalDigits(h[100..108]);
+        if (try std.fmt.parseInt(u32, mode, 8) != e.mode) return error.TarHeader;
+        writeOctal(mode, e.mode & ~@as(u32, 0o6000));
+        // The checksum counts its own field as spaces.
+        const field = h[148..156].*;
+        @memset(h[148..156], ' ');
+        var sum: u64 = 0;
+        for (h) |c| sum += c;
+        h[148..156].* = field;
+        const checksum = try octalDigits(h[148..156]);
+        if (sum >> @intCast(3 * checksum.len) != 0) return error.TarHeader;
+        writeOctal(checksum, sum);
+        try file.writePositionalAll(io, &h, at);
+        try stripped.append(gpa, .{ .name = try gpa.dupe(u8, e.name), .mode = e.mode });
+    }
+    return stripped.toOwnedSlice(gpa);
+}
+
+/// octalDigits is the run of octal digits in a tar header field, inside
+/// the padding its writer chose: libarchive's "000755 \0", Zig's
+/// "0000755\0". Rewriting it at its width keeps the header as written.
+fn octalDigits(field: []u8) ![]u8 {
+    const start = mem.findNone(u8, field, " ") orelse return error.TarHeader;
+    const end = mem.findNonePos(u8, field, start, "01234567") orelse field.len;
+    if (start == end) return error.TarHeader;
+    return field[start..end];
+}
+
+/// writeOctal fills out with value's octal digits, zero-padded. The caller
+/// checks value fits.
+fn writeOctal(out: []u8, value: u64) void {
+    var v = value;
+    var i = out.len;
+    while (i > 0) : (v >>= 3) {
+        i -= 1;
+        out[i] = '0' + @as(u8, @intCast(v & 7));
+    }
+}
+
 const testing = std.testing;
 
 /// hello_gz is `printf 'hello\n' | gzip -n`.
@@ -487,6 +556,78 @@ test "OCI trees include staged copies, not native form files" {
         "usr/share/werewolf/forms/dns/oci/server",
         "usr/share/werewolf/forms//rootfs/oci/server",
     }) |path| try testing.expect(!isOciPath(path));
+}
+
+test stripSetid {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Past ustar's name and prefix, so a long-name entry precedes its header.
+    const long = "usr/lib/" ++ &@as([250]u8, @splat('x')) ++ "/helper";
+    {
+        const f = try tmp.dir.createFile(io, "root.tar", .{});
+        defer f.close(io);
+        var wbuf: [4096]u8 = undefined;
+        var fw = f.writer(io, &wbuf);
+        var w: std.tar.Writer = .{ .underlying_writer = &fw.interface };
+        try w.writeDir("usr/share/group", .{ .mode = 0o2775 });
+        try w.writeFileBytes("usr/bin/unix_chkpwd", "pam", .{ .mode = 0o2755 });
+        try w.writeFileBytes(long, "setuid", .{ .mode = 0o4755 });
+        try w.writeFileBytes("usr/bin/plain", "plain", .{ .mode = 0o755 });
+        try w.writeLink("usr/bin/link", "unix_chkpwd", .{});
+        try w.finishPedantically();
+        try fw.interface.flush();
+    }
+    // libarchive pads its octal fields otherwise: "000755 \0".
+    var padded = "002755 \x00".*;
+    try testing.expectEqualStrings("002755", try octalDigits(&padded));
+    var blank = "       \x00".*;
+    try testing.expectError(error.TarHeader, octalDigits(&blank));
+
+    const f = try tmp.dir.openFile(io, "root.tar", .{ .mode = .read_write });
+    defer f.close(io);
+    const stripped = try stripSetid(gpa, io, f);
+    defer {
+        for (stripped) |s| gpa.free(s.name);
+        gpa.free(stripped);
+    }
+    try testing.expectEqual(3, stripped.len);
+    try testing.expectEqualStrings("usr/share/group", stripped[0].name);
+    try testing.expectEqual(0o2775, stripped[0].mode);
+    try testing.expectEqualStrings("usr/bin/unix_chkpwd", stripped[1].name);
+    try testing.expectEqualStrings(long, stripped[2].name);
+    try testing.expectEqual(0o4755, stripped[2].mode);
+    // Read back, checksums and all: each mode without the bits, contents
+    // as they were. A second pass finds nothing.
+    var rbuf: [4096]u8 = undefined;
+    var r = f.reader(io, &rbuf);
+    var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(
+        &r.interface,
+        .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
+    );
+    const want = [_]struct { []const u8, u32 }{
+        .{ "usr/share/group", 0o775 }, .{ "usr/bin/unix_chkpwd", 0o755 },
+        .{ long, 0o755 },              .{ "usr/bin/plain", 0o755 },
+        .{ "usr/bin/link", 0o777 },
+    };
+    for (want) |w| {
+        const e = (try it.next()).?;
+        try testing.expectEqualStrings(w[0], e.name);
+        try testing.expectEqual(w[1], e.mode);
+        if (mem.eql(u8, w[0], "usr/bin/unix_chkpwd")) {
+            var data: [3]u8 = undefined;
+            try it.reader.readSliceAll(&data);
+            it.unread_file_bytes = 0;
+            try testing.expectEqualStrings("pam", &data);
+        }
+    }
+    try testing.expectEqual(null, try it.next());
+    const again = try stripSetid(gpa, io, f);
+    defer gpa.free(again);
+    try testing.expectEqual(0, again.len);
 }
 
 test configMisses {

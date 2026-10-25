@@ -37,7 +37,7 @@ database descriptor. The authority also performs the HTTPS check, so it is
 the one process trusted to handle both network evidence and SQLite.
 SQLite's WAL, shared-memory and main files all need the same protection.
 
-`tools/checkout-unwound-sqlite` verifies the official SQLite 3.54.1 source
+`tools/checkout-unwound-sqlite.zig` verifies the official SQLite 3.54.1 source
 archive by SHA3-256 before extracting its amalgamation into `out/`. The age
 writer links it statically. `cmd/unwound/age_db.zig` opens the schema with
 foreign keys, trusted schema disabled and WAL requested. It records a check's
@@ -68,7 +68,7 @@ reply naming another registered domain. An immutable image marker,
 refusal, and the assigned-domain bypass. The authority fixture also checks a
 live RDAP lookup, its audit row and read-only root view.
 
-`test/check-unwound-age-mount` demonstrates one workable mount boundary:
+`test/check-unwound-age-mount.zig` demonstrates one workable mount boundary:
 start the writer in a private mount namespace before a read-only bind covers
 its directory in the main namespace. SQLite can create its database, WAL and
 shared-memory files through the writer's normal path, while root in the main

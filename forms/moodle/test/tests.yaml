@@ -35,9 +35,7 @@ suites:
                 - postgres
                 - -d
                 - postgres
-              stdin: 'SELECT count(*) > 0 FROM pg_tables WHERE schemaname = ''moodle'';
-
-                '
+              stdin: "SELECT count(*) > 0 FROM pg_tables WHERE schemaname = 'moodle';\n"
               readonly: true
               env:
                 LC_ALL: C
@@ -47,9 +45,7 @@ suites:
                   run: true
             expect:
               exit: 0
-              stdout: 't
-
-                '
+              stdout: "t\n"
             await: 165s
       - name: moodle-install
         steps:
@@ -71,9 +67,7 @@ suites:
                 - postgres
                 - -d
                 - postgres
-              stdin: 'SELECT value FROM moodle.mdl_config WHERE name=''rolesactive'';
-
-                '
+              stdin: "SELECT value FROM moodle.mdl_config WHERE name='rolesactive';\n"
               readonly: true
               env:
                 LC_ALL: C
@@ -83,9 +77,7 @@ suites:
                   run: true
             expect:
               exit: 0
-              stdout: '1
-
-                '
+              stdout: "1\n"
             await: 165s
   - name: moodle-ca
     readiness: true
@@ -438,9 +430,7 @@ suites:
                 - postgres
                 - -d
                 - postgres
-              stdin: 'SELECT value FROM moodle.mdl_config WHERE name=''pathtogs'';
-
-                '
+              stdin: "SELECT value FROM moodle.mdl_config WHERE name='pathtogs';\n"
               readonly: true
               env:
                 LC_ALL: C
@@ -450,9 +440,7 @@ suites:
                   run: true
             expect:
               exit: 0
-              stdout: '/usr/bin/gs
-
-                '
+              stdout: "/usr/bin/gs\n"
       - name: moodle-cron
         steps:
           - exec:
@@ -473,10 +461,7 @@ suites:
                 - postgres
                 - -d
                 - postgres
-              stdin: 'SELECT value::bigint > 0 FROM moodle.mdl_config_plugins WHERE plugin=''tool_task''
-                AND name=''lastcronstart'';
-
-                '
+              stdin: "SELECT value::bigint > 0 FROM moodle.mdl_config_plugins WHERE plugin='tool_task' AND name='lastcronstart';\n"
               readonly: true
               env:
                 LC_ALL: C
@@ -486,9 +471,7 @@ suites:
                   run: true
             expect:
               exit: 0
-              stdout: 't
-
-                '
+              stdout: "t\n"
             await: 165s
   - name: moodle-avatar
     source: driver.zig

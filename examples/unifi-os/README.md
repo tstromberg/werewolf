@@ -34,8 +34,8 @@ connectivity remain to be verified. Startup checks require both application
 APIs, HTTPS serving and a real nginx worker replacement after reload.
 Reboot checks compare the instance UUID and TLS certificate and require
 retained MongoDB records and RabbitMQ messages.
-Run `make FORM=examples/unifi-os DEV=1 AGAIN_FORMS=unifi-os _check-form`
-after building the diagnostic image to check startup and retained state.
+The native test harness runs [the checks](test/tests.yaml) on startup and
+after a reboot: `make check-native-tests-unifi-os`.
 Identity unit tests run with `node --test examples/unifi-os/test/identity.test.mjs`.
 
 ### Importing data

@@ -8,6 +8,11 @@ const http = @import("fetch.zig");
 const match = @import("match.zig");
 const system = @import("system.zig");
 const command = @import("exec.zig");
+const process = @import("process.zig");
+const tcp = @import("tcp.zig");
+const tree = @import("tree.zig");
+const udp = @import("udp.zig");
+const writes = @import("write.zig");
 const Step = struct {
     name: []const u8,
     probe: []const u8,
@@ -272,7 +277,8 @@ const Workflow = struct {
         }
         if (std.mem.eql(u8, name, "file")) return system.file(w.io, w.a, request.string, expect);
         if (std.mem.eql(u8, name, "service")) {
-            const got = try system.service(w.io, w.a, request.string);
+            var got = try system.service(w.io, w.a, request.string);
+            try process.add(w.io, w.a, &got, expect);
             if (expect.object.contains("connect_rules")) {
                 const rules = try system.read(w.io, w.a, "/usr/share/werewolf/net");
                 for (got.object.get("members").?.array.items) |*member| {
@@ -297,6 +303,14 @@ const Workflow = struct {
         }
         if (std.mem.eql(u8, name, "mount")) return system.mount(w.io, w.a, request.string);
         if (std.mem.eql(u8, name, "exec")) return w.exec(request, timeout_ms);
+        if (std.mem.eql(u8, name, "tree"))
+            return tree.probe(w.io, w.a, request, expect, timeout_ms);
+        if (std.mem.eql(u8, name, "write")) return writes.probe(w.io, w.a, request);
+        if (std.mem.eql(u8, name, "tcp")) return tcp.probe(w.io, w.a, request, timeout_ms);
+        if (std.mem.eql(u8, name, "squat")) {
+            try udp.squatter(w.io, w.a, request.string);
+            return system.object(w.a);
+        }
         return error.UnknownProbe;
     }
 
@@ -343,13 +357,32 @@ const Workflow = struct {
                     return error.MissingField, want)) return false;
             }
         }
+        if (std.mem.eql(u8, probe_name, "tcp")) {
+            if (actual.object.get("failed").?.integer == 0) return true;
+            try w.failure(
+                actual.object.get("field").?.string,
+                actual.object.get("received").?,
+                actual.object.get("want").?,
+            );
+            return false;
+        }
         var ok = true;
+        const audit = std.mem.eql(u8, probe_name, "tree");
+        if (audit) for (actual.object.get("violations").?.array.items) |v| {
+            const field = v.object.get("field").?.string;
+            try w.failure(field, v.object.get("entry").?, expected.object.get(field).?);
+            ok = false;
+        };
         var it = expected.object.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
             const want = entry.value_ptr.*;
+            // An audit judged each entry as it walked.
+            if (audit and !std.mem.eql(u8, key, "entries") and !std.mem.eql(u8, key, "files"))
+                continue;
             if (std.mem.eql(u8, probe_name, "service") and !std.mem.eql(u8, key, "processes") and
-                !std.mem.eql(u8, key, "pids_max"))
+                !std.mem.eql(u8, key, "pids_max") and !std.mem.eql(u8, key, "comm") and
+                !std.mem.eql(u8, key, "cmdline"))
             {
                 for (actual.object.get("members").?.array.items) |member| {
                     if (std.mem.eql(u8, key, "user")) {
@@ -542,7 +575,8 @@ const Workflow = struct {
         try w.failures.append(
             w.a,
             .{
-                .field = key[0..@min(key.len, 128)],
+                // A probe's own field name lives only as long as its attempt.
+                .field = try w.a.dupe(u8, key[0..@min(key.len, 128)]),
                 .got = try w.diagnostic(got),
                 .want = try w.diagnostic(want),
             },

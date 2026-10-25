@@ -1,5 +1,0 @@
-#!/bin/sh
-# A signed UKI and its sealed root update together through one firmware disk.
-set -eu
-export IPE_UPDATE_BOOT=efi
-exec test/check-image-updater "$@"

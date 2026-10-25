@@ -1,0 +1,55 @@
+# check-dns's allow/deny cases (test/check-dns.zig), a phase per resolver
+# state. A row is [uid, mode, server, outcome]: as uid, under fence, send
+# mode's traffic to server, and expect it allowed, or refused with EACCES or
+# EPERM. udp and tcp ask DNS on port 53; http and metadata connect to TCP 80;
+# https fetches https://SERVER/latest.json, resolving SERVER by name.
+# first and second are the assigned resolvers; gcp and azure, the clouds'.
+
+# The resolver is first. uid 69 has a dns grant and HTTPS by name, as the
+# real fetcher user; 207 is a recursive resolver with dns-direct.
+production:
+  - [69, udp, first, allowed]
+  - [0, udp, first, refused]
+  - [69, udp, second, refused]
+  - [69, tcp, first, allowed]
+  - [0, tcp, first, refused]
+  - [69, tcp, second, refused]
+  # A recursive resolver reaches authorities beyond the assigned resolver.
+  # Its broad TCP reply rule, installed after the narrow one, must not be
+  # discarded as EEXIST.
+  - [207, udp, second, allowed]
+  - [207, tcp, second, allowed]
+  - [207, http, first, refused]
+  - [69, https, update.werewolf.test, allowed]
+  - [69, http, first, refused]
+
+# Renewed to second: the old resolver closes and the grant stays.
+renewed:
+  - [69, udp, first, refused]
+  - [69, udp, second, allowed]
+  - [69, tcp, first, refused]
+  - [69, tcp, second, allowed]
+  - [69, https, update.werewolf.test, allowed]
+
+# GCP's resolver is also its metadata server: DNS opens, metadata HTTP stays
+# closed.
+cloud:
+  - [69, udp, gcp, allowed]
+  - [69, tcp, gcp, allowed]
+  - [69, metadata, gcp, refused]
+  - [69, udp, azure, allowed]
+  - [69, tcp, azure, allowed]
+  - [69, metadata, azure, refused]
+
+# No resolvers, no DNS.
+none:
+  - [69, udp, gcp, refused]
+  - [69, tcp, azure, refused]
+
+# A dns line for root gets the same narrow access. Forms may no longer write
+# one: only unwound's upstream user has it.
+root:
+  - [0, udp, first, allowed]
+  - [0, tcp, first, allowed]
+  - [0, udp, second, refused]
+  - [0, http, first, refused]

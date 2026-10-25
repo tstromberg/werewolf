@@ -18,13 +18,7 @@ suites:
             expect:
               exit: 0
               stdout:
-                matches: '(^|
-
-                  )localhost\.[[:space:]]+[^
-
-                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
-
-                  |$)'
+                matches: "(^|\n)localhost\\.[[:space:]]+[^\n]*IN[[:space:]]+A[[:space:]]+127\\.0\\.0\\.1(\n|$)"
             await: 60s
           - exec:
               argv:
@@ -36,13 +30,7 @@ suites:
             expect:
               exit: 0
               stdout:
-                matches: '(^|
-
-                  )localhost\.[[:space:]]+[^
-
-                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
-
-                  |$)'
+                matches: "(^|\n)localhost\\.[[:space:]]+[^\n]*IN[[:space:]]+A[[:space:]]+127\\.0\\.0\\.1(\n|$)"
             await: 60s
           - exec:
               argv:
@@ -53,13 +41,7 @@ suites:
             expect:
               exit: 0
               stdout:
-                matches: '(^|
-
-                  )localhost\.[[:space:]]+[^
-
-                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
-
-                  |$)'
+                matches: "(^|\n)localhost\\.[[:space:]]+[^\n]*IN[[:space:]]+A[[:space:]]+127\\.0\\.0\\.1(\n|$)"
             await: 60s
           - exec:
               argv:
@@ -71,13 +53,7 @@ suites:
             expect:
               exit: 0
               stdout:
-                matches: '(^|
-
-                  )localhost\.[[:space:]]+[^
-
-                  ]*IN[[:space:]]+A[[:space:]]+127\.0\.0\.1(
-
-                  |$)'
+                matches: "(^|\n)localhost\\.[[:space:]]+[^\n]*IN[[:space:]]+A[[:space:]]+127\\.0\\.0\\.1(\n|$)"
             await: 60s
       - name: unbound-forwards
         steps:
@@ -100,25 +76,7 @@ suites:
               uid: unbound
               mode: '600'
               body:
-                matches: '(^|
-
-                  )\. [^
-
-                  ]*DNSKEY[^
-
-                  ]*257 3 8 [^
-
-                  ]*
-
-                  ([^
-
-                  ]*
-
-                  )*\. [^
-
-                  ]*DNSKEY[^
-
-                  ]*257 3 8 '
+                matches: "(^|\n)\\. [^\n]*DNSKEY[^\n]*257 3 8 [^\n]*\n([^\n]*\n)*\\. [^\n]*DNSKEY[^\n]*257 3 8 "
           - file: /etc/unbound/unbound.conf
             expect:
               body:
@@ -149,25 +107,29 @@ suites:
           - file: /etc/unbound/unbound.conf
             expect:
               body:
-                contains: "\taccess-control: 0.0.0.0/0 refuse\n\taccess-control: ::/0 refuse\n\
-                  \taccess-control: 127.0.0.0/8 allow\n\taccess-control: ::1/128 allow\n\
-                  \taccess-control: 10.0.0.0/8 allow\n\taccess-control: 172.16.0.0/12 allow\n\
-                  \taccess-control: 192.168.0.0/16 allow\n\taccess-control: 100.64.0.0/10\
-                  \ allow\n\taccess-control: 169.254.0.0/16 allow\n\taccess-control: fc00::/7\
-                  \ allow\n\taccess-control: fe80::/10 allow\n"
+                contains: "\taccess-control: 0.0.0.0/0 refuse\n\taccess-control: ::/0 refuse\n\taccess-control: 127.0.0.0/8 allow\n\taccess-control: ::1/128 allow\n\taccess-control: 10.0.0.0/8 allow\n\taccess-control: 172.16.0.0/12 allow\n\taccess-control: 192.168.0.0/16 allow\n\taccess-control: 100.64.0.0/10 allow\n\taccess-control: 169.254.0.0/16 allow\n\taccess-control: fc00::/7 allow\n\taccess-control: fe80::/10 allow\n"
                 occurrences:
                   'access-control:': 11
                   'include:': 1
   - name: unbound-policy
-    source: driver.zig
-    mode: policy
-    user: root
-    policy:
-      pledge: stdio rpath
     cases:
-      seed:
-        - unbound-no-sockets
-        - unbound-no-policy-override
-      verify:
-        - unbound-no-sockets
-        - unbound-no-policy-override
+      - name: unbound-no-sockets
+        steps:
+          - tree:
+              roots:
+                - /run/svc/unbound
+                - /data/svc/unbound
+            expect:
+              type:
+                not_equals: socket
+      # No line, however indented, may widen who unbound answers.
+      - name: unbound-no-policy-override
+        steps:
+          - file: /etc/unbound/unbound.conf
+            expect:
+              body:
+                not_matches: "(^|\n)[ \t\r]*private-address:"
+          - file: /run/svc/unbound/unbound-setup.conf
+            expect:
+              body:
+                not_matches: "(^|\n)[ \t\r]*(private-address|access-control):"

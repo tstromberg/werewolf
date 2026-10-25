@@ -255,9 +255,7 @@ suites:
           - file: /usr/share/werewolf/weaknesses
             expect:
               body:
-                matches: '(^|
-
-                  )network-fence-unbypassable '
+                matches: "(^|\n)network-fence-unbypassable "
       - name: greenbone-alone
         steps:
           - service: gsad

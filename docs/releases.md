@@ -1,9 +1,11 @@
 # Releases
 
-[form-images.yml](../.github/workflows/form-images.yml) is the single image
-publisher. It builds only `minimal`, `prod-ssh` and `playground` for aarch64 and x86_64
-from pinned package snapshots on independent runners. GitHub and the R2 catalog
-carry the passing images from this same three-form set.
+[form-images.yml](../.github/workflows/form-images.yml) is the single image publisher.
+It builds `minimal`, `prod-ssh`, `playground` and `postdoc-server` for aarch64 and
+x86_64 from pinned package snapshots on independent runners. GitHub and the R2 catalog
+carry the passing images from this same set, which
+[release/images.yaml](../release/images.yaml) names; its jobs run
+[build/host/release](../tools/release/README.md).
 
 ## Boot profiles
 
@@ -17,29 +19,27 @@ IPE enforcement; its manifest explicitly records all three disabled protections.
 A signed download authenticates its files, not the platform's boot environment.
 `howl run` defaults to secure boot and never substitutes a legacy image.
 
-Secure targets publish only after all twelve protected lifecycle gates pass. Eight
-prove the exact candidate's download, protected boot, tamper refusal and retained
-enrollment. The four update gates prove the same source revision's updates, rollback,
-TPM-floor power cuts, retired-release refusal and failed-trial fallback on disposable
-keys, on the same provider and architecture. A candidate follows its signed public
-channel, so its future updates cannot run before publication. QEMU drives all three
-published forms through the owner channel; Lima currently tests `playground` over SSH.
-Legacy targets require reproducibility, coverage, integration, package-updater tests,
-raw/qcow2 parity and boots of the exact disk and direct image without Secure Boot
-or TPM.
+Secure targets publish only after all twelve protected lifecycle gates pass: eight on
+the exact bundle, and the four update gates on disposable keys from the same tree, since
+a candidate's own updates follow the public mirror. QEMU covers published forms through
+a host-private owner channel; Lima covers `playground` and `postdoc-server` through SSH.
+Postdoc also gets an authenticated API analysis and persistence check on both providers,
+using disposable configuration and a host-only software security key. Each target
+requires a configured gate runner and passing evidence. Legacy targets require
+reproducibility, coverage, integration, package-updater tests, raw/qcow2 parity and
+boots of the exact qcow2 and direct image without Secure Boot or a TPM.
 
 ## Publication
 
-Relevant pushes publish `target=base`; the hourly run uses `target=all`.
-Both select only the three published forms; manual dispatch retains both names for
-compatibility. One
-`base-images-SERIAL` GitHub release holds the verified assets for both profiles: disk
-images, kernel/initramfs or signed slot files, package inputs, test evidence and signed
-download manifests. Unpassed targets are omitted. The draft becomes public only after
-attestation and authenticated R2 parity checks. Each target includes signed package
-changes against its last published inventory. GitHub release notes also list included
-PRs and contributors. A focused `playground/qemu/x86_64` dispatch remains available for
-recovery.
+Relevant pushes publish `target=base`; the hourly run uses `target=all`. Both select
+only the forms in `release/images.yaml`; manual dispatch retains both names for
+compatibility. One `base-images-SERIAL` GitHub release holds the verified assets for
+both profiles: disk images, kernel/initramfs or signed slot files, package inputs, test
+evidence and signed download manifests. Unpassed targets are omitted. The draft becomes
+public only after attestation and authenticated R2 parity checks. Each target includes
+signed package changes against its last published inventory. GitHub release notes also
+list included PRs and contributors. A focused `playground/qemu/x86_64` dispatch remains
+available for recovery.
 
 Retries use a fresh publication timestamp in the GitHub tag, because published
 releases are immutable. The signed image serials and source provenance stay intact.

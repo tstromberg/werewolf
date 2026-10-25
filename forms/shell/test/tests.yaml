@@ -1,0 +1,50 @@
+version: 1
+suites:
+  - name: shell
+    policy:
+      run: [/usr/bin/sh]
+    cases:
+      - name: shell-sh-is-mksh
+        steps:
+          - file: /usr/bin/sh
+            expect:
+              type: symlink
+              link: mksh
+          - exec:
+              argv: [/usr/bin/sh, -c, 'case "$KSH_VERSION" in *MIRBSD*) print -rn -- mksh ;; *) exit 1 ;; esac']
+            expect:
+              exit: 0
+              stdout: mksh
+      - name: shell-expansions-and-quoting
+        steps:
+          - exec:
+              argv: [/usr/bin/sh, -c, 'set -- alpha "two words"; print -rn -- "$#|$2|$((6 * 7))"']
+            expect:
+              exit: 0
+              stdout: '2|two words|42'
+      - name: shell-pipelines-and-subshells
+        steps:
+          - exec:
+              argv: [/usr/bin/sh, -c, '(print -r -- pipeline) | while IFS= read -r line; do print -rn -- "$line"; done']
+            expect:
+              exit: 0
+              stdout: pipeline
+      - name: shell-external-command
+        steps:
+          - exec:
+              argv: [/usr/bin/sh, -c, 'exec /usr/bin/zstd --version']
+            expect:
+              exit: 0
+              stdout:
+                contains: Zstandard
+      - name: shell-exit-status
+        steps:
+          - exec:
+              argv: [/usr/bin/sh, -c, 'exit 23']
+            expect:
+              exit: 23
+      - name: shell-no-busybox
+        steps:
+          - file: /usr/bin/busybox
+            expect:
+              exists: false

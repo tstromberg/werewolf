@@ -83,9 +83,9 @@ with the same stable keys and metadata and compares the signed artifacts exactly
 PEM secrets in private temporary files, verified against their certificate first; fixes
 PE signing time; tests firmware authentication, a missing TPM, tampering and the
 complete A/B lifecycle on the artifacts; and uploads immutable objects before signed
-heads. `release/form-images` plans each release's index, one past the last published,
-and `release/publish-protected` refuses one that does not advance. Missing keys refuse;
-nothing unsigned is published.
+heads. `build/host/release form-images` plans each release's index, one past the last
+published, and `release publish-protected` refuses one that does not advance. Missing
+keys refuse; nothing unsigned is published.
 
 ## Drawbacks
 
@@ -111,4 +111,4 @@ signer or boot retired history.
 
 Test a fresh Mac and cache with no Ubuntu helper, missing-state refusal, several
 machines, interrupted downloads, publication ordering, and the update lifecycle with
-power cuts in `test/check-independent-updates`.
+power cuts in `test/check-independent-updates.zig`.

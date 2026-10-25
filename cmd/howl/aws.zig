@@ -125,10 +125,7 @@ pub fn ensureImage(
     const helper = try gpa.print("{s}/enroll-boot", .{work});
     try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = @import("files").enroll_boot });
     defer Dir.cwd().deleteFile(io, helper) catch {};
-    const setup = try gpa.print("{s}/build-helper", .{work});
     const template = try gpa.print("{s}/build-helper.yaml", .{work});
-    try Dir.cwd().writeFile(io, .{ .sub_path = setup, .data = @import("files").build_helper });
-    defer Dir.cwd().deleteFile(io, setup) catch {};
     try Dir.cwd().writeFile(
         io,
         .{ .sub_path = template, .data = @import("files").build_helper_template },
@@ -136,10 +133,7 @@ pub fn ensureImage(
     defer Dir.cwd().deleteFile(io, template) catch {};
     try howl.run(io, why, &.{
         "env",
-        try gpa.print(
-            "WEREWOLF_HELPER_SETUP={s}",
-            .{setup},
-        ),
+        try gpa.print("WEREWOLF_HOWL={s}", .{try std.process.executablePathAlloc(io, gpa)}),
         try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}),
         "sh",
         helper,

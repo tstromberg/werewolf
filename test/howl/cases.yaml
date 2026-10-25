@@ -1,0 +1,680 @@
+# What howl's command line must do, seen from outside: run by test/howl/run.zig
+# (README.md). Decisions are unit-tested where they live, in cmd/howl; these cases
+# check the exit status, what a run said and wrote, and which tools it ran.
+
+# A protected default refuses before it runs a provider tool, a build or replaces
+# the machine howl run keeps. The build system's variables are not consent.
+protections:
+  tools:
+    - aws
+    - gcloud
+    - az
+    - limactl
+    - qemu-system-aarch64
+    - qemu-system-x86_64
+    - ssh
+    - curl
+    - make
+    - gmake
+  env:
+    DISABLE: secureboot,tpm,ipe
+    DEV: '1'
+    IPE: '0'
+  keep: [build/machines/werewolf-run/disk.img]
+  cases:
+    - args: [run, --with, prod-ssh, --on, bhyve, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, bhyve, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [run, --with, prod-ssh, --on, bhyve, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, bhyve, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [run, --with, prod-ssh, --on, firecracker, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [run, --with, prod-ssh, --on, proxmox, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, proxmox, --yes]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [run, --with, prod-ssh, --on, proxmox, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    - args: [create, protection-check, --with, prod-ssh, --on, proxmox, --yes, --build]
+      status: 1
+      stderr: [protected deployment is not ready]
+    # A cloud takes a protected image built here, never an unpublished download.
+    - args: [run, --with, prod-ssh, --on, aws, --yes]
+      status: 1
+      stderr: [werewolf publishes no aws image yet]
+    - args: [create, protection-check, --with, prod-ssh, --on, aws, --yes]
+      status: 1
+      stderr: [werewolf publishes no aws image yet]
+    - args: [run, --with, prod-ssh, --on, gcp, --yes]
+      status: 1
+      stderr: [werewolf publishes no gcp image yet]
+    - args: [create, protection-check, --with, prod-ssh, --on, gcp, --yes]
+      status: 1
+      stderr: [werewolf publishes no gcp image yet]
+    - args: [run, --with, prod-ssh, --on, azure, --yes]
+      status: 1
+      stderr: [werewolf publishes no azure image yet]
+    - args: [create, protection-check, --with, prod-ssh, --on, azure, --yes]
+      status: 1
+      stderr: [werewolf publishes no azure image yet]
+    # Developer access never quietly gives up a protection.
+    - args: [run, --with, prod-ssh, --on, lima, --build, --dev, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [create, protection-check, --with, prod-ssh, --on, lima, --build, --dev, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [run, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [create, protection-check, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [run, --with, prod-ssh, --on, qemu, --build, --dev, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [create, protection-check, --with, prod-ssh, --on, qemu, --build, --dev, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [run, --with, prod-ssh, --on, qemu, --build, --dev=ssh, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [create, protection-check, --with, prod-ssh, --on, qemu, --build, --dev=ssh, --yes]
+      status: 1
+      stderr: [developer access requires an unprotected local machine]
+    - args: [upload, missing.qcow2, --on, aws]
+      status: 1
+      stderr: [cannot bring Secure Boot]
+    # Raw arguments cannot downgrade a build either.
+    - args: [_build, --with, prod-ssh, --dev, disk]
+      status: 1
+      stderr: [which --disable does not name]
+    - args: [_build, --with, prod-ssh, --disk-args, 'werewolf.disable=secureboot,tpm,ipe', disk]
+      status: 1
+      stderr: [which --disable does not name]
+
+# The Makefile's image recipes never make consent to disable a protection: only
+# DISABLE on make's command line reaches howl.
+make:
+  program: make
+  cwd: checkout
+  unset: [DISABLE, MAKEFLAGS, MFLAGS, MAKEOVERRIDES]
+  cases:
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=]
+      stdout-lacks: [--disable]
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=, 'DISABLE=secureboot,tpm,ipe']
+      stdout: ['--disable=secureboot,tpm,ipe']
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=]
+      env:
+        DISABLE: secureboot,tpm,ipe
+      status: 2
+      stderr: [not inherited from the environment]
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=1]
+      stdout-lacks: [--disable]
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=1, 'DISABLE=secureboot,tpm,ipe']
+      stdout: ['--disable=secureboot,tpm,ipe']
+    - args: [--no-print-directory, -n, image, FORM=prod-ssh, IPE=1]
+      env:
+        DISABLE: secureboot,tpm,ipe
+      status: 2
+      stderr: [not inherited from the environment]
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=]
+      stdout-lacks: [--disable]
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=, 'DISABLE=secureboot,tpm,ipe']
+      stdout: ['--disable=secureboot,tpm,ipe']
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=]
+      env:
+        DISABLE: secureboot,tpm,ipe
+      status: 2
+      stderr: [not inherited from the environment]
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=1]
+      stdout-lacks: [--disable]
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=1, 'DISABLE=secureboot,tpm,ipe']
+      stdout: ['--disable=secureboot,tpm,ipe']
+    - args: [--no-print-directory, -n, _dist-form, FORM=prod-ssh, IPE=1]
+      env:
+        DISABLE: secureboot,tpm,ipe
+      status: 2
+      stderr: [not inherited from the environment]
+
+# howl forms reads a checkout without building, fetching or writing, and the
+# published catalog only when asked, refusing one werewolf did not sign.
+forms:
+  tools: [curl]
+  reply:
+    curl:
+      - exit: 22
+        stderr: catalog is unavailable
+  cases:
+    - args: [forms, --json]
+      stdout: ['"source": "checkout"', '"form": "intel-only"', '"form": "minimal"', '"form": "web"']
+    - args: [forms, --build, --arch=arm64, --json]
+      stdout: ['"form": "minimal"', '"form": "web"', '"arch": "aarch64"']
+      stdout-lacks: [intel-only, x86_64]
+    - args: [forms, web]
+      stdout:
+        - howl run --build --with web
+        - howl test --with web
+        - howl pack --build --with web -h
+        - forms/web/README.md
+    - args: [forms, searchable, --json]
+      stdout: ['"form": "web"']
+      stdout-lacks: ['"form": "minimal"', intel-only]
+    - args: [forms, --published]
+      status: 1
+      stderr: [cannot fetch]
+      ran: [curl]
+    - args: [forms, --published, --build]
+      status: 1
+      stderr: [conflict]
+    - args: [forms, intel-only, --arch, arm64]
+      status: 1
+      stderr: [has no aarch64 form]
+    - args: [forms, --published]
+      reply:
+        curl:
+          - stdout: '{"manifest":"{}","signature":"00"}'
+      status: 1
+      stderr: [BadCatalogSignature]
+      ran: [curl]
+    - args: [forms, missing]
+      status: 1
+    - args: [forms, --arch, riscv64]
+      status: 1
+    - args: [forms, --unknown]
+      status: 1
+    - args: [forms, one, two]
+      status: 1
+    - args: [forms, --help]
+      cwd: outside
+      stderr: ['usage: howl forms']
+    - args: [forms, --build]
+      cwd: outside
+      status: 1
+      stderr: [no ./forms]
+      absent: [build]
+
+# The lock binds apko's resolution to the bytes, links and modes of the form and
+# the application, not to times, the architecture asked for or howl's own notes.
+lock:
+  tools: [apko, crane]
+  reply:
+    apko:
+      - when: [lock]
+        action: apko-lock
+    crane:
+      - when: [digest]
+        stdout: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cases:
+    - args: [_build, --with, minimal, --arch, aarch64, lock]
+      ran: [apko]
+    - args: [_build, --with, minimal, --arch, x86_64, lock]
+      unchanged: [build/lock/minimal.lock.json]
+    - before: rootfs-bytes
+      args: [_build, --with, minimal, lock]
+      ran: [apko]
+      changed: [build/lock/minimal.lock.json]
+    - args: [_build, --with, minimal, lock]
+    - before: rootfs-removed
+      args: [_build, --with, minimal, lock]
+      ran: [apko]
+    - before: rootfs-dangling
+      args: [_build, --with, minimal, lock]
+      ran: [apko]
+    - before: rootfs-relinked
+      args: [_build, --with, minimal, lock]
+      ran: [apko]
+    - before: app
+      args: [_build, --with, minimal, --app-root, '{root}/app', lock]
+      ran: [apko]
+      files:
+        - path: build/lock/minimal.lock.json
+          has: ['"app": "']
+    - args: [_build, --with, minimal, --app-root, '{root}/app', lock]
+    - before: app-executable
+      args: [_build, --with, minimal, --app-root, '{root}/app', lock]
+      ran: [apko]
+    - before: lock-unbound
+      args: [_build, --with, minimal, lock]
+      ran: [apko]
+    - before: form-created
+      args: [_build, --with, minimal, lock]
+    - before: form-applied
+      args: [_build, --with, minimal, lock]
+    # An image is pinned by digest, never pulled.
+    - before: form-image
+      args: [_build, --with, minimal, lock]
+      ran: [crane, apko]
+      calls:
+        crane:
+          starts: [digest]
+      files:
+        - path: build/lock/minimal.lock.json
+          has:
+            - example.invalid/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - args: [_build, --with, minimal, lock]
+
+# howl ssh logs in as the account id -un names, never $USER, and offers only the
+# identity a login needs: Lima's own, the developer key, or local security keys in
+# a dedicated agent that ends with the connection.
+ssh:
+  tools: [id, limactl, ssh, ssh-add, ssh-keygen, gcloud]
+  record: [SSH_AUTH_SOCK]
+  env:
+    HOME: '{root}/home'
+    USER: not-the-local-user
+    SSH_AUTH_SOCK: /test/everyday-agent
+  reply:
+    id:
+      - when: [-un]
+        stdout: alice
+    limactl:
+      - when: ['{{.Name}}']
+        stdout: werewolf-run
+      - when: ['{{.SSHLocalPort}}']
+        stdout: '60022'
+      - when: ['{{.Config.User.Name}}|{{.IdentityFile}}']
+        stdout: alice|/test/lima-key
+    ssh:
+      - when: [PubkeyAuthentication=no]
+        exit: 255
+      - exit: 0
+    ssh-add:
+      - exit: 0
+    ssh-keygen:
+      - when: [-F]
+        exit: 0
+    gcloud:
+      - when: [get-value, project]
+        stdout: test-project
+      - when: [get-value, compute/zone]
+        stdout: us-central1-a
+      - when: [value(labels.werewolf-form)]
+        stdout: playground
+      - when: ['get(networkInterfaces[0].accessConfigs[0].natIP)']
+        stdout: 203.0.113.20
+      - when: [firewall-rules, describe]
+        stdout: werewolf-run-allow
+  cases:
+    - args: [ssh]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1]
+          has: [/test/lima-key, StrictHostKeyChecking=accept-new, HostKeyAlias=werewolf-run]
+    - args: [ssh, werewolf-run]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1]
+          has: [/test/lima-key, StrictHostKeyChecking=accept-new, HostKeyAlias=werewolf-run]
+    - args: [ssh, --on, lima, werewolf-run]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1]
+          has: [/test/lima-key, StrictHostKeyChecking=accept-new, HostKeyAlias=werewolf-run]
+    # Lima's key is its NoCloud account's, not root's.
+    - args: [ssh, root@werewolf-run, --, id, -u]
+      ran: [limactl, ssh]
+      calls:
+        ssh:
+          ends: [root@127.0.0.1, id, -u]
+          lacks: [-i]
+    - args: [ssh, --on=lima, alice@werewolf-run, --, echo, root@other]
+      ran: [limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1, echo, root@other]
+    # A missing account fails as ssh failed, and never falls back to root.
+    - args: [ssh, missing@werewolf-run]
+      reply:
+        ssh:
+          - exit: 255
+      status: 255
+      ran: [limactl, ssh]
+      calls:
+        ssh:
+          ends: [missing@127.0.0.1]
+    - args: [ssh, '@werewolf-run']
+      status: 1
+    - args: [ssh, root@]
+      status: 1
+    - args: [ssh, root@@werewolf-run]
+      status: 1
+    - args: [ssh, root@../werewolf-run]
+      status: 1
+    # GCP: the same account, at the external address; root only by name.
+    - args: [ssh, --on, gcp]
+      ran: [id, gcloud, ssh]
+      calls:
+        ssh:
+          ends: [alice@203.0.113.20]
+    - args: [ssh, root@werewolf-run, --on, gcp]
+      ran: [gcloud, ssh]
+      calls:
+        ssh:
+          ends: [root@203.0.113.20]
+    - args: [ssh, --on=gcp, alice@werewolf-run, --, id, -u]
+      ran: [gcloud, ssh]
+      calls:
+        ssh:
+          ends: [alice@203.0.113.20, id, -u]
+    # The engine create recorded picks the provider.
+    - before: engine-gcp
+      args: [ssh]
+      ran: [id, gcloud, ssh]
+      calls:
+        ssh:
+          ends: [alice@203.0.113.20]
+    - args: [ssh, werewolf-run]
+      ran: [id, gcloud, ssh]
+      calls:
+        ssh:
+          ends: [alice@203.0.113.20]
+    - args: [ssh]
+      reply:
+        ssh:
+          - exit: 255
+      status: 255
+      ran: [id, gcloud, ssh]
+      calls:
+        ssh:
+          ends: [alice@203.0.113.20]
+    # Developer SSH: the address its boot reported, its listener and host key.
+    - before: dev-custom
+      args: [ssh]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@192.168.64.40]
+          has: [-p, '2222', HostKeyAlias=werewolf-run-dev]
+          lacks: [/test/lima-key]
+    - args: [ssh, root@werewolf-run]
+      ran: [limactl, ssh]
+      calls:
+        ssh:
+          ends: [root@192.168.64.40]
+    - before: dev-ended
+      args: [ssh, --on, firecracker]
+      ran: [id, ssh]
+      calls:
+        ssh:
+          ends: [alice@172.16.211.162]
+    - args: [ssh, root@werewolf-run, --on, firecracker]
+      ran: [ssh]
+      calls:
+        ssh:
+          ends: [root@172.16.211.162]
+    # Identities named go into a dedicated agent, which only the pinned machine
+    # may use, and nothing else offers a key.
+    - before: identity-files
+      args:
+        - ssh
+        - alice@werewolf-run
+        - --identity
+        - admin key
+        - --identity=second;key
+        - --
+        - printf
+        - literal;command
+      ran: [limactl, ssh-keygen, ssh-add, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1, printf, literal;command]
+          has:
+            - StrictHostKeyChecking=yes
+            - IdentityFile=none
+            - GlobalKnownHostsFile=/dev/null
+            - IdentityAgent=SSH_AUTH_SOCK
+            - -A
+            - -S
+            - none
+            - -F
+            - /dev/null
+          lacks: [-i]
+        ssh-add:
+          starts: [-t, 20h, -H, build/machines/werewolf-run/known_hosts]
+          has: [alice@werewolf-run, werewolf-run>root@werewolf-run]
+          ends: ['{root}/admin key', '{root}/second;key']
+      after: dedicated-agent
+    - args: [ssh, --identity, admin key, --identity=second;key]
+      reply:
+        ssh-add:
+          - exit: 1
+      status: 1
+      stderr: [ssh-add failed]
+      ran: [id, limactl, ssh-keygen, ssh-add]
+      after: dedicated-agent
+    # No pin, no agent: the handshake that would make one fails.
+    - args: [ssh, --identity, admin key, --identity=second;key]
+      reply:
+        ssh-keygen:
+          - exit: 1
+      status: 1
+      stderr: [could not establish a host key pin]
+      ran: [id, limactl, ssh-keygen, ssh, ssh-keygen]
+      calls:
+        ssh:
+          has: [PubkeyAuthentication=no, StrictHostKeyChecking=accept-new]
+    - args: [ssh, --identity, /missing/key]
+      status: 1
+      stderr: [cannot read identity path]
+    - args: [ssh, --identity]
+      status: 1
+    - args: [ssh, --no-agent, --identity, admin key, --identity=second;key]
+      status: 1
+      stderr: [cannot be combined]
+    - args: [ssh, --identity, admin key, --identity=second;key]
+      reply:
+        ssh:
+          - exit: 42
+      status: 42
+      ran: [id, limactl, ssh-keygen, ssh-add, ssh]
+    # Lima's own identity comes first; elsewhere the local security keys with a
+    # private stub go into the agent, never a key file.
+    - before: security-keys
+      args: [ssh]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          has: [/test/lima-key]
+    - args: [ssh, --on, firecracker]
+      ran: [id, ssh-keygen, ssh-add, ssh]
+      calls:
+        ssh-add:
+          ends: ['{root}/home/.ssh/fido']
+          lacks: ['{root}/home/.ssh/software', '{root}/home/.ssh/orphan']
+        ssh:
+          has: [StrictHostKeyChecking=yes, GlobalKnownHostsFile=/dev/null]
+    - args: [ssh, --on, firecracker, --no-agent]
+      ran: [id, ssh]
+      calls:
+        ssh:
+          has: [-a]
+          lacks: [-A]
+
+# Config tars give the person running howl an account where a form's SSH takes
+# one: by default on every target but Lima, unless the form declares accounts.
+# Root's keys stay what --root-keys gives.
+current-user:
+  tools: [id]
+  env:
+    HOME: '{root}/home'
+    USER: untrusted-environment-user
+  reply:
+    id:
+      - when: [-un]
+        stdout: alice
+  cases:
+    - args: [pack, --build, --with, playground, --root-keys, root.pub, -o, qemu.tar, --on, qemu]
+      ran: [id]
+      calls:
+        id:
+          starts: [-un]
+          ends: [-un]
+      files:
+        - path: qemu.tar:users
+          lines:
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: qemu.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    - args: [pack, --build, --with, playground, --root-keys, root.pub, -o, aws.tar, --on, aws]
+      ran: [id]
+      files:
+        - path: aws.tar:users
+          lines:
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: aws.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    # Lima provisions its own login; pack without a target adds none unasked.
+    - args: [pack, --build, --with, playground, -o, lima.tar, --on, lima, --add-current-user=yes]
+      absent: ['lima.tar:users']
+    - args: [pack, --build, --with, playground, -o, no.tar, --on, qemu, --add-current-user=no]
+      absent: ['no.tar:users']
+    - args: [pack, --build, --with, playground, -o, none.tar]
+      absent: ['none.tar:users']
+    - args: [pack, --build, --with, playground, --root-keys, root.pub, -o, none-yes.tar, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: none-yes.tar:users
+          lines:
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: none-yes.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    # Declared accounts, even none, win under auto, and stay beside the local one
+    # under yes.
+    - args: [pack, --build, --with, empty-users, -o, empty.tar, --on, qemu]
+      files:
+        - path: empty.tar:users
+          lines: []
+    - args: [pack, --build, --with, empty-users, --root-keys, root.pub, -o, empty-yes.tar, --on, qemu, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: empty-yes.tar:users
+          lines:
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: empty-yes.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    - args: [pack, --build, --with, named-users, -o, named.tar, --on, qemu]
+      files:
+        - path: named.tar:users
+          lines: [bob sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture]
+    - args: [pack, --build, --with, named-users, --root-keys, root.pub, -o, named-yes.tar, --on, qemu, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: named-yes.tar:users
+          lines:
+            - bob sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: named-yes.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    - args: [pack, --build, --with, existing-current-user, -o, existing.tar, --on, qemu, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: existing.tar:users
+          lines: [alice]
+    - before: config-users-empty
+      args: [pack, --build, --with, playground, --config, config, -o, config.tar, --on, qemu]
+      files:
+        - path: config.tar:users
+          lines: []
+    - args: [pack, --build, --with, playground, --config, config, --root-keys, root.pub, -o, config-yes.tar, --on, qemu, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: config-yes.tar:users
+          lines:
+            - alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture
+            - alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture
+        - path: config-yes.tar:authorized_keys
+          lines: [sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE6 root-only]
+    - before: config-users-alice
+      args: [pack, --build, --with, playground, --config, config, -o, config-alice.tar, --on, qemu, --add-current-user=yes]
+      ran: [id]
+      files:
+        - path: config-alice.tar:users
+          lines: [alice]
+    # A form's SSH policy decides which keys the account takes.
+    - args: [pack, --build, --with, prod-ssh, -o, prod-ssh.tar, --on, qemu]
+      ran: [id]
+      files:
+        - path: prod-ssh.tar:users
+          lines: [alice sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5 fixture]
+    - args: [pack, --build, --with, minimal, -o, minimal.tar, --on, qemu]
+      absent: ['minimal.tar:users']
+    - args: [pack, --build, --with, minimal, -o, minimal-yes.tar, --on, qemu, --add-current-user=yes]
+      status: 1
+      stderr: [does not run SSH]
+      absent: [minimal-yes.tar]
+    - args: [pack, --build, --with, playground, -o, maybe.tar, --on, qemu, --add-current-user=maybe]
+      status: 1
+      stderr: [auto, yes or no]
+      absent: [maybe.tar]
+    - args: [pack, --build, --with, playground, -o, twice.tar, --on, qemu, --add-current-user=auto, --add-current-user=no]
+      status: 1
+      stderr: [given twice]
+      absent: [twice.tar]
+    # Root is not a standard user.
+    - args: [pack, --build, --with, playground, -o, root.tar, --on, qemu]
+      reply:
+        id:
+          - stdout: root
+      ran: [id]
+      absent: ['root.tar:users']
+    - args: [pack, --build, --with, playground, -o, root-yes.tar, --on, qemu, --add-current-user=yes]
+      reply:
+        id:
+          - stdout: root
+      status: 1
+      stderr: [not a standard user]
+      ran: [id]
+      absent: [root-yes.tar]
+    # Without a key the form's sshd takes, auto adds no account and yes refuses.
+    - before: fido-removed
+      args: [pack, --build, --with, prod-ssh, -o, no-fido.tar, --on, qemu]
+      ran: [id]
+      absent: ['no-fido.tar:users']
+    - args: [pack, --build, --with, prod-ssh, -o, no-fido-yes.tar, --on, qemu, --add-current-user=yes]
+      status: 1
+      stderr: [no local public SSH keys]
+      ran: [id]
+      absent: [no-fido-yes.tar]
+    - args: [pack, --build, --with, playground, -o, software.tar, --on, qemu]
+      ran: [id]
+      files:
+        - path: software.tar:users
+          lines: [alice ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 fixture]
+    - before: software-removed
+      args: [pack, --build, --with, playground, -o, no-keys.tar, --on, qemu]
+      ran: [id]
+      absent: ['no-keys.tar:users']
+    - args: [pack, --build, --with, playground, -o, no-keys-yes.tar, --on, qemu, --add-current-user=yes]
+      status: 1
+      stderr: [no local public SSH keys]
+      ran: [id]
+      absent: [no-keys-yes.tar]

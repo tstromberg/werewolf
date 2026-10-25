@@ -1,0 +1,265 @@
+version: 1
+# coreutils gives the shim programs to start, as busybox's applets did in
+# DEV builds: echo shows the words it was handed, env sets PATH and the
+# directory. The shim under test is the form's own /bin/sh.
+packages: [coreutils]
+suites:
+  - name: sh-shim
+    policy:
+      run:
+        - /usr/lib/werewolf/sh-shim
+        - /usr/bin/env
+    cases:
+      # One program with its words, as sh splits them; an empty command runs
+      # nothing. glibc and musl pass -- before the command.
+      - name: sh-shim-words
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, "echo 'a  b' \"c d\" e'f g'"]
+            expect:
+              exit: 0
+              stdout: "a  b c d ef g\n"
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, --, echo x]
+            expect:
+              exit: 0
+              stdout: "x\n"
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, '']
+            expect:
+              exit: 0
+              stdout: ''
+              stderr: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, ' ']
+            expect:
+              exit: 0
+              stdout: ''
+              stderr: ''
+      # What sh would read specially is refused with 126 before anything runs:
+      # syntax, expansions, a glob, an assignment, sh's own words, an open
+      # quote, a control character. The refusal never shows the command,
+      # which may hold a secret.
+      - name: sh-shim-refuses
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'a | b']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'a >/tmp/x']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - file: /tmp/x
+            expect:
+              exists: false
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'a; b']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'a && b']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'echo $HOME']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'echo "$HOME"']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'echo `id`']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'a *']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'A=1 a']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, "a 'b"]
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'exit 3']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'cd /']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, "'exec' a"]
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, "a\rb"]
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, "a\nb"]
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                matches: '^sh-shim: refused: '
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, 'echo | secret']
+            expect:
+              exit: 126
+              stdout: ''
+              stderr:
+                not_matches: secret
+      # Called other than as sh -c COMMAND, as a login, by a script's #! line
+      # or with an option, it runs nothing: 1.
+      - name: sh-shim-no-shell
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim]
+            expect:
+              exit: 1
+              stderr:
+                matches: '^sh-shim: not a shell'
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -s]
+            expect:
+              exit: 1
+              stdout: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -i]
+            expect:
+              exit: 1
+              stdout: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -ec, echo]
+            expect:
+              exit: 1
+              stdout: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, -e, echo]
+            expect:
+              exit: 1
+              stdout: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c]
+            expect:
+              exit: 1
+              stdout: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, /etc/passwd]
+            expect:
+              exit: 1
+              stderr:
+                matches: '^sh-shim: not a shell'
+      # A program is found along PATH, never in the current directory, even
+      # by an empty or relative entry; none found is 127.
+      - name: sh-shim-path
+        steps:
+          - exec:
+              argv: [/usr/bin/env, -C, /usr/bin, PATH=/usr/bin, /usr/lib/werewolf/sh-shim, -c, 'true']
+            expect:
+              exit: 0
+          - exec:
+              argv: [/usr/bin/env, -C, /usr/bin, 'PATH=:', /usr/lib/werewolf/sh-shim, -c, 'true']
+            expect:
+              exit: 127
+              stderr: "sh-shim: true: not found\n"
+          - exec:
+              argv: [/usr/bin/env, -C, /usr/bin, PATH=., /usr/lib/werewolf/sh-shim, -c, 'true']
+            expect:
+              exit: 127
+              stderr: "sh-shim: true: not found\n"
+          - exec:
+              argv: [/usr/bin/env, -C, /usr, PATH=bin, /usr/lib/werewolf/sh-shim, -c, 'true']
+            expect:
+              exit: 127
+              stderr: "sh-shim: true: not found\n"
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, no-such-program]
+            expect:
+              exit: 127
+              stderr: "sh-shim: no-such-program: not found\n"
+      # Where no package or later form gives a shell, /bin/sh is the shim, and
+      # the allowance every leashed service runs it by is laid.
+      - name: sh-shim-laid
+        steps:
+          - file: /usr/bin/sh
+            expect:
+              type: symlink
+              link: /usr/lib/werewolf/sh-shim
+          - file: /etc/werewolf/allow/sh
+            expect:
+              type: file
+              size: 0
+      # Trailing /dev/null redirects only, which open no other file;
+      # test-sh-shim-fds closes the descriptors first.
+      - name: sh-shim-redirs
+        steps:
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, echo discard > /dev/null 2>&1]
+            expect:
+              exit: 0
+              stdout: ''
+              stderr: ''
+          - exec:
+              argv: [/usr/lib/werewolf/sh-shim, -c, head -c 7 < /dev/null]
+            expect:
+              exit: 0
+              stdout: ''
+  - name: sh-shim-fds
+    source: driver.zig
+    mode: fds
+    user: root
+    policy:
+      pledge: stdio rpath proc exec
+      run: [/usr/lib/werewolf/sh-shim]
+    cases:
+      seed: [sh-shim-closed-fds]
+      verify: [sh-shim-closed-fds]

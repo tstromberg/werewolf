@@ -64,7 +64,7 @@ the room before the first section's data, where the loader reads them.
 `tpm-floor boot|raise|read|handle ...` drives `lib/tpm.zig`'s release floor against a
 swtpm endpoint (a port on 127.0.0.1, or `unix:PATH`), as stage0 and the mount broker
 drive `/dev/tpmrm0`. `make check-tpm-floor` builds it as `build/host/tpm-floor` for
-`test/check-tpm-floor`.
+`test/check-tpm-floor.zig`.
 
 ## doc-check
 
@@ -104,6 +104,12 @@ malformed source fails the run and leaves OUT alone.
 An OpenSSH security key provider (sk-api.h) for `make check`, which logs in
 to machines that accept only security keys. It never asks for a touch, so
 anyone who reads its key file can log in: it is built only for the host.
+
+## release
+
+`build/host/release VERB ...` builds, tests, signs and publishes the published
+images, one verb per job of form-images.yml; the forms it publishes are
+release/images.yaml. See [release/README.md](release/README.md).
 
 ## install-deps
 

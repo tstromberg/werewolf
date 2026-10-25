@@ -38,7 +38,7 @@ LD_PRELOAD.
 The PostgreSQL form includes the static sh-shim program and lays /usr/bin/sh as a link
 to it; merged /bin reaches the same file. The alias is explicit for this form, so adding
 a debugging shell does not make PostgreSQL depend on it (the console debugger starts
-/bin/ash directly). The service's run list names initdb, sh-shim and /usr/bin/locale,
+/bin/mksh directly). The service's run list names initdb, sh-shim and /usr/bin/locale,
 which Wolfi's posix-libc-utils-bin supplies, so the backend's locale -a succeeds without
 a pretend response or a patch. No global allow: sh is added; Landlock still decides
 which binaries can execute, regardless of the alias or PATH search.

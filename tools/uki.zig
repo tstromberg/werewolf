@@ -13,12 +13,6 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
-    if (args.len == 4 and std.mem.eql(u8, args[1], "--pcr11")) {
-        const image = try Dir.cwd().readFileAlloc(io, args[2], gpa, .limited(512 << 20));
-        const digest = try pcr11(image);
-        try Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = &digest });
-        return;
-    }
     if (args.len < 4) {
         std.log.err("usage: uki STUB OUT NAME=FILE...", .{});
         std.process.exit(2);
@@ -80,40 +74,6 @@ pub fn section(image: []const u8, wanted: []const u8) !?[]const u8 {
         found = image[at..][0..size];
     }
     return found;
-}
-
-pub fn pcr11(image: []const u8) ![32]u8 {
-    for ([_][]const u8{ ".profile", ".dtbauto", ".hwids", ".efifw" }) |name|
-        if (try section(image, name) != null) return error.UnsupportedMeasuredSection;
-    const Sha256 = std.crypto.hash.sha2.Sha256;
-    var pcr: [32]u8 = @splat(0);
-    for ([_][]const u8{
-        ".linux",
-        ".osrel",
-        ".cmdline",
-        ".initrd",
-        ".ucode",
-        ".splash",
-        ".dtb",
-        ".uname",
-        ".sbat",
-        ".pcrpkey",
-    }) |name| {
-        const bytes = try section(image, name) orelse continue;
-        var hash = Sha256.init(.{});
-        hash.update(name);
-        hash.update(&.{0});
-        const named = hash.finalResult();
-        var measured: [32]u8 = undefined;
-        Sha256.hash(bytes, &measured, .{});
-        for ([2][32]u8{ named, measured }) |digest| {
-            hash = Sha256.init(.{});
-            hash.update(&pcr);
-            hash.update(&digest);
-            pcr = hash.finalResult();
-        }
-    }
-    return pcr;
 }
 
 /// parse reads the headers whose fields uki keeps to.
@@ -305,16 +265,6 @@ test "section extraction rejects ambiguous names, truncated headers and raw boun
     const altered = try a.allocator().dupe(u8, out);
     std.mem.writeInt(u32, altered[p.sections + 40 + 20 ..][0..4], 0xffffffff, .little);
     try testing.expectError(error.BadSection, section(altered, ".cmdline"));
-}
-
-test "PCR prediction refuses profiles and conditional measurements" {
-    var a = std.heap.ArenaAllocator.init(testing.allocator);
-    defer a.deinit();
-    const stub = try peForTests(a.allocator(), 4);
-    for ([_][]const u8{ ".profile", ".dtbauto", ".hwids", ".efifw" }) |name| {
-        const image = try assemble(a.allocator(), stub, &.{name}, &.{"x"});
-        try testing.expectError(error.UnsupportedMeasuredSection, pcr11(image));
-    }
 }
 
 test "PE32+ supports arm64 and x86_64, and refuses other machines" {

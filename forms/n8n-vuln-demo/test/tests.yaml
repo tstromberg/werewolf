@@ -1,0 +1,109 @@
+version: 1
+suites:
+  - name: n8n-service
+    cases:
+      - name: n8n-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/healthz
+            await: 180s
+            expect:
+              status: 200
+              json:
+                /status: ok
+          # Until migrated, n8n answers every other path 200 "starting up".
+          - fetch:
+              url: http://127.0.0.1:5678/healthz/readiness
+            await: 180s
+            expect:
+              status: 200
+              json:
+                /status: ok
+      - name: n8n-ui
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/
+            await: 60s
+            expect:
+              status: 200
+              body:
+                matches: "[Nn]8[Nn]"
+                not_matches: starting up
+      - name: n8n-settings
+        steps:
+          - fetch:
+              url: http://127.0.0.1:5678/rest/settings
+            expect:
+              status: 200
+              json:
+                /data/settingsMode: public
+      - name: n8n-native-runtime
+        steps:
+          - file: /etc/sv/n8n/service
+            expect:
+              body:
+                matches: "(^|\n)exec /usr/bin/node "
+                not_matches: /bin/sh
+      - name: n8n-database
+        steps:
+          - file: /data/svc/n8n/.n8n/database.sqlite
+            expect:
+              type: file
+              uid: n8n
+              size:
+                min: 1
+      - name: n8n-loopback-ports
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 5679
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 5679
+          - listeners:
+              protocol: tcp
+              port: 5680
+            await: 60s
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 5680
+  - name: test-n8n-vuln-demo
+    source: driver.zig
+    mode: http
+    user: n8n
+    memory: 256
+    policy:
+      pledge: stdio rpath wpath inet connect
+      read: [/etc/sv/n8n/service, /usr/lib/apk/db/installed]
+      connect: [tcp/5678]
+    cases:
+      seed:
+        - ready
+        - editor
+        - version
+        - auth-required
+        - login
+        - persisted-workflow
+        - run-workflow
+        - code-runner
+        - cve-2025-68613-present-contained
+        - direct-node
+        - hardened-node
+        - owner-setup
+        - create-workflow
+      verify:
+        - ready
+        - editor
+        - version
+        - auth-required
+        - login
+        - persisted-workflow
+        - run-workflow
+        - code-runner
+        - cve-2025-68613-present-contained
+        - direct-node
+        - hardened-node

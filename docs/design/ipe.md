@@ -89,7 +89,10 @@ installing, arming or rebooting; retained signatures also protect operator `try`
 - Maintaining and testing a custom kernel on both architectures.
 - Signing each distinct root, including an application's custom image.
 - Native code already in the trusted image remains available to IPE.
-- The strict root policy refuses anonymous executable memory; JIT forms are unsupported.
+- Werewolf's kernel leaves anonymous executable memory to `PR_SET_MDWE`.
+  A form's `jit` allowance permits native JIT compilation; IPE still refuses
+  executable mappings of files outside the verified root. Leash restores MDWE
+  for non-JIT services and narrowed helper programs.
 
 ## Alternatives Considered
 
@@ -110,5 +113,7 @@ kernel probe without seccomp, Landlock or noexec mounts. It tests trusted
 exec, mmap and mprotect, an executable tmpfs, another verified volume, a trusted loader
 mapping untrusted ELF, and lost policy-administration capability. Missing,
 tampered, untrusted-signer and correctly signed wrong-root policies must stop stage0.
-Anonymous executable mmap and mprotect are refused. CI runs
-the same suite on x86_64 and aarch64 with disposable keys.
+Anonymous memory can become executable before MDWE is set, as a JIT form
+requires; after MDWE is set, executable writable mappings and transitions to
+executable memory are refused. CI runs the same suite on x86_64 and aarch64
+with disposable keys.

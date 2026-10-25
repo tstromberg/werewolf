@@ -1,9 +1,13 @@
 #!/bin/sh
-# forms/gitea/test/config DIR: the gitea form's config for make check, in DIR: the
-# site's address, its administrator and the password gitea-init gives
-# Gitea for it, which test/boot and forms/gitea/test/checks use.
+# forms/gitea/test/config DIR: the gitea form's config for its tests, in DIR:
+# the site's address, its administrator and the password gitea-init gives
+# Gitea for it, and an Ed25519 key, made here, that forms/gitea/test/tests.yaml
+# adds to the administrator and pushes over Gitea's SSH with.
 set -eu
-mkdir -p "$1/gitea"
+mkdir -p "$1/gitea" "$1/tests"
 umask 077
 printf '%s' werewolf-check-pass >"$1/gitea/admin-password"
 echo '{"url":"http://127.0.0.1:3000/","domain":"127.0.0.1","admin":"admin","admin-email":"admin@example.test"}' >"$1/gitea/settings.json"
+rm -f "$1/tests/gitea-ssh-key" "$1/tests/gitea-ssh-key.pub"
+ssh-keygen -q -t ed25519 -N '' -C gitea-check -f "$1/tests/gitea-ssh-key"
+mv "$1/tests/gitea-ssh-key.pub" "$1/tests/gitea-ssh-public"

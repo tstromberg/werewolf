@@ -62,7 +62,7 @@ failed launch, `CLOUD-MODE-create.log`. Each needs that cloud's CLI logged in:
 
 - **GCP:** gcloud with a project (`GCP_PROJECT`, or gcloud's own) and `GCP_ZONE`, by
   default `us-central1-a`. C4, C4A and N4 machines boot from `hyperdisk-balanced`.
-  Passed 2026-10-24 in `us-west1-a` on `c4a-standard-1`, all fourteen checks.
+  Passed 2026-10-25 in `us-west1-a` on `c4a-standard-1`, all fifteen checks.
 - **AWS:** the aws CLI's region and credentials (`aws login` or `aws configure`, or
   `AWS_REGION` and `AWS_PROFILE`), and a default VPC. Passed 2026-10-25 in `us-west-2`
   on Graviton, all checks. Its console needs `CONFIG_SERIAL_8250_PCI` for Graviton's PCI
@@ -75,18 +75,18 @@ failed launch, `CLOUD-MODE-create.log`. Each needs that cloud's CLI logged in:
 
 ## `make check-independent-updates`
 
-[test/check-independent-updates](../test/check-independent-updates), on Lima (macOS) or
-`PROVIDER=qemu` (Linux, swtpm), proves a machine takes its own TPM and updates from a
-static HTTPS channel alone ([design](design/independent-updates.md)). A, made by `howl
-create --build`, enrolls at floor 1; its updater installs B; rollback returns to A;
-power cuts around the floor's increment while installing C keep B booting; stage0
-refuses a restored disk holding retired A; unhealthy E falls back to C at floor 3; a
-root session cannot open the TPM. Output goes to `BUILD/check/independent-updates`,
-which must not exist yet. Passed on Lima 2026-10-24, all ten checks, against swtpm.
+[test/check-independent-updates.zig](../test/check-independent-updates.zig), on Lima
+(macOS) or `PROVIDER=qemu` (Linux, swtpm), proves a machine takes its own TPM and
+updates from a static HTTPS channel alone ([design](design/independent-updates.md)). A,
+made by `howl create --build`, enrolls at floor 1; its updater installs B; rollback
+returns to A; power cuts around the floor's increment while installing C keep B
+booting; stage0 refuses a restored disk holding retired A; unhealthy E falls back to C
+at floor 3; a root session cannot open the TPM. Passed on Lima 2026-10-24, all ten
+checks, against swtpm. Output goes to `BUILD/check/independent-updates`; it must be new.
 
 ## `make check-gcp-metadata`
 
-[test/gcp-metadata](../test/gcp-metadata) builds this checkout's `prod-ssh` with
+[test/gcp-metadata.zig](../test/gcp-metadata.zig) builds this checkout's `prod-ssh` with
 `machine.metadata-users: true`, creates a fresh GCP VM with the software security-key
 provider from [test/keys](../test/keys), and changes its metadata as an operator would:
 user-data at boot, instance and project keys, declared-user precedence, refusal of root
@@ -123,10 +123,10 @@ deployment. Normal howl launches pass signed A/B recovery with the private runti
 a sustained TAP transfer test panicked in virtio TX. Secure Boot and TPM were off.
 Earlier bilbo x86_64 results do not qualify ARM64, or vice versa.
 
-`test/check-bhyve-lifecycle HOST ARCH DISK.zst KEY [tap|slirp] [SECONDS]` tests a fresh
-copy of a prebuilt playground disk through howl's create/reconfigure, supervisor, stop
-and delete paths. KEY and KEY.pub are a disposable SSH identity. The host needs
-passwordless doas, firmware, zstd, and Python 3 for TAP; the builder needs Zig, zstd and
+`make check-bhyve-lifecycle ARGS='HOST ARCH DISK.zst KEY [tap|slirp] [SECONDS]'` tests a
+fresh copy of a prebuilt playground disk through howl's create/reconfigure, supervisor,
+stop and delete paths. KEY and KEY.pub are a disposable SSH identity. The host needs
+passwordless doas, firmware and zstd; the builder needs Zig, zstd and
 e2fsck. ARM64 needs legacy virtio PCI (kernel 7.2.11-r6 or later). TAP requires an
 existing bridge; `BHYVE_BRIDGE` selects it. `BHYVE_TEST_IP` and `BHYVE_TEST_GW` select a
 static test subnet instead of DHCP. The test does not create a bridge or change host

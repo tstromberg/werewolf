@@ -1,6 +1,7 @@
 # playground: a machine to try werewolf on, here: howl run's form on Lima,
 # QEMU, Firecracker and bhyve. prod, the sshd form taking key files beside
-# security keys, and bash, for Lima's readiness probes, so Lima manages it.
+# security keys, hardened Python and BusyBox tools; bash supports Lima's
+# readiness probes, so Lima manages it. mksh supplies /bin/sh.
 base: prod
 
 # Those who log in, root and people (:people, Lima's login among them),
@@ -15,6 +16,8 @@ net:
 
 packages:
   - bash
+  - busybox-full
+  - python-3.15
 
 # SSH-backed su, taking ed25519 key files too: Lima's own, and ~/.ssh's.
 # Security keys are touched, never required to verify.
@@ -29,8 +32,8 @@ weaknesses:
   network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers remain restricted
   network-root-https-arbitrary: root may reach SSH, HTTP and HTTPS anywhere (tcp/22, 80, 443, 8000, 8080), to try things out
   network-ssh-config: forwarded agents provide fresh authentication for su
-  network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
+  network-no-login: sshd provides operator access by key; BusyBox includes telnetd, which nothing starts
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys
-  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
-  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
-  programs-no-shell: bash, for Lima's readiness probes, and busybox-full's shell, for those who log in
+  programs-no-downloaders: SSH and scp support operator access; BusyBox provides wget, nc and telnet
+  programs-no-interpreters: hardened Python 3.15 and BusyBox awk support interactive use
+  programs-no-shell: bash serves Lima readiness probes; mksh provides operator shells and /bin/sh

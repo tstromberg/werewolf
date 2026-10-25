@@ -5,22 +5,27 @@ suites:
     cases:
       - name: ruby-ready
         steps:
-          - fetch: {url: 'http://127.0.0.1:8080/'}
+          - fetch:
+              url: 'http://127.0.0.1:8080/'
             expect:
               status: 200
-              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+              body:
+                matches: "^werewolf: Ruby .* is answering\n$"
             await: 60s
   - name: ruby
     cases:
       - name: ruby-greeting
         steps:
-          - fetch: {url: 'http://127.0.0.1:8080/'}
+          - fetch:
+              url: 'http://127.0.0.1:8080/'
             expect:
               status: 200
-              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+              body:
+                matches: "^werewolf: Ruby .* is answering\n$"
       - name: ruby-content-type
         steps:
-          - fetch: {url: 'http://127.0.0.1:8080/'}
+          - fetch:
+              url: 'http://127.0.0.1:8080/'
             expect:
               status: 200
               headers:
@@ -28,24 +33,46 @@ suites:
                   matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$
       - name: ruby-reconnect
         steps:
-          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+          - fetch:
+              url: 'http://127.0.0.1:8080/arbitrary-path'
             expect:
               status: 200
-              body: {matches: "^werewolf: Ruby .* is answering\n$"}
-          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+              body:
+                matches: "^werewolf: Ruby .* is answering\n$"
+          - fetch:
+              url: 'http://127.0.0.1:8080/arbitrary-path'
             expect:
               status: 200
-              body: {matches: "^werewolf: Ruby .* is answering\n$"}
-          - fetch: {url: 'http://127.0.0.1:8080/arbitrary-path'}
+              body:
+                matches: "^werewolf: Ruby .* is answering\n$"
+          - fetch:
+              url: 'http://127.0.0.1:8080/arbitrary-path'
             expect:
               status: 200
-              body: {matches: "^werewolf: Ruby .* is answering\n$"}
+              body:
+                matches: "^werewolf: Ruby .* is answering\n$"
+  # Raw HTTP/1.0, and a request split by a pause, get one framed reply and
+  # then the end of the stream. Content-Length is the body's: 29 bytes and
+  # RUBY_VERSION, 5 to 7 bytes, so the reply's three possible lengths.
   - name: ruby-wire
-    source: driver.zig
-    mode: wire
-    user: root
-    policy:
-      pledge: stdio inet
     cases:
-      seed: [ruby-framing, ruby-fragmented]
-      verify: [ruby-framing, ruby-fragmented]
+      - name: ruby-framing
+        steps:
+          - tcp:
+              connect: 127.0.0.1:8080
+              exchange:
+                - send: "GET / HTTP/1.0\r\n\r\n"
+                - expect:
+                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: (34\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{5}|35\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{6}|36\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{7}) is answering\n$"
+                - close: eof
+      - name: ruby-fragmented
+        steps:
+          - tcp:
+              connect: 127.0.0.1:8080
+              exchange:
+                - send: "GET / HTTP/1.1\r\nHost: localhost\r\n"
+                - pause: 1s
+                - send: "\r\n"
+                - expect:
+                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: (34\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{5}|35\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{6}|36\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{7}) is answering\n$"
+                - close: eof

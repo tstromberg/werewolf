@@ -8,13 +8,16 @@ howl test --with caddy --arch x86_64
 ```
 
 Most forms run `make -k check-FORM check-shellfree-FORM`: integration tests in a DEV VM,
-then posture and console checks of the shipping form. Forms with `test/native.json`,
+then posture and console checks of the shipping form. Forms with `test/tests.yaml`,
 such as `postgresql`, instead run compiled Zig drivers under leash as service clients,
 without shell or SSH ([driver guide](testing-native.md)). A generated form pins the
 production package closure and is
 compared with production before boot ([design](design/image-release-testing.md)).
 Image publishing requires further checks ([form-images.md](form-images.md)).
 [Local iteration](design/local-test-iteration.md) keeps the VM running between changes.
+Checks boot their kernels directly, so they build without Secure Boot, the TPM and,
+unless `IPE=1`, IPE, and name them in `--disable` (the Makefile's `CHECK_DISABLE`);
+`check-secureboot`, `check-tpm-floor`, `check-ipe` and the release gates test those.
 
 PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
 [Greenbone](../forms/greenbone/README.md#testing-status) covers GMP/OSP, database roles,
@@ -37,7 +40,7 @@ make -j check       # boot every form, and a slot, side by side, and check each
 make check-FORM     # one form; check-shellfree-FORM boots it as it ships
 make check-posture  # concurrent scans, stale probes and fresh audit evidence
 make check-dns      # Linux: resolver, DHCP and TLS fixtures in private namespaces
-python3 test/form-coverage --list   # each form's integration cases
+make form-coverage  # each form's integration cases
 ```
 
 [Live tests](testing-live.md) cover network, cloud and remote hosts; see
@@ -52,9 +55,9 @@ macOS); tutorials need Go, rustup with Linux musl targets, .NET 10 and a JDK.
 It boots every form and a slot with native EFI under QEMU. Passing requires a successful
 boot, expected [checks](../test/checks) as root, and a clean shutdown.
 
-Legacy checks add BusyBox and developer SSH with `DEV=1`. Shipping-image checks
-(`check-shellfree-<form>`) use [test/boot](../test/boot) to judge posture and expected
-console output (`forms/<form>/test/console`) without running guest commands.
+Legacy checks add mksh, BusyBox tools and developer SSH with `DEV=1`. Shipping-image
+checks (`check-shellfree-<form>`) use [test/boot](../test/boot) to judge posture and
+expected console output (`forms/<form>/test/console`) without running guest commands.
 
 Checks attack lockdown, memory access, one-way sysctls, setuid, undeclared listeners,
 execution from `/tmp`, and `nobody` writing `/run`, seeing others' processes or planting
@@ -75,8 +78,8 @@ TPM and IPE stay enabled. Logs/profile: `build/security-probes/`; `werewolf-run`
 `make check-mount-broker LINUX_TEST_RUNNER=sudo` tests the confined broker's roles,
 malformed requests, stalled readers and staged-file integrity in a Linux mount
 namespace. CI runs it beside updater construction tests; macOS can use
-`LINUX_TEST_RUNNER='limactl shell VM sudo -n'`. `make fuzz-broker` fuzzes its wire
-parser.
+`LINUX_TEST_RUNNER='limactl shell VM sudo -n'` with a VM that mounts the checkout.
+`make fuzz-broker` fuzzes its wire parser.
 
 Other boots cover what one boot cannot:
 
@@ -86,10 +89,10 @@ Other boots cover what one boot cannot:
 | `prod` with no key | refuse its LUKS2 disk, mount an empty read-only tmpfs, say why in `/run/werewolf/nodata` | [test/checks-nodata](../test/checks-nodata) |
 | `minimal` with one root byte changed (`check-verity`) | dm-verity names the block; stage0 stops before the root is mounted | `root-verified` in test/checks, for every other boot |
 | a slot that never commits (`check-deadman`) | the deadman says why and resets the machine | `werewolf.deadman`, honoured by DEV builds only |
-| `prod` behind a stand-in metadata server, as each cloud | take a good config on GCP, AWS (by session token only), Hetzner and Azure; refuse a tar with a link or `../`; ask nothing on no cloud or on Hyper-V | [test/metadata](../test/metadata), [test/cloud-boot](../test/cloud-boot) |
+| `prod` behind a stand-in metadata server, as each cloud | take a good config on GCP, AWS (by session token only), Hetzner and Azure; refuse a tar with a link or `../`; ask nothing on no cloud or on Hyper-V | [test/metadata.zig](../test/metadata.zig), [test/cloud-boot](../test/cloud-boot) |
 | `prod` with no address; `minimal` with a packed one (`check-static`) | take it from DHCP, the client split as it claims; or from `howl pack --ip --gw --dns` | [test/checks-lease](../test/checks-lease), [test/checks-static](../test/checks-static) |
 | the slot | find `root.erofs` by UUID, keep `/boot` read-only, commit its EFI entry once healthy for a minute | a 128 MiB ext4 and a FAT EFI partition with one counted entry |
-| each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image](../test/check-legacy-image); the shared image workflow |
+| each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image.zig](../test/check-legacy-image.zig); the shared image workflow |
 
 Each machine gets blank/config disks, a fixed test LUKS2 key and distinct forwarded
 ports (22200 and 23200 plus its form index), so `make -j` can run them together.
@@ -100,10 +103,11 @@ test/boot waits for bounded events; logs stay in `build/<arch>/check/`.
 A service/application form needs five distinct cases through its running service:
 read/write, authentication, refusals, configured content or reboot persistence. Name
 each behaviour; assertions about one operation count once, and shared boot/posture
-checks do not count. `python3 test/form-coverage` enforces this in `make test`;
-`--list` shows cases and [exceptions](../test/form-coverage-exceptions) explain shared
-suites. Review judges quality. `make check-apps` tests HTTP for `-app` forms and `php`
-using [test/app-fixtures](../test/app-fixtures).
+checks do not count. `make test` enforces this
+([form-coverage](../tools/form-coverage.zig)); `make form-coverage` lists cases, and
+[exceptions](../test/form-coverage-exceptions) explain shared suites. Review judges
+quality. `make check-apps` tests HTTP for `-app` forms and `php` using
+[test/app-fixtures](../test/app-fixtures).
 
 ## Writing a check
 
@@ -158,9 +162,9 @@ keeps every line.
 
 [check.yml](../.github/workflows/check.yml) runs host tests on both architectures, four
 `forms` shards, three `shellfree` shards and four platform groups.
-[ci-forms](../test/ci-forms) checks forms serially, cleaning successful images and
-retaining failures, logs, locks and native results. Platform boots share CPUs within a
-memory budget; [ci-setup](../test/ci-setup) installs pinned tools.
+[ci-forms](../test/ci-forms.zig) checks forms serially, cleaning successful images
+and retaining failures, logs, locks and native results. Platform boots share CPUs within
+a memory budget; [ci-setup](../test/ci-setup) installs pinned tools.
 
 Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
 `make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.

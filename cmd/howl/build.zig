@@ -50,7 +50,7 @@ pub const Spec = struct {
     arch: howl.Arch,
     /// dev adds a shell, as DEV=1 does.
     dev: bool = false,
-    /// dev_shell adds BusyBox and form-specific debug tools. SSH iteration
+    /// dev_shell adds mksh, BusyBox tools and form-specific debug tools. SSH iteration
     /// keeps developer access but uses sh-shim and the native clients only.
     dev_shell: bool = true,
     /// disabled is what --disable gave up of werewolf's protections. An
@@ -810,7 +810,9 @@ pub fn prepare(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec) !B {
 
 /// toolEnv returns the tools' environment: COPYFILE_DISABLE=1, so macOS's
 /// tar adds no AppleDouble files, and no make variables, so a make that
-/// runs howl passes the make howl runs nothing but what howl says.
+/// runs howl passes the make howl runs nothing but what howl says. Make
+/// exports DISABLE from its command line; the make howl runs refuses it
+/// from the environment, and howl has already taken it as --disable.
 fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);

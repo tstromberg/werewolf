@@ -1,0 +1,53 @@
+# What a protected boot must show the host-side checks (test/host/evidence.zig).
+# Editing a list changes what every check that reads it demands.
+
+# The live updater coordinator's /proc status: each field once, with exactly
+# these values. Capabilities are the kernel's hex masks.
+updater:
+  Uid: [77, 77, 77, 77]
+  Gid: [77, 77, 77, 77]
+  Threads: [1]
+  NoNewPrivs: [1]
+  Seccomp: [2]
+  CapInh: [0]
+  CapPrm: [0]
+  CapEff: [0]
+  CapBnd: [0]
+  CapAmb: [0]
+
+# The line each fresh boot's coordinator prints, after handover.
+coordinator: "autoupdate: coordinator uid=77 gid=77 caps=0 nnp=1"
+
+# ab-status flags every A/B boot must report true; secure_boot as well
+# when the test is signed.
+enforced: [verified_root, ipe]
+
+# Posture checks a published image must pass, as its owner channel
+# reports them (check-public-image, check-published-lifecycle on QEMU).
+published:
+  - boot-secure-boot
+  - boot-ipe-enforced
+  - boot-rollback-protected
+  - files-root-verity
+  - files-root-readonly
+  - files-exec-refused
+  - files-system-writes
+
+# The same, read over SSH (check-published-run, check-published-lifecycle
+# on Lima).
+ssh:
+  - boot-secure-boot
+  - boot-ipe-enforced
+  - boot-rollback-protected
+  - files-root-verity
+
+# Runtime protections a cloud machine's root posture must pass; no
+# declared weakness excuses them (test/cloud, cloud-posture).
+cloud:
+  - boot-secure-boot
+  - boot-rollback-protected
+  - boot-ipe-enforced
+  - kernel-lockdown
+  - kernel-seal
+  - files-root-verity
+  - network-fence-unbypassable

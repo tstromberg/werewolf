@@ -34,4 +34,3 @@ alongside other accounts, preserving an existing declaration for that name;
 `no` disables the addition. This does not grant `admin`. Lima keeps its NoCloud
 user, and developer SSH remains root-only. `howl pack --on TARGET` applies the
 same default; without a target, pack requires `--add-current-user=yes`.
-

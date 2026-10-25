@@ -214,26 +214,16 @@ pub fn enroll(
 ) !void {
     const helper = try gpa.print("{s}/enroll-boot", .{dir});
     try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = embedded.enroll_boot });
-    const setup = try gpa.print("{s}/build-helper", .{dir});
     const template = try gpa.print("{s}/build-helper.yaml", .{dir});
-    const firmware = try gpa.print("{s}/native-firmware", .{dir});
-    const requirements = try gpa.print("{s}/firmware-requirements.txt", .{dir});
-    try Dir.cwd().writeFile(io, .{ .sub_path = setup, .data = embedded.build_helper });
     try Dir.cwd().writeFile(io, .{
         .sub_path = template,
         .data = embedded.build_helper_template,
     });
-    try Dir.cwd().writeFile(io, .{ .sub_path = firmware, .data = embedded.native_firmware });
-    try Dir.cwd().writeFile(io, .{
-        .sub_path = requirements,
-        .data = embedded.firmware_requirements,
-    });
     var env = try howl.environ.clone(gpa);
     defer env.deinit();
-    try env.put("WEREWOLF_HELPER_SETUP", setup);
+    // enroll-boot asks this howl for native firmware and the build helper.
+    try env.put("WEREWOLF_HOWL", try std.process.executablePathAlloc(io, gpa));
     try env.put("WEREWOLF_HELPER_TEMPLATE", template);
-    try env.put("WEREWOLF_FIRMWARE_SETUP", firmware);
-    try env.put("WEREWOLF_FIRMWARE_REQUIREMENTS", requirements);
     const enrolled = try steps.exec(
         &.{.{ .argv = &.{
             "sh", helper, @tagName(arch), cert, dir, "local", owner,

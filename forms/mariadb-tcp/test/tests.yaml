@@ -1,6 +1,6 @@
 version: 1
 packages:
-  - mariadb-12.3-client
+  - mariadb-client
 suites:
   - name: mariadb-admin
     policy:
@@ -20,9 +20,7 @@ suites:
               readonly: true
             expect:
               exit: 0
-              stdout: '1
-
-                '
+              stdout: "1\n"
             await: 60s
           - exec:
               argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
@@ -32,11 +30,7 @@ suites:
                 LC_ALL: C
             expect:
               exit: 0
-              stdout: '0
-
-                3306
-
-                '
+              stdout: "0\n3306\n"
           - listeners: tcp
             expect:
               contains:

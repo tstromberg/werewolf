@@ -45,16 +45,13 @@ jobs:
       - name: Use the tested ARM firmware and immutable variable-store profile
         if: matrix.runner == 'ubuntu-26.04-arm'
         run: |
-          python3 tools/native-firmware aarch64 boot/firmware-requirements.txt build/ipe-check/firmware.json
-          python3 - <<'PY' >>"$GITHUB_ENV"
-          import json, pathlib, shutil
-          firmware = json.loads(pathlib.Path('build/ipe-check/firmware.json').read_text())
-          target = pathlib.Path('build/ipe-check/firmware').resolve()
-          target.mkdir()
-          for source, name in [('code.fd', 'code.fd'), ('template.fd', 'vars.fd')]:
-              shutil.copyfile(firmware[source], target / name)
-          print('SECUREBOOT_DIR=' + str(target))
-          PY
+          make howl
+          # One path a line: virt-fw-vars, the code, the variable template.
+          firmware=$(build/host/howl _native-firmware aarch64)
+          mkdir build/ipe-check/firmware
+          cp "$(printf '%s\n' "$firmware" | sed -n 2p)" build/ipe-check/firmware/code.fd
+          cp "$(printf '%s\n' "$firmware" | sed -n 3p)" build/ipe-check/firmware/vars.fd
+          echo "SECUREBOOT_DIR=$PWD/build/ipe-check/firmware" >>"$GITHUB_ENV"
       - name: Stock Alpine Secure Boot release
         run: make check-secureboot
       - name: Build the test kernel and test enforcement

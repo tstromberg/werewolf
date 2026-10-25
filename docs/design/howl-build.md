@@ -37,7 +37,9 @@ depended on make's target names and `--debug=b` output, and:
 
 **lib/image.zig** holds what howl and the updater share, as functions of
 bytes, never paths: gunzip and unzstd; the zboot unwrap and x86 `vmlinux`;
-the kernel config's rules; mkfs.erofs's options and version check.
+the kernel config's rules; mkfs.erofs's options and version check. Its
+`stripSetid` clears every setuid and setgid bit in a root's tar, through
+an open file, as the updater clears them in its tree.
 
 **cmd/howl/build.zig** (with `packages.zig`, `app.zig`, `melange.zig` and
 `slot.zig`) runs the pipeline as steps, each skipped when its output is

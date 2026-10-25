@@ -23,7 +23,7 @@ keeps every line.
 
 [check.yml](../.github/workflows/check.yml) runs host tests on both architectures,
 four `forms` shards, three `shellfree` shards, and four platform groups.
-[test/ci-forms](../test/ci-forms) checks existing targets one form at a time,
+[test/ci-forms.zig](../test/ci-forms.zig) checks existing targets one form at a time,
 cleans successful images/disks, and retains logs, locks, and native results.
 Failures keep their images. Platform boots share CPUs within their memory budget.
 [test/ci-setup](../test/ci-setup) installs pinned tools.

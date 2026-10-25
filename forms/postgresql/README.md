@@ -64,7 +64,7 @@ every start.
 - The image's SQL files run on every start. An `INSERT` needs a conflict target, or the
   rows multiply. `--import` runs once.
 - This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger uses
-  `/bin/ash`. A form replacing the PostgreSQL service must keep its explicit initdb,
+  `/bin/mksh`. A form replacing the PostgreSQL service must keep its explicit initdb,
   sh-shim and locale run paths.
 
 ## Size

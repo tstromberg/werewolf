@@ -16,9 +16,7 @@ suites:
             expect:
               status: 200
               body:
-                matches: '^OK
-
-                  ?$'
+                matches: "^OK\n?$"
             await: 120s
       - name: miniflux-https
         steps:
