@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from consumer_trust import (mirror_roots, validate_updates, candidate_boot,
+from consumer_trust import (mirror_roots, validate_updates, candidate_boot, enrolled_boot,
                             UPDATE_GATES, CANDIDATE_GATES, PUBLISHED_CHECKS, SSH_CHECKS)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'release'))
 import image_profiles
@@ -200,13 +200,7 @@ def console():
 try:
     run(arguments, 'first-run', timeout=600)
     first = committed()
-    for line in ('stage0: Secure Boot enforced outside setup mode',
-                 "stage0: Secure Boot admits only this image's signer",
-                 'stage0: slot a: root.erofs, read-only, verified',
-                 'stage0: IPE: only this root image may execute; policy administration removed',
-                 'stage0: TPM floor %d: release %d admitted; reset authority sealed' % (index, index)):
-        if line not in console().read_text(errors='replace'):
-            raise RuntimeError('the console lacks ' + line)
+    enrolled_boot(console().read_text(errors='replace'), index)
     if not requests:
         raise RuntimeError('the first run downloaded nothing from the mirror')
     if not shellfree:

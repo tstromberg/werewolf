@@ -35,6 +35,18 @@ PUBLISHED_CHECKS = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-prot
 SSH_CHECKS = PUBLISHED_CHECKS[:4]
 
 
+def enrolled_boot(console, index):
+    """Require stage0's actual account of the candidate's first protected boot."""
+    required = ("stage0: Secure Boot enforced outside setup mode",
+                "stage0: Secure Boot admits only this image's signer",
+                "stage0: slot a: /boot/slot/a/root.erofs, read-only, verified",
+                "stage0: IPE: only this root image may execute; policy administration removed",
+                "stage0: TPM floor %d: release %d admitted; reset authority sealed" % (index, index))
+    for line in required:
+        if line not in console:
+            raise ValueError('the console lacks ' + line)
+
+
 def validate_updates(evidence, provider, arch, commit):
     """Require this tree's complete update proof on the same runtime target."""
     if evidence.get('format') != 'werewolf-update-evidence/1' or evidence.get('passed') is not True:
