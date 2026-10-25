@@ -46,7 +46,7 @@ def check():
                     serial = (start + datetime.timedelta(seconds=offset)).strftime('%Y%m%dT%H%M%SZ')
                     bundle = Path('build/qemu-validation-candidates') / form / str(offset)
                     run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/build-protected',
-                         form, 'qemu', 'x86_64', serial, bundle], env)
+                         form, 'qemu', 'x86_64', serial, str(offset + 1), bundle], env)
                     bundles.append(bundle)
                 run([sys.executable, 'release/with-protected-keys', sys.executable, 'release/authorize-protected',
                      'build/host/howl', 'qemu', *bundles], env)
