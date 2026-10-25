@@ -117,23 +117,26 @@ or deadman's timeout returns to the previous slot. That recovers the image, not 
 ([updater.md](updater.md), [releases.md](releases.md)). To protect the next boot,
 firmware must verify the signed unified kernel image (loader, kernel, stage0, command
 line): an unchecked one defeats the rest even with a signed root. A changed boot
-configuration can still select an older signed image; the TPM-held minimum version that
-prevents it is unfinished ([verified-boot.md](design/verified-boot.md)). All of this
-runs inside the guest, so the hypervisor must be trusted.
+configuration could select an older signed image, so a protected machine's first boot
+takes its TPM, and stage0 refuses any release below its channel's floor, which rises to
+the running release before a slot is replaced
+([independent-updates.md](design/independent-updates.md)). All of this runs inside the
+guest, so the hypervisor must be trusted.
 
 ## Protections a machine can be made without
 
 Three protections reach across reboots: Secure Boot checks the boot files, a TPM records
 which releases may boot, and IPE runs only native code from the verified root. `howl
 --disable=secureboot,tpm,ipe` makes a machine without them, which every provider but
-Lima and QEMU needs for now ([cli](design/cli.md)). Nothing disables them by default: a
-build refuses an image that would lack a protection `--disable` does not name, and says
-how to give it. Make builds also default to no disabled protections; legacy test images
-require an explicit command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment
-value is refused. The command line names what
-the machine lacks (`werewolf.disable`), and posture and the login message say so. The
-keys a build signs with live in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in
-`build/`: a machine takes only updates signed with them, so back that directory up.
+Lima, QEMU and, for `--build` images, GCP, AWS and Azure needs for now
+([cli](design/cli.md)). Nothing disables them by default: a build refuses an image that
+would lack a protection `--disable` does not name, and says how to give it. Make builds
+also default to no disabled protections; legacy test images require an explicit
+command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment value is
+refused. The command line names what the machine lacks (`werewolf.disable`), and posture
+and the login message say so. The keys a build signs with live in `$XDG_DATA_HOME/howl`
+(`~/.local/share/howl`), never in `build/`: a machine takes only updates signed with
+them, so back that directory up.
 
 | Disabled | What that allows |
 | --- | --- |

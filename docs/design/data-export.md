@@ -14,7 +14,7 @@ howl export NAME --via ssh --output backup.tar
 ```
 
 Export produces an archive of persistent application data plus a manifest: not vendor
-signing keys, machine enrollment/TPM custody, the boot disk or a runnable image. Restore
+signing keys, machine enrollment/TPM state, the boot disk or a runnable image. Restore
 into another machine is a separate operation with its own compatibility checks. Begin
 with complete `/data` export; path selection and logical dumps can follow.
 

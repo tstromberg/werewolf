@@ -1,10 +1,9 @@
-//! Authenticated, machine-independent boot disks and their exact measured slot.
+//! Authenticated, machine-independent boot disks and their exact signed slot.
 const std = @import("std");
 const howl = @import("howl.zig");
 const image = @import("prebuilt");
 const tpm = @import("tpm");
 const uki = @import("uki");
-const enrollment = @import("enrollment.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -15,19 +14,17 @@ pub const Request = struct {
     image_certificate: []const u8,
     channel: []const u8,
 };
+pub const format = "werewolf-boot/2";
 pub const Manifest = struct {
-    format: []const u8 = "werewolf-boot/1",
+    format: []const u8 = format,
     form: []const u8,
     image: image.Manifest,
     disk: image.Artifact,
     raw_size: u64,
     boot_certificate: []const u8,
-    permit_host: []const u8,
-    permit_port: u16,
-    pcr11: []const u8,
     configuration: ?@import("boot-config.zig").Definition = null,
 };
-pub const Verified = struct { manifest: Manifest, release: [32]u8, pcr: [32]u8 };
+pub const Verified = struct { manifest: Manifest };
 pub const Producer = struct {
     form: []const u8,
     arch: []const u8,
@@ -39,10 +36,36 @@ pub const Producer = struct {
     image_certificate: []const u8,
     boot_certificate: []const u8,
     channel: []const u8,
-    permit_host: []const u8,
-    permit_port: u16,
     configuration_form: ?[]const u8 = null,
 };
+
+/// hex parses a SHA-256 digest written as 64 hex digits.
+pub fn hex(text: []const u8) ![32]u8 {
+    if (text.len != 64) return error.BadDigest;
+    var value: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&value, text);
+    return value;
+}
+
+/// durable writes a new file, mode 0600, and syncs it and its directory.
+pub fn durable(io: Io, file: []const u8, data: []const u8) !void {
+    const out = try Dir.cwd().createFile(io, file, .{
+        .exclusive = true,
+        .permissions = .fromMode(0o600),
+    });
+    defer out.close(io);
+    try out.writeStreamingAll(io, data);
+    try out.sync(io);
+    // Zig otherwise opens Linux directories with O_PATH, which cannot be fsynced.
+    const dir = try Dir.cwd().openDir(
+        io,
+        std.fs.path.dirname(file) orelse ".",
+        .{ .iterate = true },
+    );
+    defer dir.close(io);
+    const handle: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    try handle.sync(io);
+}
 
 fn read(io: Io, gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     const bytes = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(limit + 1));
@@ -77,21 +100,16 @@ fn key(io: Io, gpa: Allocator, cert: []const u8) !@import("apk").Key {
 }
 
 pub fn check(m: Manifest, expected: image.Identity) !void {
-    if (!std.mem.eql(u8, m.format, "werewolf-boot/1") or
+    if (!std.mem.eql(u8, m.format, format) or
         !@import("form").isName(m.form)) return error.BadBootImageProfile;
     try image.check(m.image, expected);
     if (m.configuration) |definition| try @import("boot-config.zig").check(definition, m.form);
-    if (m.image.boot_context == null or m.image.files.@"uki.efi" == null or
-        m.permit_port == 0 or
-        (!std.mem.eql(u8, m.permit_host, "192.168.5.2") and
-            !std.mem.eql(u8, m.permit_host, "10.0.2.2"))) return error.BadBootImageProfile;
+    if (m.image.files.@"uki.efi" == null) return error.BadBootImageProfile;
     if (m.disk.size == 0 or m.disk.size > 2 << 30 or m.raw_size < 512 << 20 or
         m.raw_size > 16 << 30 or m.raw_size % (1 << 20) != 0)
         return error.BadBootImageSize;
-    _ = try enrollment.hex(m.disk.sha256);
-    _ = try enrollment.hex(m.boot_certificate);
-    const pcr = try enrollment.hex(m.pcr11);
-    if (std.mem.eql(u8, &pcr, &@as([32]u8, @splat(0)))) return error.UnmeasuredBootImage;
+    _ = try hex(m.disk.sha256);
+    _ = try hex(m.boot_certificate);
 }
 
 pub fn open(
@@ -120,7 +138,7 @@ pub fn admitHead(io: Io, gpa: Allocator, request: Request, arch: howl.Arch) !Man
     if (!std.mem.eql(
         u8,
         &try certificate(io, gpa, request.boot_certificate),
-        &try enrollment.hex(m.boot_certificate),
+        &try hex(m.boot_certificate),
     )) return error.WrongBootCertificate;
     return m;
 }
@@ -153,21 +171,16 @@ pub fn verify(io: Io, gpa: Allocator, request: Request, arch: howl.Arch) !Verifi
     );
     try image.matches(m.disk, compressed.size, compressed.sha256);
     const raw = try read(io, gpa, try gpa.print("{s}/uki.efi", .{slot}), 512 << 20);
-    const pcr = try uki.pcr11(raw);
-    if (!std.mem.eql(u8, &pcr, &try enrollment.hex(m.pcr11))) return error.WrongBootMeasurement;
-    const release = tpm.releaseId(
-        @tagName(arch),
-        try enrollment.hex(m.image.files.@"root.erofs".sha256),
-        try enrollment.hex(m.image.files.vmlinuz.sha256),
-        try enrollment.hex(m.image.files.@"stage0.zst".sha256),
-        try enrollment.hex(m.image.boot_context.?),
-    );
+    // The signed UKI must name the release the signed manifest names: the
+    // channel and index stage0 holds to the TPM floor.
     const line = try uki.section(raw, ".cmdline") orelse return error.MissingBootIdentity;
     var bad: @import("cmdline").Failure = .{};
     const parsed = @import("cmdline").parse(std.mem.trimEnd(u8, line, "\x00"), &bad) orelse
         return error.BadBootIdentity;
-    if (!parsed.tpm or !parsed.secure or !parsed.native or parsed.release == null or
-        !std.mem.eql(u8, &parsed.release.?, &release)) return error.WrongBootIdentity;
+    const channel = parsed.channel orelse return error.WrongBootIdentity;
+    if (!parsed.secure or !parsed.native or parsed.index.? != m.image.index or
+        !std.mem.eql(u8, &std.fmt.bytesToHex(channel, .lower), m.image.channel_id))
+        return error.WrongBootIdentity;
     for ([_]struct { []const u8, image.Artifact }{
         .{ ".linux", m.image.files.vmlinuz }, .{ ".initrd", m.image.files.@"stage0.zst" },
     }) |part| {
@@ -188,7 +201,7 @@ pub fn verify(io: Io, gpa: Allocator, request: Request, arch: howl.Arch) !Verifi
             try gpa.print("{s}/uki.efi", .{slot}),
         },
     );
-    return .{ .manifest = m, .release = release, .pcr = pcr };
+    return .{ .manifest = m };
 }
 
 pub fn materialize(
@@ -198,7 +211,6 @@ pub fn materialize(
     request: Request,
     verified: Verified,
     output: []const u8,
-    factory: []const u8,
 ) !void {
     const raw_size = verified.manifest.raw_size;
     try steps.enter(.{ .name = "Unpacking the authenticated boot disk", .short = "disk" });
@@ -259,42 +271,6 @@ pub fn materialize(
         gpa,
         &.{ "osslsigncode", "verify", "-CAfile", request.boot_certificate, "-in", loader },
     );
-    const commands = try gpa.print("{s}/enroll-disk.cmds", .{work});
-    defer Dir.cwd().deleteFile(io, commands) catch {};
-    const updates = "mkdir /state\nwrite {s} /state/0\n" ++
-        "sif /state uid 0\nsif /state gid 0\n" ++
-        "sif /state mode 040700\n" ++
-        "sif /state/0 uid 0\nsif /state/0 gid 0\n" ++
-        "sif /state/0 mode 0100600\n";
-    try enrollment.durable(io, commands, try gpa.print(updates, .{try quote(gpa, factory)}));
-    const debugfs = if (@import("builtin").os.tag == .macos)
-        "/opt/homebrew/opt/e2fsprogs/sbin/debugfs"
-    else
-        "debugfs";
-    _ = try capture(
-        io,
-        gpa,
-        &.{
-            debugfs,
-            "-w",
-            "-f",
-            commands,
-            try gpa.print("{s}?offset={d}", .{ output, layout.root_first * 512 }),
-        },
-    );
-    // debugfs reports command failures on stderr while exiting successfully.
-    const readback = try capture(
-        io,
-        gpa,
-        &.{
-            debugfs,
-            "-R",
-            "cat /state/0",
-            try gpa.print("{s}?offset={d}", .{ output, layout.root_first * 512 }),
-        },
-    );
-    if (!std.mem.eql(u8, readback, try read(io, gpa, factory, tpm.record_size + 512)))
-        return error.FactoryJournalWriteFailed;
 }
 
 fn loaderEntry(text: []const u8) !void {
@@ -347,19 +323,6 @@ fn unpack(io: Io, input: []const u8, output: []const u8, limit: u64) !void {
     try file.sync(io);
 }
 
-fn quote(gpa: Allocator, path: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try out.append(gpa, '"');
-    for (path) |c| {
-        if (std.ascii.isControl(c)) return error.BadDiskPath;
-        if (c == '"' or c == '\\') try out.append(gpa, '\\');
-        try out.append(gpa, c);
-    }
-    try out.append(gpa, '"');
-    return out.toOwnedSlice(gpa);
-}
-
 pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
     if (args.len == 3 and std.mem.eql(u8, args[0], "download")) {
         const provider = std.meta.stringToEnum(howl.Platform, args[2]) orelse
@@ -378,7 +341,7 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         );
         return;
     }
-    if (args.len == 8 and std.mem.eql(u8, args[0], "head")) {
+    if (args.len == 7 and std.mem.eql(u8, args[0], "head")) {
         const arch = howl.archName(args[5]) orelse return error.WrongImageArch;
         const m = try admitHead(io, gpa, .{
             .directory = args[1],
@@ -387,13 +350,6 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
             .channel = args[4],
         }, arch);
         if (!std.mem.eql(u8, m.form, args[6])) return error.WrongBootForm;
-        const host: []const u8 = if (std.mem.eql(u8, args[7], "lima"))
-            "192.168.5.2"
-        else if (std.mem.eql(u8, args[7], "qemu"))
-            "10.0.2.2"
-        else
-            return error.BadSecuredProvider;
-        if (!std.mem.eql(u8, m.permit_host, host)) return error.WrongBootProvider;
         if (m.configuration == null) return error.MissingDeploymentDefinition;
         try Io.File.stdout().writeStreamingAll(io, try std.json.Stringify.valueAlloc(gpa, m, .{}));
         return;
@@ -425,8 +381,8 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
 
 /// seal makes p's built image a boot bundle: the slot, its signed head and
 /// the compressed disk beside a boot.json the image key signs, which binds
-/// the form, the disk, the boot certificate, the permit endpoint and the
-/// predicted PCR 11. release/build-protected seals werewolf's images with
+/// the form, the disk and the boot certificate. release/build-protected seals werewolf's images
+/// with
 /// it, and howl the images it builds with the user's own keys.
 pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
     const arch = howl.archName(p.arch) orelse return error.WrongImageArch;
@@ -488,24 +444,10 @@ pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
             u8,
             &std.fmt.bytesToHex(try certificate(io, gpa, p.boot_certificate), .lower),
         ),
-        .permit_host = p.permit_host,
-        .permit_port = p.permit_port,
-        .pcr11 = try gpa.dupe(
-            u8,
-            &std.fmt.bytesToHex(
-                try uki.pcr11(try read(
-                    io,
-                    gpa,
-                    try gpa.print("{s}/uki.efi", .{p.slot}),
-                    512 << 20,
-                )),
-                .lower,
-            ),
-        ),
     };
     try check(m, .{ .channel = p.channel, .arch = p.arch });
     const head = try gpa.print("{s}/boot.json", .{p.output});
-    try enrollment.durable(io, head, try std.json.Stringify.valueAlloc(gpa, m, .{}));
+    try durable(io, head, try std.json.Stringify.valueAlloc(gpa, m, .{}));
     try howl.run(
         io,
         why,
@@ -537,7 +479,7 @@ pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
         io,
         .{},
     );
-    const verified = try verify(
+    _ = try verify(
         io,
         gpa,
         .{
@@ -548,27 +490,13 @@ pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
         },
         arch,
     );
-    try enrollment.durable(
-        io,
-        try gpa.print("{s}/slot/release.id", .{p.output}),
-        &verified.release,
-    );
-    try enrollment.durable(io, try gpa.print("{s}/slot/pcr11", .{p.output}), &verified.pcr);
-}
-
-test "disk journal paths are quoted without command injection" {
-    const t = std.testing;
-    const value = try quote(t.allocator, "/a b/c\"d\\e");
-    defer t.allocator.free(value);
-    try t.expectEqualStrings("\"/a b/c\\\"d\\\\e\"", value);
-    try t.expectError(error.BadDiskPath, quote(t.allocator, "key\nwrite bad"));
 }
 
 test "boot entries cannot add unsigned options or select another executable" {
     const t = std.testing;
     try loaderEntry("title werewolf a\nuki /werewolf/a/uki.efi\n");
     for ([_][]const u8{
-        "uki /werewolf/a/uki.efi\noptions werewolf.tpm=0\n",
+        "uki /werewolf/a/uki.efi\noptions werewolf.disable=tpm\n",
         "efi /werewolf/a/uki.efi\n",
         "uki /other.efi\n",
         "uki /werewolf/a/uki.efi\nuki /werewolf/a/uki.efi\n",
@@ -604,7 +532,7 @@ test "disk decompression enforces exact size and removes invalid partial output"
     try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "disk", .{}));
 }
 
-test "portable boot profiles require measured signed IPE and bounded declared transport" {
+test "portable boot profiles require signed IPE, a UKI and bounded disks" {
     const t = std.testing;
     const zero = &@as([64]u8, @splat('0'));
     var files: image.Files = undefined;
@@ -624,7 +552,8 @@ test "portable boot profiles require measured signed IPE and bounded declared tr
         .root_hash = zero,
         .kernel = "6.18-test",
         .packages = &.{.{ .name = "init", .origin = "init", .version = "1" }},
-        .boot_context = zero,
+        .channel_id = zero,
+        .index = 1,
         .files = files,
     };
     const valid: Manifest = .{
@@ -633,22 +562,14 @@ test "portable boot profiles require measured signed IPE and bounded declared tr
         .disk = .{ .size = 1, .sha256 = zero },
         .raw_size = 8 << 30,
         .boot_certificate = zero,
-        .permit_host = "192.168.5.2",
-        .permit_port = 9443,
-        .pcr11 = &@as([64]u8, @splat('1')),
     };
     try check(valid, identity);
     var bad = valid;
     bad.image.ipe = false;
     try t.expectError(error.NotAnIpeImage, check(bad, identity));
     bad = valid;
-    bad.image.boot_context = null;
-    try t.expectError(error.BadBootImageProfile, check(bad, identity));
-    bad = valid;
-    bad.permit_host = "127.0.0.1";
-    try t.expectError(error.BadBootImageProfile, check(bad, identity));
-    bad = valid;
-    bad.permit_port = 0;
+    bad.image.files.@"uki.efi" = null;
+    bad.image.build = &image.buildId(bad.image.files);
     try t.expectError(error.BadBootImageProfile, check(bad, identity));
     bad = valid;
     bad.raw_size = 32 << 30;
@@ -656,11 +577,22 @@ test "portable boot profiles require measured signed IPE and bounded declared tr
     bad = valid;
     bad.form = "../foreign";
     try t.expectError(error.BadBootImageProfile, check(bad, identity));
-    bad = valid;
-    bad.pcr11 = zero;
-    try t.expectError(error.UnmeasuredBootImage, check(bad, identity));
     try t.expectError(
         error.WrongImageChannel,
         check(valid, .{ .channel = "https://foreign.test", .arch = identity.arch }),
     );
+}
+
+test "durable files are exclusive and private" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const file = try std.fs.path.join(t.allocator, &.{ root, "record" });
+    defer t.allocator.free(file);
+    try durable(t.io, file, "kept");
+    try t.expectError(error.PathAlreadyExists, durable(t.io, file, "again"));
+    const st = try tmp.dir.statFile(t.io, "record", .{});
+    try t.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
 }

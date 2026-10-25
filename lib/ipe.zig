@@ -11,27 +11,6 @@ pub const prefix = "policy_name=werewolf policy_version=1.0.0\n" ++
     "DEFAULT action=DENY\nop=EXECUTE dmverity_roothash=sha256:";
 pub const suffix = " action=ALLOW\n";
 pub const max_policy = 64 << 10;
-/// boot_policy is the TPM bootstrap image's: its initramfs alone may execute.
-/// The kernel has no policy of its own; tpm-enroll activates this one, signed
-/// with the image key, before anything else runs.
-pub const boot_policy = "policy_name=werewolf_boot policy_version=0.0.0\n" ++
-    "DEFAULT action=DENY\nop=EXECUTE boot_verified=TRUE action=ALLOW\n";
-
-/// Enrollment trusts only the signed initramfs and never enables a workload root.
-pub fn bootstrapEnforced(text: []const u8, is_active: []const u8, enforce: []const u8) bool {
-    return mem.eql(u8, text, boot_policy) and mem.eql(u8, mem.trim(u8, is_active, "\n"), "1") and
-        mem.eql(u8, mem.trim(u8, enforce, "\n"), "1");
-}
-
-test "bootstrap IPE trust refuses permissive policies and disabled enforcement" {
-    const t = std.testing;
-    try t.expect(bootstrapEnforced(boot_policy, "1\n", "1\n"));
-    try t.expect(!bootstrapEnforced(boot_policy, "0", "1"));
-    try t.expect(!bootstrapEnforced(boot_policy, "1", "0"));
-    try t.expect(!bootstrapEnforced("DEFAULT action=ALLOW\n", "1", "1"));
-    try t.expect(!bootstrapEnforced(boot_policy ++ "op=EXECUTE action=ALLOW\n", "1", "1"));
-}
-
 /// policy writes the single-root policy; no initramfs or other volume is trusted.
 pub fn policy(w: *std.Io.Writer, root: [32]u8) std.Io.Writer.Error!void {
     try w.print(prefix ++ "{s}" ++ suffix, .{std.fmt.bytesToHex(root, .lower)});

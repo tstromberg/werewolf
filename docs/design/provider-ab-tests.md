@@ -24,7 +24,7 @@ their signed manifests before the operator can authenticate a rollback.
 
 - Treating unsupported firmware as a passing Secure Boot test.
 - Publishing test images or private signers to a public update service.
-- Implementing the unfinished TPM retirement protocol.
+- The TPM floor, which `test/check-independent-updates` tests.
 
 ## Detailed design
 
@@ -68,7 +68,8 @@ Live cloud and remote-host tests are opt-in. Local firmware tests run in CI.
 Boot and policy private keys stay on the build host. Test SSH allowances and
 loopback TLS service are confined to disposable fixtures. A production signer
 is never used for intentionally unhealthy releases. A/B recovery must remain
-available after commit; the per-release TPM floor cannot be enabled unchanged.
+available after commit, which is why the TPM floor rises only when the inactive slot
+is replaced ([independent-updates.md](independent-updates.md)).
 
 ## Reliability Considerations
 

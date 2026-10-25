@@ -16,7 +16,7 @@ downloads = importlib.util.module_from_spec(spec)
 loader.exec_module(downloads)
 GATES = {'secure_boot', 'ipe', 'verified_root', 'rollback_protected', 'ab_upgrade',
          'operator_rollback', 'unhealthy_fallback', 'retirement_cuts', 'tamper_refused',
-         'no_consumer_builds', 'no_vendor_private_keys', 'shared_issuer', 'fresh_download', 'independent_owners'}
+         'no_consumer_builds', 'no_vendor_private_keys', 'fresh_download'}
 
 
 def gates(report, manifest, descriptor, provider):
@@ -33,15 +33,14 @@ def gates(report, manifest, descriptor, provider):
 def prepare(howl, bundle, report, provider, output, trust='release/protected', release_assets=None):
     bundle, output, trust = Path(bundle).resolve(), Path(output).resolve(), Path(trust).resolve()
     metadata = json.loads(downloads.read(trust / 'trust.json', 4096))
-    if set(metadata) != {'format', 'source', 'permit_port'} or metadata['format'] != 'werewolf-boot-trust/1':
+    if set(metadata) != {'format', 'source'} or metadata['format'] != 'werewolf-boot-trust/2':
         raise ValueError('invalid committed publication trust')
     # The form and architecture here only choose expected identities. They do not
     # authorize bytes; native signature/profile admission runs before copying files.
     raw = json.loads(downloads.read(bundle / 'boot.json', downloads.HEAD_LIMIT))
     form, arch = raw['form'], raw['image']['arch']
-    gateway = '192.168.5.2' if provider == 'lima' else '10.0.2.2'
     request = dict(source=metadata['source'], cache='unused', form=form, arch=arch, provider=provider,
-        channel='https://%s:%d/%s' % (gateway, metadata['permit_port'], form),
+        channel='%s/%s/%s' % (metadata['source'], form, provider),
         boot_certificate=str(trust / 'boot.crt'), image_certificate=str(trust / 'image.crt'))
     downloads.validate_request(request)
     manifest = downloads.native(howl, 'head', bundle, request)
@@ -74,6 +73,14 @@ def prepare(howl, bundle, report, provider, output, trust='release/protected', r
         for name in ('boot.json', 'boot.json.sig'):
             shutil.copyfile(bundle / name, latest / name)
             shutil.copyfile(bundle / name, objects / name)
+        # The channel machines follow: CHANNEL/ARCH/BUILD/FILE and CHANNEL/ARCH/latest.json
+        # (lib/prebuilt.zig), where CHANNEL is SOURCE/FORM/PROVIDER.
+        build = staging / relative / manifest['image']['build']
+        build.mkdir()
+        for name in downloads.FILES:
+            shutil.copyfile(bundle / 'slot' / name, build / name)
+        for name in ('latest.json', 'latest.json.sig'):
+            shutil.copyfile(bundle / 'prebuilt' / arch / name, staging / relative / name)
         if exported is not None:
             # Existing boot/image heads stay byte-identical. The additional
             # downloads signature covers qcow2, runtime evidence and GHA provenance.
@@ -87,12 +94,17 @@ def prepare(howl, bundle, report, provider, output, trust='release/protected', r
         for path in sorted(staging.rglob('*')):
             if path.is_file():
                 key = str(path.relative_to(staging))
+                # The boot head and the channel's update head change; the objects'
+                # copies of latest.json are content-addressed and never do.
+                head = key.endswith(('/latest/boot.json', '/latest/boot.json.sig')) or \
+                    key in (str(relative / 'latest.json'), str(relative / 'latest.json.sig'))
                 entries.append(dict(key=key, size=path.stat().st_size, sha256=downloads.sha(path),
-                                    immutable='/objects/' in key))
+                                    immutable=not head))
         # Consumers never trust this unsigned upload plan. Each signed descriptor
         # and its separately signed image head are independently authenticated.
-        plan = dict(format='werewolf-boot-upload/1', form=form, provider=provider, arch=arch,
-                    descriptor=descriptor, serial=manifest['image']['serial'], files=entries)
+        plan = dict(format='werewolf-boot-upload/2', form=form, provider=provider, arch=arch,
+                    descriptor=descriptor, serial=manifest['image']['serial'],
+                    index=manifest['image']['index'], files=entries)
         downloads.atomic(staging / 'publication.json', plan)
         os.rename(staging, output)
     return plan

@@ -3,35 +3,32 @@
 ## Summary
 
 `howl run` downloads the latest authenticated protected image and deploys it through
-Lima on macOS; `--build` builds from source with the caller's signing credentials,
-managed locally if absent. Secure deployment is the default; incomplete providers and
-missing protection fail closed. Status: importer, dedicated trust, cached downloader
-and candidate CI implemented; default wiring remains gated.
+Lima on macOS or QEMU on Linux; `--build` builds from source with the caller's signing
+credentials, managed locally if absent. Secure deployment is the default; incomplete
+providers and missing protection fail closed. Clouds take `--build` images only:
+werewolf publishes no cloud images yet. Status: built.
 
 ## Background
 
-New roots take machine authority from firmware and TLS trust from signed config; source
-builds use per-machine channels, imported bundles a declared local one. The [download
-design](protected-downloads.md) covers dedicated trust, cache floors and publication
-evidence, the [boot bundle design](boot-images.md) shared artifact enrollment and a
-multiplexed host issuer. The shared release flow also publishes explicit legacy-boot
-images without this protected profile; its manifests and channels remain separate.
+The [download design](protected-downloads.md) covers dedicated trust, cache floors and
+publication evidence, the [boot bundle design](boot-images.md) admission and
+enrollment, and [independent updates](independent-updates.md) the TPM floor and how a
+machine follows its channel. The shared release flow also publishes explicit
+legacy-boot images without this protected profile; its manifests stay separate.
 
 ## Goals
 
 Boot downloaded images without a kernel compile, local image composition or publisher
-private key, through Lima on macOS (its QEMU backend gives enrolled firmware and a
-persistent TPM). Preserve exact-pair A/B updates, operator rollback, failed-trial
-fallback and interrupted retirement. Authenticate published code apart from the user's
-machine enrollment and recovery authority; refuse mismatched keys, profiles and missing
-TPM state without changing trust. Publish only artifacts tested as users run them.
+private key. Keep A/B updates, operator rollback and failed-trial fallback, with each
+machine updating itself from werewolf's public channel. Authenticate published code
+with pinned keys; refuse mismatched keys, profiles and TPM state without changing
+trust. Publish only artifacts tested as users run them.
 
 ## Non-Goals
 
-Protecting against a Mac administrator who restores VM and virtual TPM together;
+Protecting against a host administrator who restores VM and virtual TPM together;
 falling back to VZ, an unprotected image or a source build when a download fails;
-building custom applications without `--build` or a published application channel;
-exporting private host signing or TPM credentials to the workload or builder.
+building custom applications without `--build`; publishing cloud images.
 
 ## Detailed design
 
@@ -44,76 +41,74 @@ reject replay, serial reuse and another architecture. An application, local form
 changed image declaration requires `--build`, never silent composition. `--build` honors
 `WEREWOLF_BOOT_KEY`/`WEREWOLF_BOOT_CRT` and the complete IPE override tuple, or makes a
 private local identity once and keeps it; credential loss, mismatch or partial state
-requires inspection, not implicit rotation or re-enrollment.
+requires inspection, not implicit rotation. A `--build` image follows a channel only if
+its builder serves one ([secure local deployment](secure-local-deployment.md)).
 
 ### Published code trust
 
 A dedicated protected-image boot certificate, separate from the legacy release
 certificate, signs the published loader and UKIs, and howl pins its identity; a legacy
 signature must not authorize a kernel that omits mandatory IPE or TPM checks. The IPE
-kernel has a stable public policy authority and a pinned measured EFI stub, and every
-protected root requires Secure Boot, IPE, a verified root and protocol-v2 TPM
-authorization. Vendor signatures authenticate code and the update manifest, artifact
-hashes bind the whole slot, and the signed UKI supplies the shared release identity.
+kernel has a stable public policy authority, and every protected root requires Secure
+Boot, IPE, a verified root and the TPM floor (`/usr/share/werewolf/tpm/protocol` is
+`3`). Vendor signatures authenticate code and the update manifest, artifact hashes bind
+the whole slot, and the signed UKI's `werewolf.channel` and `werewolf.index` name the
+release.
 
-### Machine authority outside the published root
+### Firmware and TPM
 
-The explicit `2-firmware` enrollment mode leaves embedded-key roots unchanged and reads
-the single authenticated firmware Platform Key as its TPM permit authority: howl
-installs a unique machine owner certificate as PK/KEK, which administer firmware, and
-the code certificate in db, which authorizes execution. Firmware must start outside
-setup mode with exactly that trust; stage0 reads bounded EFI signature-list data before
-workloads and refuses ambiguous or missing keys. Host-side provisioning defines the NV
-policy for that public machine key and signs its factory record; the nonce, journal and
-reset credentials stay machine-specific, and boot still requires a nonzero PCR, an
-authenticated journal, a protected hierarchy and the exact pair.
+Firmware on every provider admits the image's own boot certificate and no other signer;
+stage0 requires Secure Boot on, setup mode off, and that the EFI `db` less `dbx` is
+exactly that certificate before workloads. AWS and GCP enroll it as the whole PK, KEK
+and db. Azure keeps Microsoft's PK, since a custom PK leaves its firmware in setup mode,
+and revokes Microsoft's UEFI CAs in `dbx` so only the image's signer remains. The
+VM's TPM starts empty and its first boot makes it the machine's own. No machine key,
+nonce or credential exists on the host, so nothing a host keeps can authorize a release.
 
-### Update transport and retirement
+### Update channel and retirement
 
-The published root pins its vendor image channel and manifest key independently of the
-machine permit key; image fetching is separate from the host permit endpoint, and
-configuration cannot authorize code or reset NV. Permit requests carry the machine
-nonce, candidate identity, protected predecessor and retained PCR; the local authority
-authenticates vendor manifests and release/PCR mappings before signing a transition,
-and the [signed transport declaration](machine-transport.md) binds TLS trust to the
-nonce. Several Lima guests share a host listener or declare isolated ones; immutable
-host/port declarations bound the endpoint, which signed config cannot widen. Commit
-retains both releases, replacement retires only the inactive one, once, and rollback
-and unhealthy-trial fallback reuse that authorization without lowering the floor.
+A published image follows the channel `SOURCE/FORM/PROVIDER` of
+`release/protected/trust.json`'s source, `https://dist.werewolf-linux.org/boot/v1`. The
+root pins that channel and the image key; configuration cannot authorize code or lower
+the floor. The machine's updater fetches the head as `_update`, requires the running
+channel and a later index, and has the mount broker raise the floor to the running
+release's index before overwriting the inactive slot. Commit, failed-trial fallback and
+operator rollback touch no TPM state.
 
 ### Publication gates
 
 Playground is published too, so the default command has a disk. CI compiles pinned IPE
-kernels and measured stubs, cached by source, architecture and public signer bytes;
-builds twice with the same stable keys and metadata and compares the signed artifacts
-exactly; keeps PEM secrets in private temporary files, verified against their
-certificate first; fixes PE signing time; tests firmware authentication, a missing TPM,
-wrong enrollment, tampering and the complete A/B lifecycle on the artifacts; and uploads
-immutable objects before signed heads. Missing keys refuse; nothing unsigned is
-published. Only after these gates pass does the consumer take the profile as default.
+kernels and stubs, cached by source, architecture and public signer bytes; builds twice
+with the same stable keys and metadata and compares the signed artifacts exactly; keeps
+PEM secrets in private temporary files, verified against their certificate first; fixes
+PE signing time; tests firmware authentication, a missing TPM, tampering and the
+complete A/B lifecycle on the artifacts; and uploads immutable objects before signed
+heads. `release/form-images` plans each release's index, one past the last published,
+and `release/publish-protected` refuses one that does not advance. Missing keys refuse;
+nothing unsigned is published.
 
 ## Drawbacks
 
-Portable machine enrollment adds a firmware trust parser and a second signing authority
-to audit; production needs a dedicated signing identity and protected CI secrets; host
-permit publication stays an availability dependency.
+Production needs a dedicated signing identity and protected CI secrets. Every machine
+of a channel trusts one boot certificate, which running VMs cannot rotate.
 
 ## Alternatives Considered
 
 Sharing a publisher private key with clients or guests defeats code authentication.
 Baking a unique machine key into each root requires a source build for every consumer.
-Reusing legacy boot trust authorizes older signed kernels without mandatory
-enforcement, and dropping TPM retirement makes retired code bootable again.
+A machine-owner PK with host-held TPM credentials (protocol v2) needs a signer at every
+update. Reusing legacy boot trust authorizes older signed kernels without mandatory
+enforcement, and dropping the floor makes retired code bootable again.
 
 ## Security Considerations
 
-Firmware enrollment, measured code identity and NV authorization must agree before
-workload handover; key sourcing changes need tests for setup mode, foreign and duplicate
-PKs, legacy db entries and key substitution. Mutable config, a mirror or a compromised
-guest must not choose a new signer or authorize retired history.
+Firmware enrollment, signed code identity and the TPM floor must agree before workload
+handover; key sourcing changes need tests for setup mode, foreign PKs and key
+substitution. Mutable config, a mirror or a compromised guest must not choose a new
+signer or boot retired history.
 
 ## Reliability Considerations
 
-Test a fresh Mac and cache with no Ubuntu helper, retained-authority restart,
-missing-state refusal, several Lima guests, publisher restart, interrupted downloads,
-publication ordering, and the real VM/TPM cut tests and A/B matrix in both modes.
+Test a fresh Mac and cache with no Ubuntu helper, missing-state refusal, several
+machines, interrupted downloads, publication ordering, and the update lifecycle with
+power cuts in `test/check-independent-updates`.

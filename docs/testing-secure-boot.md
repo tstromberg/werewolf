@@ -41,11 +41,8 @@ Linux needs `python3-virt-firmware`, OVMF and `qemu-efi-aarch64`; on macOS
 [tools/enroll-boot](../tools/enroll-boot) uses hash-pinned firmware and the
 Mac's own Python. `SECUREBOOT_DIR` may supply `code.fd` and `vars.fd`; the
 pinned systemd stubs are `out/tools/stubs/ARCH/linux.efi.stub`, and
-`tools/build-tpm-stub OUT` builds the measured one on Linux, with no key.
-[test/check-boot-authority](../test/check-boot-authority) boots a signed
-probe against real EFI variables: valid enrollment, a foreign PK, KEK or db,
-extra db trust and setup mode, for `--tpm-firmware` builds, whose machine
-authority is the firmware's PK.
+`tools/build-tpm-stub OUT` builds the one protected images use, on Linux, with no
+key.
 
 ## Provider A/B upgrades and rollbacks
 
@@ -88,84 +85,47 @@ cloud targets make billable resources: use test credentials.
 
 ## TPM
 
-A TPM records which releases may boot, so an older signed release cannot be
-booted again ([design/tpm-ab-retirement.md](design/tpm-ab-retirement.md)).
-The protocol is tested on the host, against swtpm, before any guest is:
-
-- [test/check-tpm-policy](../test/check-tpm-policy) (Linux, swtpm and
-  tpm2-tools) tests signed monotonic NV writes, replay, altered data,
-  undefine and hierarchy-reset refusal; `TPM_POLICY_PROBE=build/host/tpm-policy`
-  runs werewolf's own TPM commands through it.
-- `python3 test/check-tpm-ab` tests the exact-pair replacement protocol
-  with real TPM commands: both members, operator rollback, wrong, zero and
-  changed PCRs, replayed state, altered signatures, direct writes, index
-  removal, hierarchy resets, weaker provisioning, and eleven boundary models
-  with simulator restarts, one a dropped `NV_Extend` reply, after which
-  recovery reads the anchor and refuses a blind retry.
-- `python3 test/check-tpm-enrollment` tests native enrollment against swtpm
-  on macOS or Linux: private file modes, repeat refusal, restart, supervisor
-  crash recovery and cleanup.
-
-`make IPE=1 check-tpm-guest` builds disposable TPM-gated releases and boots
-QEMU with persistent swtpm state (`swtpm`, `tpm2-tools`, `systemd-boot-efi`,
-and a TPM-enabled `UKI_STUB`: Alpine's stub does not measure, and a
-mandatory boot refuses a zero PCR 11). It checks the signed identity, exact
-root, predicted PCRs and posture, then commit, operator rollback, failed
-trials and power cuts around the NV extension, killing VM and simulator
-while keeping disk, variables and NV; then it restores retired A, installs a
-signed but unmeasured UKI and removes the TPM, each of which stage0 must
-refuse. Only logs and `evidence.jsonl` are kept. The build takes
-`--tpm-pub` (or `WEREWOLF_TPM_PUB`) and `WEREWOLF_BOOT_STATE`, the signed
-factory pair, and `tools/tpm-enroll` initialises a host-controlled TPM.
-
-Enrollment from a cloud is tested without deploying one. `test/cloud-enrollment`
-checks SDK replies and the immutable AWS and GCP TPM identity pins, and
-`python3 test/check-cloud-tpm-activation`, with `build/host/tpm-bootstrap`
-and `tpm-policy` built, checks quotes, publisher-signed encrypted capsules,
-provisioning, tamper and replay against fresh simulators
-([design/cloud-tpm-enrollment.md](design/cloud-tpm-enrollment.md),
-[design/tpm-bootstrap-protocol.md](design/tpm-bootstrap-protocol.md)).
-`make IPE=1 check-tpm-bootstrap-guest` boots the separate signed enrollment
-UKI, whose agent runs alone as PID 1 over a bounded virtio channel: PCR and
-EK binding, encrypted provisioning, protected readback and reboot must
-hold; wrong machines or PCRs, foreign signatures, invalid AEAD, unsigned or
-oversized capsules, replay, unmeasured images, absent TPMs, tampered UKIs
-and setup mode must refuse. It also cuts the power at the owner-auth,
-NV-definition and NV-extension boundaries and boots a measured recovery
-image; `make check-tpm-recovery` tests all twelve provisioning boundaries
-on macOS or Linux, keeping only public manifests, quotes and logs.
+Each release channel has one TPM counter, its floor, and a release boots only if its
+index reaches it ([design/independent-updates.md](design/independent-updates.md)). `make
+check-tpm-floor`, also part of `make test` as `_test/tpm-floor`, runs
+[test/check-tpm-floor](../test/check-tpm-floor) against swtpm with
+`build/host/tpm-floor`, which drives lib/tpm.zig's code as stage0 and the mount broker
+do. A fresh TPM must enroll at the release's index, and an enrollment cut after each
+step must complete on the next boot. Then raw commands play guest root: undefining,
+redefining, writing, locking or re-passwording the counter, clearing the TPM or
+re-enabling clear, reopening the platform hierarchy and emptying the owner or lockout
+password must all fail, and incrementing must work. A release below the floor, another
+channel's release, a TPM someone else owns, an owner policy and a different counter at
+the handle must be refused.
 
 ## Local deployment and publication
 
 `howl run --build` is the protected path: an arm64 Lima QEMU guest on macOS, protected
-QEMU on Linux, with host-managed enrollment, HTTPS image publication and permits
-([design/secure-local-deployment.md](design/secure-local-deployment.md)). `make
-check-secure-lima` and, on Linux, `make check-secure-qemu` drive it: creation, several
-signed updates, operator rollback, restart with the same NV authorization, kills of VM
-and simulator around NV extension, resume of a completed update, and an unhealthy
-counted trial recovering its predecessor; PCR 11 must match the booted release's
-prediction, and writable-code execution, verified-root writes and reauthorizing retired
-history must be refused. `make check-run-cache` (macOS, an isolated checkout) measures
-repeat runs and resume, refusing repeated builders, changed boot ids and replaced
-authority; `make check-shared-boot` (arm64 Lima) seals one vendor artifact, withholds
-the vendor keys and enrolls two machines, which must share code and PCRs with distinct
-owner keys, nonces and anchors ([design/boot-images.md](design/boot-images.md)).
+QEMU on Linux ([design/secure-local-deployment.md](design/secure-local-deployment.md)).
+`make check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
+[test/check-independent-updates](../test/check-independent-updates): `howl create
+--build` makes release A (index 1) of a channel the test serves as static HTTPS files
+under a private CA, and boots it under Secure Boot, IPE and a fresh TPM, which it must
+enroll at floor 1. A root session must not open the TPM, and IPE must refuse code
+outside the verified root. The machine's own updater then installs B and C from the
+channel; operator rollback to the retained release, a power cut before and after the
+floor's increment, a restored disk holding retired A (stage0 must refuse it, the TPM
+kept) and a failed trial that falls back with the floor unchanged follow. No host
+service but the file server takes part.
 [test/check-published-lifecycle](../test/check-published-lifecycle) runs the
-production-signed playground bundles under isolated Lima enrollments with no source tree
-or vendor keys, and emits publication gates only when every check passes.
+production-signed playground bundles under isolated enrollments with no source tree or
+vendor keys, and emits publication gates only when every check passes.
 
-The host-side pieces have suites of their own, run by `make test`,
-`_test/local-publisher` and
+The host-side pieces have suites of their own, run by `make test` and
 [protected-images.yml](../.github/workflows/protected-images.yml):
 `test/local-prerequisites` (cache tampering, incomplete publication, signer custody,
 kernel and stub invalidation, interrupted builds), `test/boot-images` and
 `test/boot-download` (admission: foreign and altered signatures, weak profiles,
-unknown fields, size bounds, torn heads, replay, equivocation),
+unknown fields, release identity, size bounds, torn heads, replay, equivocation), and
 `test/protected-release` and `test/protected-publication` (signing custody, ordered
-uploads, interruption recovery, immutable collisions, release floors), and the
-[machine-transport](design/machine-transport.md) tests, which reject foreign machines,
-endpoints, signers and every single-byte mutation. Candidate CI has no publication
-permission ([design/protected-downloads.md](design/protected-downloads.md)).
+uploads, interruption recovery, immutable collisions, release floors, an index that
+does not advance). Candidate CI has no publication permission
+([design/protected-downloads.md](design/protected-downloads.md)).
 
 To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make`
 with a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,

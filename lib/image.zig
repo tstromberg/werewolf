@@ -161,6 +161,10 @@ const config_rules = [_]struct { []const u8, Want, []const u8 }{
     .{ "CONFIG_POSIX_CPU_TIMERS_TASK_WORK", .yes, "closes CVE-2025-38352's race" },
     .{ "CONFIG_AUDIT", .yes, "init logs every refused exec through audit (lib/audit.zig)" },
     .{ "CONFIG_AUDITSYSCALL", .yes, "audit's system call rules, the refused-exec rule among them" },
+    .{ "CONFIG_TCG_TPM", .yes, "stage0 holds each release to its TPM floor (lib/tpm.zig)" },
+    .{ "CONFIG_TCG_TIS", .yes, "the TIS-interface TPMs QEMU, Lima and clouds give" },
+    .{ "CONFIG_TCG_CRB", .yes, "the CRB-interface TPMs clouds give" },
+    .{ "CONFIG_SERIAL_8250_PCI", .yes, "AWS Graviton's console is a PCI 16550 (1d0f:8250)" },
 };
 
 /// ConfigMiss is a kernel config option that breaks its rule.
@@ -494,6 +498,10 @@ test configMisses {
         \\CONFIG_LSM="landlock,lockdown"
         \\CONFIG_AUDIT=y
         \\CONFIG_AUDITSYSCALL=y
+        \\CONFIG_TCG_TPM=y
+        \\CONFIG_TCG_TIS=y
+        \\CONFIG_TCG_CRB=y
+        \\CONFIG_SERIAL_8250_PCI=y
         \\CONFIG_HID=y
     ;
     try testing.expectEqualStrings("", configValue(config, "CONFIG_TLS"));

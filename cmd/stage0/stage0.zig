@@ -35,7 +35,6 @@ pub fn main(init: std.process.Init) !void {
     if (boot_line.len == 0) fail("cannot read /proc/cmdline", .{});
     var boot = cmdline.parse(boot_line, &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
-    if (boot.bootstrap) fail("enrollment boot cannot hand over a workload", .{});
 
     // The kernel forces lockdown to confidentiality from its config, so no
     // one, root included, reads its memory (kcore, perf reads); raise it here
@@ -163,13 +162,26 @@ pub fn main(init: std.process.Init) !void {
         .{ img, @tagName(linux.errno(rc)) },
     );
     const root_ms = bootMs();
-    const journal = if (boot.slots != null) "/boot/state" else "";
-    const protected_rollback = tpm.boot(io, gpa, boot.release, journal) catch |err|
-        fail("TPM rollback: {s}; not handing over", .{@errorName(err)});
-    if (protected_rollback) say(
-        "TPM release authorization checked; reset authority protected",
-        .{},
-    );
+    // Firmware that admits a second signer would boot that signer's loader
+    // beside werewolf, outside every check below.
+    if (boot.native and boot.secure) {
+        firmwareTrust(gpa) catch |err| fail(
+            "Secure Boot: {s}; not handing over",
+            .{@errorName(err)},
+        );
+        say("Secure Boot admits only this image's signer", .{});
+    }
+    // A release boots only at or above its channel's floor, which this
+    // first boot sets and nothing later lowers (lib/tpm.zig).
+    const floor = releaseFloor(io, boot) catch |err|
+        fail("TPM floor: {s}; not handing over", .{@errorName(err)});
+    if (floor) |f| {
+        if (f.index < f.floor) fail(
+            "TPM floor: release {d} is below its channel's floor, {d}; not handing over",
+            .{ f.index, f.floor },
+        );
+        say("TPM floor {d}: release {d} admitted; reset authority sealed", .{ f.floor, f.index });
+    }
     if (boot.slot) |slot|
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
@@ -216,11 +228,13 @@ pub fn main(init: std.process.Init) !void {
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
-    // Pass init only WEREWOLF_BOOT, each phase's end in boot-clock ms. The
-    // kernel puts every NAME=value it does not take into stage0's
-    // environment, and it must not reach every process on the machine.
+    // Pass init only WEREWOLF_BOOT, each phase's end in boot-clock ms, and
+    // WEREWOLF_ROLLBACK, the TPM floor found. The kernel puts every
+    // NAME=value it does not take into stage0's environment, and it must not
+    // reach every process on the machine.
     var env: std.process.Environ.Map = .init(gpa);
-    if (protected_rollback) try env.put("WEREWOLF_ROLLBACK", "checked");
+    var marker: [tpm.Marker.max]u8 = undefined;
+    if (floor) |f| try env.put("WEREWOLF_ROLLBACK", try f.format(&marker));
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
         try gpa.print(
             "kernel={d} disk={d} slot={d} root={d}",
@@ -230,6 +244,29 @@ pub fn main(init: std.process.Init) !void {
         try gpa.print("kernel={d} disk={d} root={d}", .{ kernel_ms, disk_ms, root_ms }));
     const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
+}
+
+/// releaseFloor enrolls or checks the TPM for a release that names its
+/// channel, and returns what it found; null for an image without the floor.
+/// A root that requires the floor never boots without a release identity.
+fn releaseFloor(io: std.Io, boot: cmdline.Cmdline) !?tpm.Marker {
+    const required = linux.errno(linux.access(
+        "/root" ++ tpm.metadata ++ "/protocol",
+        linux.F_OK,
+    )) ==
+        .SUCCESS;
+    const channel = boot.channel orelse {
+        if (required) return error.MissingSealedBootIdentity;
+        return null;
+    };
+    if (!required) return error.UnexpectedReleaseIdentity;
+    var device = try tpm.Device.open();
+    defer device.close();
+    return .{
+        .handle = tpm.handle(channel),
+        .floor = try device.boot(io, channel, boot.index.?),
+        .index = boot.index.?,
+    };
 }
 
 fn enforceIpe(io: std.Io, gpa: std.mem.Allocator, root: [32]u8) !void {
@@ -534,6 +571,107 @@ fn writeFile(path: [:0]const u8, data: []const u8) bool {
 
 /// readAll returns path's contents, or "". It reads to the end because
 /// procfs and sysfs report a size of 0.
+/// firmwareTrust requires that the signers firmware admits, db's
+/// certificates less dbx's, are exactly the image's boot certificate, which
+/// howl puts in the verified root. An extra one is named by its hash: a
+/// cloud template's CA, or one an enrollment left behind.
+fn firmwareTrust(gpa: std.mem.Allocator) !void {
+    const vars = "/sys/firmware/efi/efivars";
+    const own = readAll(gpa, "/root/usr/share/werewolf/boot.der");
+    if (own.len == 0) return error.NoBootCertificate;
+    const db_text = readAll(gpa, vars ++ "/db-d719b2cb-3d3a-4596-a3bc-dad00e67656f");
+    const dbx_text = readAll(gpa, vars ++ "/dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f");
+    const db = try signatures(gpa, db_text, x509);
+    // dbx revokes a signer by its whole certificate or by its SHA-256.
+    const revoked_certs = try signatures(gpa, dbx_text, x509);
+    const revoked_hashes = try signatures(gpa, dbx_text, sha256);
+    var found = false;
+    var extra: usize = 0;
+    for (db) |certificate| {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(certificate, &digest, .{});
+        var revoked = false;
+        for (revoked_certs) |r| revoked = revoked or std.mem.eql(u8, r, certificate);
+        for (revoked_hashes) |r| revoked = revoked or std.mem.eql(u8, r, &digest);
+        if (revoked) continue;
+        if (std.mem.eql(u8, certificate, own)) {
+            found = true;
+            continue;
+        }
+        // List every signer firmware still admits, so one boot names the
+        // whole set to revoke; a hash fits a line, a certificate does not.
+        extra += 1;
+        say("Secure Boot admits another signer, sha256 {x}", .{&digest});
+    }
+    if (extra > 0) return error.ForeignSignerInDb;
+    if (!found) return error.SignerNotInDb;
+}
+
+// EFI_CERT_X509_GUID and EFI_CERT_SHA256_GUID, the signature-list types
+// stage0 reads: whole certificates and bare SHA-256 digests.
+const x509 = [16]u8{
+    0xa1,
+    0x59,
+    0xc0,
+    0xa5,
+    0xe4,
+    0x94,
+    0xa7,
+    0x4a,
+    0x87,
+    0xb5,
+    0xab,
+    0x15,
+    0x5c,
+    0x2b,
+    0xf0,
+    0x72,
+};
+const sha256 = [16]u8{
+    0x26,
+    0x16,
+    0xc4,
+    0xc1,
+    0x4c,
+    0x50,
+    0x92,
+    0x40,
+    0xac,
+    0xa9,
+    0x41,
+    0xf9,
+    0x36,
+    0x93,
+    0x43,
+    0x28,
+};
+
+/// signatures lists a database's entries of one type (x509 or sha256) as
+/// efivarfs shows it: four attribute bytes, then EFI_SIGNATURE_LISTs, each a
+/// type GUID, three sizes, a header and same-sized entries of owner GUID and
+/// data. An absent variable holds nothing; a malformed one is a refusal.
+fn signatures(gpa: std.mem.Allocator, variable: []const u8, kind: [16]u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    if (variable.len == 0) return out.items;
+    if (variable.len < 4) return error.MalformedSignatureList;
+    var rest = variable[4..];
+    while (rest.len > 0) {
+        if (rest.len < 28) return error.MalformedSignatureList;
+        const list_size = std.mem.readInt(u32, rest[16..20], .little);
+        const header_size = std.mem.readInt(u32, rest[20..24], .little);
+        const entry_size = std.mem.readInt(u32, rest[24..28], .little);
+        if (list_size < 28 or list_size > rest.len or header_size > list_size - 28)
+            return error.MalformedSignatureList;
+        var entries = rest[28 + header_size .. list_size];
+        if (entry_size <= 16 or entries.len % entry_size != 0) return error.MalformedSignatureList;
+        while (entries.len > 0) : (entries = entries[entry_size..]) {
+            if (std.mem.eql(u8, rest[0..16], &kind)) try out.append(gpa, entries[16..entry_size]);
+        }
+        rest = rest[list_size..];
+    }
+    return out.items;
+}
+
 fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
     const fd = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return "";
@@ -574,6 +712,42 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
+
+test signatures {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const owner: [16]u8 = @splat(0xee);
+    var variable: std.ArrayList(u8) = .empty;
+    try variable.appendSlice(gpa, &.{ 0x27, 0, 0, 0 }); // attributes
+    // Two certificates of three bytes in one X.509 list, then a hash list.
+    try variable.appendSlice(gpa, &x509);
+    try variable.appendSlice(gpa, &.{ 28 + 2 * 19, 0, 0, 0, 0, 0, 0, 0, 19, 0, 0, 0 });
+    for ([_][]const u8{ &.{ 1, 2, 3 }, &.{ 4, 5, 6 } }) |certificate| {
+        try variable.appendSlice(gpa, &owner);
+        try variable.appendSlice(gpa, certificate);
+    }
+    try variable.appendSlice(gpa, &sha256);
+    try variable.appendSlice(gpa, &.{ 28 + 48, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0 });
+    try variable.appendSlice(gpa, &owner);
+    try variable.appendNTimes(gpa, 0xab, 32);
+    const certs = try signatures(gpa, variable.items, x509);
+    try testing.expectEqual(@as(usize, 2), certs.len);
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, certs[0]);
+    try testing.expectEqualSlices(u8, &.{ 4, 5, 6 }, certs[1]);
+    // The same bytes read for their one hash entry, not the certificates.
+    const hashes = try signatures(gpa, variable.items, sha256);
+    const expected_hash: [32]u8 = @splat(0xab);
+    try testing.expectEqual(@as(usize, 1), hashes.len);
+    try testing.expectEqualSlices(u8, &expected_hash, hashes[0]);
+    try testing.expectEqual(@as(usize, 0), (try signatures(gpa, "", x509)).len);
+    try testing.expectEqual(@as(usize, 0), (try signatures(gpa, &.{ 0x27, 0, 0, 0 }, x509)).len);
+    // A list claiming more than the variable holds, then entries of no size.
+    const short = variable.items[0 .. variable.items.len - 1];
+    try testing.expectError(error.MalformedSignatureList, signatures(gpa, short, x509));
+    variable.items[4 + 24] = 16;
+    try testing.expectError(error.MalformedSignatureList, signatures(gpa, variable.items, x509));
+}
 
 test identify {
     var b: [4096]u8 = @splat(0);

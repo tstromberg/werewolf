@@ -17,9 +17,10 @@ with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
 
     inputs = ['howl', root / 'form', 'x86_64', 'kernel', 'ipe.key', 'ipe.crt',
               root / 'fixture-build', 'https://127.0.0.1/image', '20261012T000000Z']
-    protected, output = ab_build.arguments(*inputs, 'boot.key', 'boot.crt', 'permit.pub')
+    protected, output = ab_build.arguments(*inputs, 'boot.key', 'boot.crt', True, index=3)
     assert protected[1] == '_build' and protected[-2:] == ['prebuilt', 'qcow2']
-    assert '--boot-native' in protected and '--tpm-pub' in protected
+    assert '--boot-native' in protected and '--tpm' in protected
+    assert protected[protected.index('--image-index') + 1] == '3'
     assert not any(flag.startswith('--disable') for flag in protected)
     secure, _ = ab_build.arguments(*inputs, 'boot.key', 'boot.crt')
     assert '--disable=tpm' in secure

@@ -43,8 +43,9 @@ mitigated, by choice.
     on its own if it fails.
 
 The fine print: you must trust the hypervisor, your application's bugs are still yours,
-and every host but QEMU and Lima currently needs `--disable=secureboot,tpm,ipe`. The
-[security guide](docs/security.md) covers every control and its limits.
+and every host but QEMU, Lima and, with `--build`, GCP, AWS and Azure currently needs
+`--disable=secureboot,tpm,ipe`. The [security guide](docs/security.md) covers every
+control and its limits.
 
 ## Try it
 

@@ -485,8 +485,6 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
     }
     // Remove what create kept: the disks, and the config tar, which holds
     // secrets.
-    if (on == .lima or on == .qemu or
-        on == .bhyve) @import("local-secure.zig").stopPublisher(io, gpa, dir);
     Dir.cwd().deleteTree(io, dir) catch {};
 }
 

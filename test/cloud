@@ -197,8 +197,10 @@ cp "$raw" "${keep%.log}.raw.log"
 seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
 seen 'stage0: Secure Boot enforced outside setup mode' && ok secure-boot ||
 	fail "secure-boot: stage0 did not verify firmware enforcement outside setup mode"
-seen 'stage0: TPM release authorization checked; reset authority protected' && ok tpm-authorization ||
-	fail "tpm-authorization: stage0 did not verify release authorization and protected reset authority"
+seen "stage0: Secure Boot admits only this image's signer" && ok firmware-trust ||
+	fail "firmware-trust: stage0 did not find the image's signer alone in db less dbx"
+seen 'stage0: TPM floor [0-9]+: release [0-9]+ admitted; reset authority sealed' && ok tpm-floor ||
+	fail "tpm-floor: stage0 did not take the TPM and admit this release at its channel's floor"
 seen 'stage0: IPE: only this root image may execute; policy administration removed' && ok ipe-enforced ||
 	fail "ipe-enforced: stage0 did not enforce the root policy and remove policy administration"
 if seen 'werewolf.disable=|posture: .*disabled='; then

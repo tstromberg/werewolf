@@ -6,12 +6,37 @@ import json
 import os
 from pathlib import Path
 import platform
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 
 HOWL = str(Path(sys.argv.pop(1)).resolve())
+FILES = ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi')
+NATIVE = ('werewolf.native=1 werewolf.secure=1 werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 '
+          'werewolf.esp=57E1-F000')
+
+
+def build_id(files):
+    digest = hashlib.sha256()
+    for name in FILES:
+        digest.update(('%s %s %d\n' % (name, files[name]['sha256'], files[name]['size'])).encode())
+    return digest.hexdigest()
+
+
+def pe(machine, sections):
+    """A minimal PE32+ image holding sections, as tools/uki.zig reads one."""
+    start = (0x40 + 4 + 20 + 112 + 40 * len(sections) + 511) // 512 * 512
+    table, body = b'', b''
+    for name, data in sections:
+        at = start + len(body)
+        table += struct.pack('<8sIIIIIIHHI', name, len(data), at, len(data), at, 0, 0, 0, 0, 0x40000040)
+        body += data
+    headers = (b'MZ' + bytes(0x3a) + struct.pack('<I', 0x40) + b'PE\0\0' +
+               struct.pack('<HHIIIHH', machine, len(sections), 0, 0, 0, 112, 0x22) +
+               struct.pack('<H', 0x20b) + bytes(30) + struct.pack('<II', 512, 512) + bytes(72) + table)
+    return headers + bytes(start - len(headers)) + body
 
 
 class Admission(unittest.TestCase):
@@ -26,17 +51,11 @@ class Admission(unittest.TestCase):
         der = subprocess.check_output(['openssl', 'x509', '-in', str(self.root / 'vendor.crt'), '-outform', 'DER'])
         image = json.loads(Path('lib/testdata/prebuilt/image.json').read_text())
         image['arch'] = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
-        image['boot_context'] = '0' * 64
         image['files']['uki.efi'] = dict(size=1, sha256='1' * 64)
-        digest = hashlib.sha256()
-        for name in ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi'):
-            artifact = image['files'][name]
-            digest.update(('%s %s %d\n' % (name, artifact['sha256'], artifact['size'])).encode())
-        image['build'] = digest.hexdigest()
-        self.manifest = dict(format='werewolf-boot/1', form='playground', image=image,
+        image['build'] = build_id(image['files'])
+        self.manifest = dict(format='werewolf-boot/2', form='playground', image=image,
             disk=dict(size=1, sha256='0' * 64), raw_size=8 << 30,
-            boot_certificate=hashlib.sha256(der).hexdigest(), permit_host='192.168.5.2',
-            permit_port=9443, pcr11='1' * 64)
+            boot_certificate=hashlib.sha256(der).hexdigest())
 
     def invoke(self, manifest=None, signer='vendor', mutate=False, trust='vendor'):
         head = self.root / 'boot.json'
@@ -73,11 +92,12 @@ class Admission(unittest.TestCase):
 
     def test_signed_weak_profiles_are_rejected(self):
         for fields, value, reason in [
+            (('format',), 'werewolf-boot/1', 'BadBootImageProfile'),
+            (('image', 'format'), 'werewolf-image/1', 'NotAnIpeImage'),
             (('image', 'ipe'), False, 'NotAnIpeImage'),
-            (('image', 'boot_context'), None, 'BadBootImageProfile'),
-            (('permit_port',), 0, 'BadBootImageProfile'),
-            (('permit_host',), '127.0.0.1', 'BadBootImageProfile'),
-            (('pcr11',), '0' * 64, 'UnmeasuredBootImage'),
+            (('image', 'channel_id'), '0' * 63, 'BadImageRelease'),
+            (('image', 'channel_id'), 'A' * 64, 'BadImageRelease'),
+            (('image', 'index'), 0, 'BadImageRelease'),
             (('raw_size',), 32 << 30, 'BadBootImageSize'),
             (('disk', 'size'), 3 << 30, 'BadBootImageSize'),
             (('form',), '../foreign', 'BadBootImageProfile'),
@@ -94,6 +114,45 @@ class Admission(unittest.TestCase):
 
     def test_signed_unknown_fields_cannot_change_security_policy(self):
         self.refused(dict(self.manifest, allow_insecure=True), 'UnknownField')
+        # Protocol v2's permit endpoint, PCR 11 and boot context are no longer fields.
+        self.refused(dict(self.manifest, permit_host='192.168.5.2', permit_port=9443, pcr11='1' * 64),
+                     'UnknownField')
+        self.refused(dict(self.manifest, image=dict(self.manifest['image'], boot_context='0' * 64)), 'UnknownField')
+
+    def test_signed_uki_must_name_the_manifests_channel_and_index(self):
+        image = self.manifest['image']
+        release = ' werewolf.channel=%s werewolf.index=%d'
+        foreign = hashlib.sha256(b'https://foreign.test/shop').hexdigest()
+        slot, head = self.root / 'slot', self.root / 'prebuilt' / image['arch']
+        slot.mkdir()
+        head.mkdir(parents=True)
+        payloads = {name: ('fixture:' + name).encode() for name in FILES[:-1]}
+        disk = b'compressed-disk-fixture'
+        (self.root / 'disk.img.zst').write_bytes(disk)
+        self.manifest['disk'] = dict(size=len(disk), sha256=hashlib.sha256(disk).hexdigest())
+        for line, reason in [
+            # The identity holds and the sections match; the unsigned PE then fails Authenticode.
+            (NATIVE + release % (image['channel_id'], image['index']), 'BootImageToolFailed'),
+            (NATIVE + release % (foreign, image['index']), 'WrongBootIdentity'),
+            (NATIVE + release % (image['channel_id'], image['index'] + 1), 'WrongBootIdentity'),
+            (NATIVE, 'WrongBootIdentity'),
+            (NATIVE + ' werewolf.tpm=2 werewolf.release=' + '1' * 64, 'BadBootIdentity'),
+            (None, 'MissingBootIdentity'),
+        ]:
+            with self.subTest(line=line):
+                sections = [(b'.linux', payloads['vmlinuz']), (b'.initrd', payloads['stage0.zst'])]
+                if line is not None:
+                    sections.append((b'.cmdline', line.encode() + b'\0'))
+                payloads['uki.efi'] = pe(0xaa64 if image['arch'] == 'aarch64' else 0x8664, sections)
+                for name, raw in payloads.items():
+                    (slot / name).write_bytes(raw)
+                image['files'] = {name: dict(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                                  for name, raw in payloads.items()}
+                image['build'] = build_id(image['files'])
+                (head / 'latest.json').write_text(json.dumps(image))
+                subprocess.run(['openssl', 'dgst', '-sha256', '-sign', self.root / 'vendor.key',
+                    '-out', head / 'latest.json.sig', head / 'latest.json'], check=True, capture_output=True)
+                self.refused(self.manifest, reason)
 
 
 if __name__ == '__main__':

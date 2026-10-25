@@ -117,8 +117,7 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
     args, output = ab_build.arguments(
         howl, form, arch, kernel, key, cert, root / 'build', channel, version,
         env.get('AB_BOOT_KEY', key) if mode == 'secure' else None,
-        env.get('AB_BOOT_CRT', cert) if mode == 'secure' else None,
-        env.get('WEREWOLF_TPM_PUB'))
+        env.get('AB_BOOT_CRT', cert) if mode == 'secure' else None)
     run(args, 'build-' + label)
     ab_build.export(output, form, arch, release)
     if mode == 'secure':

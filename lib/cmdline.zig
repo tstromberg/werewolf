@@ -84,38 +84,47 @@ pub const Cmdline = struct {
     /// disable names the protections the machine was made without (howl's
     /// --disable), less any its provider supplies regardless.
     disable: Protections = .empty,
-    /// bootstrap is a rootless enrollment boot; stage0 must never hand it over.
-    bootstrap: bool = false,
-    /// recovery is a separate signed bootstrap; never inferred from TPM state.
-    recovery: bool = false,
-    tpm: bool = false,
-    release: ?[32]u8 = null,
+    /// channel is the release channel's 32-byte identity, from the signed UKI;
+    /// with index it selects the machine's TPM floor (docs/design/independent-updates.md).
+    channel: ?[32]u8 = null,
+    /// index is this release's place in its channel: 1, 2, 3, ...
+    index: ?u64 = null,
 };
 
 const Key = std.meta.FieldEnum(Cmdline);
 
-test "TPM enforcement requires sealed secure native identity and rejects overrides" {
+test "the TPM floor requires a sealed secure native release and rejects overrides" {
     const t = std.testing;
     var f: Failure = .{};
     const native = "werewolf.native=1 werewolf.secure=1 " ++
         "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000";
-    const release = " werewolf.release=" ++ @as([64]u8, @splat('a'));
-    try t.expect(parse(native ++ " werewolf.tpm=2" ++ release, &f).?.tpm);
+    const channel = " werewolf.channel=" ++ @as([64]u8, @splat('a'));
+    const release = parse(native ++ channel ++ " werewolf.index=42", &f).?;
+    try t.expectEqual(@as(u64, 42), release.index.?);
+    try t.expectEqual(@as(u8, 0xaa), release.channel.?[31]);
     try t.expect(parse("werewolf.disable=secureboot,tpm,ipe", &f).?.disable.eql(.full));
     // Signed native boot without the TPM or IPE, as QEMU makes one.
     try t.expect(parse(native ++ " werewolf.disable=tpm,ipe", &f).?.secure);
     for ([_][]const u8{
-        native ++ " werewolf.tpm=2",
-        native ++ release,
-        native ++ " werewolf.tpm=1" ++ release,
-        native ++ " werewolf.tpm=2" ++ release ++ release,
-        native ++ " werewolf.tpm=2" ++ release ++ " werewolf.disable=tpm,ipe",
+        native ++ channel,
+        native ++ " werewolf.index=1",
+        native ++ channel ++ " werewolf.index=0",
+        native ++ channel ++ " werewolf.index=01",
+        native ++ channel ++ " werewolf.index=-1",
+        native ++ channel ++ " werewolf.index=18446744073709551616",
+        native ++ " werewolf.channel=" ++ @as([63]u8, @splat('a')) ++ " werewolf.index=1",
+        native ++ " werewolf.channel=" ++ @as([64]u8, @splat('g')) ++ " werewolf.index=1",
+        native ++ channel ++ channel ++ " werewolf.index=1",
+        native ++ channel ++ " werewolf.index=1 werewolf.disable=tpm,ipe",
         native ++ " werewolf.disable=secureboot,tpm",
+        native ++ " werewolf.tpm=2",
+        native ++ " werewolf.release=" ++ @as([64]u8, @splat('a')),
+        native ++ " werewolf.bootstrap=1",
         "werewolf.disable=secureboot",
         "werewolf.disable=ipe,ipe",
         "werewolf.disable=landlock",
         "werewolf.disable=1",
-        "werewolf.tpm=2" ++ release,
+        channel ++ " werewolf.index=1",
     }) |bad| try t.expect(parse(bad, &f) == null);
 }
 
@@ -162,38 +171,18 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
             .disable => c.disable = protections(v) orelse
                 return refuse(f, "not secureboot, tpm or ipe, comma-separated, each once"),
-            .bootstrap => c.bootstrap = if (isOne(v)) true else return refuse(f, "not 1"),
-            .recovery => c.recovery = if (isOne(v)) true else return refuse(f, "not 1"),
-            .tpm => c.tpm = if (std.mem.eql(u8, v, "2"))
-                true
-            else
-                return refuse(f, "not protocol 2"),
-            .release => {
+            .channel => {
                 var digest: [32]u8 = undefined;
-                if (v.len != 64) return refuse(f, "not a SHA-256 release identity");
-                _ = std.fmt.hexToBytes(&digest, v) catch return refuse(f, "not a SHA-256 identity");
-                c.release = digest;
+                if (v.len != 64) return refuse(f, "not a 64-digit hex channel identity");
+                _ = std.fmt.hexToBytes(&digest, v) catch
+                    return refuse(f, "not a 64-digit hex channel identity");
+                c.channel = digest;
             },
+            .index => c.index = releaseIndex(v) orelse
+                return refuse(f, "not a release index: 1 or more, in decimal"),
         }
     }
-    if (c.bootstrap) {
-        f.word = "werewolf.bootstrap";
-        if (!c.native or !c.secure) return refuse(f, "requires secure native enrollment boot");
-        var allowed: std.EnumSet(Key) = .empty;
-        inline for (.{ Key.native, Key.secure, Key.bootstrap }) |key| allowed.insert(key);
-        if (c.recovery) allowed.insert(.recovery);
-        if (!seen.subsetOf(allowed)) return refuse(
-            f,
-            "cannot carry workload or administration options",
-        );
-    }
-    if (c.recovery and !c.bootstrap) {
-        f.word = "werewolf.recovery";
-        return refuse(f, "requires a signed bootstrap, never a workload boot");
-    }
-    if (c.native and !c.bootstrap and
-        (c.slots == null or c.esp == null or c.root.len > 0))
-    {
+    if (c.native and (c.slots == null or c.esp == null or c.root.len > 0)) {
         f.word = "werewolf.native";
         return refuse(f, "needs native slots and ESP, without a direct root");
     }
@@ -201,13 +190,15 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
         f.word = "werewolf.secure";
         return refuse(f, "requires signed native boot identity");
     }
-    if (c.tpm != (c.release != null) or (c.tpm and !c.secure)) {
-        f.word = "werewolf.tpm";
-        return refuse(f, "requires secure native boot and an exact release identity");
+    if ((c.channel == null) != (c.index == null) or (c.channel != null and !c.secure)) {
+        f.word = "werewolf.channel";
+        return refuse(f, "comes with werewolf.index, on a secure native boot");
     }
     // What a machine lacks cannot also be what it booted with; and the TPM's
-    // record means something only while signed boot code enforces it.
-    if ((c.disable.contains(.secureboot) and c.secure) or (c.disable.contains(.tpm) and c.tpm)) {
+    // floor means something only while signed boot code enforces it.
+    if ((c.disable.contains(.secureboot) and c.secure) or
+        (c.disable.contains(.tpm) and c.channel != null))
+    {
         f.word = "werewolf.disable";
         return refuse(f, "names a protection this boot has");
     }
@@ -231,33 +222,6 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     }
     f.* = .{};
     return c;
-}
-
-test "enrollment boot cannot acquire workload identity or relaxed controls" {
-    var f: Failure = .{};
-    const line = "werewolf.native=1 werewolf.secure=1 werewolf.bootstrap=1";
-    try testing.expect(parse(line, &f).?.bootstrap);
-    for ([_][]const u8{
-        "werewolf.bootstrap=1",            "werewolf.native=1 werewolf.bootstrap=1",
-        line ++ " werewolf.root=vda",      line ++ " werewolf.data=vdb",
-        line ++ " werewolf.slot=a",        line ++ " werewolf.slots=" ++ id,
-        line ++ " werewolf.esp=57E1-F000", line ++ " werewolf.seal=learn",
-        line ++ " werewolf.debug=1",       line ++ " werewolf.check=1",
-        line ++ " werewolf.tpm=2",         line ++ " werewolf.release=" ++ @as([64]u8, @splat('a')),
-        line ++ " werewolf.bootstrap=1",   line ++ " werewolf.bootstrap=0",
-    }) |bad| try testing.expect(parse(bad, &f) == null);
-}
-
-test "recovery requires an explicit secure rootless bootstrap identity" {
-    var f: Failure = .{};
-    const line = "werewolf.native=1 werewolf.secure=1 werewolf.bootstrap=1 werewolf.recovery=1";
-    try testing.expect(parse(line, &f).?.recovery);
-    for ([_][]const u8{
-        "werewolf.recovery=1",          "werewolf.native=1 werewolf.secure=1 werewolf.recovery=1",
-        line ++ " werewolf.recovery=1", line ++ " werewolf.root=vda",
-        line ++ " werewolf.slot=a",     line ++ " werewolf.seal=learn",
-        line ++ " werewolf.debug=1",    line ++ " werewolf.recovery=0",
-    }) |bad| try testing.expect(parse(bad, &f) == null);
 }
 
 /// The stub's path is a routing hint. The signed verity root remains the authority.
@@ -356,6 +320,14 @@ pub fn serial(s: []const u8) ?u32 {
         n = n << 4 | (std.fmt.charToDigit(c, 16) catch return null);
     }
     return n;
+}
+
+/// releaseIndex parses a release index: 1 or more, plain decimal digits,
+/// no sign or leading zero, that fits in 64 bits.
+pub fn releaseIndex(s: []const u8) ?u64 {
+    if (s.len == 0 or s.len > 20 or s[0] == '0') return null;
+    for (s) |c| if (!std.ascii.isDigit(c)) return null;
+    return std.fmt.parseInt(u64, s, 10) catch null;
 }
 
 fn isOne(s: []const u8) bool {

@@ -10,6 +10,7 @@ const dm = @import("dm");
 const policy = @import("update-policy");
 const signed = @import("prebuilt");
 const broker = @import("broker");
+const tpm = @import("tpm");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const cap_sys_admin = 21;
@@ -351,7 +352,7 @@ fn roleForOp(op: []const u8) !broker.Role {
     if (std.mem.eql(u8, op, "esp-disarm") or std.mem.eql(u8, op, "esp-arm") or
         std.mem.eql(u8, op, "esp-inspect") or std.mem.eql(u8, op, "esp-install") or
         std.mem.eql(u8, op, "slot-root") or std.mem.eql(u8, op, "slot-decl") or
-        std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "slot-state") or
+        std.mem.eql(u8, op, "slot-meta") or std.mem.eql(u8, op, "floor") or
         std.mem.eql(u8, op, "installer-runtime") or std.mem.eql(u8, op, "reboot") or
         std.mem.eql(u8, op, "updater-ready") or std.mem.eql(u8, op, "owner-channel"))
         return .updater;
@@ -408,9 +409,11 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
         try slotMetaNow(try broker.parseSlotMeta(request));
         return "ok\n";
     }
-    if (std.mem.eql(u8, op, "slot-state")) {
-        try slotStateNow(try broker.parseSlotState(request));
-        return "ok\n";
+    if (std.mem.eql(u8, op, "floor")) {
+        if (!std.mem.eql(u8, request, "floor")) return error.BadRequest;
+        const value = try raiseFloor();
+        log.event("floor", .{ .floor = value });
+        return std.mem.print(out, "ok n={d}\n", .{value});
     }
     if (std.mem.eql(u8, op, "esp-status")) {
         if (!std.mem.eql(u8, request, "esp-status")) return error.BadRequest;
@@ -1231,16 +1234,18 @@ fn slotMetaNow(meta: broker.SlotMeta) !void {
     linux.sync();
 }
 
-fn slotStateNow(req: broker.SlotJournal) !void {
-    const m = try bootMount();
-    defer _ = linux.close(m);
-    const dir = try openDirAt(m, "state", true);
-    defer _ = linux.close(dir);
-    const name: []const u8 = if (req.position == 0) "0" else "1";
-    try updaterReadable(dir, true);
-    try copyChecked(dir, "boot.permit", name, req.permit, max_staged);
-    try updaterReadableFile(dir, name);
-    linux.sync();
+/// raiseFloor raises the running release's channel floor to its index, so
+/// the slot about to be overwritten, and every release older than this one,
+/// can never boot again. The index is stage0's checked command line's.
+fn raiseFloor() !u64 {
+    var cmdline_buf: [4096]u8 = undefined;
+    var refused: cmdline.Failure = .{};
+    const parsed = cmdline.parse(readFile("/proc/cmdline", &cmdline_buf), &refused) orelse
+        return error.BadCommandLine;
+    const channel = parsed.channel orelse return error.NoReleaseFloor;
+    var device = try tpm.Device.open();
+    defer device.close();
+    return device.raise(tpm.handle(channel), parsed.index.?);
 }
 
 fn espInspectNow(out: []u8) ![]const u8 {
@@ -1296,7 +1301,8 @@ test "each broker operation belongs to one socketpair role" {
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("slot-root"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("slot-decl"));
     try std.testing.expectEqual(broker.Role.updater, try roleForOp("slot-meta"));
-    try std.testing.expectEqual(broker.Role.updater, try roleForOp("slot-state"));
+    try std.testing.expectEqual(broker.Role.updater, try roleForOp("floor"));
+    try std.testing.expectError(error.UnknownEspOperation, roleForOp("slot-state"));
     try std.testing.expectEqual(broker.Role.stage, try roleForOp("shutdown"));
     try std.testing.expectError(error.UnknownEspOperation, roleForOp("victim"));
     try std.testing.expectError(error.UnknownEspOperation, roleForOp("boot"));
@@ -1572,6 +1578,16 @@ test "reboot requires the updater role and an exact request" {
     try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "reboot", &out));
     try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "reboot", &out));
     try testing.expectError(error.BadRequest, handleRequest(&log, .updater, "reboot extra", &out));
+}
+
+test "the floor takes no argument and belongs to the updater" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var log: Log = .{};
+    var out: [1024]u8 = undefined;
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "floor", &out));
+    try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "floor", &out));
+    for ([_][]const u8{ "floor 1", "floor n=1", "floor " }) |request|
+        try testing.expectError(error.BadRequest, handleRequest(&log, .updater, request, &out));
 }
 
 test "EFI versions contain only the canonical serial and advance" {

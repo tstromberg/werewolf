@@ -139,9 +139,10 @@ try:
             time.sleep(2)
     if boot is None:
         raise RuntimeError('actual production image did not report committed protected boot')
-    files = ('permit.key', 'permit.pub', 'factory.permit', 'credentials/owner.auth', 'credentials/lockout.auth')
+    # The host keeps no TPM authority: only the enrolled boot certificate and profile.
+    files = ('boot.crt', 'authority/profile.json')
     authority = machine / 'authority'
-    before = {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}
+    before = {name: hashlib.sha256((machine / name).read_bytes()).hexdigest() for name in files}
     downloaded = len(requests)
     checked = {str(path): path.read_bytes() for path in (consumer / 'build/boot-cache').rglob('current.json')}
     began = time.monotonic()
@@ -151,10 +152,10 @@ try:
         raise RuntimeError('unchanged run rebooted or performed another download')
     if checked != {str(path): path.read_bytes() for path in (consumer / 'build/boot-cache').rglob('current.json')}:
         raise RuntimeError('unchanged run repeated mirror freshness checks')
-    if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
+    if before != {name: hashlib.sha256((machine / name).read_bytes()).hexdigest() for name in files}:
         raise RuntimeError('repeat run replaced machine authority')
     profile = json.loads((authority / 'profile.json').read_text())
-    downloaded_head = Path(profile['bootstrap']['directory']) / 'boot.json'
+    downloaded_head = Path(profile['bundle']['directory']) / 'boot.json'
     if hashlib.sha256(downloaded_head.read_bytes()).hexdigest() != descriptor:
         raise RuntimeError('actual download differs from the expected published image')
     if profile['spec']['boot_key'] is not None or profile['spec']['ipe_key'] is not None:
@@ -172,8 +173,8 @@ try:
             time.sleep(2)
     if resumed is None or resumed == boot:
         raise RuntimeError('stopped production machine did not resume')
-    if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
-        raise RuntimeError('resume replaced owner or TPM authorization')
+    if before != {name: hashlib.sha256((machine / name).read_bytes()).hexdigest() for name in files}:
+        raise RuntimeError('resume replaced the enrollment')
     result = dict(descriptor=descriptor, default_signed_download=True, no_consumer_builds=True,
                   production_mirror=public,
                   no_vendor_private_keys=True, secure_boot=True, ipe=True, rollback_protected=True,
@@ -189,6 +190,5 @@ finally:
     server.server_close()
     shutil.rmtree(lima_home, ignore_errors=True)
     shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
-    shutil.rmtree(consumer / 'data/howl/permit-service', ignore_errors=True)
     identity.unlink(missing_ok=True)
     key.unlink(missing_ok=True)

@@ -6,7 +6,7 @@ check. It exits 1 if any check fails. It assumes nothing of werewolf: copy
 the static binary to any Linux machine and run it as root to compare, or,
 in a checkout there, run `make posture`, which builds it and runs it with
 sudo. Only where `/usr/share/werewolf` exists does it add the werewolf
-checks: the IPE policy, TPM A/B authorization, root device, updater, leash,
+checks: the IPE policy, the TPM release floor, root device, updater, leash,
 generated services and the compiled network policy. Elsewhere the kernel,
 mount, capability, system-call and SSH checks still run, and the report
 reads no image allowances or excuses.
@@ -42,32 +42,31 @@ posture --json | jq -r '.checks[] | select(.result == "fail") | .name'
 ✅ SYN flood protection    /proc/sys: net.ipv4.tcp_syncookies = 1
 ```
 
-`--summary` runs fresh checks and prints the state and counts on one line,
-then one row per failure: an amber `gap` for one the image's declared
-weaknesses excuse, a red `FAIL` for one they do not. The labels work without
-colour, which redirected output, `NO_COLOR` and `TERM=dumb` suppress. A gap
-still counts as a failure and exits 1.
+`--summary` runs fresh checks and prints three parts: the form, its release and
+kernel; the state and counts; then a red `✗` row for each failure the image's
+declared weaknesses do not excuse, and one line naming the gaps they do. A run
+without root takes boot's result for each check whose files only root may read,
+so a login sees what boot measured. Colour is limited to the state's dot and the
+`✗`, and `NO_COLOR`, `TERM=dumb` and redirected output turn it off. A gap still
+counts as a failure and exits 1.
 
 ```text
-Security posture: EXPECTED GAPS · 86 passed · 5 failed · 5 skipped
-  gap   Shells present            /bin/sh, /bin/ash, /bin/bash
-  gap   Download / network tools  /bin/wget, /bin/nc, /bin/netcat, /bin/telnet
-  gap   Interpreters present      /bin/awk
-  gap   Login servers present     /bin/sshd, /bin/telnetd
-  gap   SSH security key policy   ordinary keys accepted
+playground 2026.10.24.2204 · Linux 7.2.12-werewolf
+● Posture: expected gaps · 90 passed · 8 gaps · 3 skipped
+  Gaps: shells, downloaders, interpreters, root DNS, root web access, +3 more
 ```
 
 | State | Meaning |
 | --- | --- |
-| NOMINAL | No failed checks. |
-| EXPECTED GAPS | Every failure is excused by the image's declared weaknesses. |
-| DEGRADED | At least one failure is not excused. |
+| nominal | No failed checks. |
+| expected gaps | Every failure is excused by the image's declared weaknesses. |
+| degraded | At least one failure is not excused. |
 
-These describe the measured checks, not a guarantee: NOMINAL does not mean
-every check ran, and a non-root scan says its coverage is limited. Program
-rows name installed tools, not running servers. `playground` shows this
-summary at interactive terminal logins through `/etc/profile.d/posture.sh`;
-for your own bashrc:
+These describe the measured checks, not a guarantee: nominal does not mean
+every check ran, and a run without root and without boot's report says its
+coverage is limited. Gaps name installed tools and allowances, not running
+servers. `playground` shows this summary at interactive terminal logins
+through `/etc/profile.d/posture.sh`, below its greeting; for your own bashrc:
 
 ```sh
 case $- in

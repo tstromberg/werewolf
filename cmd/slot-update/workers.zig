@@ -28,7 +28,7 @@ pub const Packages = struct {
     packages: []const []const u8,
 };
 const Build = struct { kernel: []const u8, host: []const u8 };
-const Fetch = struct { url: []const u8, maximum: usize, ca: ?[]const u8 };
+const Fetch = struct { url: []const u8, maximum: usize };
 const Read = struct { job: cve.Job, size: usize };
 
 pub fn start(io: std.Io) !void {
@@ -62,24 +62,9 @@ pub fn start(io: std.Io) !void {
         .NOCTTY = true,
         .NONBLOCK = true,
     }, 0), "open update console"));
+    // The broker raises the TPM floor; the updater never holds the device.
     var refused: @import("cmdline").Failure = .{};
-    const boot_policy = @import("cmdline").parse(
-        boot_line,
-        &refused,
-    ) orelse return error.BadCommandLine;
-    if (boot_policy.tpm) {
-        const device = linux.open(
-            "/dev/tpmrm0",
-            .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true },
-            0,
-        );
-        if (linux.errno(device) == .SUCCESS) {
-            const fd: i32 = @intCast(device);
-            defer _ = linux.close(fd);
-            _ = try sandbox.sys(linux.fchown(fd, 0, coordinator_id), "update TPM group");
-            _ = try sandbox.sys(linux.fchmod(fd, 0o660), "update TPM access");
-        } else if (linux.errno(device) != .NOENT) return error.UpdateTpmDevice;
-    }
+    _ = @import("cmdline").parse(boot_line, &refused) orelse return error.BadCommandLine;
     var pair: [2]i32 = undefined;
     _ = try sandbox.sys(
         linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &pair),
@@ -141,10 +126,9 @@ fn configAccess(path: [:0]const u8) !void {
     defer _ = linux.close(fd);
     _ = try sandbox.sys(linux.fchown(fd, 0, coordinator_id), "config traversal group");
     _ = try sandbox.sys(linux.fchmod(fd, 0o710), "config traversal access");
-    // Only the operator policy and signed public transport declaration belong
-    // to the coordinator. Other config, including secrets, stays root-only.
-    for ([_][:0]const u8{ "update-policy.json", "machine-transport" }) |name|
-        try configReadAccess(fd, name);
+    // Only the operator's policy belongs to the coordinator. Other config,
+    // including secrets, stays root-only.
+    try configReadAccess(fd, "update-policy.json");
 }
 
 fn configReadAccess(dir: i32, name: [:0]const u8) !void {
@@ -420,17 +404,7 @@ fn runJob(
         .fetch => {
             const args = try std.json.parseFromSliceLeaky(Fetch, gpa, data, .{});
             if (args.maximum > 16 << 30) return error.TooBig;
-            const ca = if (args.ca) |text| try decodeCertificate(gpa, text) else null;
-            cve.fetcherPinned(
-                m.update_id,
-                null,
-                args.url,
-                body,
-                args.maximum,
-                ca,
-                out,
-                parent,
-            );
+            cve.fetcherBounded(m.update_id, null, args.url, body, args.maximum, out, parent);
         },
         .read => {
             const args = try std.json.parseFromSliceLeaky(Read, gpa, data, .{});
@@ -474,16 +448,12 @@ fn launcherDomain() !void {
     try domain.port(sandbox.connect_tcp, 443);
     try domain.port(sandbox.connect_tcp, 53);
     var threaded: std.Io.Threaded = .init_single_threaded;
-    for ([_][]const u8{
-        "/usr/share/werewolf/image-update/port",
-        "/usr/share/werewolf/tpm/permit-port",
-    }) |path| {
-        var buf: [16]u8 = undefined;
-        const text = Dir.cwd().readFile(threaded.io(), path, &buf) catch continue;
+    var buf: [16]u8 = undefined;
+    if (Dir.cwd().readFile(threaded.io(), "/usr/share/werewolf/image-update/port", &buf)) |text| {
         const port = try std.fmt.parseUnsigned(u16, std.mem.trim(u8, text, "\n"), 10);
         if (port == 0) return error.BadWorkerPort;
         try domain.port(sandbox.connect_tcp, port);
-    }
+    } else |_| {}
     try domain.restrict();
 }
 
@@ -536,7 +506,6 @@ fn coordinatorDomain() !void {
         .{ "/run/werewolf", sandbox.read_file | sandbox.read_dir },
         .{ m.state_dir, sandbox.own_dir | sandbox.make_sym | sandbox.refer },
         .{ "/dev/pts", sandbox.read_dir | sandbox.write_file },
-        .{ "/dev/tpmrm0", sandbox.read_file | sandbox.write_file },
     }) |grant| {
         const rc = linux.open(grant[0], .{ .PATH = true, .CLOEXEC = true }, 0);
         if (linux.errno(rc) == .NOENT) continue;
@@ -623,22 +592,8 @@ pub fn build(
 ) !void {
     try checked(u, .build, Build{ .kernel = kernel, .host = u.host }, null);
 }
-pub fn fetch(u: *m.Update, url: []const u8, body: i32, max: usize, ca: ?[]const u8) !sandbox.Exit {
-    // DER is binary; JSON strings must be UTF-8.
-    const encoded = if (ca) |der| try encodeCertificate(u.gpa, der) else null;
-    return call(u, .fetch, Fetch{ .url = url, .maximum = max, .ca = encoded }, body);
-}
-
-fn encodeCertificate(gpa: std.mem.Allocator, der: []const u8) ![]const u8 {
-    const encoder = std.base64.standard.Encoder;
-    return encoder.encode(try gpa.alloc(u8, encoder.calcSize(der.len)), der);
-}
-
-fn decodeCertificate(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
-    const decoder = std.base64.standard.Decoder;
-    const der = try gpa.alloc(u8, try decoder.calcSizeForSlice(text));
-    try decoder.decode(der, text);
-    return der;
+pub fn fetch(u: *m.Update, url: []const u8, body: i32, max: usize) !sandbox.Exit {
+    return call(u, .fetch, Fetch{ .url = url, .maximum = max }, body);
 }
 
 pub fn read(u: *m.Update, job: cve.Job, body: cve.Body) !sandbox.Exit {
@@ -835,14 +790,14 @@ fn validCoordinatorStatus(status: []const u8) bool {
     return seen == 0x1ff;
 }
 
-test "coordinator reads its policy and public transport without reading secrets or writing config" {
+test "coordinator reads its policy without reading secrets or writing config" {
     if (@import("builtin").os.tag != .linux or linux.geteuid() != 0) return error.SkipZigTest;
     const t = std.testing;
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    for ([_][]const u8{ "update-policy.json", "machine-transport", "secret" }) |name| {
+    for ([_][]const u8{ "update-policy.json", "secret" }) |name| {
         const file = try tmp.dir.createFile(t.io, name, .{ .permissions = .fromMode(0o600) });
         defer file.close(t.io);
         try file.writeStreamingAll(t.io, "fixture");
@@ -859,7 +814,7 @@ test "coordinator reads its policy and public transport without reading secrets 
     if (pid == 0) {
         _ = linux.close(output[0]);
         sandbox.dropTo(coordinator_id, null) catch linux.exit_group(1);
-        for ([_][:0]const u8{ "update-policy.json", "machine-transport" }) |name| {
+        for ([_][:0]const u8{"update-policy.json"}) |name| {
             const raw = linux.openat(tmp.dir.handle, name, .{ .CLOEXEC = true }, 0);
             if (linux.errno(raw) != .SUCCESS) linux.exit_group(2);
             const fd: i32 = @intCast(raw);
@@ -1230,21 +1185,4 @@ fn constructionProbe(
         "/work/root.erofs",
         "/work/root",
     });
-}
-
-test "coordinator preserves binary pinned certificates across worker requests" {
-    const t = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const der = [_]u8{ 0, 127, 128, 255, 192, 191 };
-    const request: Fetch = .{
-        .url = "https://example.test/",
-        .maximum = 4096,
-        .ca = try encodeCertificate(gpa, &der),
-    };
-    const json = try std.json.Stringify.valueAlloc(gpa, request, .{});
-    const parsed = try std.json.parseFromSliceLeaky(Fetch, gpa, json, .{});
-    try t.expectEqualSlices(u8, &der, try decodeCertificate(gpa, parsed.ca.?));
-    try t.expectError(error.InvalidCharacter, decodeCertificate(gpa, "????"));
 }

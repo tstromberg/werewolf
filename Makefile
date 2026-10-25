@@ -117,7 +117,8 @@ HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) $(if $(D
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
-	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL))
+	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL)) \
+	$(if $(IMAGE_INDEX),--image-index $(IMAGE_INDEX)) $(if $(TPM),--tpm)
 image slot: $(HOWL)
 	$(HOWL_BUILD) $@
 .PHONY: prebuilt
@@ -193,9 +194,8 @@ LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package --dep allow --dep people -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
-	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
-	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
-ZIG_MODULES = --dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
+	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig
+ZIG_MODULES = --dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -273,7 +273,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
-	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -295,8 +295,8 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/local-publisher _test/local-prerequisites _test/cloud-enrollment _test/bootstrap-image _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/ci-forms: ; python3 test/ci-forms-test
 	python3 test/check-dispatch
@@ -348,7 +348,6 @@ _test/bhyve-network: ; python3 test/check-bhyve-network
 _test/bhyve-runtime: ; python3 test/bhyve-runtime-tests
 _test/package-consumers: build/host/form
 	python3 test/package-consumers
-_test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
 _test/release-signing:
 	python3 test/release-signing
 	python3 test/native-firmware
@@ -360,11 +359,9 @@ _test/local-prerequisites: $(HOWL)
 	python3 test/local-prerequisites
 	python3 test/lima-state $(HOWL)
 	python3 test/build-helper
-_test/cloud-enrollment: $(HOWL)
-	python3 test/cloud-enrollment $(HOWL)
-	python3 test/aws-console-access
-_test/local-publisher: $(HOWL) build/host/tpm-policy build/host/form
-	python3 test/local-publisher $(HOWL)
+_test/tpm-floor: build/host/tpm-floor
+	python3 test/check-tpm-floor build/host/tpm-floor
+_test/boot-images: $(HOWL) build/host/form
 	python3 test/boot-images $(HOWL)
 	python3 test/boot-download $(HOWL)
 	python3 test/protected-release
@@ -381,40 +378,18 @@ _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-_test/lib/machine-transport.zig: ; zig test --dep apk -Mroot=lib/machine-transport.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-_test/lib/tpm-bootstrap.zig: ; zig test --dep apk --dep tpm -Mroot=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-_test/lib/enrollment.zig: ; zig test --dep apk --dep tpm --dep bootstrap -Mroot=lib/enrollment.zig --dep apk -Mtpm=lib/tpm.zig --dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/enrollment.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/apk.zig lib/package.zig
-	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe --dep bootstrap --dep enrollment --dep apk --dep tpm -Mroot=$< --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig --dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
-build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/apk.zig lib/package.zig
+build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 
-.PHONY: check-tpm-guest check-tpm-recovery check-tpm-bootstrap-guest check-secure-lima check-secure-qemu check-run-cache check-shared-boot
-check-tpm-recovery: build/host/tpm-policy
-	python3 test/check-tpm-recovery
+.PHONY: check-tpm-floor check-independent-updates
+# The release floor against swtpm, as guest root would attack it (lib/tpm.zig).
+check-tpm-floor: _test/tpm-floor
 
-check-tpm-bootstrap-guest: build/host/tpm-bootstrap build/host/tpm-policy build/host/uki $(call program_bin,tpm-enroll)
-	@[ "$(IPE)" = 1 ] || { echo 'check-tpm-bootstrap-guest: set IPE=1 and a measured UKI_STUB' >&2; exit 1; }
-	python3 test/check-tpm-bootstrap-guest --arch $(ARCH) --kernel $(IPE_KERNEL) --stub $(UKI_STUB) \
-		--agent $(call program_bin,tpm-enroll) --work $(BUILD)/check/tpm-bootstrap \
-		--ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT) \
-		--unmeasured-stub out/tools/stubs/$(ARCH)/linux.efi.stub --recovery-cuts
-
-check-tpm-guest: $(HOWL) build/host/tpm-policy build/host/uki
-	DEBUGFS=$(DEBUGFS) python3 test/check-tpm-qemu $(HOWL) $(ARCH) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(BUILD)/check/tpm-guest
-
-check-secure-lima: $(HOWL)
-	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-lima
-check-run-cache: $(HOWL)
-	python3 test/check-run-cache $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/run-cache
-
-check-shared-boot: $(HOWL)
-	python3 test/check-shared-boot $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/shared-boot
-
-check-secure-qemu: $(HOWL)
-	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-qemu qemu
+# Unrelated machines install from a public image, take their own TPMs, and update
+# from a static channel with no host help (docs/design/independent-updates.md).
+check-independent-updates: $(HOWL)
+	python3 test/check-independent-updates $(HOWL) $(BUILD)/check/independent-updates $(PROVIDER)
 
 _test/lib/form.zig: ; zig test --dep allow --dep sshd -Mroot=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig -Msettings=lib/settings.zig
 _test/lib/sshd.zig: ; zig test --dep settings -Mroot=lib/sshd.zig -Msettings=lib/settings.zig
@@ -1010,12 +985,12 @@ check-gcp-metadata: $(HOWL) $(TEST_SK)
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
 
-# Exercise both checkout builds and published downloads without downgrades.
+# Exercise checkout builds on every cloud; werewolf publishes no cloud downloads yet.
 .PHONY: check-prod-ssh-clouds
 check-prod-ssh-clouds:
-	@failed=0; for cloud in gcp aws azure; do for mode in build download; do \
-		$(MAKE) --no-print-directory check-$$cloud CLOUD_MODE=$$mode || failed=1; \
-	done; done; exit $$failed
+	@failed=0; for cloud in gcp aws azure; do \
+		$(MAKE) --no-print-directory check-$$cloud CLOUD_MODE=build || failed=1; \
+	done; exit $$failed
 
 # Explicit live lifecycle tests; cloud credentials are never required by PR CI.
 .PHONY: check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox check-bhyve-secureboot _check-provider-ab

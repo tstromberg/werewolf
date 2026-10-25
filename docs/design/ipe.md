@@ -40,13 +40,10 @@ off and an empty `IPE_BOOT_POLICY` (`lib/ipe.zig`, `checkConfig`). Tests sign
 with a disposable key: `tools/test-kernel ARCH CERT OUT` builds kernel-build at
 the commit `boot/kernel-build` pins, its IPE trusting `CERT`.
 
-The TPM enrollment image's `tpm-enroll` loads, activates and enforces
-`enrollment/ipe-boot.p7b` (from `tools/build-tpm-bootstrap`; the text is
-`lib/ipe.zig`'s `boot_policy`), which permits execution from initramfs only.
-Stage0 opens the verified root and, when the image requires IPE (its marker),
-loads `ipe.p7b` from initramfs. The kernel verifies its PKCS#7 signature.
-Stage0 checks the deployed policy against the mounted root hash, activates it,
-and forces enforcing mode. The final policy has no initramfs exception:
+Stage0 opens the verified root and, when the image requires IPE (its marker), loads
+`ipe.p7b` from initramfs. The kernel verifies its PKCS#7 signature. Stage0 checks the
+deployed policy against the mounted root hash, activates it, and forces enforcing mode.
+The final policy has no initramfs exception:
 
 ```text
 policy_name=werewolf policy_version=1.0.0
@@ -80,12 +77,12 @@ On macOS, `make ipe-kernel` also needs `QEMU_KERNEL_IMAGE` and
 Howl also accepts `--ipe-kernel`, `--ipe-key`, `--ipe-cert` for `build` and
 `_build`; all three are required together.
 
-**Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and
-`IMAGE_SERIAL`, then export with `make prebuilt`. The updater verifies the
-complete slot before installing, arming or rebooting; retained signatures
-also protect operator `try` ([prebuilt-images.md](prebuilt-images.md)).
-Unenrolled IPE machines return `IpeSignedImageRequired`. Production IPE
-rollout still needs signing-key provisioning and channel publication.
+**Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and `IMAGE_SERIAL`,
+then export with `make prebuilt`. The updater verifies the complete slot before
+installing, arming or rebooting; retained signatures also protect operator `try`
+([prebuilt-images.md](prebuilt-images.md)). Unenrolled IPE machines return
+`IpeSignedImageRequired`. Published protected images follow werewolf's public channel
+([independent-updates.md](independent-updates.md)).
 
 ## Drawbacks
 

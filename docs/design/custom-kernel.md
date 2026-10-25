@@ -70,8 +70,8 @@ derives its own likewise for each release, so a new series comes with its option
 release carries the config, implied options, checker report and boot logs.
 
 **IPE.** Every kernel has IPE, lockdown at `confidentiality` and no policy of its own;
-stage0 loads an IPE image's signed policy, `tpm-enroll` the TPM bootstrap's. For tests'
-disposable keys `tools/test-kernel` builds `boot/kernel-build`'s commit with `IPE_CRT=`.
+stage0 loads an IPE image's signed policy. For tests' disposable keys
+`tools/test-kernel` builds `boot/kernel-build`'s commit with `IPE_CRT=`.
 
 **werewolf changes**, a clean break: a machine composed locally on `linux-virt` stays
 on its slot until reinstalled.

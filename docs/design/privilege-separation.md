@@ -52,9 +52,8 @@ Before `exec fence runit`, `init` opens three `AF_UNIX` `SOCK_SEQPACKET` socketp
   `/etc/runit/3` (`stop`). `slot-update` (`60`) and `slot-keep` (`61`) call
   `broker.keepOnlyClient(role)`, closing the other two and setting
   `PR_SET_DUMPABLE = 0`; every other supervised program closes descriptors `>= 3`.
-- **Never lend `/boot` as a mount.** `mount-broker` updates `/boot/state/{0,1}` and
-  `/boot/slot/{a,b}` itself (`slot-state`, `slot-root`, `slot-decl`, `slot-meta`) on a
-  detached `fsmount` of `/boot`.
+- **Never lend `/boot` as a mount.** `mount-broker` updates `/boot/slot/{a,b}` itself
+  (`slot-root`, `slot-decl`, `slot-meta`) on a detached `fsmount` of `/boot`.
 - **Harden `copyChecked`.** Open staged files with `openat2(RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS)` and `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then check `S_ISREG`.
 

@@ -1,5 +1,5 @@
 {
-  "format": "werewolf-image/1",
+  "format": "werewolf-image/2",
   "channel": "https://example.test/shop",
   "arch": "aarch64",
   "serial": "20261011T000000Z",
@@ -16,6 +16,8 @@
   ],
   "advisories": [],
   "declaration": null,
+  "channel_id": "d3b7569959fa1ad090a63b173abd86c996c060693fcc01df673a4bb401035840",
+  "index": 1,
   "files": {
     "vmlinuz": {
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

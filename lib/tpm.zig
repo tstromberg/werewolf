@@ -1,27 +1,51 @@
-//! TPM 2.0 signed retirement; serial-floor commands remain host-only test probes.
+//! TPM 2.0 release floor: one NV counter per release channel, which boot
+//! reads, the mount broker raises, and nothing lowers. A release boots only
+//! if its index is at least the floor (docs/design/independent-updates.md).
+//!
+//! stage0 enrolls a fresh TPM on first boot: it defines the counter, disables
+//! clear and sets random owner and lockout authorization that nothing keeps.
+//! The counter has empty authorization and no policy, so anyone holding the
+//! device may increment it, which only retires releases, and nobody may
+//! define, undefine, lock, clear or lower it.
 const std = @import("std");
-const apk = @import("apk");
+const posix = std.posix;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const retirement = @import("boot-state.zig");
-pub const Record = retirement.Record;
-pub const record_size = retirement.size;
-pub const releaseId = retirement.releaseId;
-pub const pair_index: u32 = 0x01500021;
-// Written, no DA, auth read, NV extend, owner/policy write.
-pub const pair_attributes: u32 = 0x2204004a;
-pub const pair_qualifier = "werewolf.boot/2";
-pub const index: u32 = 0x01500020;
-pub const attributes: u32 = 0x2204100a; // written, no DA, auth read, write-all, owner/policy write
-pub const qualifier = "werewolf.rollback/1";
-pub const metadata = "/usr/share/werewolf/tpm";
+/// firmware parses the boot certificate howl enrolls (boot-authority.zig).
 pub const firmware = @import("boot-authority.zig");
-pub const transport = @import("machine-transport.zig");
+
+/// metadata holds protocol, which marks a root whose boot requires the floor.
+pub const metadata = "/usr/share/werewolf/tpm";
+pub const protocol = "3\n";
+pub const device = "/dev/tpmrm0";
+
 const owner: u32 = 0x40000001;
+const lockout: u32 = 0x4000000a;
+const endorsement: u32 = 0x4000000b;
 const platform: u32 = 0x4000000c;
 const password: u32 = 0x40000009;
 
+/// counter_attributes are AUTHWRITE, TPM_NT_COUNTER, AUTHREAD and NO_DA:
+/// no owner or platform write, no write or read lock, no policy delete.
+pub const counter_attributes: u32 = 0x02040014;
+const written: u32 = 1 << 29;
+
+// TPM_PT_PERMANENT and TPM_PT_STARTUP_CLEAR, and the bits read from them.
+const permanent: u32 = 0x200;
+const startup_clear: u32 = 0x201;
+const owner_auth_set: u32 = 1 << 0;
+const lockout_auth_set: u32 = 1 << 2;
+const disable_clear: u32 = 1 << 8;
+const ph_enable: u32 = 1 << 0;
+const sh_enable: u32 = 1 << 1;
+
+/// handle is the NV index of channel's counter. Publishers refuse a channel
+/// whose handle another of theirs already has.
+pub fn handle(channel: [32]u8) u32 {
+    return 0x01500000 | @as(u32, channel[0]) << 8 | channel[1];
+}
+
 const Bytes = struct {
-    data: [4096]u8 = undefined,
+    data: [512]u8 = undefined,
     len: usize = 0,
     fn bytes(b: *Bytes, input: []const u8) void {
         if (input.len > b.data.len - b.len) unreachable;
@@ -29,9 +53,9 @@ const Bytes = struct {
         b.len += input.len;
     }
     fn int(b: *Bytes, comptime T: type, input: T) void {
-        if (@sizeOf(T) > b.data.len - b.len) unreachable;
-        std.mem.writeInt(T, b.data[b.len..][0..@sizeOf(T)], input, .big);
-        b.len += @sizeOf(T);
+        var raw: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &raw, input, .big);
+        b.bytes(&raw);
     }
     fn sized(b: *Bytes, input: []const u8) void {
         b.int(u16, @intCast(input.len));
@@ -58,56 +82,7 @@ const Read = struct {
     }
 };
 
-/// GCP omits the platform hierarchy from AUTH_POLICIES. Accept that only
-/// after its reset path is closed (TPM_PT_STARTUP_CLEAR.phEnable is false).
-/// Owner, lockout and endorsement must always be present; an enabled platform
-/// must also be reported.
-/// A missing entry can never stand in for an enabled hierarchy's policy.
-pub fn checkHierarchyPolicies(raw: []const u8, platform_enabled: bool) !void {
-    var r: Read = .{ .data = raw };
-    if (try r.int(u8) != 0 or try r.int(u32) != 9) return error.UnprotectedTpmHierarchy;
-    const count = try r.int(u32);
-    if (count != 4 and !(count == 3 and !platform_enabled)) return error.UnprotectedTpmHierarchy;
-    for ([3]u32{ owner, 0x4000000a, 0x4000000b }) |handle| {
-        if (try r.int(u32) != handle or try r.int(u16) != 0x10)
-            return error.UnprotectedTpmHierarchy;
-    }
-    if (count == 4 and (try r.int(u32) != platform or try r.int(u16) != 0x10))
-        return error.UnprotectedTpmHierarchy;
-    if (r.at != r.data.len) return error.BadTpmResponse;
-}
-
-test "GCP may omit only its disabled platform hierarchy; other omissions and policies refuse" {
-    const t = std.testing;
-    // Actual GCP AUTH_POLICIES response, excluding the TPM response header.
-    const google = [_]u8{
-        0,    0, 0,    0,    9, 0,    0,    0, 3,
-        0x40, 0, 0,    1,    0, 0x10, 0x40, 0, 0,
-        0xa,  0, 0x10, 0x40, 0, 0,    0xb,  0, 0x10,
-    };
-    try checkHierarchyPolicies(&google, false);
-    try t.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(&google, true));
-    var all = google ++ [_]u8{ 0x40, 0, 0, 0xc, 0, 0x10 };
-    all[8] = 4;
-    try checkHierarchyPolicies(&all, false);
-    try checkHierarchyPolicies(&all, true);
-    for (0..google.len) |length| {
-        if (checkHierarchyPolicies(google[0..length], false)) |_|
-            return error.TruncatedPoliciesAccepted
-        else |_| {}
-    }
-    for ([_]usize{ 0, 4, 8, 12, 14, 18, 20, 24, 26 }) |at| {
-        var changed = google;
-        changed[at] ^= 1;
-        if (checkHierarchyPolicies(&changed, false)) |_|
-            return error.ForeignHierarchyPolicyAccepted
-        else |_| {}
-    }
-    try t.expectError(error.BadTpmResponse, checkHierarchyPolicies(&(google ++ [_]u8{0}), false));
-    all[all.len - 1] = 0xb; // An alternate platform policy remains forbidden.
-    try t.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(&all, false));
-}
-
+/// command starts a TPM command; with auth, one empty-password session.
 fn command(code: u32, handles: []const u32, auth: ?u32) Bytes {
     var b: Bytes = .{};
     b.int(u16, if (auth != null) 0x8002 else 0x8001);
@@ -124,252 +99,136 @@ fn command(code: u32, handles: []const u32, auth: ?u32) Bytes {
     return b;
 }
 
-fn passwordCommand(code: u32, handles: []const u32, secret: []const u8) Bytes {
-    var b = command(code, handles, null);
-    std.mem.writeInt(u16, b.data[0..2], 0x8002, .big);
-    b.int(u32, @intCast(9 + secret.len));
-    b.int(u32, password);
-    b.sized("");
-    b.int(u8, 0);
-    b.sized(secret);
-    return b;
-}
-
-pub fn public(key: apk.Key) !Bytes {
-    if (key.modulus.len != 256 and key.modulus.len != 384 and
-        key.modulus.len != 512) return error.BadTpmKey;
-    if (!std.mem.eql(u8, key.exponent, &.{ 1, 0, 1 })) return error.BadTpmKey;
+/// counterPublic is the exact TPMS_NV_PUBLIC of the counter at h.
+fn counterPublic(h: u32, attributes: u32) Bytes {
     var b: Bytes = .{};
-    b.int(u16, 1); // RSA
-    b.int(u16, 0xb); // SHA-256 name
-    b.int(u32, 0x40040); // signing, userWithAuth
-    b.sized("");
-    b.int(u16, 0x10); // no symmetric algorithm
-    b.int(u16, 0x10); // unrestricted signature scheme
-    b.int(u16, @intCast(key.modulus.len * 8));
-    b.int(u32, 65537);
-    b.sized(key.modulus);
-    return b;
-}
-
-fn name(data: []const u8) [34]u8 {
-    var out: [34]u8 = undefined;
-    std.mem.writeInt(u16, out[0..2], 0xb, .big);
-    Sha256.hash(data, out[2..34], .{});
-    return out;
-}
-
-pub fn authorization(key: apk.Key) ![32]u8 {
-    return authorize(key, qualifier);
-}
-
-fn authorize(key: apk.Key, reference: []const u8) ![32]u8 {
-    const pubkey = try public(key);
-    const key_name = name(pubkey.slice());
-    var b: Bytes = .{};
-    b.bytes(&@as([32]u8, @splat(0)));
-    b.int(u32, 0x16a); // PolicyAuthorize
-    b.bytes(&key_name);
-    var first: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &first, .{});
-    b = .{};
-    b.bytes(&first);
-    b.bytes(reference);
-    var result: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &result, .{});
-    return result;
-}
-
-pub fn pairAuthorization(key: apk.Key) ![32]u8 {
-    return authorize(key, pair_qualifier);
-}
-
-fn pairPublic(key: apk.Key) !Bytes {
-    var b: Bytes = .{};
-    b.int(u32, pair_index);
-    b.int(u16, 0xb);
-    b.int(u32, pair_attributes);
-    b.sized(&try pairAuthorization(key));
-    b.int(u16, 32);
-    return b;
-}
-
-pub fn pairCpHash(key: apk.Key, state: Record) ![32]u8 {
-    const nv = try pairPublic(key);
-    const nv_name = name(nv.slice());
-    var b: Bytes = .{};
-    b.int(u32, 0x136); // NV_Extend
-    b.bytes(&nv_name);
-    b.bytes(&nv_name);
-    b.sized(&state.digest());
-    var result: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &result, .{});
-    return result;
-}
-
-fn pcrSelection(b: *Bytes) void {
-    b.int(u32, 1);
-    b.int(u16, 0xb); // SHA-256
-    b.int(u8, 3);
-    b.bytes(&.{ 0, 8, 0 }); // PCR 11
-}
-
-/// Exact old anchor, retained UKI measurement and one exact NV extension.
-pub fn pairApproved(key: apk.Key, state: Record) ![32]u8 {
-    _ = try Record.decode(&state.encode());
-    const nv = try pairPublic(key);
-    var b: Bytes = .{};
-    b.bytes(&state.previous);
-    b.int(u16, 0);
-    b.int(u16, 0); // equality
-    var args: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &args, .{});
-    b = .{};
-    b.bytes(&@as([32]u8, @splat(0)));
-    b.int(u32, 0x149); // PolicyNV
-    b.bytes(&args);
-    b.bytes(&name(nv.slice()));
-    var digest: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &digest, .{});
-    b = .{};
-    b.bytes(&digest);
-    b.int(u32, 0x17f); // PolicyPCR
-    pcrSelection(&b);
-    var pcr_digest: [32]u8 = undefined;
-    Sha256.hash(&state.pcr, &pcr_digest, .{});
-    b.bytes(&pcr_digest);
-    Sha256.hash(b.slice(), &digest, .{});
-    b = .{};
-    b.bytes(&digest);
-    b.int(u32, 0x16e); // PolicyCpHash
-    b.bytes(&try pairCpHash(key, state));
-    Sha256.hash(b.slice(), &digest, .{});
-    return digest;
-}
-
-pub fn pairMessage(key: apk.Key, state: Record) ![32 + pair_qualifier.len]u8 {
-    return (try pairApproved(key, state)) ++ pair_qualifier.*;
-}
-
-pub fn verifyRecord(
-    key: apk.Key,
-    raw: []const u8,
-    signature: []const u8,
-    anchor: [32]u8,
-    release: [32]u8,
-) !Record {
-    const state = try Record.decode(raw);
-    const message = try pairMessage(key, state);
-    try apk.verify(key, &message, signature);
-    if (!std.mem.eql(u8, &state.anchor(), &anchor)) return error.StaleBootState;
-    if (!state.allows(release)) return error.RollbackRefused;
-    return state;
-}
-
-fn nvPublic(key: apk.Key) !Bytes {
-    var b: Bytes = .{};
-    b.int(u32, index);
-    b.int(u16, 0xb);
+    b.int(u32, h);
+    b.int(u16, 0xb); // SHA-256 names
     b.int(u32, attributes);
-    b.sized(&try authorization(key));
+    b.sized(""); // no policy
     b.int(u16, 8);
     return b;
 }
 
-pub fn value(serial: u64) [8]u8 {
-    var b: [8]u8 = undefined;
-    std.mem.writeInt(u64, &b, serial, .big);
-    return b;
+fn name(public: []const u8) [34]u8 {
+    var out: [34]u8 = undefined;
+    std.mem.writeInt(u16, out[0..2], 0xb, .big);
+    Sha256.hash(public, out[2..34], .{});
+    return out;
 }
 
-pub fn cpHash(key: apk.Key, serial: u64) ![32]u8 {
-    const nv = try nvPublic(key);
-    const nv_name = name(nv.slice());
-    var b: Bytes = .{};
-    b.int(u32, 0x137); // NV_Write
-    b.bytes(&nv_name);
-    b.bytes(&nv_name);
-    b.sized(&value(serial));
-    b.int(u16, 0);
-    var digest: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &digest, .{});
-    return digest;
-}
-
-/// PolicyNV(floor <= serial) and PolicyCpHash(exact NV_Write), signed with qualifier.
-pub fn approved(key: apk.Key, serial: u64) ![32]u8 {
-    const nv = try nvPublic(key);
-    const nv_name = name(nv.slice());
-    var b: Bytes = .{};
-    b.bytes(&value(serial));
-    b.int(u16, 0);
-    b.int(u16, 9); // unsigned <=
-    var args: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &args, .{});
-    b = .{};
-    b.bytes(&@as([32]u8, @splat(0)));
-    b.int(u32, 0x149); // PolicyNV
-    b.bytes(&args);
-    b.bytes(&nv_name);
-    var digest: [32]u8 = undefined;
-    Sha256.hash(b.slice(), &digest, .{});
-    b = .{};
-    b.bytes(&digest);
-    b.int(u32, 0x16e); // PolicyCpHash
-    b.bytes(&try cpHash(key, serial));
-    Sha256.hash(b.slice(), &digest, .{});
-    return digest;
+/// checkHierarchyPolicies reads TPM_CAP_AUTH_POLICIES. Owner and lockout
+/// must have none, and so must the platform when listed: a policy would be
+/// a second way to their authority. The endorsement hierarchy reaches no
+/// owner index, so its policy is the provider's business. GCP omits a
+/// disabled platform hierarchy; an enabled one must be listed.
+pub fn checkHierarchyPolicies(raw: []const u8, platform_enabled: bool) !void {
+    var r: Read = .{ .data = raw };
+    if (try r.int(u8) != 0 or try r.int(u32) != 9) return error.UnprotectedTpmHierarchy;
+    const count = try r.int(u32);
+    if (count > 4) return error.BadTpmResponse;
+    var guarded: u2 = 0;
+    var listed_platform = false;
+    for (0..count) |_| {
+        const h = try r.int(u32);
+        const algorithm = try r.int(u16);
+        _ = try r.bytes(switch (algorithm) {
+            0x10 => 0,
+            0x04 => 20,
+            0x0b => 32,
+            0x0c => 48,
+            0x0d => 64,
+            else => return error.BadTpmResponse,
+        });
+        switch (h) {
+            owner, lockout => {
+                if (algorithm != 0x10) return error.UnprotectedTpmHierarchy;
+                guarded += 1;
+            },
+            platform => {
+                if (algorithm != 0x10) return error.UnprotectedTpmHierarchy;
+                listed_platform = true;
+            },
+            endorsement => {},
+            else => return error.BadTpmResponse,
+        }
+    }
+    if (r.at != r.data.len) return error.BadTpmResponse;
+    if (guarded != 2 or (platform_enabled and !listed_platform))
+        return error.UnprotectedTpmHierarchy;
 }
 
 pub const Device = struct {
-    io: std.Io,
-    file: std.Io.File,
+    fd: posix.fd_t,
     response: [4096]u8 = undefined,
     last_error: u32 = 0,
 
-    pub fn open(io: std.Io) !Device {
-        return .{
-            .io = io,
-            .file = try std.Io.Dir.cwd().openFile(io, "/dev/tpmrm0", .{ .mode = .read_write }),
-        };
-    }
-    pub fn close(d: *Device) void {
-        std.crypto.secureZero(u8, &d.response);
-        d.file.close(d.io);
+    pub fn open() !Device {
+        return .{ .fd = try posix.openat(posix.AT.FDCWD, device, .{
+            .ACCMODE = .RDWR,
+            .CLOEXEC = true,
+            .NOFOLLOW = true,
+        }, 0) };
     }
 
+    pub fn close(d: *Device) void {
+        std.crypto.secureZero(u8, &d.response);
+        _ = posix.system.close(d.fd);
+    }
+
+    fn send(d: *Device, bytes: []const u8) !void {
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const rc = posix.system.write(d.fd, bytes[at..].ptr, bytes.len - at);
+            switch (posix.errno(rc)) {
+                .SUCCESS => at += @intCast(rc),
+                .INTR => {},
+                else => return error.TpmWrite,
+            }
+        }
+    }
+
+    fn receive(d: *Device, end: usize, got: usize) !usize {
+        const n = try posix.read(d.fd, d.response[got..end]);
+        if (n == 0) return error.BadTpmResponse;
+        return got + n;
+    }
+
+    /// call sends b and returns the response's parameters. It retries the
+    /// TPM's warnings (busy, self-test, NV rate) for up to ten seconds.
     fn call(d: *Device, b: *Bytes) !Read {
         defer std.crypto.secureZero(u8, &b.data);
         std.mem.writeInt(u32, b.data[2..6], @intCast(b.len), .big);
-        try d.file.writeStreamingAll(d.io, b.slice());
-        var got = try d.file.readStreaming(d.io, &.{&d.response});
-        while (got < 10) {
-            const n = try d.file.readStreaming(d.io, &.{d.response[got..]});
-            if (n == 0) return error.BadTpmResponse;
-            got += n;
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            try d.send(b.slice());
+            var got = try d.receive(d.response.len, 0);
+            while (got < 10) got = try d.receive(d.response.len, got);
+            const size = std.mem.readInt(u32, d.response[2..6], .big);
+            if (size < 10 or size > d.response.len or got > size) return error.BadTpmResponse;
+            while (got < size) got = try d.receive(size, got);
+            d.last_error = std.mem.readInt(u32, d.response[6..10], .big);
+            switch (d.last_error) {
+                0 => {},
+                0x908, 0x90a, 0x920, 0x922, 0x923 => {
+                    if (tries == 100) return error.TpmBusy;
+                    const pause: posix.timespec = .{ .sec = 0, .nsec = 100_000_000 };
+                    _ = posix.system.nanosleep(&pause, null);
+                    continue;
+                },
+                else => return error.TpmRefused,
+            }
+            var r: Read = .{ .data = d.response[10..size] };
+            const tag = std.mem.readInt(u16, d.response[0..2], .big);
+            if (tag == 0x8002) return .{ .data = try r.bytes(try r.int(u32)) };
+            if (tag != 0x8001) return error.BadTpmResponse;
+            return r;
         }
-        const size = std.mem.readInt(u32, d.response[2..6], .big);
-        if (size < 10 or size > d.response.len or got > size) return error.BadTpmResponse;
-        while (got < size) {
-            const n = try d.file.readStreaming(d.io, &.{d.response[got..size]});
-            if (n == 0) return error.BadTpmResponse;
-            got += n;
-        }
-        d.last_error = std.mem.readInt(u32, d.response[6..10], .big);
-        if (d.last_error != 0) return error.TpmRefused;
-        var r: Read = .{ .data = d.response[10..size] };
-        const tag = std.mem.readInt(u16, d.response[0..2], .big);
-        if (tag == 0x8002) {
-            const len = try r.int(u32);
-            return .{ .data = try r.bytes(len) };
-        }
-        if (tag != 0x8001) return error.BadTpmResponse;
-        return r;
     }
 
     fn property(d: *Device, id: u32) !u32 {
-        var b = command(0x17a, &.{}, null);
-        b.int(u32, 6);
+        var b = command(0x17a, &.{}, null); // GetCapability
+        b.int(u32, 6); // TPM_CAP_TPM_PROPERTIES
         b.int(u32, id);
         b.int(u32, 1);
         var r = try d.call(&b);
@@ -379,188 +238,43 @@ pub const Device = struct {
         return r.int(u32);
     }
 
-    /// Enroll a fresh TPM; credentials stay transient in an attested bootstrap.
-    pub fn provision(
-        d: *Device,
-        key: apk.Key,
-        initial: Record,
-        credentials: *const [2][32]u8,
-    ) !void {
-        const zero: [32]u8 = @splat(0);
-        if (!std.mem.eql(u8, &initial.previous, &zero) or
-            !std.mem.eql(
-                u8,
-                &initial.retained,
-                &initial.candidate,
-            )) return error.WrongFactoryBootState;
-        for (credentials) |*secret|
-            if (std.mem.eql(u8, secret, &zero)) return error.BadProvisioningCredential;
-        if (try d.property(0x200) & 5 != 0) return error.TpmAlreadyProvisioned;
-        try d.noHierarchyPolicies();
-        var b = command(0x17a, &.{}, null);
-        b.int(u32, 1); // HANDLES
-        b.int(u32, pair_index);
-        b.int(u32, 1);
-        var r = try d.call(&b);
-        _ = try r.int(u8);
-        if (try r.int(u32) != 1) return error.BadTpmResponse;
-        const count = try r.int(u32);
-        if (count > 1) return error.BadTpmResponse;
-        if (count == 1 and try r.int(u32) == pair_index) return error.TpmAlreadyProvisioned;
-        if (r.at != r.data.len) return error.BadTpmResponse;
-        for ([2]u32{ owner, 0x4000000a }, credentials) |hierarchy, *secret| {
-            b = command(0x129, &.{hierarchy}, password); // HierarchyChangeAuth
-            b.sized(secret);
-            _ = try d.call(&b);
-        }
-        b = passwordCommand(0x127, &.{0x4000000a}, &credentials[1]); // ClearControl
-        b.int(u8, 1);
-        _ = try d.call(&b);
-        var nv = try pairPublic(key);
-        std.mem.writeInt(u32, nv.data[6..10], pair_attributes & ~@as(u32, 1 << 29), .big);
-        b = passwordCommand(0x12a, &.{owner}, &credentials[0]); // NV_DefineSpace
-        b.sized("");
-        b.sized(nv.slice());
-        _ = try d.call(&b);
-        // The first extension is terminal: every reset guard must already hold.
-        try d.disablePlatform();
-        try d.hierarchyProtected();
-        b = passwordCommand(0x136, &.{ owner, pair_index }, &credentials[0]);
-        b.sized(&initial.digest());
-        _ = try d.call(&b);
-        if (!std.mem.eql(u8, &try d.anchor(key), &initial.anchor())) return error.WrongBootState;
-    }
-
-    pub const Progress = struct { lockout: bool, clear_disabled: bool, defined: bool };
-
-    /// Read-only admission for explicit recovery; any written index is terminal.
-    pub fn incomplete(d: *Device, key: apk.Key) !Progress {
-        try d.noHierarchyPolicies();
-        const permanent = try d.property(0x200);
-        if (permanent & 1 == 0) return error.NoIncompleteEnrollment;
-        if (try d.property(0x201) & 2 == 0) return error.TpmOwnerDisabled;
-        var state: Progress = .{
-            .lockout = permanent & 4 != 0,
-            .clear_disabled = permanent & 0x100 != 0,
-            .defined = false,
-        };
-        var b = command(0x17a, &.{}, null);
-        b.int(u32, 1); // HANDLES
-        b.int(u32, index);
-        b.int(u32, 2);
-        var r = try d.call(&b);
-        if (try r.int(u8) > 1 or try r.int(u32) != 1) return error.BadTpmResponse;
-        const count = try r.int(u32);
-        if (count > 2) return error.BadTpmResponse;
-        for (0..count) |_| {
-            const handle = try r.int(u32);
-            if (handle == index) return error.WrongRollbackIndex;
-            if (handle == pair_index) state.defined = true;
-        }
-        if (r.at != r.data.len) return error.BadTpmResponse;
-        if (state.defined) {
-            if (!state.lockout or !state.clear_disabled) return error.UnprotectedTpmHierarchy;
-            b = command(0x169, &.{pair_index}, null);
-            r = try d.call(&b);
-            const actual = try r.sized();
-            if (actual.len < 10) return error.WrongRollbackIndex;
-            if (std.mem.readInt(u32, actual[6..10], .big) & (1 << 29) != 0)
-                return error.TpmAlreadyProvisioned;
-            var expected = try pairPublic(key);
-            std.mem.writeInt(u32, expected.data[6..10], pair_attributes & ~@as(u32, 1 << 29), .big);
-            if (!std.mem.eql(u8, actual, expected.slice()) or
-                !std.mem.eql(u8, try r.sized(), &name(actual)) or r.at != r.data.len)
-                return error.WrongRollbackIndex;
-        }
-        return state;
-    }
-
-    /// Finish an unwritten factory pair using the original durable credentials only.
-    pub fn recover(d: *Device, key: apk.Key, initial: Record, credentials: *const [2][32]u8) !void {
-        const zero: [32]u8 = @splat(0);
-        if (!std.mem.eql(u8, &initial.previous, &zero) or
-            !std.mem.eql(
-                u8,
-                &initial.retained,
-                &initial.candidate,
-            )) return error.WrongFactoryBootState;
-        for (credentials) |*secret|
-            if (std.mem.eql(u8, secret, &zero)) return error.BadProvisioningCredential;
-        const before = try d.incomplete(key);
-        // Authenticate owner without changing its auth or enabled state.
-        var b = passwordCommand(0x121, &.{owner}, &credentials[0]);
-        b.int(u32, owner);
-        b.int(u8, 1);
-        _ = try d.call(&b);
-        if (before.lockout) {
-            // Prove existing lockout auth by retaining the exact same credential.
-            b = passwordCommand(0x129, &.{0x4000000a}, &credentials[1]);
-            b.sized(&credentials[1]);
-            _ = try d.call(&b);
-        }
-        if (!std.meta.eql(before, try d.incomplete(key))) return error.EnrollmentChanged;
-        if (!before.lockout) {
-            b = command(0x129, &.{0x4000000a}, password);
-            b.sized(&credentials[1]);
-            _ = try d.call(&b);
-        }
-        if (!before.clear_disabled) {
-            b = passwordCommand(0x127, &.{0x4000000a}, &credentials[1]);
-            b.int(u8, 1);
-            _ = try d.call(&b);
-        }
-        if (!before.defined) {
-            var nv = try pairPublic(key);
-            std.mem.writeInt(u32, nv.data[6..10], pair_attributes & ~@as(u32, 1 << 29), .big);
-            b = passwordCommand(0x12a, &.{owner}, &credentials[0]);
-            b.sized("");
-            b.sized(nv.slice());
-            _ = try d.call(&b);
-        }
-        try d.disablePlatform();
-        try d.hierarchyProtected();
-        b = passwordCommand(0x136, &.{ owner, pair_index }, &credentials[0]);
-        b.sized(&initial.digest());
-        _ = try d.call(&b);
-        if (!std.mem.eql(u8, &try d.anchor(key), &initial.anchor())) return error.WrongBootState;
-    }
-
-    pub fn disablePlatform(d: *Device) !void {
-        if (try d.property(0x201) & 1 == 0) return;
-        var b = command(0x121, &.{platform}, password);
-        b.int(u32, platform);
-        b.int(u8, 0);
-        _ = d.call(&b) catch |err| {
-            // UEFI can retain an enabled hierarchy with a firmware-held random auth.
-            if (err == error.TpmRefused and d.authRefused()) {
-                try d.noHierarchyPolicies();
-                return;
-            }
-            return err;
-        };
-        if (try d.property(0x201) & 1 != 0) return error.TpmPlatformEnabled;
-    }
-
     fn authRefused(d: *Device) bool {
         return d.last_error == 0x9a2 or d.last_error == 0x98e;
     }
 
     fn noHierarchyPolicies(d: *Device) !void {
-        const platform_enabled = try d.property(0x201) & 1 != 0;
+        const platform_enabled = try d.property(startup_clear) & ph_enable != 0;
         var b = command(0x17a, &.{}, null);
-        b.int(u32, 9); // AUTH_POLICIES
+        b.int(u32, 9); // TPM_CAP_AUTH_POLICIES
         b.int(u32, owner);
         b.int(u32, 4);
         const r = try d.call(&b);
         try checkHierarchyPolicies(r.data, platform_enabled);
     }
 
+    /// disablePlatform closes the platform hierarchy until the next reset,
+    /// so nothing after boot can re-enable clear. Firmware that keeps it
+    /// behind a random password of its own has closed it already.
+    pub fn disablePlatform(d: *Device) !void {
+        if (try d.property(startup_clear) & ph_enable == 0) return;
+        var b = command(0x121, &.{platform}, password); // HierarchyControl
+        b.int(u32, platform);
+        b.int(u8, 0);
+        _ = d.call(&b) catch |err| {
+            if (err == error.TpmRefused and d.authRefused()) return d.noHierarchyPolicies();
+            return err;
+        };
+        if (try d.property(startup_clear) & ph_enable != 0) return error.TpmPlatformEnabled;
+    }
+
+    /// hierarchyProtected requires what enrollment leaves: owner and lockout
+    /// authorization set, clear disabled, no hierarchy policy, and the
+    /// platform hierarchy closed or behind firmware's own password.
     fn hierarchyProtected(d: *Device) !void {
-        if (try d.property(0x200) & 0x105 != 0x105) return error.UnprotectedTpmHierarchy;
+        const flags = owner_auth_set | lockout_auth_set | disable_clear;
+        if (try d.property(permanent) & flags != flags) return error.UnprotectedTpmHierarchy;
         try d.noHierarchyPolicies();
-        if (try d.property(0x201) & 1 == 0) return;
-        // An auth-only no-op must be refused. Boot's trusted firmware/ stage0
-        // established the protection before any guest-controlled process ran.
+        if (try d.property(startup_clear) & ph_enable == 0) return;
         var b = command(0x121, &.{platform}, password);
         b.int(u32, platform);
         b.int(u8, 1);
@@ -571,473 +285,267 @@ pub const Device = struct {
         return error.UnprotectedTpmHierarchy;
     }
 
-    pub fn floor(d: *Device, key: apk.Key) !u64 {
-        // Reset authority must remain outside the guest, including physical-presence commands.
-        try d.hierarchyProtected();
-        var b = command(0x169, &.{index}, null);
+    pub const Counter = enum { absent, unwritten, written };
+
+    /// counter reports whether h holds this protocol's counter, by its
+    /// exact public area; anything else at h is refused.
+    pub fn counter(d: *Device, h: u32) !Counter {
+        var b = command(0x17a, &.{}, null);
+        b.int(u32, 1); // TPM_CAP_HANDLES
+        b.int(u32, h);
+        b.int(u32, 1);
         var r = try d.call(&b);
+        _ = try r.int(u8);
+        if (try r.int(u32) != 1) return error.BadTpmResponse;
+        const count = try r.int(u32);
+        if (count > 1) return error.BadTpmResponse;
+        const found = count == 1 and try r.int(u32) == h;
+        if (r.at != r.data.len) return error.BadTpmResponse;
+        if (!found) return .absent;
+        b = command(0x169, &.{h}, null); // NV_ReadPublic
+        r = try d.call(&b);
         const actual = try r.sized();
-        const expected = try nvPublic(key);
-        if (!std.mem.eql(u8, actual, expected.slice()) or
-            !std.mem.eql(u8, try r.sized(), &name(actual)))
-            return error.WrongRollbackIndex;
-        b = command(0x14e, &.{ index, index }, password);
+        const nv_name = try r.sized();
+        if (r.at != r.data.len) return error.BadTpmResponse;
+        for ([_]Counter{ .unwritten, .written }) |state| {
+            const attributes = if (state == .written)
+                counter_attributes | written
+            else
+                counter_attributes;
+            const expected = counterPublic(h, attributes);
+            if (std.mem.eql(u8, actual, expected.slice())) {
+                if (!std.mem.eql(u8, nv_name, &name(actual))) return error.BadTpmResponse;
+                return state;
+            }
+        }
+        return error.WrongTpmCounter;
+    }
+
+    /// read returns the written counter at h.
+    pub fn read(d: *Device, h: u32) !u64 {
+        var b = command(0x14e, &.{ h, h }, password); // NV_Read
         b.int(u16, 8);
         b.int(u16, 0);
-        r = try d.call(&b);
+        var r = try d.call(&b);
         const data = try r.sized();
         if (data.len != 8) return error.BadTpmResponse;
         return std.mem.readInt(u64, data[0..8], .big);
     }
 
-    pub fn anchor(d: *Device, key: apk.Key) ![32]u8 {
+    /// raise increments the counter at h until it holds at least target,
+    /// and returns its value. A counter's first increment starts it from
+    /// the highest value any counter on the TPM has held, which may already
+    /// pass target. A lost reply is settled by reading, never by counting.
+    pub fn raise(d: *Device, h: u32, target: u64) !u64 {
+        var value: u64 = switch (try d.counter(h)) {
+            .absent => return error.ForeignTpm,
+            .unwritten => 0,
+            .written => try d.read(h),
+        };
+        var budget = (target -| value) +| 8;
+        while (value < target) : (budget -= 1) {
+            if (budget == 0) return error.TpmCounterStuck;
+            var b = command(0x134, &.{ h, h }, password); // NV_Increment
+            _ = d.call(&b) catch |err| if (err == error.TpmRefused) return err;
+            value = try d.read(h);
+        }
+        return value;
+    }
+
+    /// enroll makes a fresh TPM the machine's: the channel's counter at
+    /// least index, clear disabled, then random lockout and owner passwords
+    /// that nothing keeps. Each step is checked first and owner comes last,
+    /// so a cut leaves a state the next boot completes.
+    fn enroll(d: *Device, io: std.Io, h: u32, index: u64) !void {
+        if (try d.property(startup_clear) & sh_enable == 0) return error.TpmOwnerDisabled;
+        try d.noHierarchyPolicies();
+        const flags = try d.property(permanent);
+        // Enrollment disables clear before it sets lockout's password.
+        if (flags & lockout_auth_set != 0 and flags & disable_clear == 0) return error.ForeignTpm;
+        if (try d.counter(h) == .absent) {
+            var b = command(0x12a, &.{owner}, password); // NV_DefineSpace
+            b.sized("");
+            b.sized(counterPublic(h, counter_attributes).slice());
+            _ = try d.call(&b);
+        }
+        _ = try d.raise(h, index);
+        if (flags & disable_clear == 0) {
+            var b = command(0x127, &.{lockout}, password); // ClearControl
+            b.int(u8, 1);
+            _ = try d.call(&b);
+        }
+        var secret: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &secret);
+        for ([_]u32{ lockout, owner }) |hierarchy| {
+            if (hierarchy == lockout and flags & lockout_auth_set != 0) continue;
+            try io.randomSecure(&secret);
+            var b = command(0x129, &.{hierarchy}, password); // HierarchyChangeAuth
+            b.sized(&secret);
+            _ = try d.call(&b);
+        }
+    }
+
+    /// boot closes the platform's reset path, enrolls a TPM nobody owns
+    /// yet, verifies the enrolled state and returns channel's floor. The
+    /// caller refuses an index below it.
+    pub fn boot(d: *Device, io: std.Io, channel: [32]u8, index: u64) !u64 {
+        if (index == 0) return error.BadReleaseIndex;
+        const h = handle(channel);
+        try d.disablePlatform();
+        const flags = try d.property(permanent);
+        if (flags & owner_auth_set == 0) {
+            try d.enroll(io, h, index);
+        } else if (flags & (lockout_auth_set | disable_clear) != lockout_auth_set | disable_clear) {
+            // Enrollment sets owner's password last: this one is another's.
+            return error.ForeignTpm;
+        }
         try d.hierarchyProtected();
-        var b = command(0x169, &.{pair_index}, null);
-        var r = try d.call(&b);
-        const actual = try r.sized();
-        const expected = try pairPublic(key);
-        if (!std.mem.eql(u8, actual, expected.slice()) or
-            !std.mem.eql(u8, try r.sized(), &name(actual))) return error.WrongRollbackIndex;
-        b = command(0x14e, &.{ pair_index, pair_index }, password);
-        b.int(u16, 32);
-        b.int(u16, 0);
-        r = try d.call(&b);
-        const data = try r.sized();
-        if (data.len != 32) return error.BadTpmResponse;
-        var result: [32]u8 = undefined;
-        @memcpy(&result, data);
-        return result;
-    }
-
-    pub fn pcr11(d: *Device) ![32]u8 {
-        var b = command(0x17e, &.{}, null);
-        pcrSelection(&b);
-        var r = try d.call(&b);
-        _ = try r.int(u32);
-        var selection: Bytes = .{};
-        pcrSelection(&selection);
-        if (!std.mem.eql(u8, try r.bytes(selection.len), selection.slice()) or
-            try r.int(u32) != 1) return error.BadTpmResponse;
-        const data = try r.sized();
-        if (data.len != 32) return error.BadTpmResponse;
-        var result: [32]u8 = undefined;
-        @memcpy(&result, data);
-        return result;
-    }
-
-    pub fn check(d: *Device, key: apk.Key, serial: u64) !void {
-        if (serial < try d.floor(key)) return error.RollbackRefused;
-    }
-
-    fn flush(d: *Device, handle: u32) void {
-        var b = command(0x165, &.{handle}, null);
-        _ = d.call(&b) catch {};
-    }
-
-    const Session = struct { handle: u32, key_name: [34]u8, ticket: Bytes };
-
-    fn session(
-        d: *Device,
-        key: apk.Key,
-        policy: [32]u8,
-        reference: []const u8,
-        signature: []const u8,
-    ) !Session {
-        if (signature.len != key.modulus.len) return error.BadRollbackSignature;
-        const area = try public(key);
-        var b = command(0x167, &.{}, null); // LoadExternal
-        b.sized("");
-        b.sized(area.slice());
-        b.int(u32, owner);
-        var r = try d.call(&b);
-        const signer = try r.int(u32);
-        defer d.flush(signer);
-        const key_name = name(area.slice());
-        if (!std.mem.eql(u8, try r.sized(), &key_name)) return error.BadTpmResponse;
-        var signed_data: Bytes = .{};
-        signed_data.bytes(&policy);
-        signed_data.bytes(reference);
-        var hash: [32]u8 = undefined;
-        Sha256.hash(signed_data.slice(), &hash, .{});
-        b = command(0x177, &.{signer}, null); // VerifySignature
-        b.sized(&hash);
-        b.int(u16, 0x14);
-        b.int(u16, 0xb);
-        b.sized(signature);
-        r = try d.call(&b);
-        var ticket: Bytes = .{};
-        ticket.bytes(r.data);
-        b = command(0x17b, &.{}, null); // GetRandom
-        b.int(u16, 32);
-        r = try d.call(&b);
-        var nonce: [32]u8 = undefined;
-        const random = try r.sized();
-        if (random.len != 32) return error.BadTpmResponse;
-        @memcpy(&nonce, random);
-        b = command(0x176, &.{ 0x40000007, 0x40000007 }, null); // StartAuthSession
-        b.sized(&nonce);
-        b.sized("");
-        b.int(u8, 1);
-        b.int(u16, 0x10);
-        b.int(u16, 0xb);
-        r = try d.call(&b);
-        return .{ .handle = try r.int(u32), .key_name = key_name, .ticket = ticket };
-    }
-
-    fn authorizeSession(d: *Device, s: Session, policy: [32]u8, reference: []const u8) !void {
-        var b = command(0x16a, &.{s.handle}, null);
-        b.sized(&policy);
-        b.sized(reference);
-        b.sized(&s.key_name);
-        b.bytes(s.ticket.slice());
-        _ = try d.call(&b);
-    }
-
-    pub fn advance(d: *Device, key: apk.Key, serial: u64, signature: []const u8) !void {
-        try d.check(key, serial);
-        const policy = try approved(key, serial);
-        const s = try d.session(key, policy, qualifier, signature);
-        defer d.flush(s.handle);
-        var b = command(0x149, &.{ index, index, s.handle }, password);
-        b.sized(&value(serial));
-        b.int(u16, 0);
-        b.int(u16, 9);
-        _ = try d.call(&b);
-        b = command(0x16e, &.{s.handle}, null);
-        b.sized(&try cpHash(key, serial));
-        _ = try d.call(&b);
-        try d.authorizeSession(s, policy, qualifier);
-        b = command(0x137, &.{ index, index }, s.handle);
-        b.sized(&value(serial));
-        b.int(u16, 0);
-        _ = try d.call(&b);
-    }
-
-    pub fn retire(d: *Device, key: apk.Key, state: Record, signature: []const u8) !void {
-        if (!std.mem.eql(u8, &try d.anchor(key), &state.previous))
-            return error.StaleBootState;
-        const policy = try pairApproved(key, state);
-        const s = try d.session(key, policy, pair_qualifier, signature);
-        defer d.flush(s.handle);
-        var b = command(0x149, &.{ pair_index, pair_index, s.handle }, password);
-        b.sized(&state.previous);
-        b.int(u16, 0);
-        b.int(u16, 0);
-        _ = try d.call(&b);
-        b = command(0x17f, &.{s.handle}, null);
-        var digest: [32]u8 = undefined;
-        Sha256.hash(&state.pcr, &digest, .{});
-        b.sized(&digest);
-        pcrSelection(&b);
-        _ = try d.call(&b);
-        b = command(0x16e, &.{s.handle}, null);
-        b.sized(&try pairCpHash(key, state));
-        _ = try d.call(&b);
-        try d.authorizeSession(s, policy, pair_qualifier);
-        b = command(0x136, &.{ pair_index, pair_index }, s.handle);
-        b.sized(&state.digest());
-        _ = try d.call(&b);
-        if (!std.mem.eql(u8, &try d.anchor(key), &state.anchor())) return error.StaleBootState;
+        // An owned TPM without this channel's counter is another's.
+        if (try d.counter(h) != .written) return error.ForeignTpm;
+        return d.read(h);
     }
 };
 
-pub fn keyAt(io: std.Io, gpa: std.mem.Allocator, root: []const u8) !apk.Key {
-    const protocol = try readFile(
-        io,
-        gpa,
-        try gpa.print("{s}{s}/protocol", .{ root, metadata }),
-        16,
-    );
-    if (std.mem.eql(u8, protocol, "2-firmware\n")) {
-        const pinned = readFile(
-            io,
-            gpa,
-            try gpa.print("{s}{s}/vendor.sha256", .{ root, metadata }),
-            32,
-        ) catch |err| switch (err) {
-            error.StreamTooLong => return error.BadBootProtocol,
-            else => return err,
-        };
-        if (pinned.len != 32) return error.BadBootProtocol;
-        return firmware.load(io, gpa, pinned[0..32].*);
+/// Marker is what stage0 found before handover, as init records it in
+/// marker_path for posture: the channel's counter, its floor, and this
+/// release's index, which was at least the floor.
+pub const Marker = struct {
+    handle: u32,
+    floor: u64,
+    index: u64,
+
+    pub const path = "/run/werewolf/rollback-checked";
+    /// max is the longest format writes: two 20-digit numbers and a handle.
+    pub const max = "floor= index= handle=0x".len + 2 * 20 + 8;
+
+    pub fn format(m: Marker, buf: []u8) ![]const u8 {
+        return std.mem.print(buf, "floor={d} index={d} handle=0x{x:0>8}", .{
+            m.floor, m.index, m.handle,
+        });
     }
-    if (!std.mem.eql(u8, protocol, "2\n")) return error.BadBootProtocol;
-    return apk.parseKey(
-        gpa,
-        try readFile(io, gpa, try gpa.print("{s}{s}/signer.pub", .{ root, metadata }), 8192),
-    );
-}
 
-fn readFile(io: std.Io, gpa: std.mem.Allocator, file: []const u8, limit: usize) ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(limit + 1));
-}
-
-test "key source is explicit and a broken firmware pin never falls back to an embedded signer" {
-    const t = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
-    const dir = try gpa.print("{s}{s}", .{ root, metadata });
-    try std.Io.Dir.cwd().createDirPath(t.io, dir);
-    const protocol = try gpa.print("{s}/protocol", .{dir});
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "2\n" });
-    const pem = @embedFile("testdata/tpm-ab/signer.pub");
-    try std.Io.Dir.cwd().writeFile(t.io, .{
-        .sub_path = try gpa.print("{s}/signer.pub", .{dir}),
-        .data = pem,
-    });
-    const expected = try apk.parseKey(gpa, pem);
-    try t.expectEqualSlices(u8, expected.modulus, (try keyAt(t.io, gpa, root)).modulus);
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "2-firmware\n" });
-    try t.expectError(error.FileNotFound, keyAt(t.io, gpa, root));
-    const pin = try gpa.print("{s}/vendor.sha256", .{dir});
-    for ([_]usize{ 0, 31, 33 }) |n| {
-        try std.Io.Dir.cwd().writeFile(
-            t.io,
-            .{ .sub_path = pin, .data = (@as([33]u8, @splat(0)))[0..n] },
-        );
-        try t.expectError(error.BadBootProtocol, keyAt(t.io, gpa, root));
+    /// parse reads exactly what format writes, and refuses anything else,
+    /// including an index below the floor.
+    pub fn parse(text: []const u8) ?Marker {
+        var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), ' ');
+        const floor = number(it.next() orelse return null, "floor=") orelse return null;
+        const index = number(it.next() orelse return null, "index=") orelse return null;
+        const h = std.mem.cutPrefix(u8, it.next() orelse return null, "handle=0x") orelse
+            return null;
+        if (it.next() != null or h.len != 8) return null;
+        const value = std.fmt.parseUnsigned(u32, h, 16) catch return null;
+        if (value >> 16 != 0x0150 or index < floor or floor == 0) return null;
+        return .{ .handle = value, .floor = floor, .index = index };
     }
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "unknown\n" });
-    try t.expectError(error.BadBootProtocol, keyAt(t.io, gpa, root));
-}
 
-pub const Journal = struct { record: Record, position: u1 };
-
-pub fn bundle(key: apk.Key, raw: []const u8) !Record {
-    if (raw.len != record_size + key.modulus.len) return error.BadBootState;
-    const record = try Record.decode(raw[0..record_size]);
-    const message = try pairMessage(key, record);
-    try apk.verify(key, &message, raw[record_size..]);
-    return record;
-}
-
-/// Select by protected state, never by a disk-side completion flag.
-pub fn current(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    key: apk.Key,
-    directory: []const u8,
-    anchor_value: [32]u8,
-    release: [32]u8,
-) !Journal {
-    for (0..2) |i| {
-        const file = try gpa.print("{s}/{d}", .{ directory, i });
-        const raw = readFile(io, gpa, file, record_size + 512) catch |err| switch (err) {
-            error.FileNotFound, error.StreamTooLong => continue,
-            else => return err,
-        };
-        const record = bundle(key, raw) catch continue;
-        if (!std.mem.eql(u8, &record.anchor(), &anchor_value)) continue;
-        if (!record.allows(release)) return error.RollbackRefused;
-        return .{ .record = record, .position = @intCast(i) };
+    fn number(word: []const u8, comptime key: []const u8) ?u64 {
+        const digits = std.mem.cutPrefix(u8, word, key) orelse return null;
+        if (digits.len == 0 or digits.len > 20 or digits[0] == '0') return null;
+        for (digits) |c| if (!std.ascii.isDigit(c)) return null;
+        return std.fmt.parseUnsigned(u64, digits, 10) catch null;
     }
-    return error.MissingBootState;
+};
+
+const testing = std.testing;
+
+test "channel handles stay in werewolf's NV range and differ by the channel's first bytes" {
+    var channel: [32]u8 = @splat(0xff);
+    channel[0] = 0xab;
+    channel[1] = 0xcd;
+    try testing.expectEqual(@as(u32, 0x0150abcd), handle(channel));
+    channel[2] = 0;
+    try testing.expectEqual(@as(u32, 0x0150abcd), handle(channel));
+    try testing.expectEqual(@as(u32, 0x01500000), handle(@splat(0)));
 }
 
-pub fn boot(io: std.Io, gpa: std.mem.Allocator, release: ?[32]u8, directory: []const u8) !bool {
-    if (release == null) {
-        std.Io.Dir.cwd().access(io, "/root" ++ metadata, .{}) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
-        return error.MissingSealedBootIdentity;
-    }
-    const key = try keyAt(io, gpa, "/root");
-    var device = try Device.open(io);
-    defer device.close();
-    try device.disablePlatform();
-    const pcr = try device.pcr11();
-    const state = try current(io, gpa, key, directory, try device.anchor(key), release.?);
-    try checkPcr(state.record, release.?, pcr);
-    return true;
-}
-
-pub fn protected(io: std.Io, gpa: std.mem.Allocator, release: ?[32]u8, directory: []const u8) bool {
-    const id = release orelse return false;
-    const key = keyAt(io, gpa, "") catch return false;
-    var device = Device.open(io) catch return false;
-    defer device.close();
-    const anchor_value = device.anchor(key) catch return false;
-    const pcr = device.pcr11() catch return false;
-    const state = current(io, gpa, key, directory, anchor_value, id) catch return false;
-    checkPcr(state.record, id, pcr) catch return false;
-    return true;
-}
-
-fn checkPcr(record: Record, release: [32]u8, pcr: [32]u8) !void {
-    try measured(pcr);
-    if (std.mem.eql(u8, &release, &record.retained) and !std.mem.eql(u8, &pcr, &record.pcr))
-        return error.UnmeasuredBoot;
-}
-
-fn measured(pcr: [32]u8) !void {
-    if (std.mem.eql(u8, &pcr, &@as([32]u8, @splat(0)))) return error.UnmeasuredBoot;
-}
-
-test "mandatory TPM boot refuses an unmeasured PCR" {
-    try std.testing.expectError(error.UnmeasuredBoot, measured(@splat(0)));
-    try measured(@splat(1));
-    const r: Record = .{
-        .machine = @splat(1),
-        .previous = @splat(0),
-        .retained = @splat(2),
-        .candidate = @splat(3),
-        .pcr = @splat(4),
+test "the counter's public area has no policy, no lock and no owner write" {
+    const public = counterPublic(0x0150abcd, counter_attributes);
+    const expected = [_]u8{
+        0x01, 0x50, 0xab, 0xcd, // handle
+        0x00, 0x0b, // SHA-256
+        0x02, 0x04, 0x00, 0x14, // NO_DA | AUTHREAD | TPM_NT_COUNTER | AUTHWRITE
+        0x00, 0x00, // empty policy
+        0x00, 0x08, // eight bytes
     };
-    try checkPcr(r, @splat(2), @splat(4));
-    try std.testing.expectError(error.UnmeasuredBoot, checkPcr(r, @splat(2), @splat(5)));
-    try checkPcr(r, @splat(3), @splat(5));
+    try testing.expectEqualSlices(u8, &expected, public.slice());
+    // TPMA_NV: PPWRITE 0, OWNERWRITE 1, POLICYWRITE 3, POLICY_DELETE 10,
+    // WRITELOCKED 11, WRITEALL 12, WRITEDEFINE 13, WRITE_STCLEAR 14,
+    // GLOBALLOCK 15, PPREAD 16, OWNERREAD 17, POLICYREAD 19, ORDERLY 26,
+    // CLEAR_STCLEAR 27, READLOCKED 28, PLATFORMCREATE 30, READ_STCLEAR 31.
+    for ([_]u5{ 0, 1, 3, 10, 11, 12, 13, 14, 15, 16, 17, 19, 26, 27, 28, 30, 31 }) |bit|
+        try testing.expect(counter_attributes & (@as(u32, 1) << bit) == 0);
+    try testing.expectEqual(@as(u32, 1), counter_attributes >> 4 & 0xf); // TPM_NT_COUNTER
 }
 
-/// Persist a complete signed bundle before the caller removes an entry or retires NV.
-pub fn publish(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    directory: []const u8,
-    position: u1,
-    raw: []const u8,
-) !void {
-    try std.Io.Dir.cwd().createDirPath(io, directory);
-    const target = try gpa.print("{s}/{d}", .{ directory, position });
-    const temp = try gpa.print("{s}.tmp", .{target});
-    const file = try std.Io.Dir.cwd().createFile(io, temp, .{ .permissions = .fromMode(0o600) });
-    defer file.close(io);
-    try file.writeStreamingAll(io, raw);
-    try file.sync(io);
-    try std.Io.Dir.cwd().rename(temp, std.Io.Dir.cwd(), target, io);
-    // Also persist creation/rename of the directory and its parent on ext4.
-    if (@import("builtin").os.tag == .linux) std.os.linux.sync();
-}
-
-test "TPM values and parsers keep complete bounded binary records" {
-    const t = std.testing;
-    try t.expectEqual(@as(u64, 20), std.mem.readInt(u64, &value(20), .big));
-    var r: Read = .{ .data = &.{ 0, 8, 1, 2 } };
-    try t.expectError(error.BadTpmResponse, r.sized());
-    var b = command(0x137, &.{ index, index }, password);
-    try t.expectEqual(@as(usize, 31), b.len);
-    b.sized(&value(20));
-    b.int(u16, 0);
-    try t.expectEqual(@as(usize, 43), b.len);
-}
-
-test "journal ignores a torn new record but refuses stale authorization and retired releases" {
-    const t = std.testing;
-    const io = t.io;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", arena.allocator());
-    const gpa = arena.allocator();
-    const dir = try gpa.print("{s}/journal", .{root});
-    const key = try apk.parseKey(gpa, @embedFile("testdata/tpm-ab/signer.pub"));
-    const raw = @embedFile("testdata/tpm-ab/ab.state") ++ @embedFile("testdata/tpm-ab/ab.sig");
-    const record = try bundle(key, raw);
-    try t.expectError(
-        error.MissingBootState,
-        current(io, gpa, key, dir, record.anchor(), record.retained),
-    );
-    try publish(io, gpa, dir, 0, raw);
-    try tmp.dir.writeFile(io, .{ .sub_path = "journal/1", .data = raw[0..100] });
-    const selected = try current(io, gpa, key, dir, record.anchor(), record.candidate);
-    try t.expectEqual(@as(u1, 0), selected.position);
-    try t.expectError(
-        error.MissingBootState,
-        current(io, gpa, key, dir, @splat(9), record.retained),
-    );
-    try t.expectError(
-        error.RollbackRefused,
-        current(io, gpa, key, dir, record.anchor(), @splat(9)),
-    );
-    try publish(io, gpa, dir, 1, raw);
-    try t.expectEqualDeep(
-        record,
-        (try current(io, gpa, key, dir, record.anchor(), record.retained)).record,
-    );
-}
-
-test "canonical policy hashes match real TPM trial sessions and signature tickets" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const key = try apk.parseKey(arena.allocator(), @embedFile("testdata/tpm/signer.pub"));
-    const area = try public(key);
-    try t.expectEqualSlices(u8, @embedFile("testdata/tpm/signer.name"), &name(area.slice()));
-    try t.expectEqualSlices(
+test "commands carry one empty-password session" {
+    const b = command(0x134, &.{ 0x0150abcd, 0x0150abcd }, password);
+    try testing.expectEqualSlices(u8, &.{ 0x80, 0x02 }, b.slice()[0..2]);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0x01, 0x34 }, b.slice()[6..10]);
+    try testing.expectEqualSlices(
         u8,
-        @embedFile("testdata/tpm/authorize.policy"),
-        &try authorization(key),
+        &.{ 0, 0, 0, 9, 0x40, 0, 0, 9, 0, 0, 0, 0, 0 },
+        b.slice()[18..],
     );
-    inline for (.{ 10, 20 }) |serial| {
-        const prefix = "testdata/tpm/" ++ std.fmt.comptimePrint("{d}", .{serial});
-        try t.expectEqualSlices(u8, @embedFile(prefix ++ ".cp")[2..], &try cpHash(key, serial));
-        const policy = try approved(key, serial);
-        try t.expectEqualSlices(u8, @embedFile(prefix ++ ".policy"), &policy);
-        var message: Bytes = .{};
-        message.bytes(&policy);
-        message.bytes(qualifier);
-        try apk.verify(key, message.slice(), @embedFile(prefix ++ ".sig"));
-        message.data[0] ^= 1;
-        try t.expectError(
-            error.BadSignature,
-            apk.verify(key, message.slice(), @embedFile(prefix ++ ".sig")),
-        );
+    try testing.expectEqual(@as(usize, 10), command(0x17a, &.{}, null).len);
+}
+
+test "hierarchy policies: owner and lockout none, platform none while listed" {
+    // Actual GCP AUTH_POLICIES response, excluding the TPM response header.
+    const google = [_]u8{
+        0,    0, 0,    0,    9, 0,    0,    0, 3,
+        0x40, 0, 0,    1,    0, 0x10, 0x40, 0, 0,
+        0xa,  0, 0x10, 0x40, 0, 0,    0xb,  0, 0x10,
+    };
+    try checkHierarchyPolicies(&google, false);
+    try testing.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(&google, true));
+    var all = google ++ [_]u8{ 0x40, 0, 0, 0xc, 0, 0x10 };
+    all[8] = 4;
+    try checkHierarchyPolicies(&all, true);
+    for (0..google.len) |length| {
+        if (checkHierarchyPolicies(google[0..length], false)) |_|
+            return error.TruncatedPoliciesAccepted
+        else |_| {}
     }
+    try testing.expectError(
+        error.BadTpmResponse,
+        checkHierarchyPolicies(&(google ++ [_]u8{0}), false),
+    );
+    // An endorsement policy is allowed; an owner, lockout or platform one is not.
+    const policy = [_]u8{ 0, 0x0b } ++ @as([32]u8, @splat(7));
+    try checkHierarchyPolicies(google[0..21] ++ [_]u8{ 0x40, 0, 0, 0xb } ++ policy, false);
+    const owned = google[0..9] ++ [_]u8{ 0x40, 0, 0, 1 } ++ policy ++ google[15..];
+    try testing.expectError(error.UnprotectedTpmHierarchy, checkHierarchyPolicies(owned, false));
+    const platformed = all[0..27] ++ [_]u8{ 0x40, 0, 0, 0xc } ++ policy;
+    try testing.expectError(
+        error.UnprotectedTpmHierarchy,
+        checkHierarchyPolicies(platformed, true),
+    );
+    // Owner or lockout missing from the list is never assumed safe.
+    const missing = [_]u8{ 0, 0, 0, 0, 9, 0, 0, 0, 1, 0x40, 0, 0, 1, 0, 0x10 };
+    try testing.expectError(
+        error.UnprotectedTpmHierarchy,
+        checkHierarchyPolicies(&missing, false),
+    );
 }
 
-test "A/B policy and exact-pair verification match independent TPM trial fixtures" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const key = try apk.parseKey(arena.allocator(), @embedFile("testdata/tpm-ab/signer.pub"));
-    const raw = @embedFile("testdata/tpm-ab/ab.state");
-    const signature = @embedFile("testdata/tpm-ab/ab.sig");
-    const record = try Record.decode(raw);
-    const area = try public(key);
-    try t.expectEqualSlices(u8, @embedFile("testdata/tpm-ab/signer.name"), &name(area.slice()));
-    try t.expectEqualSlices(
-        u8,
-        @embedFile("testdata/tpm-ab/authorize.policy"),
-        &try pairAuthorization(key),
-    );
-    try t.expectEqualSlices(
-        u8,
-        @embedFile("testdata/tpm-ab/ab.cp")[2..],
-        &try pairCpHash(key, record),
-    );
-    try t.expectEqualSlices(
-        u8,
-        @embedFile("testdata/tpm-ab/ab.policy"),
-        &try pairApproved(key, record),
-    );
-    for ([2][32]u8{ record.retained, record.candidate }) |release|
-        try t.expectEqualDeep(
-            record,
-            try verifyRecord(key, raw, signature, record.anchor(), release),
-        );
-    try t.expectError(
-        error.RollbackRefused,
-        verifyRecord(key, raw, signature, record.anchor(), @splat(0)),
-    );
-    try t.expectError(
-        error.StaleBootState,
-        verifyRecord(key, raw, signature, record.previous, record.retained),
-    );
-    try t.expectError(
-        error.BadSignature,
-        verifyRecord(key, raw, signature[0..255], record.anchor(), record.retained),
-    );
-    for (16..raw.len) |i| {
-        var changed = record.encode();
-        changed[i] ^= 1;
-        try t.expectError(
-            error.BadSignature,
-            verifyRecord(key, &changed, signature, record.anchor(), record.retained),
-        );
-    }
+test "the boot marker round-trips and refuses anything else" {
+    var buf: [Marker.max]u8 = undefined;
+    const largest: Marker = .{
+        .handle = 0x0150ffff,
+        .floor = std.math.maxInt(u64),
+        .index = std.math.maxInt(u64),
+    };
+    try testing.expectEqualDeep(largest, Marker.parse(try largest.format(&buf)).?);
+    const m: Marker = .{ .handle = 0x0150abcd, .floor = 3, .index = 7 };
+    const text = try m.format(&buf);
+    try testing.expectEqualStrings("floor=3 index=7 handle=0x0150abcd", text);
+    try testing.expectEqualDeep(m, Marker.parse(text).?);
+    try testing.expectEqualDeep(m, Marker.parse("floor=3 index=7 handle=0x0150abcd\n").?);
+    for ([_][]const u8{
+        "",                                   "checked",
+        "floor=3 index=2 handle=0x0150abcd",  "floor=0 index=2 handle=0x0150abcd",
+        "floor=03 index=7 handle=0x0150abcd", "floor=3 index=7 handle=0x0160abcd",
+        "floor=3 index=7 handle=0x150abcd",   "floor=3 index=7 handle=0x0150abcd x",
+        "index=7 floor=3 handle=0x0150abcd",  "floor=3  index=7 handle=0x0150abcd",
+    }) |bad| try testing.expectEqual(null, Marker.parse(bad));
 }

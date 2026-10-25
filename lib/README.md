@@ -65,8 +65,21 @@ inherited `SOCK_SEQPACKET` socketpair (`Role.updater`, `Role.keeper`,
 and drops dumpability. Neither the EFI partition nor `/boot` is ever lent as a
 mount: `esp-status`, `esp-commit`, `esp-disarm`, `esp-arm`, `esp-inspect` and
 `esp-install` have the broker work on the ESP detached, `slot-root`,
-`slot-decl`, `slot-meta` and `slot-state` do the same for `/boot/slot/{a,b}`
-and `/boot/state/{0,1}`, and `shutdown` unmounts `/data` and `/boot`.
+`slot-decl` and `slot-meta` do the same for `/boot/slot/{a,b}`, `floor` raises
+the running release's TPM floor (lib/tpm.zig), and `shutdown` unmounts `/data`
+and `/boot`.
+
+## tpm
+
+The release floor ([independent-updates.md](../docs/design/independent-updates.md)):
+one NV counter per release channel at `0x0150XXXX`, XXXX the channel identity's first
+two bytes, with empty authorization, no policy and the attributes AUTHWRITE, COUNTER,
+AUTHREAD and NO_DA. `Device.boot`, for stage0, closes the platform hierarchy, enrolls a
+TPM nobody owns (defines the counter at the release's index, disables clear, sets
+random owner and lockout passwords it forgets) and returns the floor; `Device.raise`,
+for the mount broker, increments the counter to an index and never lowers it. `Marker`
+is what init records in `/run/werewolf/rollback-checked` for posture: `floor=M index=N
+handle=0x...`. A root holding `/usr/share/werewolf/tpm/protocol` (`3`) requires it.
 
 ## dm
 
@@ -98,10 +111,6 @@ version check that refuses one before 1.9, which writes empty files from a tar. 
 
 ## cmdline
 
-The signed enrollment UKI uses `werewolf.bootstrap=1` with `native=1` and `secure=1`.
-Its separately measured recovery variant adds `werewolf.recovery=1`; neither mode
-accepts workload options. Ordinary stage0 refuses workload handover in either mode.
-
 Parses the `werewolf.*` words of the kernel command line for stage0,
 init, mount-broker, slot-update, leash, posture and others:
 
@@ -113,6 +122,9 @@ init, mount-broker, slot-update, leash, posture and others:
 | `slots=UUID`, `slot=a\|b` | the `/boot` ext4 partition, and this boot's slot; both or neither |
 | `esp=XXXX-XXXX` | the EFI system partition, by FAT serial |
 | `root=DEV` | direct boot: the disk holding the image; not with `slot` |
+| `native=1`, `secure=1` | a native UKI boot, which needs `slots` and `esp` and takes its slot from firmware; with `secure`, Secure Boot is required |
+| `channel=HEX`, `index=N` | the release's channel (64 hex digits) and index, held to the TPM floor; both or neither, on a secure boot only |
+| `disable=LIST` | the protections (`secureboot`, `tpm`, `ipe`) the machine lacks; `secureboot` needs `tpm` |
 | `deadman=SECONDS` | the deadman's wait, 1 to 600 |
 | `seal=learn\|enforce`, `debug=1` | DEV=1 builds only |
 | `check=1` | posture's attacks, for tests |

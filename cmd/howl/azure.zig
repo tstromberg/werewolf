@@ -234,47 +234,19 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
-}
-
-/// The machine's firmware owner is distinct from its code-signing authority.
-/// Bootstrap images contain no workload and are validated by their own layout.
-pub fn ensureImageWithAuthority(
-    io: Io,
-    gpa: Allocator,
-    p: Place,
-    form: []const u8,
-    arch: howl.Arch,
-    disk: []const u8,
-    work: []const u8,
-    authority: ?[]const u8,
-    kind: @import("secureboot.zig").BootKind,
-    why: *howl.Why,
-) ![]const u8 {
-    if (kind == .bootstrap) {
-        if (authority == null) return error.MissingBootstrapAuthority;
-        _ = try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
-    } else _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    // The image's own boot certificate is the one signer firmware admits:
+    // the published vendor's for a download, the builder's for a --build.
+    // Azure keeps Microsoft's PK (an image bringing its own boots in setup
+    // mode), so the gallery version takes Microsoft's UEFI CA template,
+    // adds the certificate to db and revokes the template's CAs in dbx.
+    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     const der = try Dir.cwd().readFileAlloc(
         io,
         try gpa.print("{s}/boot.der", .{work}),
         gpa,
         .limited(8192),
     );
-    var digest = try images.sha256(io, disk);
-    const owner = if (authority) |cert| blk: {
-        const path = try gpa.print("{s}/owner.der", .{work});
-        try howl.run(io, why, &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path });
-        const bytes = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
-        const owner_key = try @import("tpm").firmware.certificateKey(bytes);
-        const code_key = try @import("tpm").firmware.certificateKey(der);
-        if (std.mem.eql(u8, owner_key.modulus, code_key.modulus)) return error.SharedBootAuthority;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&digest);
-        hash.update(bytes);
-        digest = std.fmt.bytesToHex(hash.finalResult(), .lower);
-        break :blk bytes;
-    } else der;
+    const digest = try images.sha256(io, disk);
     const name = try images.name(gpa, form, arch, &digest);
     const gallery = try std.mem.replaceOwned(u8, gpa, name, "-", "_");
     if (ask(io, gpa, p, &.{
@@ -284,7 +256,7 @@ pub fn ensureImageWithAuthority(
         "--query",        "id",                      "-o",
         "tsv",
     })) |id| {
-        try verifyGallery(io, gpa, id, der, owner, why);
+        try verifyGallery(io, gpa, id, der, why);
         howl.say(io, "image {s}: there already", .{name});
         return id;
     }
@@ -332,13 +304,8 @@ pub fn ensureImageWithAuthority(
     }, why);
     const version = try gpa.print("{s}/images/boot/versions/1.0.0", .{gallery_id});
     const body = try gpa.print("{s}/gallery-version.json", .{work});
-    try Dir.cwd().writeFile(io, .{ .sub_path = body, .data = try galleryVersionWithAuthority(
-        gpa,
-        p.location,
-        source_id,
-        der,
-        owner,
-    ) });
+    const body_text = try galleryVersion(gpa, p.location, source_id, der);
+    try Dir.cwd().writeFile(io, .{ .sub_path = body, .data = body_text });
     defer Dir.cwd().deleteFile(io, body) catch {};
     try howl.run(io, why, try galleryRequest(gpa, version, body));
     const start = Io.Clock.awake.now(io);
@@ -353,7 +320,7 @@ pub fn ensureImageWithAuthority(
             "tsv",
         }) orelse "";
         if (std.mem.eql(u8, state, "Succeeded")) {
-            try verifyGallery(io, gpa, version, der, owner, why);
+            try verifyGallery(io, gpa, version, der, why);
             return version;
         }
         if (std.mem.eql(u8, state, "Failed")) return why.refuse(
@@ -390,12 +357,12 @@ fn verifyGallery(
     gpa: Allocator,
     version: []const u8,
     der: []const u8,
-    owner: []const u8,
     why: *howl.Why,
 ) !void {
     const read = call(io, gpa, try galleryReadRequest(gpa, version));
-    if (!read.ok or !try galleryEnrolledWithAuthority(gpa, read.out, der, owner)) return why.refuse(
-        "Azure did not retain the disk's exact PK/KEK/db enrollment; refusing to launch its VM",
+    if (!read.ok or !try galleryEnrolled(gpa, read.out, der)) return why.refuse(
+        "Azure did not retain the disk certificate in db and Microsoft's UEFI CAs in dbx " ++
+            "under its UEFI CA template; refusing to launch its VM",
         .{},
     );
 }
@@ -411,15 +378,49 @@ fn galleryReadRequest(gpa: Allocator, version: []const u8) ![]const []const u8 {
     });
 }
 
-fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
-    return galleryEnrolledWithAuthority(gpa, text, der, der);
+/// template is Azure's own PK, KEK and db: Microsoft's keys and the CAs
+/// that sign other vendors' loaders. revoked lists those CAs, for dbx.
+const template = "MicrosoftUefiCertificateAuthorityTemplate";
+
+// Azure's UEFI CA template puts Microsoft's signers in db beside ours. stage0
+// admits db less dbx and requires that to be the image's certificate alone,
+// so the gallery version revokes every other db signer in dbx by its SHA-256.
+// Three are Microsoft's published UEFI CAs (boot/microsoft/); the last is one
+// more the template's db carries, seen on Azure westus 2026-10-25 and absent
+// from microsoft/secureboot_objects. stage0 names any further one by its hash.
+const extra_revocations = [_][32]u8{
+    .{
+        0xca, 0x40, 0x0f, 0x91, 0x3a, 0xc6, 0xa5, 0x5a, 0x5c, 0xc8, 0x62, 0x9c, 0xe8, 0xd2, 0xb8,
+        0x47, 0xbf, 0xa0, 0xfc, 0xca, 0xd2, 0x0a, 0x4d, 0x13, 0x3c, 0x1f, 0x76, 0xda, 0xb2, 0xb3,
+        0x69, 0x25,
+    },
+};
+
+/// revoked returns the SHA-256 of every signer dbx must carry: each Microsoft
+/// UEFI CA the template trusts, and extra_revocations.
+fn revoked(gpa: Allocator) ![]const [32]u8 {
+    const cas = @import("files").microsoft_uefi_cas;
+    const out = try gpa.alloc([32]u8, cas.len + extra_revocations.len);
+    for (cas, out[0..cas.len]) |cert, *digest|
+        std.crypto.hash.sha2.Sha256.hash(cert, digest, .{});
+    @memcpy(out[cas.len..], &extra_revocations);
+    return out;
 }
 
-fn galleryEnrolledWithAuthority(gpa: Allocator, text: []const u8, der: []const u8, owner: []const u8) !bool {
-    const Key = struct { type: []const u8, value: []const []const u8 };
+/// hashes is revoked() as Azure stores a sha256 signature: base64 of each.
+fn hashes(gpa: Allocator) ![]const []const u8 {
+    const digests = try revoked(gpa);
+    const out = try gpa.alloc([]const u8, digests.len);
+    for (digests, out) |*digest, *value| value.* = try base64(gpa, digest);
+    return out;
+}
+
+const Key = struct { type: []const u8, value: []const []const u8 };
+
+fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
     const Record = struct {
         signatureTemplateNames: []const []const u8,
-        additionalSignatures: struct { pk: Key, kek: []const Key, db: []const Key },
+        additionalSignatures: struct { db: []const Key = &.{}, dbx: []const Key = &.{} },
     };
     const parsed = std.json.parseFromSlice(Record, gpa, text, .{
         .ignore_unknown_fields = true,
@@ -427,20 +428,33 @@ fn galleryEnrolledWithAuthority(gpa: Allocator, text: []const u8, der: []const u
     defer parsed.deinit();
     const r = parsed.value;
     if (r.signatureTemplateNames.len != 1 or
-        !std.mem.eql(u8, r.signatureTemplateNames[0], "NoSignatureTemplate") or
-        r.additionalSignatures.kek.len != 1 or r.additionalSignatures.db.len != 1) return false;
+        !std.mem.eql(u8, r.signatureTemplateNames[0], template))
+        return false;
+    // db holds our certificate; dbx the revoked signers' SHA-256, nothing else.
+    if (!sameValues(r.additionalSignatures.db, "x509", &.{try base64(gpa, der)})) return false;
+    return sameValues(r.additionalSignatures.dbx, "sha256", try hashes(gpa));
+}
+
+/// sameValues is true when keys, every one of type kind, hold exactly want.
+fn sameValues(keys: []const Key, kind: []const u8, want: []const []const u8) bool {
+    var count: usize = 0;
+    for (keys) |key| {
+        if (!std.mem.eql(u8, key.type, kind)) return false;
+        for (key.value) |value| {
+            count += 1;
+            var found = false;
+            for (want) |w| {
+                if (std.mem.eql(u8, value, w)) found = true;
+            }
+            if (!found) return false;
+        }
+    }
+    return count == want.len;
+}
+
+fn base64(gpa: Allocator, der: []const u8) ![]const u8 {
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
-    defer gpa.free(encoded);
-    const certificate = std.base64.standard.Encoder.encode(encoded, der);
-    const owner_encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(owner.len));
-    defer gpa.free(owner_encoded);
-    const owner_certificate = std.base64.standard.Encoder.encode(owner_encoded, owner);
-    for ([_]Key{
-        r.additionalSignatures.pk, r.additionalSignatures.kek[0], r.additionalSignatures.db[0],
-    }, [_][]const u8{ owner_certificate, owner_certificate, certificate }) |key, expected|
-        if (!std.mem.eql(u8, key.type, "x509") or key.value.len != 1 or
-            !std.mem.eql(u8, key.value[0], expected)) return false;
-    return true;
+    return std.base64.standard.Encoder.encode(encoded, der);
 }
 
 fn galleryVersion(
@@ -449,22 +463,6 @@ fn galleryVersion(
     source: []const u8,
     der: []const u8,
 ) ![]const u8 {
-    return galleryVersionWithAuthority(gpa, location, source, der, der);
-}
-
-fn galleryVersionWithAuthority(
-    gpa: Allocator,
-    location: []const u8,
-    source: []const u8,
-    der: []const u8,
-    owner: []const u8,
-) ![]const u8 {
-    const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
-    const cert = std.base64.standard.Encoder.encode(encoded, der);
-    const signature = .{ .type = "x509", .value = [_][]const u8{cert} };
-    const owner_encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(owner.len));
-    const owner_cert = std.base64.standard.Encoder.encode(owner_encoded, owner);
-    const owner_signature = .{ .type = "x509", .value = [_][]const u8{owner_cert} };
     return std.json.Stringify.valueAlloc(gpa, .{
         .location = location,
         .properties = .{
@@ -474,11 +472,10 @@ fn galleryVersionWithAuthority(
             },
             .storageProfile = .{ .osDiskImage = .{ .source = .{ .id = source } } },
             .securityProfile = .{ .uefiSettings = .{
-                .signatureTemplateNames = .{"NoSignatureTemplate"},
+                .signatureTemplateNames = .{template},
                 .additionalSignatures = .{
-                    .pk = owner_signature,
-                    .kek = .{owner_signature},
-                    .db = .{signature},
+                    .db = .{.{ .type = "x509", .value = .{try base64(gpa, der)} }},
+                    .dbx = .{.{ .type = "sha256", .value = try hashes(gpa) }},
                 },
             } },
         },
@@ -630,9 +627,6 @@ pub fn create(
     }
     if (!enabled)
         _ = try need(io, gpa, p, &.{ "vm", "boot-diagnostics", "enable", "-n", name }, why);
-    // The isolated enrollment agent intentionally never announces workload
-    // readiness. Its caller owns observation and any explicit diagnostic reboot.
-    if (std.mem.eql(u8, form, "tpm-bootstrap")) return;
     if (try awaitUpWithin(io, gpa, p, name, "", first_boot_seconds) != .late) return;
     howl.say(io, "{s}: its first boot was not watched from the start; restarting it once", .{name});
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
@@ -828,24 +822,7 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, vm: ?Vm, why: 
 }
 
 const testing = std.testing;
-test "gallery preserves separate firmware owner and code-signing trust" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const code = &[_]u8{ 1, 2, 3 };
-    const owner = &[_]u8{ 4, 5, 6 };
-    const body = try galleryVersionWithAuthority(gpa, "westus2", "/disks/bootstrap", code, owner);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
-    defer parsed.deinit();
-    const uefi = parsed.value.object.get("properties").?.object.get("securityProfile").?.object.get("uefiSettings").?;
-    const text = try std.json.Stringify.valueAlloc(gpa, uefi, .{});
-    try testing.expect(try galleryEnrolledWithAuthority(gpa, text, code, owner));
-    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, owner, code));
-    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, code, code));
-    try testing.expect(!try galleryEnrolledWithAuthority(gpa, text, &.{7}, owner));
-}
-
-test "gallery enrollment replaces default trust with the disk certificate" {
+test "gallery adds the disk certificate to db and revokes the template's signers in dbx" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -859,14 +836,20 @@ test "gallery enrollment replaces default trust with the disk certificate" {
     const uefi = properties.get("securityProfile").?.object.get("uefiSettings").?.object;
     const templates = uefi.get("signatureTemplateNames").?.array.items;
     try testing.expectEqual(@as(usize, 1), templates.len);
-    try testing.expectEqualStrings("NoSignatureTemplate", templates[0].string);
+    try testing.expectEqualStrings(template, templates[0].string);
     const signatures = uefi.get("additionalSignatures").?.object;
-    inline for (.{ "pk", "kek", "db" }) |field| {
-        const v = signatures.get(field).?;
-        const sig = if (std.mem.eql(u8, field, "pk")) v.object else v.array.items[0].object;
-        try testing.expectEqualStrings("x509", sig.get("type").?.string);
-        try testing.expectEqualStrings("AQID", sig.get("value").?.array.items[0].string);
-    }
+    // No PK or KEK of our own: Azure refuses a PK beside a template, and a
+    // PK alone leaves its firmware in setup mode.
+    try testing.expect(signatures.get("pk") == null and signatures.get("kek") == null);
+    const db = signatures.get("db").?.array.items[0].object;
+    try testing.expectEqualStrings("x509", db.get("type").?.string);
+    try testing.expectEqualStrings("AQID", db.get("value").?.array.items[0].string);
+    const dbx = signatures.get("dbx").?.array.items[0].object;
+    try testing.expectEqualStrings("sha256", dbx.get("type").?.string);
+    const want = try hashes(gpa);
+    try testing.expectEqual(want.len, dbx.get("value").?.array.items.len);
+    for (dbx.get("value").?.array.items, want) |value, w|
+        try testing.expectEqualStrings(w, value.string);
     const retained = try std.json.Stringify.valueAlloc(
         gpa,
         @as(std.json.Value, .{ .object = uefi }),
@@ -883,6 +866,47 @@ test "gallery enrollment replaces default trust with the disk certificate" {
     try testing.expect(std.mem.find(u8, read[5], "&$expand=UefiSettings") != null);
 }
 
+test "gallery enrollment holds only with every revocation and no extra signer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const want = try hashes(gpa);
+    const first = want[0];
+    const rest = try std.mem.join(gpa, "\",\"", want[1..]);
+    // Split across entries and reordered, as Azure may store it: still enrolled.
+    const split = try gpa.print(
+        \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{"pk":null,"kek":[],
+        \\"db":[{{"type":"x509","value":["AQID"]}}],
+        \\"dbx":[{{"type":"sha256","value":["{s}"]}},{{"type":"sha256","value":["{s}"]}}]}}}}
+    , .{ template, rest, first });
+    try testing.expect(try galleryEnrolled(gpa, split, &.{ 1, 2, 3 }));
+    const cases = [_][]const u8{
+        // A revocation missing: that signer's loaders would boot.
+        try gpa.print(
+            \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
+            \\"db":[{{"type":"x509","value":["AQID"]}}],"dbx":[{{"type":"sha256","value":["{s}"]}}]}}}}
+        , .{ template, rest }),
+        // A second signer in db.
+        try gpa.print(
+            \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
+            \\"db":[{{"type":"x509","value":["AQID","BAUG"]}}],
+            \\"dbx":[{{"type":"sha256","value":["{s}","{s}"]}}]}}}}
+        , .{ template, rest, first }),
+        // dbx as whole certificates, not the hashes stage0 matches.
+        try gpa.print(
+            \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
+            \\"db":[{{"type":"x509","value":["AQID"]}}],
+            \\"dbx":[{{"type":"x509","value":["{s}","{s}"]}}]}}}}
+        , .{ template, rest, first }),
+        // Our own PK: the template Azure honours is the one named.
+        try gpa.print(
+            \\{{"signatureTemplateNames":["NoSignatureTemplate"],"additionalSignatures":{{
+            \\"db":[{{"type":"x509","value":["AQID"]}}],
+            \\"dbx":[{{"type":"sha256","value":["{s}","{s}"]}}]}}}}
+        , .{ rest, first }),
+    };
+    for (cases) |text| try testing.expect(!try galleryEnrolled(gpa, text, &.{ 1, 2, 3 }));
+}
 test openArgs {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

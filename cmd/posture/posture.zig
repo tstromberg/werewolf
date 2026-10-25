@@ -285,6 +285,10 @@ pub const Report = struct {
     os: []const u8,
     host: []const u8,
     kernel: []const u8,
+    /// form is the werewolf form the image was made from.
+    form: ?[]const u8 = null,
+    /// release is the image's release serial, as 20261024T220456Z.
+    release: ?[]const u8 = null,
     root: bool,
     /// disabled names the protections the machine was made without
     /// (werewolf.disable, from howl's --disable).
@@ -298,13 +302,14 @@ pub const Report = struct {
     /// known compares failures with the image's weaknesses, on a werewolf
     /// image. slot-keep commits a slot only when unexpected is empty.
     known: ?Known = null,
-    /// tpm is the A/B pair's state as this run read it from the TPM: the
-    /// anchor and PCR 11, hex. ab-status reads boot's (test/ab-status.zig).
+    /// tpm is the release floor stage0 admitted this boot at: the channel's
+    /// counter, its floor and this release's index. ab-status reads it
+    /// (test/ab-status.zig).
     tpm: ?Tpm = null,
     checks: []const Check,
 };
 
-pub const Tpm = struct { anchor: []const u8, pcr11: []const u8 };
+pub const Tpm = struct { handle: u32, floor: u64, index: u64 };
 
 pub const Check = struct {
     id: []const u8,
@@ -382,16 +387,34 @@ pub const Posture = struct {
     walk_entries: usize = 0,
     checks: std.ArrayList(Check) = .empty,
     /// cache lets a check this process cannot make take boot's result
-    /// (fromBoot); --no-cache leaves it skipped.
+    /// (fromBoot, a check citing a file in denied, and any skip without
+    /// root); --no-cache leaves it as this run found it.
     cache: bool = true,
+    /// denied is the files this run may not read: root's alone, PID 1's when
+    /// hidepid hides it, or any a confined session's Landlock layer refuses.
+    denied: std.ArrayList([]const u8) = .empty,
     /// boot is boot's report's checks, read at first need.
     boot: ?[]const Check = null,
-    /// tpm is the A/B pair's state, if this run could read the TPM.
+    /// tpm is the release floor stage0 recorded for this boot, if readable.
     tpm: ?Tpm = null,
 
-    pub fn add(p: *Posture, c: Check) !void {
+    pub fn add(p: *Posture, check: Check) !void {
+        var c = check;
+        const source = c.source orelse evidence.source(c.id) orelse c.how;
+        // A check whose evidence this run may not read, or that it skipped
+        // without root, takes boot's result: boot's run, as root, read it
+        // this boot. Without one, a run without root says what it missed.
+        const denied = if (source) |s| p.deniedIn(s) else null;
+        if (denied != null or (!p.root and c.result == .skip)) if (p.bootCheck(c.id)) |b|
+            return p.checks.append(p.gpa, try p.cached(b));
+        if (denied != null and !p.root) {
+            c.result = .skip;
+            c.detail = try p.gpa.print("{s}: permission denied", .{denied.?});
+            c.observed = null;
+            c.comparison = null;
+        }
         var measured = c;
-        measured.source = c.source orelse evidence.source(c.id) orelse c.how;
+        measured.source = source;
         measured.expected = c.expected orelse c.how;
         measured.observed = c.observed orelse if (c.detail.len > 0)
             c.detail
@@ -536,9 +559,29 @@ pub const Posture = struct {
     /// root SSH session may not ask netlink or the TPM (forms/sshd). Without
     /// boot's result, or with --no-cache, it adds skipped.
     pub fn fromBoot(p: *Posture, skipped: Check) !void {
-        if (p.cache) for (p.bootChecks()) |c| if (std.mem.eql(u8, c.id, skipped.id))
-            return p.checks.append(p.gpa, try p.cached(c));
+        if (p.bootCheck(skipped.id)) |c| return p.checks.append(p.gpa, try p.cached(c));
         try p.add(skipped);
+    }
+
+    /// deniedIn returns a file in denied that source cites, by its path or
+    /// by a directory above it.
+    fn deniedIn(p: *Posture, source: []const u8) ?[]const u8 {
+        if (p.denied.items.len == 0) return null;
+        var words = std.mem.tokenizeAny(u8, source, " ;,()");
+        while (words.next()) |word| {
+            const cited = std.mem.trimEnd(u8, word, ":");
+            if (cited.len < 2 or cited[0] != '/') continue;
+            for (p.denied.items) |path| if (std.mem.startsWith(u8, path, cited) and
+                (path.len == cited.len or path[cited.len] == '/')) return path;
+        }
+        return null;
+    }
+
+    /// bootCheck returns boot's result for id, if the cache may be used.
+    fn bootCheck(p: *Posture, id: []const u8) ?Check {
+        if (!p.cache) return null;
+        for (p.bootChecks()) |c| if (std.mem.eql(u8, c.id, id)) return c;
+        return null;
     }
 
     /// fromBootRest adds, as fromBoot does, each check of boot's report this
@@ -573,8 +616,12 @@ pub const Posture = struct {
         var disabled: std.ArrayList([]const u8) = .empty;
         for (std.enums.values(cmdline.Protection)) |x|
             if (p.disabled.contains(x)) try disabled.append(p.gpa, @tagName(x));
+        const form = trim(p.read("/usr/share/werewolf/form"));
+        const release = trim(p.read("/usr/share/werewolf/image-update/serial"));
         var r: Report = .{
             .time = try rfc3339(p.gpa, nowSecs(p.io)),
+            .form = if (form.len > 0) form else null,
+            .release = if (release.len > 0) release else null,
             .os = prettyName(if (os_release.len > 0) os_release else p.read("/usr/lib/os-release")),
             .host = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
             .kernel = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.release, 0)),
@@ -921,7 +968,13 @@ pub const Posture = struct {
     /// read returns the whole file at path, or "". It avoids
     /// Dir.readFileAlloc, which trusts stat's size, and procfs reports 0.
     pub fn read(p: *Posture, path: []const u8) []const u8 {
-        var f = evidenceFile(p.io, path) catch return "";
+        var f = evidenceFile(p.io, path) catch |err| {
+            if (refusedOpen(err, path)) note: {
+                for (p.denied.items) |d| if (std.mem.eql(u8, d, path)) break :note;
+                p.denied.append(p.gpa, p.gpa.dupe(u8, path) catch break :note) catch {};
+            }
+            return "";
+        };
         defer f.close(p.io);
         var buf: [4096]u8 = undefined;
         var r = f.readerStreaming(p.io, &buf);
@@ -944,6 +997,20 @@ pub const Posture = struct {
 };
 
 const max_evidence = 16 << 20;
+
+/// refusedOpen reports whether opening path failed for want of permission,
+/// not for want of the file. PID 1 always exists, so /proc/1 missing is
+/// hidepid hiding it.
+fn refusedOpen(err: anyerror, path: []const u8) bool {
+    if (@import("builtin").os.tag != .linux)
+        return err == error.AccessDenied or err == error.PermissionDenied;
+    if (err != error.SystemCall) return false;
+    return switch (sandbox.failed_errno) {
+        .ACCES, .PERM => true,
+        .NOENT => std.mem.startsWith(u8, path, "/proc/1/"),
+        else => false,
+    };
+}
 
 /// parseBoot returns the checks of a report posture wrote as JSON.
 fn parseBoot(gpa: Allocator, json: []const u8) ![]const Check {
@@ -1204,58 +1271,92 @@ fn printKnown(w: *Io.Writer, k: Known) !void {
 
 /// A login-sized report: state and counts on one line, then only failed
 /// checks. Declared gaps are amber; unexpected failures are red.
+/// printSummary writes the login summary: what the machine is, its state and
+/// counts on one line, a row for each failure the image does not excuse, and
+/// the gaps it declares on one more. Colour is a dot and a mark, no more.
 fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: bool) !void {
     const reset = if (color) "\x1b[0m" else "";
+    const bold = if (color) "\x1b[1m" else "";
     const dim = if (color) "\x1b[2m" else "";
-    const green = if (color) "\x1b[32m" else "";
     const red = if (color) "\x1b[31m" else "";
-    const amber = if (color) "\x1b[33m" else "";
+    const width = cols orelse 120;
     const state = summaryState(r);
-    const state_color = switch (state) {
-        .nominal => green,
-        .expected_gaps => amber,
-        .degraded => red,
-    };
-    try w.print("Security posture: {s}{s}{s} · ", .{ state_color, state.label(), reset });
-    try w.print("{s}{d} passed{s} · {s}{d} failed{s} · {s}{d} skipped{s}", .{
-        green,          r.summary.pass,
-        reset,          if (r.summary.fail > 0) state_color else dim,
-        r.summary.fail, reset,
-        dim,            r.summary.skip,
-        reset,
+
+    try w.writeAll(bold);
+    try writeClean(w, r.form orelse r.os);
+    try w.writeAll(reset);
+    if (r.release) |serial| {
+        var buf: [15]u8 = undefined;
+        try w.writeByte(' ');
+        try writeClean(w, version(&buf, serial));
+    }
+    try w.print(" {s}·{s} Linux ", .{ dim, reset });
+    try writeClean(w, r.kernel);
+    try w.writeByte('\n');
+
+    var failed: usize = 0;
+    var gaps: usize = 0;
+    var cached = false;
+    var label_width: usize = 0;
+    for (r.checks) |c| {
+        cached = cached or (c.cached orelse false);
+        if (c.result != .fail) continue;
+        if (c.excuse != null) {
+            gaps += 1;
+        } else {
+            failed += 1;
+            label_width = @max(label_width, summaryLabel(c).len);
+        }
+    }
+    try w.print("{s}●{s} Posture: {s} {s}· {d} passed", .{
+        if (color) state.color() else "", reset, state.label(), dim, r.summary.pass,
     });
+    if (failed > 0) try w.print(" · {s}{d} failed{s}{s}", .{ red, failed, reset, dim });
+    if (gaps > 0) try w.print(" · {d} {s}", .{ gaps, if (gaps == 1) "gap" else "gaps" });
+    if (r.summary.skip > 0) try w.print(" · {d} skipped", .{r.summary.skip});
+    try w.writeAll(reset);
     if (r.dev) try w.print("{s} · dev mode{s}", .{ red, reset });
     if (r.disabled.len > 0) {
         try w.print("{s} · protections disabled: ", .{red});
         try writeList(w, r.disabled, ", ");
         try w.writeAll(reset);
     }
-    if (!r.root) try w.print("{s} · some checks limited (not root){s}", .{ dim, reset });
+    // Without root, and without boot's report to fill in, much is unseen.
+    if (!r.root and !cached) try w.print("{s} · not root: limited{s}", .{ dim, reset });
     try w.writeByte('\n');
-    var width: usize = 0;
-    for (r.checks) |c| if (c.result == .fail) {
-        width = @max(width, summaryLabel(c).len);
-    };
+
     // Leave room for evidence even when a check has a long name.
-    width = @min(width, (cols orelse 120) / 3);
+    label_width = @min(label_width, width / 3);
     for (r.checks) |c| {
-        if (c.result != .fail) continue;
-        try w.print("  {s}{s}{s}  ", .{
-            if (c.excuse != null) amber else red,
-            if (c.excuse != null) "gap " else "FAIL",
-            reset,
-        });
-        const label_len = try printSummaryCell(gpa, w, summaryLabel(c), width);
-        try w.splatByteAll(' ', width -| label_len);
-        try w.writeAll("  ");
-        _ = try printSummaryCell(
-            gpa,
-            w,
-            try summaryDetail(gpa, c),
-            (cols orelse 120) -| (width + 10),
-        );
-        try w.writeByte('\n');
+        if (c.result != .fail or c.excuse != null) continue;
+        try w.print("  {s}✗{s} ", .{ red, reset });
+        const label_len = try printSummaryCell(gpa, w, summaryLabel(c), label_width);
+        try w.splatByteAll(' ', label_width -| label_len);
+        try w.print("  {s}", .{dim});
+        _ = try printSummaryCell(gpa, w, try summaryDetail(gpa, c), width -| (label_width + 6));
+        try w.print("{s}\n", .{reset});
     }
+
+    if (gaps == 0) return;
+    var names: std.ArrayList(u8) = .empty;
+    for (r.checks) |c| if (c.result == .fail and c.excuse != null)
+        try listAdd(gpa, &names, "{s}", .{gap_names.get(c.id) orelse summaryLabel(c)});
+    const lead = "  Gaps: ";
+    const f = fit(names.items, width -| lead.len);
+    try w.print("{s}{s}", .{ dim, lead });
+    try writeClean(w, names.items[0..f.len]);
+    if (f.more > 0) try w.print(", +{d} more", .{f.more});
+    try w.print("{s}\n", .{reset});
+}
+
+/// version returns an image serial, 20261024T220456Z, as 2026.10.24.2204,
+/// or the serial as it is if it is not one.
+fn version(buf: *[15]u8, serial: []const u8) []const u8 {
+    if (serial.len != 16 or serial[8] != 'T' or serial[15] != 'Z') return serial;
+    for (serial[0..15], 0..) |c, i| if (i != 8 and !std.ascii.isDigit(c)) return serial;
+    return std.mem.print(buf, "{s}.{s}.{s}.{s}", .{
+        serial[0..4], serial[4..6], serial[6..8], serial[9..13],
+    }) catch serial;
 }
 
 const summary_labels = std.StaticStringMap([]const u8).initComptime(.{
@@ -1268,6 +1369,27 @@ const summary_labels = std.StaticStringMap([]const u8).initComptime(.{
     .{ "programs-no-debuggers", "Debuggers present" },
     .{ "network-no-login", "Login servers present" },
     .{ "network-ssh-security-keys", "SSH security key policy" },
+});
+
+/// gap_names name, in a word or two, what a declared weakness lets in.
+const gap_names = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "programs-no-shell", "shells" },
+    .{ "programs-no-downloaders", "downloaders" },
+    .{ "programs-no-interpreters", "interpreters" },
+    .{ "programs-no-compilers", "compilers" },
+    .{ "programs-no-module-tools", "module tools" },
+    .{ "programs-no-network-tools", "network tools" },
+    .{ "programs-no-debuggers", "debuggers" },
+    .{ "network-no-login", "login servers" },
+    .{ "network-ssh-config", "SSH options" },
+    .{ "network-ssh-security-keys", "SSH key files" },
+    .{ "network-root-dns-assigned", "root DNS" },
+    .{ "network-root-https-arbitrary", "root web access" },
+    .{ "network-fence-unbypassable", "fence bypass" },
+    .{ "kernel-write-xor-execute", "writable code" },
+    .{ "kernel-no-hypervisor", "hypervisor" },
+    .{ "processes-services-leashed", "unleashed services" },
+    .{ "updates-enabled", "updates off" },
 });
 
 fn summaryLabel(c: Check) []const u8 {
@@ -1307,7 +1429,8 @@ fn summaryDetail(gpa: Allocator, c: Check) ![]const u8 {
     } else if (summary_labels.has(c.id)) {
         return if (c.detail.len > 0) c.detail else c.observed orelse "unavailable";
     }
-    const detail = c.comparison orelse if (c.detail.len > 0) c.detail else c.excuse orelse "";
+    // What was found reads better at a login than the comparison behind it.
+    const detail = if (c.detail.len > 0) c.detail else c.comparison orelse c.excuse orelse "";
     return std.mem.replaceOwned(u8, gpa, detail, ", want ", "; expected ");
 }
 
@@ -1339,9 +1462,17 @@ const Verdict = enum {
 
     fn label(s: Verdict) []const u8 {
         return switch (s) {
-            .nominal => "NOMINAL",
-            .expected_gaps => "EXPECTED GAPS",
-            .degraded => "DEGRADED",
+            .nominal => "nominal",
+            .expected_gaps => "expected gaps",
+            .degraded => "degraded",
+        };
+    }
+
+    fn color(s: Verdict) []const u8 {
+        return switch (s) {
+            .nominal => "\x1b[32m",
+            .expected_gaps => "\x1b[33m",
+            .degraded => "\x1b[31m",
         };
     }
 };
@@ -1921,30 +2052,44 @@ test "login summary keeps failures, marks exceptions and cleans terminal text" {
     var out: Io.Writer.Allocating = .init(gpa);
     try printSummary(gpa, &out.writer, r, null, false);
     try testing.expectEqualStrings(
-        "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped\n" ++
-            "  FAIL  Lockdown?[2J  none?\n" ++
-            "  gap   No shell      playground uses bash\n",
+        "Wolfi · Linux 6\n" ++
+            "● Posture: degraded · 1 passed · 1 failed · 1 gap · 1 skipped\n" ++
+            "  ✗ Lockdown?[2J  none?\n" ++
+            "  Gaps: No shell\n",
         out.written(),
     );
     out.clearRetainingCapacity();
     try printSummary(gpa, &out.writer, r, 30, true);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\x1b[31mFAIL\x1b[0m"));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\x1b[33mgap \x1b[0m"));
+    try testing.expectEqual(1, std.mem.count(u8, out.written(), "\x1b[31m●\x1b[0m"));
+    try testing.expectEqual(1, std.mem.count(u8, out.written(), "\x1b[31m✗\x1b[0m"));
     try testing.expect(std.unicode.utf8ValidateSlice(out.written()));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "…\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "…") != null);
     out.clearRetainingCapacity();
     var limited = r;
     limited.root = false;
     try printSummary(gpa, &out.writer, limited, null, false);
-    try testing.expect(std.mem.startsWith(
+    try testing.expect(std.mem.indexOf(
         u8,
         out.written(),
-        "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped · some checks limited " ++
-            "(not root)\n",
-    ));
+        "· 1 skipped · not root: limited\n",
+    ) != null);
+    // Boot's results fill in what a run without root cannot see.
+    out.clearRetainingCapacity();
+    var filled = checks;
+    filled[0].cached = true;
+    limited.checks = &filled;
+    try printSummary(gpa, &out.writer, limited, null, false);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "not root") == null);
 }
 
-test "playground summary states each measured gap in six rows at 80 columns" {
+test version {
+    var buf: [15]u8 = undefined;
+    try testing.expectEqualStrings("2026.10.24.2204", version(&buf, "20261024T220456Z"));
+    try testing.expectEqualStrings("2026-10-24", version(&buf, "2026-10-24"));
+    try testing.expectEqualStrings("2026102xT220456Z", version(&buf, "2026102xT220456Z"));
+}
+
+test "playground summary names each declared gap on one line" {
     const gpa = testing.allocator;
     const ids = [_][]const u8{
         "programs-no-shell", "programs-no-downloaders",   "programs-no-interpreters",
@@ -1972,9 +2117,11 @@ test "playground summary states each measured gap in six rows at 80 columns" {
         "pubkeyauthoptions=touch-required";
     const r: Report = .{
         .time = "",
-        .os = "",
+        .os = "Werewolf Linux (Wolfi-based)",
         .host = "",
-        .kernel = "",
+        .kernel = "7.2.12-werewolf",
+        .form = "playground",
+        .release = "20261024T220456Z",
         .root = true,
         .summary = .{ .pass = 86, .fail = 5, .skip = 5 },
         .checks = &checks,
@@ -1986,20 +2133,18 @@ test "playground summary states each measured gap in six rows at 80 columns" {
     defer arena.deinit();
     try printSummary(arena.allocator(), &out.writer, r, 80, false);
     try testing.expectEqualStrings(
-        "Security posture: EXPECTED GAPS · 86 passed · 5 failed · 5 skipped\n" ++
-            "  gap   Shells present            /bin/sh, /bin/ash, /bin/bash\n" ++
-            "  gap   Download / network tools  /bin/wget, /bin/nc, /bin/netcat, /bin/telnet\n" ++
-            "  gap   Interpreters present      /bin/awk\n" ++
-            "  gap   Login servers present     /bin/sshd, /bin/telnetd\n" ++
-            "  gap   SSH security key policy   ordinary keys accepted\n",
+        "playground 2026.10.24.2204 · Linux 7.2.12-werewolf\n" ++
+            "● Posture: expected gaps · 86 passed · 5 gaps · 5 skipped\n" ++
+            "  Gaps: shells, downloaders, interpreters, login servers, SSH key files\n",
         out.written(),
     );
     out.clearRetainingCapacity();
     try printSummary(arena.allocator(), &out.writer, r, 45, false);
-    try testing.expectEqual(6, std.mem.count(u8, out.written(), "\n"));
-    var rows = std.mem.tokenizeScalar(u8, out.written(), '\n');
-    _ = rows.next(); // The heading keeps all counts, including at narrow widths.
-    while (rows.next()) |row| try testing.expect(row.len <= 45);
+    try testing.expect(std.mem.endsWith(
+        u8,
+        out.written(),
+        "\n  Gaps: shells, downloaders, +3 more\n",
+    ));
     checks[4].observed = "pubkeyacceptedalgorithms=sk-ssh-ed25519@openssh.com; " ++
         "pubkeyauthoptions=none";
     try testing.expectEqualStrings(
@@ -2414,7 +2559,7 @@ test "a check this process cannot make takes boot's result, marked cached" {
         .kernel = "7.2",
         .root = true,
         .summary = .{},
-        .tpm = .{ .anchor = "aa", .pcr11 = "bb" },
+        .tpm = .{ .handle = 0x0150abcd, .floor = 3, .index = 7 },
         .checks = &.{ inbound, attack },
     }, json_options);
     var p: Posture = .{
@@ -2447,4 +2592,74 @@ test "a check this process cannot make takes boot's result, marked cached" {
     try testing.expectEqual(4, p.checks.items.len);
     try testing.expectEqualStrings("processes-leash-attack", p.checks.items[3].id);
     try testing.expect(p.checks.items[3].cached.?);
+    // Without root, any skip takes boot's result, as root read it.
+    p.root = false;
+    try p.add(skipped);
+    try testing.expectEqual(Result.pass, p.checks.items[4].result);
+    try testing.expect(p.checks.items[4].cached.?);
+}
+
+test "a check citing a file this run may not read takes boot's result" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const ipe_check: Check = .{
+        .id = "boot-ipe-enforced",
+        .area = "boot",
+        .name = "Only this image's native code executes",
+        .why = "root must not disable the integrity policy",
+        .how = "the policy is active and enforcing",
+        .result = .pass,
+    };
+    const json = try std.json.Stringify.valueAlloc(gpa, Report{
+        .time = "2026-10-24T00:00:00Z",
+        .os = "Werewolf",
+        .host = "werewolf",
+        .kernel = "7.2",
+        .root = true,
+        .summary = .{},
+        .checks = &.{ipe_check},
+    }, json_options);
+    var p: Posture = .{
+        .io = testing.io,
+        .gpa = gpa,
+        .root = false,
+        .boot = try parseBoot(gpa, json),
+    };
+    // Unread, the switches look off: this run's own verdict is a fail.
+    var unread = ipe_check;
+    unread.result = .fail;
+    unread.detail = "no enforcing release IPE policy";
+    // A file under a directory the source cites.
+    try p.denied.append(gpa, "/sys/kernel/security/ipe/enforce");
+    try p.add(unread);
+    try testing.expectEqual(Result.pass, p.checks.items[0].result);
+    try testing.expect(p.checks.items[0].cached.?);
+    // --no-cache, without root: what it could not read, not a fail.
+    p.cache = false;
+    try p.add(unread);
+    try testing.expectEqual(Result.skip, p.checks.items[1].result);
+    try testing.expectEqualStrings(
+        "/sys/kernel/security/ipe/enforce: permission denied",
+        p.checks.items[1].detail,
+    );
+    try testing.expectEqualStrings(
+        "/sys/kernel/security/ipe/enforce: permission denied",
+        p.checks.items[1].observed.?,
+    );
+    // Root, refused by a session's Landlock layer, keeps its own verdict.
+    p.root = true;
+    try p.add(unread);
+    try testing.expectEqual(Result.fail, p.checks.items[2].result);
+    // A file cited by name; a longer name is another file.
+    p.root = false;
+    p.denied.clearRetainingCapacity();
+    try p.denied.append(gpa, "/proc/1/status");
+    var stat = unread;
+    stat.source = "/proc/1/stat: field 52";
+    try p.add(stat);
+    try testing.expectEqual(Result.fail, p.checks.items[3].result);
+    stat.source = "/proc/1/status: CapBnd";
+    try p.add(stat);
+    try testing.expectEqual(Result.skip, p.checks.items[4].result);
 }

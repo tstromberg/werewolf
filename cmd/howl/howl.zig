@@ -82,10 +82,6 @@ pub fn main(init: std.process.Init) void {
     environ = init.environ_map;
     const args = init.minimal.args.toSlice(gpa) catch fatal(io, "out of memory", .{});
     if (args.len < 2) fatal(io, "{s}", .{usage});
-    if (std.mem.eql(u8, args[1], "_permit-bridge")) {
-        @import("permit-transport.zig").command(io, gpa, args[2..]) catch std.process.exit(1);
-        return;
-    }
     const verb = std.meta.stringToEnum(
         enum {
             build,
@@ -112,15 +108,7 @@ pub fn main(init: std.process.Init) void {
             @"_bhyve-secure",
             _firecracker,
             _unpack,
-            @"_boot-permit",
-            @"_boot-record",
-            @"_local-refresh",
-            @"_cloud-ek",
-            @"_cloud-bootstrap",
-            @"_cloud-workload",
             @"_boot-image",
-            @"_enroll-image",
-            @"_accept-image",
         },
         args[1],
     ) orelse
@@ -149,15 +137,7 @@ pub fn main(init: std.process.Init) void {
         .versions => @import("download.zig").versions(io, gpa, args[2..], &why),
         // Internal: the Makefile's image targets (build.zig).
         ._build => native.buildTargets(io, gpa, args[2..], &why),
-        .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
-        .@"_boot-record" => @import("enrollment.zig").verify(io, gpa, args[2..]),
-        .@"_cloud-ek" => @import("cloud-enrollment.zig").retrieve(io, gpa, args[2..], &why),
-        .@"_cloud-bootstrap" => @import("cloud-bootstrap.zig").command(io, gpa, args[2..], &why),
-        .@"_cloud-workload" => @import("cloud-bootstrap.zig").workload(io, gpa, args[2..], &why),
-        .@"_local-refresh" => @import("local-secure.zig").refresh(io, gpa, args[2..], &why),
         .@"_boot-image" => @import("boot-image.zig").command(io, gpa, args[2..], &why),
-        .@"_enroll-image" => @import("local-secure.zig").enrollImage(io, gpa, args[2..], &why),
-        .@"_accept-image" => @import("local-secure.zig").acceptImage(io, gpa, args[2..], &why),
         // Internal: create runs howl again as the bhyve or Firecracker supervisor.
         ._bhyve => if (args.len < 5)
             why.refuse("_bhyve NAME CONFIG BHYVE...", .{})
@@ -622,7 +602,7 @@ pub const Options = struct {
     /// nothing given up, the machine is protected.
     disabled: cmdline.Protections = .empty,
     boot_image: ?@import("boot-image.zig").Request = null,
-    /// built is the build of boot_image when howl made it here (--build).
+    /// built is the protected image howl made here for the machine (--build).
     built: ?@import("local-secure.zig").Built = null,
     production_download: bool = false,
     /// dev is the local --dev launch path; init uses its config marker only
@@ -1725,6 +1705,12 @@ pub fn disableValue(v: []const u8, why: *Why) !cmdline.Protections {
     return set;
 }
 
+/// securedHere reports whether on runs protected machines on this host
+/// (local-secure.zig), rather than in a cloud.
+fn securedHere(on: Platform) bool {
+    return on == .lima or on == .qemu or on == .bhyve;
+}
+
 fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
     if (!launch.protected()) return;
     if (launch.dev) return why.refuse(
@@ -1732,9 +1718,19 @@ fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
             "{s} --disable=" ++ every_protection,
         .{if (launch.dev_shell) "--dev" else "--dev=ssh"},
     );
-    if (on != .lima and on != .qemu) return why.refuse(
-        "{t}: protected deployment is not ready; use Lima on macOS or QEMU on Linux, or give " ++
-            "up what {t} cannot provide yet: --disable=" ++ every_protection,
+    if (on == .lima or on == .qemu) return;
+    // A cloud's firmware enrolls the image's own boot key; its first boot
+    // takes the TPM (docs/design/independent-updates.md).
+    if (on.is(.cloud)) {
+        if (launch.local) return;
+        return why.refuse(
+            "{t}: werewolf publishes no {t} image yet; build one with your own keys: --build",
+            .{ on, on },
+        );
+    }
+    return why.refuse(
+        "{t}: protected deployment is not ready; use Lima on macOS, QEMU on Linux or a cloud, " ++
+            "or give up what {t} cannot provide yet: --disable=" ++ every_protection,
         .{ on, on },
     );
 }
@@ -1754,8 +1750,13 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     try testing.expect(downloaded.protected() and !downloaded.local);
     try requireProtection(.lima, downloaded, &why);
     try requireProtection(.qemu, downloaded, &why);
-    for ([_]Platform{ .firecracker, .bhyve, .proxmox, .aws, .gcp, .azure }) |on|
+    for ([_]Platform{ .firecracker, .bhyve, .proxmox }) |on|
         try testing.expectError(error.Refused, requireProtection(on, launch, &why));
+    // Clouds take a protected image built here; werewolf publishes none for them.
+    for ([_]Platform{ .aws, .gcp, .azure }) |on| {
+        try requireProtection(on, launch, &why);
+        try testing.expectError(error.Refused, requireProtection(on, downloaded, &why));
+    }
     const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev" }, &why);
     try testing.expectError(error.Refused, requireProtection(.lima, dev, &why));
     const unprotected = try launchFlags(
@@ -2021,10 +2022,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
     if (replacing) {
         var keep = false;
-        if (o.protected()) {
+        if (o.protected() and securedHere(on)) {
             const cached = try @import("local-secure.zig").reuse(io, gpa, o, name, tar);
             if (cached == .running) {
-                try @import("local-secure.zig").startPublisher(io, gpa, name, why);
                 milestones.done(.{
                     .name = try gpa.print("{s} running, inputs unchanged; total", .{name}),
                     .short = "ready",
@@ -2033,8 +2033,6 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
                 return;
             }
             keep = cached == .configure;
-            if (cached == .miss and o.local)
-                try @import("local-secure.zig").resumeLocal(io, gpa, &o, name, tell, why);
         }
         if (o.protected() and madeOn(io, gpa, name) != null) keep = true;
         if (!keep) if (madeOn(
@@ -2055,9 +2053,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         // Resolve and check it before anything is built or made.
         o.allow_from = try cloud.allowSource(io, gpa, a, why);
     }
-    // A protected --build machine enrolls a bundle built here, as a
-    // download's machine enrolls werewolf's.
-    if (o.protected() and o.local and o.boot_image == null)
+    // A protected --build machine here boots an image built with the user's
+    // own keys; a cloud's is built as its release disk (cloud.zig).
+    if (o.protected() and o.local and securedHere(on) and o.built == null)
         try @import("local-secure.zig").resumeLocal(io, gpa, &o, name, tell, why);
     // Record the platform, so delete, console and ssh find the machine.
     const dir = try machineDir(gpa, name);
@@ -2257,10 +2255,18 @@ pub fn releaseDiskAt(
     // A kernel with IPE, given here, keeps IPE whatever --disable gave up.
     var disabled = o.disabled;
     if (kernel != null) disabled.remove(.ipe);
+    // WEREWOLF_DISK_ARGS adds kernel arguments to a cloud disk's signed command
+    // line, for diagnosis: earlycon, ignore_loglevel. The build signs them.
+    var words: std.ArrayList([]const u8) = .empty;
+    if (environ.get("WEREWOLF_DISK_ARGS")) |extra| {
+        var it = std.mem.tokenizeAny(u8, extra, " \t");
+        while (it.next()) |w| try words.append(gpa, w);
+    }
     const p = try buildHere(io, gpa, &steps, .{
         .form = o.form,
         .arch = arch,
         .disabled = disabled,
+        .disk = .{ .args = words.items },
         .app = ab.root,
         .published = !o.local,
         .boot_key = if (boot_signer) |k| k.key else null,
@@ -2278,6 +2284,15 @@ pub fn releaseDiskAt(
             null,
         .ipe_updates = if (kernel != null) environ.get("IPE_UPDATES") else null,
         .image_serial = if (kernel != null) environ.get("IMAGE_SERIAL") else null,
+        // A cloud's protected image holds its release to the TPM floor.
+        .tpm = target != null and kernel != null and !o.disabled.contains(.tpm),
+        .image_index = if (environ.get("IMAGE_INDEX")) |text|
+            cmdline.releaseIndex(text) orelse return why.refuse(
+                "IMAGE_INDEX={s}: a release index, 1 or more",
+                .{text},
+            )
+        else
+            1,
     }, .{ .qcow2 = true });
     _ = try steps.finish();
     return target orelse gpa.print("{s}/disk.qcow2", .{p.out});
@@ -2347,8 +2362,6 @@ const testing = std.testing;
 
 test {
     _ = @import("discovery.zig");
-    _ = @import("enrollment.zig");
-    _ = @import("cloud-enrollment.zig");
     _ = @import("local-secure.zig");
     _ = @import("secureboot.zig");
     _ = @import("prerequisites.zig");

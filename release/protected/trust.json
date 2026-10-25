@@ -1,5 +1,4 @@
 {
-  "format": "werewolf-boot-trust/1",
-  "source": "https://dist.werewolf-linux.org/boot/v1",
-  "permit_port": 9443
+  "format": "werewolf-boot-trust/2",
+  "source": "https://dist.werewolf-linux.org/boot/v1"
 }

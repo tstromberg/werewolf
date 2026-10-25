@@ -40,9 +40,9 @@ class ProtectedExport(unittest.TestCase):
                         '-subj', '/CN=release-export-test', '-keyout', cls.key, '-out', cls.trust / 'image.crt'],
                        check=True, capture_output=True)
         shutil.copyfile(cls.trust / 'image.crt', cls.trust / 'boot.crt')
-        (cls.trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
-            source='https://vendor.test/boot/v1', permit_port=9443)))
-        cls.manifest = dict(form='playground', image=dict(arch='x86_64', build='a' * 64,
+        (cls.trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/2',
+            source='https://vendor.test/boot/v1')))
+        cls.manifest = dict(form='playground', image=dict(arch='x86_64', build='a' * 64, index=1,
             serial=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')), raw_size=512 << 20)
         (cls.bundle / 'boot.json').write_text(json.dumps(cls.manifest))
         subprocess.run(['openssl', 'dgst', '-sha256', '-sign', cls.key, '-out', cls.bundle / 'boot.json.sig',
@@ -95,6 +95,10 @@ class ProtectedExport(unittest.TestCase):
         objects = self.work / 'store/playground/qemu/x86_64/objects' / plan['descriptor']
         for name in list(signed['files']) + ['downloads.json', 'downloads.json.sig']:
             self.assertEqual((self.copy / (self.prefix + '-' + name)).read_bytes(), (objects / name).read_bytes())
+        # The update head machines follow is the same signed image head.
+        for name in ('latest.json', 'latest.json.sig'):
+            self.assertEqual((self.bundle / 'prebuilt/x86_64' / name).read_bytes(),
+                             (self.work / 'store/playground/qemu/x86_64' / name).read_bytes())
 
     def test_modified_qcow2_or_signature_is_rejected(self):
         for suffix in ('disk.qcow2', 'downloads.json.sig'):

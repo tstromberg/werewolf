@@ -26,38 +26,40 @@
 ### Dedicated production trust
 
 `release/protected/boot.crt` authorizes protected loaders and UKIs alone;
-`release/protected/image.crt` IPE policies and signed image and boot heads.
-Neither may reuse a legacy release key. `release/protected/trust.json` fixes the HTTPS
-mirror and the declared host permit port. `release/create-protected-trust PRIVATE
-PUBLIC` refuses partial state or replacing committed trust; custody is the Git-ignored
-`config/release-signing/protected/` (0600, directory 0700), backed up offline.
-`WEREWOLF_PROTECTED_BOOT_KEY` and `WEREWOLF_PROTECTED_IMAGE_KEY` live in the main-only
-release environment; `release/with-protected-keys` checks both committed certificates
-before starting a child and removes the temporary keys after. Melange compile staging
-gets public inputs only; module and policy signing stays on the host.
+`release/protected/image.crt` IPE policies and signed image and boot heads. Neither may
+reuse a legacy release key. `release/protected/trust.json` (`werewolf-boot-trust/2`)
+fixes the HTTPS mirror, `source`; a published image's channel is `SOURCE/FORM/PROVIDER`.
+`release/create-protected-trust PRIVATE PUBLIC` refuses partial state or replacing
+committed trust; custody is the Git-ignored `config/release-signing/protected/` (0600,
+directory 0700), backed up offline. `WEREWOLF_PROTECTED_BOOT_KEY` and
+`WEREWOLF_PROTECTED_IMAGE_KEY` live in the main-only release environment;
+`release/with-protected-keys` checks both committed certificates before starting a child
+and removes the temporary keys after. Melange compile staging gets public inputs only;
+module and policy signing stays on the host.
 
 ### Mirror layout
 
-Apart from the local update and permit channel, with a namespace per provider gateway:
+Per form, provider and architecture: the channel updaters follow, then howl's bundles.
 
 ```text
+boot/v1/FORM/PROVIDER/ARCH/latest.json[.sig]
+boot/v1/FORM/PROVIDER/ARCH/BUILD/{vmlinuz,root.erofs,stage0.zst,cmdline,uki.efi}
 boot/v1/FORM/PROVIDER/ARCH/latest/boot.json[.sig]
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/disk.{img.zst,qcow2}
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{vmlinuz,root.erofs,stage0.zst,cmdline,uki.efi}
-boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{latest,downloads}.json[.sig]
-boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{gates.json,boot.crt,image.crt}
+boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{latest,downloads}.json[.sig], gates.json, boot.crt, image.crt
 ```
 
 `DESCRIPTOR` hashes the signed boot JSON. Objects precede heads; torn pairs fail closed.
 
 ### Admission and caching
 
-`howl _boot-image head DIR BOOT_CERT IMAGE_CERT CHANNEL ARCH FORM PROVIDER`
-authenticates bounded metadata, checks the boot certificate hash and requires the exact
-requested identity before any artifact the descriptor names is fetched. A redirect
-cannot downgrade to HTTP or inject credentials; requests identify Werewolf (on macOS,
-system curl for TLS 1.3). Streams enforce signed sizes and hashes, and admission checks
-image and PE signatures, kernel, initrd, measured identity and PCR before promotion.
+`howl _boot-image head DIR BOOT_CERT IMAGE_CERT CHANNEL ARCH FORM` authenticates bounded
+metadata, checks the boot certificate hash and requires the exact requested identity
+before any artifact the descriptor names is fetched. A redirect cannot downgrade to HTTP
+or inject credentials; requests identify Werewolf (on macOS, system curl for TLS 1.3).
+Streams enforce signed sizes and hashes, and admission checks image and PE signatures,
+kernel, initrd and the UKI's release identity before promotion.
 
 A private lock serializes downloads for one channel and trust identity across mirrors;
 hash-addressed objects share slot bytes, and a partial download is removed on failure.
@@ -66,17 +68,16 @@ change times: unchanged, it skips rehashing and native verification for five min
 metadata signatures still checked; a changed validator or byte forces verification.
 
 The persistent floor binds serial, build and descriptor hash and advances only after
-full admission; equal serials must name the same descriptor, disk and PCR included, and
-older or future heads, a corrupt floor or a missing retained floor fail closed. The
-floor retires no TPM release and replaces no bootstrap bundle: an enrollment keeps its
-owner and TPM state and accepts a candidate through its issuer.
+full admission; equal serials must name the same descriptor, disk included, and older or
+future heads, a corrupt floor or a missing retained floor fail closed. This floor is the
+host's; it retires no TPM release and changes no machine already made.
 
-`howl versions` lists complete target bundles in published `base-images-SERIAL`
-GitHub releases (also the earlier `protected-SERIAL` tags). `run` and `create` take
-`--version SERIAL|TAG` to install their initial bundle from those assets, using the
-same embedded trust, bounded transport and native admission. Each requested version
-has a separate cache floor; it neither lowers the latest channel's floor nor pins
-the enrolled machine's update channel. Existing enrollment and TPM checks still apply.
+`howl versions` lists complete target bundles in published `base-images-SERIAL` GitHub
+releases (also the earlier `protected-SERIAL` tags). `run` and `create` take `--version
+SERIAL|TAG` to install their initial bundle from those assets, using the same embedded
+trust, bounded transport and native admission. Each requested version has a separate
+cache floor; it neither lowers the latest channel's floor nor pins the enrolled
+machine's update channel.
 
 ### CI and publication
 
@@ -94,13 +95,12 @@ prod-ssh and playground through the owner channel; Lima currently covers playgro
 Tested bundles publish; PRs run QEMU with disposable trust (`protected-images.yml`).
 
 `release/prepare-protected` requires committed trust, evidence for the exact artifact,
-provider and architecture, and native admission: all fourteen evidence checks must be
-boolean true (A/B upgrade, operator rollback, unhealthy fallback, retirement cuts,
-tampering, owner isolation, fresh downloads), and lays out immutable objects, signed
-heads and an upload plan in a new directory, atomically. `release/publish-protected`
-checks the store's authenticated floor and uploads objects before heads, a signed-head
-receipt keeping the newest accepted release across an interrupted write. Signed
-configuration accompanies the exact code; a resumed machine keeps its bootstrap.
+provider and architecture, and native admission: all twelve evidence checks (`GATES`)
+must be boolean true, and lays out immutable objects, the channel's files, signed heads
+and an upload plan in a new directory, atomically. Each release takes its channel's next
+index (`release/form-images`); `release/publish-protected` refuses one that does not
+advance, checks the store's authenticated floor and uploads objects before heads, a
+signed-head receipt keeping the newest across an interrupted write.
 
 `release/export-protected` retains signatures, compares qcow2 with raw disk, and signs
 asset hashes, lifecycle evidence, source commit and GHA run; uploads reverify them.
@@ -110,9 +110,9 @@ and image failures in one issue per workflow, closing on recovery; never from a 
 
 ## Security Considerations
 
-Vendor signatures authorize code and machine keys TPM transitions, never the other.
-Advancing a cache head never deletes a VM, resets TPM state or replaces owner keys;
-changing production trust takes a deliberate rotation design, never a missing key.
+Vendor signatures authorize code; each machine's TPM floor decides which signed releases
+still boot. Advancing a cache head never deletes a VM or resets TPM state; changing
+production trust takes a deliberate rotation design, never a missing key.
 
 ## Reliability Considerations
 

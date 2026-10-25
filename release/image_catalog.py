@@ -102,7 +102,9 @@ def validate(row):
         raise ValueError('invalid form catalog inputs')
     if 'latest' in row:
         latest = row['latest']
-        if set(latest) != {'serial', 'commit', 'descriptor', 'object', 'size'} or \
+        # index, the release's place in its channel, came with protocol v3.
+        if set(latest) - {'index'} != {'serial', 'commit', 'descriptor', 'object', 'size'} or \
+                (type(latest.get('index', 1)) is not int or latest.get('index', 1) < 1) or \
                 not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', latest['serial']) or \
                 not re.fullmatch(r'[0-9a-f]{40}', latest['commit']) or not HEX.fullmatch(latest['descriptor']) or \
                 latest['object'] != key + '/objects/' + latest['descriptor'] or type(latest['size']) is not int:
@@ -153,7 +155,7 @@ def page(rows, title='Werewolf images', legacy_rows=()):
             '<h1>' + html.escape(title) + '</h1>',
             '<p>Secure-boot images are built twice with every protection: signed UEFI boot, IPE, a verified root '
             'and TPM-anchored A/B updates. A target is published only when its exact bundle has passed '
-            'all fourteen lifecycle gates; a failed build or gate keeps the previous release.</p>',
+            'all twelve lifecycle gates; a failed build or gate keeps the previous release.</p>',
             '<p><code>howl run --with FORM</code> downloads, verifies and enrolls a published image. '
             'Its qcow2 boots only through that enrollment. '
             '<a href="https://github.com/werewolf-linux/werewolf/blob/main/docs/form-images.md">'

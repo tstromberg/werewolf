@@ -40,12 +40,18 @@ with tempfile.TemporaryDirectory(prefix='howl-protections-') as temporary:
         assert not invoked.exists(), (args, 'a backend or weaker build was invoked')
         assert (previous / 'disk.img').read_bytes() == b'previous machine must survive refusal'
 
-    for provider in ('aws', 'gcp', 'azure', 'bhyve', 'firecracker', 'proxmox'):
+    for provider in ('bhyve', 'firecracker', 'proxmox'):
         for build in ([], ['--build']):
             for verb in ('run', 'create'):
                 args = [verb, *(['protection-check'] if verb == 'create' else []),
                         '--with', 'prod-ssh', '--on', provider, '--yes', *build]
                 refused(args, 'protected deployment is not ready')
+    # A cloud takes a protected image built here, never an unpublished download.
+    for provider in ('aws', 'gcp', 'azure'):
+        for verb in ('run', 'create'):
+            refused([verb, *(['protection-check'] if verb == 'create' else []),
+                     '--with', 'prod-ssh', '--on', provider, '--yes'],
+                    'werewolf publishes no %s image yet' % provider)
     for provider in ('lima', 'qemu'):
         for dev in ('--dev', '--dev=ssh'):
             for verb in ('run', 'create'):

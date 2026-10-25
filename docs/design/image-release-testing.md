@@ -38,18 +38,17 @@ probes; export is optional, never the test transport.
 | Native integration | Production payload plus compiled drivers | Live SQL, peer auth, permissions, persistence |
 | Release acceptance | Unmodified signed candidate | The artifact's boot, behavior, lifecycle guarantees |
 
-The variant adds only declared test executables, their dependencies and launch
-metadata: no DEV, shell, compiler or sshd. Production programs are the same bytes in
-both variants and the filesystem, package and policy delta is checked against an
-allowlist; added tests change hashes and PCRs, so results name the variant. Drivers
-are small Zig executables sharing a result protocol, preferring existing clients (psql)
-run with argument arrays; each suite pins its clients, lives beside its form and keeps
-its own permissions. They are built into the variant's verified root under isolated
-test authority with Secure Boot, IPE, verity and enforcement on; one that needs the
-seal or a service's confinement relaxed is refused. Publication rejects variants by
-manifest identity as well as payload delta. The [fourteen protected
-gates](../../release/prepare-protected) stay; moving an exact-image assertion to shared
-fixtures needs a policy review and validator tests.
+The variant adds only declared test executables, their dependencies and launch metadata:
+no DEV, shell, compiler or sshd. Production programs are the same bytes in both variants
+and the filesystem, package and policy delta is checked against an allowlist; added
+tests change hashes, so results name the variant. Drivers are small Zig executables
+sharing a result protocol, preferring existing clients (psql) run with argument arrays;
+each suite pins its clients, lives beside its form and keeps its own permissions. They
+are built into the variant's verified root under isolated test authority with Secure
+Boot, IPE, verity and enforcement on; one that needs the seal or a service's confinement
+relaxed is refused. Publication rejects variants by manifest identity as well as payload
+delta. The [twelve protected gates](../../release/prepare-protected) stay; moving an
+exact-image assertion to shared fixtures needs a policy review and validator tests.
 Exact-image runs boot a verified writable copy with no DEV, ssh, test agent or extra
 privilege; slots are never installed by hand; vendor keys stay in signing jobs and
 unhealthy fixtures on disposable authority; storage is observed, never repaired.
@@ -83,7 +82,7 @@ output and a deadline, checking locale, UTF-8 writes and rollback, while a separ
 confined identity must fail peer login; the server's policy and exposure stay. Phase one
 writes a unique row; the next boot of the same disk, and the boot after P → C, read it
 before any setup write. The unmodified candidate boots and updates separately, proving
-measured identity, readiness, commitment and no public SQL. Greenbone's clients check
+signed identity, readiness, commitment and no public SQL. Greenbone's clients check
 GMP/OSP, target persistence, ordinary database roles, Valkey ACLs and read-only shares.
 HTTPS login, P → C and a fixture scan remain proposed; repeatable scans need a pinned
 feed cache and 8 GiB RAM.
@@ -103,14 +102,14 @@ fixture-only successors are never promoted; power-cut runs keep real TPM state.
 
 `howl forms`, `howl forms FORM` and `howl test --with FORM` stay, the last running both
 suites; `--dev` stays for debugging; a proposed `howl test --image BUNDLE` tests an
-artifact without injecting code. form-images.yml becomes the sole image orchestrator
-and GitHub writer (APKs apart): pinned inputs, two builds, a gate per target; change
+artifact without injecting code. form-images.yml becomes the sole image orchestrator and
+GitHub writer (APKs apart): pinned inputs, two builds, a gate per target; change
 detection covers trust, tools and test policy; only supported passing targets advance,
-and evidence never crosses providers or architectures. Immutable R2 objects go up
-before signed heads, public bytes are verified, serial floors kept; drafts stay private
-until parity, a receipt makes retries idempotent, nothing falls back to legacy trust.
-Notes compare each image with its last passing inventory and list the merged PRs and
-commits; missing history holds publication.
+and evidence never crosses providers or architectures. Immutable R2 objects go up before
+signed heads, public bytes are verified, serial and index floors kept; drafts stay
+private until parity, a receipt makes retries idempotent, nothing falls back to legacy
+trust. Notes compare each image with its last passing inventory and list the merged PRs
+and commits; missing history holds publication.
 
 ## Staged delivery
 

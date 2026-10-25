@@ -85,56 +85,11 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
-}
-
-pub const BootKind = @import("secureboot.zig").BootKind;
-
-/// A protected machine owns PK and KEK separately from its code-signing db.
-/// The authority also participates in the image identity, so an image enrolled
-/// for another machine can never be reused merely because its disk matches.
-pub fn ensureImageWithAuthority(
-    io: Io,
-    gpa: Allocator,
-    p: Place,
-    form: []const u8,
-    arch: howl.Arch,
-    disk: []const u8,
-    work: []const u8,
-    authority: ?[]const u8,
-    kind: BootKind,
-    why: *howl.Why,
-) ![]const u8 {
-    if (kind == .bootstrap) {
-        if (authority == null) return error.MissingBootstrapAuthority;
-        _ = try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
-    } else _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
-    var digest = try images.sha256(io, disk);
+    // The image's own boot certificate is PK, KEK and db: the published
+    // vendor's for a download, the builder's for a --build.
+    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    const digest = try images.sha256(io, disk);
     const code = try gpa.print("{s}/boot.der", .{work});
-    const owner = if (authority) |cert| blk: {
-        const path = try gpa.print("{s}/owner.der", .{work});
-        try howl.run(
-            io,
-            why,
-            &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path },
-        );
-        const der = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
-        const vendor = try Dir.cwd().readFileAlloc(io, code, gpa, .limited(4096));
-        const owner_key = try @import("tpm").firmware.certificateKey(der);
-        const vendor_key = try @import("tpm").firmware.certificateKey(vendor);
-        if (std.mem.eql(
-            u8,
-            owner_key.modulus,
-            vendor_key.modulus,
-        )) return error.SharedBootAuthority;
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&digest);
-        hash.update(der);
-        var combined: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        hash.final(&combined);
-        digest = std.fmt.bytesToHex(combined, .lower);
-        break :blk path;
-    } else code;
     const name = try images.name(gpa, form, arch, &digest);
     if (ask(
         io,
@@ -194,9 +149,9 @@ pub fn ensureImageWithAuthority(
         "--guest-os-features",
         "UEFI_COMPATIBLE,GVNIC",
         "--platform-key-file",
-        owner,
+        code,
         "--key-exchange-key-file",
-        owner,
+        code,
         "--signature-database-file",
         code,
         "--labels",
@@ -245,6 +200,7 @@ pub fn create(
     why: *howl.Why,
 ) !void {
     const m = machine(arch);
+    const machine_type = size orelse m.size;
     try howl.run(io, why, try gcloud(gpa, p, &.{
         "compute",
         "instances",
@@ -253,7 +209,7 @@ pub fn create(
         "--zone",
         p.zone,
         "--machine-type",
-        size orelse m.size,
+        machine_type,
         "--image",
         image,
         // Use SSD, not GCP's HDD default (pd-standard), which read an 8 GB
@@ -261,7 +217,7 @@ pub fn create(
         // to ssh took 3.8 s on pd-balanced against 5.3 s, for $0.10 a
         // GB-month against $0.04.
         "--boot-disk-type",
-        "pd-balanced",
+        bootDiskType(machine_type),
         "--network-interface",
         try gpa.print("nic-type={s}", .{m.nic}),
         "--tags",
@@ -276,6 +232,21 @@ pub fn create(
         "--metadata-from-file",
         try gpa.print("user-data={s}", .{b64}),
     }));
+}
+
+/// bootDiskType is the SSD a machine type boots from: Hyperdisk for the
+/// families that take no Persistent Disk (C4, C4A, N4), pd-balanced otherwise.
+fn bootDiskType(machine_type: []const u8) []const u8 {
+    for ([_][]const u8{ "c4-", "c4a-", "c4d-", "n4-", "n4a-" }) |family|
+        if (std.mem.startsWith(u8, machine_type, family)) return "hyperdisk-balanced";
+    return "pd-balanced";
+}
+
+test bootDiskType {
+    try std.testing.expectEqualStrings("pd-balanced", bootDiskType("t2a-standard-1"));
+    try std.testing.expectEqualStrings("pd-balanced", bootDiskType("e2-medium"));
+    try std.testing.expectEqualStrings("hyperdisk-balanced", bootDiskType("c4a-standard-1"));
+    try std.testing.expectEqualStrings("hyperdisk-balanced", bootDiskType("n4-standard-2"));
 }
 
 /// publishConfig replaces user-data without restarting the instance.
