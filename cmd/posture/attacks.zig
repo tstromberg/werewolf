@@ -120,11 +120,16 @@ pub fn run(p: *Posture) !void {
     // second scan must not remove the first scan's files or leash directories.
     // Keep the lock file in place: unlinking it would let another scan lock
     // a different inode. Closing the descriptor also releases it after a crash.
-    const guard: ?Io.File = if (p.werewolf) try Dir.cwd().createFile(
+    const guard: ?Io.File = if (p.werewolf) Dir.cwd().createFile(
         p.io,
         "/run/werewolf/posture-attack.lock",
         .{ .truncate = false, .permissions = .fromMode(0o600) },
-    ) else null;
+    ) catch |err| switch (err) {
+        // A root SSH session may not write /run/werewolf (forms/sshd's
+        // Landlock layer, docs/design/ssh-hardening.md): boot's results.
+        error.AccessDenied => return p.fromBootRest(),
+        else => return err,
+    } else null;
     defer if (guard) |f| f.close(p.io);
     if (guard) |f| try f.lock(p.io, .exclusive);
 
@@ -237,11 +242,29 @@ pub fn run(p: *Posture) !void {
     if (p.werewolf) try leashAttack(p);
 }
 
+const leash_attack_name = "A leashed service stays on its leash";
+const leash_attack_why = "A service that is taken over can reach only the files, programs and " ++
+    "ports its service file names.";
+
 /// leashAttack checks that a leashed service can do what its file grants and
 /// nothing more. It leashes a copy of posture as nobody, which runs probe and
 /// reports what it should not have been able to do.
 fn leashAttack(p: *Posture) !void {
     if (!exists(p.io, leash_bin)) return;
+    // Leashing drops capabilities from the bounding set, which takes SETPCAP.
+    // A root SSH session lacks it (lib/service.zig login_set): posture run
+    // there takes boot's result, and makes no probe files its root, without
+    // DAC_OVERRIDE, could not remove.
+    if (linux.prctl(@backingInt(linux.PR.CAPBSET_READ), linux.CAP.SETPCAP, 0, 0, 0) != 1)
+        return p.fromBoot(.{
+            .id = "processes-leash-attack",
+            .area = "processes",
+            .name = leash_attack_name,
+            .why = leash_attack_why,
+            .how = "leashes this program as nobody, which takes CAP_SETPCAP",
+            .result = .skip,
+            .detail = "this process cannot leash: it lacks SETPCAP, as a root SSH session does",
+        });
     var exe: [Dir.max_path_bytes]u8 = undefined;
     const self = exe[0 .. Dir.cwd().readLink(p.io, "/proc/self/exe", &exe) catch return];
     // Clear the probe's directories before the run too: a power cut mid-probe
@@ -315,9 +338,8 @@ fn leashAttack(p: *Posture) !void {
     try p.add(.{
         .id = "processes-leash-attack",
         .area = "processes",
-        .name = "A leashed service stays on its leash",
-        .why = "A service that is taken over can reach only the files, programs and ports " ++
-            "its service file names.",
+        .name = leash_attack_name,
+        .why = leash_attack_why,
         .how = try p.gpa.print(
             "this program, leashed as nobody, granted TCP port {d} (a port the policy " ++
                 "names, which fence lets anything connect to; 0: none, so not tried) " ++

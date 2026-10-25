@@ -39,15 +39,18 @@ pub const usage =
     \\       howl test --with FORM [--arch ARCH] [--iterate [--driver NAME] [--phase seed|verify]]   run the release gate or reuse a local test VM
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--add-current-user auto|yes|no] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
     \\       howl ssh [[USER@]NAME] [--identity KEY | --no-agent] [-- COMMAND...]
     \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
+    \\       howl import NAME DIR   stage initial data for a protected VM’s next cold start; destination must be empty
+    \\       howl sync NAME DIR     stage added/changed files for a protected VM’s next cold start; keep destination-only files
+    \\       howl import NAME --retry SNAPSHOT-ID   reselect a retained snapshot for recovery
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
     "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] " ++
     "[--size TYPE] " ++
-    "[--allow-from me|CIDR] " ++
+    "[--allow-from me|CIDR] [--add-current-user auto|yes|no] " ++
     "[--network tap|slirp] [--bridge NAME] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -90,6 +93,8 @@ pub fn main(init: std.process.Init) void {
             pack,
             run,
             create,
+            import,
+            sync,
             apply,
             delete,
             console,
@@ -111,6 +116,8 @@ pub fn main(init: std.process.Init) void {
             @"_boot-record",
             @"_local-refresh",
             @"_cloud-ek",
+            @"_cloud-bootstrap",
+            @"_cloud-workload",
             @"_boot-image",
             @"_enroll-image",
             @"_accept-image",
@@ -126,6 +133,8 @@ pub fn main(init: std.process.Init) void {
         .pack => pack(io, gpa, args[2..], &why),
         .run => runForm(io, gpa, args[2..], &why),
         .create => create(io, gpa, args[2..], &why),
+        .import => @import("local-secure.zig").importData(io, gpa, args[2..], .init, &why),
+        .sync => @import("local-secure.zig").importData(io, gpa, args[2..], .sync, &why),
         .apply => @import("apply.zig").apply(io, gpa, args[2..], &why),
         .delete => verbs.delete(io, gpa, args[2..], &why),
         .console => verbs.console(io, gpa, args[2..], &why),
@@ -143,6 +152,8 @@ pub fn main(init: std.process.Init) void {
         .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
         .@"_boot-record" => @import("enrollment.zig").verify(io, gpa, args[2..]),
         .@"_cloud-ek" => @import("cloud-enrollment.zig").retrieve(io, gpa, args[2..], &why),
+        .@"_cloud-bootstrap" => @import("cloud-bootstrap.zig").command(io, gpa, args[2..], &why),
+        .@"_cloud-workload" => @import("cloud-bootstrap.zig").workload(io, gpa, args[2..], &why),
         .@"_local-refresh" => @import("local-secure.zig").refresh(io, gpa, args[2..], &why),
         .@"_boot-image" => @import("boot-image.zig").command(io, gpa, args[2..], &why),
         .@"_enroll-image" => @import("local-secure.zig").enrollImage(io, gpa, args[2..], &why),
@@ -271,6 +282,8 @@ pub const Interface = struct {
     /// people is the manifest's users as the config tar's `users` file
     /// (lib/form.zig peopleFile); empty when it names no one.
     people: []const u8 = "",
+    /// Distinguish an explicit empty users map from an absent one.
+    people_defined: bool = false,
 };
 
 /// own_files are the tar files werewolf's programs read, each set by a howl
@@ -295,6 +308,7 @@ const reserved = [_][]const u8{
     "dns",
     "data-key",
     "root-keys",
+    "add-current-user",
     "dev",
     "update-policy",
     "on",
@@ -587,6 +601,7 @@ pub const Options = struct {
     data_key: ?[]const u8 = null,
     update_policy: ?[]const u8 = null,
     root_keys: ?[]const u8 = null,
+    add_current_user: enum { auto, yes, no } = .auto,
     /// own_keys are the keys from ~/.ssh create copies to root (keys.zig),
     /// where no --root-keys or --config gives root any.
     own_keys: ?[]const u8 = null,
@@ -629,6 +644,7 @@ pub const Options = struct {
 /// not a flag or a flag's value is FORM; a second is the machine's name.
 pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
     var o: Options = .{};
+    var current_user_given = false;
     var flags: std.ArrayList([2][]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -689,6 +705,11 @@ pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
         if (slot) |s| {
             if (s.* != null) return why.refuse("--{s} given twice", .{flag});
             s.* = v;
+        } else if (std.mem.eql(u8, flag, "add-current-user")) {
+            if (current_user_given) return why.refuse("--add-current-user given twice", .{});
+            current_user_given = true;
+            o.add_current_user = std.meta.stringToEnum(@TypeOf(o.add_current_user), v) orelse
+                return why.refuse("--add-current-user {s}: auto, yes or no", .{v});
         } else if (std.mem.eql(u8, flag, "network")) {
             if (o.network != null) return why.refuse("--network given twice", .{});
             o.network = std.meta.stringToEnum(bhyve.Mode, v) orelse
@@ -769,7 +790,7 @@ pub fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) !
     if (o.config) |dir| try readConfigDir(io, gpa, dir, &entries, why);
     // The manifest's people, as init makes their accounts and keys files
     // (lib/form.zig peopleFile): the machine's own, never a taken form's.
-    if (iface.people.len > 0) try add(
+    if (iface.people_defined or iface.people.len > 0) try add(
         gpa,
         &entries,
         .{ .path = "users", .data = iface.people, .from = "form.yaml's users" },
@@ -1165,7 +1186,14 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
     if (o.out == null and
         !o.check) return why.refuse("say where: -o FILE, or -n to check only", .{});
 
-    const entries = try gather(io, gpa, iface, o, why);
+    const entries = try keys.addCurrentUser(
+        io,
+        gpa,
+        iface,
+        o,
+        try gather(io, gpa, iface, o, why),
+        why,
+    );
     const tar = try writeTar(gpa, entries);
     if (o.on) |t| if (misfit(
         entries,
@@ -1201,6 +1229,7 @@ pub fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Inter
         error.Form => return why.refuse("{s}", .{failure.text}),
         error.OutOfMemory => return error.OutOfMemory,
     };
+    iface.people_defined = c[c.len - 1].spec.get("users") != null;
     // The image lays the forms over each other, so the last one's wins.
     for (c) |f| {
         const path = try gpa.print("{s}/rootfs/etc/werewolf/update-policy.json", .{f.dir});
@@ -1232,6 +1261,11 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     );
     try row(w, "--data-key FILE", "data.key: /data in LUKS2");
     try row(w, "--root-keys FILE", "authorized_keys: root's, where the form runs sshd");
+    try row(
+        w,
+        "--add-current-user auto|yes|no",
+        "add your local SSH account; auto when users is absent, except Lima",
+    );
     try row(
         w,
         "--users.NAME.keys LINE",
@@ -1813,7 +1847,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     });
     if (o.protected() and !o.local) {
         o.production_download = true;
-        if (o.app != null or o.import_dir != null or !forms.isName(o.form)) return why.refuse(
+        if (o.app != null or !forms.isName(o.form)) return why.refuse(
             "custom code requires --build; signed downloads deploy a published form",
             .{},
         );
@@ -1975,7 +2009,14 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             verbose,
         );
     }
-    const entries = try gather(io, gpa, iface, o, why);
+    const entries = try keys.addCurrentUser(
+        io,
+        gpa,
+        iface,
+        o,
+        try gather(io, gpa, iface, o, why),
+        why,
+    );
     const tar = try writeTar(gpa, entries);
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
     if (replacing) {

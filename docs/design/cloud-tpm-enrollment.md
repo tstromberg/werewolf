@@ -49,7 +49,17 @@ networking, with the factory machine nonce, signed factory-record digest and boo
 mode sealed in its identity (`cmd/tpm-enroll`, `tools/build-tpm-bootstrap`); workload
 UKIs keep the mandatory v2 checks. Nothing else runs in bootstrap mode, which refuses
 to start where protected enrollment exists, with no guest reset or force option.
-Provider transport and factory boot selection remain open.
+The internal GCP test uses a dedicated second serial port, selected only by the signed
+initramfs. It verifies the provider EK before sending an encrypted capsule, then swaps
+the stopped instance's boot disk for the authenticated factory disk without replacing
+the instance or its TPM. This passed with both `prod-ssh` SSH accounts on 2026-10-24;
+normal launch, download and update qualification remain open.
+
+GCP firmware leaves a volatile empty-password platform reset path enabled. Both the
+bootstrap and workload close it before handling enrollment credentials or exposing the
+workload. GCP omits the platform handle from its authorization-policy capability; that
+omission is accepted only after independently verifying that the platform hierarchy is
+disabled. Owner, lockout and endorsement policy entries remain mandatory.
 
 The bootstrap creates a TPM attestation key with fixed TPM and parent attributes,
 adminWithPolicy set and userWithAuth clear, so empty-password activation fails. Its

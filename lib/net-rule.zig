@@ -40,6 +40,8 @@ pub const Rule = struct {
     /// dport_last widens dport into a range. Null is dport alone.
     dport_last: ?u16 = null,
     uid: ?u32 = null,
+    /// uid_last widens uid into a range. Null is uid alone.
+    uid_last: ?u32 = null,
 };
 
 pub const NLMSG_ERROR = 2;
@@ -82,7 +84,7 @@ pub fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
         FRA_DPORT_RANGE,
         std.mem.sliceAsBytes(&[2]u16{ d, r.dport_last orelse d }),
     );
-    if (r.uid) |u| b.attr(FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ u, u }));
+    if (r.uid) |u| b.attr(FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ u, r.uid_last orelse u }));
     // struct nlmsghdr: length, type, flags, sequence, port.
     std.mem.writeInt(u32, buf[0..4], @intCast(b.len), .little);
     std.mem.writeInt(u16, buf[4..6], kind, .little);

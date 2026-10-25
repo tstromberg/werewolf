@@ -710,18 +710,38 @@ pub const Device = struct {
             if (value == 0x01500020 or value == 0x01500021) return error.TpmAlreadyProvisioned;
         }
         try r.end();
+        // Firmware may leave an empty-password platform reset path (GCP).
+        // Close it before creating attestation keys or receiving credentials,
+        // as stage0 does before workload handover. Ownership/NV admission
+        // precedes this volatile guard, so replay never changes an enrollment.
+        var guard: tpm.Device = .{ .io = d.io, .file = d.file };
+        defer std.crypto.secureZero(u8, &guard.response);
+        try guard.disablePlatform();
+        packet = command(0x17a, &.{}, &.{});
+        packet.int(u32, 6);
+        packet.int(u32, 0x201); // startup-clear: is the platform hierarchy enabled?
+        packet.int(u32, 1);
+        reply = try d.call(&packet, false, 0);
+        r = &reply.parameters;
+        if (try r.int(u8) > 1 or try r.int(u32) != 6 or try r.int(u32) != 1 or
+            try r.int(u32) != 0x201) return error.BadTpmResponse;
+        const platform_enabled = try r.int(u32) & 1 != 0;
+        try r.end();
         packet = command(0x17a, &.{}, &.{});
         packet.int(u32, 9); // hierarchy authorization policies
         packet.int(u32, 0x40000001);
         packet.int(u32, 4);
         reply = try d.call(&packet, false, 0);
-        r = &reply.parameters;
-        if (try r.int(u8) != 0 or try r.int(u32) != 9 or try r.int(u32) != 4)
-            return error.UnprotectedTpmHierarchy;
-        for ([4]u32{ 0x40000001, 0x4000000a, 0x4000000b, 0x4000000c }) |hierarchy|
-            if (try r.int(u32) != hierarchy or try r.int(u16) != 0x10)
-                return error.UnprotectedTpmHierarchy;
-        try r.end();
+        tpm.checkHierarchyPolicies(reply.parameters.raw, platform_enabled) catch |err| {
+            // GetCapability returns public policy metadata only. Retain the
+            // refusal while making provider differences diagnosable; never
+            // log arbitrary TPM replies or credential-bearing commands.
+            std.debug.print(
+                "tpm-bootstrap: hierarchy policy capability: {x}\n",
+                .{reply.parameters.raw},
+            );
+            return err;
+        };
     }
 
     fn session(d: *Device) !u32 {

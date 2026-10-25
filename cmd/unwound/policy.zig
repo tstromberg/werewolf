@@ -83,15 +83,11 @@ pub const Policy = struct {
             var words = mem.tokenizeScalar(u8, line, ' ');
             if (!mem.eql(u8, words.next() orelse "", "lookup")) continue;
             if (p.n == max_grants or number > std.math.maxInt(u16)) return error.BadPolicy;
-            const id = std.fmt.parseInt(
-                u32,
-                words.next() orelse "",
-                10,
-            ) catch return error.BadPolicy;
+            const id: dns.Uids = try .parse(words.next() orelse "");
             const pattern = words.next() orelse return error.BadPolicy;
             var g: Grant = .{
                 .service = for (p.users.ids[0..p.users.len], 0..) |u, i| {
-                    if (u == id) break @intCast(i);
+                    if (u.first == id.first and u.last == id.last) break @intCast(i);
                 } else unreachable,
                 .kind = .exact,
                 .name = .{},
@@ -127,7 +123,8 @@ pub const Policy = struct {
         return if (dns.labelIndex(p.users, ip)) |i| @intCast(i) else null;
     }
 
-    pub fn uid(p: *const Policy, s: u8) u32 {
+    /// uid is the user s's label stands for: one uid, or a range, as `:people`.
+    pub fn uid(p: *const Policy, s: u8) dns.Uids {
         return p.users.ids[s];
     }
 
@@ -205,7 +202,7 @@ test "grants: exact names, subtrees, wildcards and their types" {
     try p.parse(example);
     try testing.expectEqual(3, p.users.len);
     const svc = p.service(.{ 127, 53, 0, 1 }).?;
-    try testing.expectEqual(1001, p.uid(svc));
+    try testing.expectEqual(dns.Uids.one(1001), p.uid(svc));
     const cases = [_]struct { s: u8, n: []const u8, t: u16, d: Decision }{
         .{
             .s = 0,

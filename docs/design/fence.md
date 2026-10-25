@@ -91,6 +91,8 @@ to (443, say) passes, but reaches only a socket that exists.
   DNS, the one UDP declared, fits 512 bytes (no EDNS0) or retries on TCP.
 - **Destinations.** `connect USER tcp/443` reaches any HTTPS server;
   `dns USER` is restricted to detected resolvers ([dns.md](dns.md)).
+- **Address order.** glibc ranks addresses by a UDP connect() to each, which
+  rule 299 refuses on undeclared ports; minimal's `/etc/gai.conf` puts IPv4 first.
 
 ## Alternatives Considered
 

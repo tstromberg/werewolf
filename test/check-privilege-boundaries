@@ -69,6 +69,11 @@ try:
     require("baseline", ssh("root", "uname -a; cat /proc/cmdline; "
                             "stat -c '%u:%g:%a %n' /data/.werewolf/identities; "
                             "cat /etc/sv/sshd/service; cat /run/werewolf/posture.json"))
+    # Root's session holds sshd's login capabilities, pledge and write layer.
+    for tty in (False, True):
+        require(f"root-probe-{'pty' if tty else 'pipe'}",
+                ssh("root", "/usr/lib/werewolf/privilege-probe root", tty),
+                contains="PASS root-no-dac-override")
     for user in ("auditone", "audittwo"):
         require(f"{user}-setup", ssh(user, "umask 077; printf private > ~/private; "
                                     "mkdir -p ~/.ssh; printf 'id -u > ~/rc.uid\\n' > ~/.ssh/rc"))
@@ -77,9 +82,16 @@ try:
                     ssh(user, "/usr/lib/werewolf/privilege-probe", tty),
                     contains="PASS cannot-regain-root")
         peer = "audittwo" if user == "auditone" else "auditone"
+        # sshd runs no ~/.ssh/rc (PermitUserRC no, docs/design/ssh-hardening.md).
         require(f"{user}-home-isolation", ssh(user,
-            f"test \"$(cat ~/rc.uid)\" = \"$(id -u)\" && "
+            "test ! -e ~/rc.uid && "
             f"! cat /data/home/{peer}/private 2>~/denied && grep -q 'Permission denied' ~/denied"))
+        # playground grants people names through unwound and a few ports: 443
+        # is routed, so TEST-NET times out, and 25 is refused at once.
+        require(f"{user}-network", ssh(user,
+            "nslookup example.com >/dev/null && "
+            "wget -q -T 2 -O /dev/null http://192.0.2.1:25/ 2>&1 | grep -q 'Permission denied' && "
+            "! wget -q -T 2 -O /dev/null http://192.0.2.1:443/ 2>&1 | grep -q 'Permission denied'"))
         require(f"{user}-no-remote-forward", ssh(user, "true", extra=(
             "-o", "ExitOnForwardFailure=yes", "-R", "0:127.0.0.1:22")), False,
             "remote port forwarding failed")

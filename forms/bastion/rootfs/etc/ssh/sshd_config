@@ -16,7 +16,6 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
-UsePAM no
 StrictModes yes
 KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com
 HostKeyAlgorithms ssh-ed25519
@@ -45,4 +44,5 @@ LoginGraceTime 30
 ClientAliveInterval 60
 ClientAliveCountMax 3
 UseDNS no
+Compression no
 LogLevel VERBOSE

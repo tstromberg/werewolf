@@ -531,9 +531,10 @@ const Frontend = struct {
             if (service == null or free == null or f.open[service.?] >= max_conns_per_service) {
                 if (service) |s| {
                     f.stats.busy += 1;
-                    f.say("{{\"event\":\"connection\",\"uid\":{d},\"decision\":\"deny\",\"why\":" ++
+                    f.say("{{\"event\":\"connection\",\"uid\":{f},\"decision\":\"deny\",\"why\":" ++
                         "\"busy\",\"detail\":\"{s}\"}}", .{
-                        policy.uid(s), if (free == null) "connections" else "service_connections",
+                        std.json.fmt(policy.uid(s), .{}),
+                        if (free == null) "connections" else "service_connections",
                     });
                 } else f.unlabeled(@bitCast(from.addr));
                 _ = linux.close(fd);
@@ -1141,9 +1142,9 @@ const Frontend = struct {
             std.mem.print(&tbuf, "{d}", .{t}) catch unreachable;
         var buf: [768]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
-        w.print("unwound: {{\"event\":\"query\",\"seq\":{d},\"uid\":{d},\"decision\":\"{s}\",\"w" ++
+        w.print("unwound: {{\"event\":\"query\",\"seq\":{d},\"uid\":{f},\"decision\":\"{s}\",\"w" ++
             "hy\":\"{s}\"", .{
-            f.seq, policy.uid(s), if (allow) "allow" else "deny", why,
+            f.seq, std.json.fmt(policy.uid(s), .{}), if (allow) "allow" else "deny", why,
         }) catch {};
         if (x.detail) |d| w.print(",\"detail\":\"{s}\"", .{d}) catch {};
         if (x.bits > 0) w.print(",\"bits\":{d:.2}", .{x.bits}) catch {};

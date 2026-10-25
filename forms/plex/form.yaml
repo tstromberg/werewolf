@@ -1,6 +1,7 @@
 # Unmodified Plex; isolation lives here. No shell, JIT, discovery, DLNA,
 # UPnP, relay, downloaded plugins or runtime codec installation.
 base: prod
+imports: [init, sync]
 
 programs: [plex-loopback.so]
 
@@ -70,7 +71,7 @@ services:
     run:
       - /usr/lib/werewolf/plex-transcode
       - '"/usr/lib/plexmediaserver/Plex Media Scanner"'
-    read: /data/svc/plex-media
+    read: /data/svc/plex-media /run/svc/plex-media
     write: /run/svc/plex-transcode/jobs
     config:
       - plex-token /run/config/plex/token

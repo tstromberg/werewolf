@@ -13,16 +13,28 @@ pub fn start(
     user: []const u8,
     identities: []const []const u8,
     ssh: []const []const u8,
+    command_len: usize,
     why: *howl.Why,
 ) !void {
-    const pin = try std.process.run(gpa, io, .{
-        .argv = &.{ "ssh-keygen", "-F", alias, "-f", known_hosts },
-    });
-    if (pin.term != .exited or pin.term.exited != 0) return why.refuse(
-        "{s}: no pinned host key; connect with howl ssh --no-agent first, " ++
-            "verify the host key, then retry",
-        .{alias},
-    );
+    if (!try hasPin(io, gpa, known_hosts, alias)) {
+        // Destination constrained keys need the server's host key before
+        // ssh-add can load them. Use the same accept-new policy as ordinary
+        // SSH, but make an authentication-free handshake with no command so
+        // first use can establish that pin without a separate --no-agent run.
+        var first: std.ArrayList([]const u8) = .empty;
+        try first.appendSlice(gpa, &.{
+            "ssh",                             "-o",                      "BatchMode=yes",           "-o",                        "IdentityAgent=none",
+            "-o",                              "PubkeyAuthentication=no", "-o",                      "PasswordAuthentication=no", "-o",
+            "KbdInteractiveAuthentication=no", "-o",                      "GSSAPIAuthentication=no",
+        });
+        const target_args = ssh[1 .. ssh.len - command_len];
+        for (target_args) |arg| try first.append(gpa, if (std.mem.eql(u8, arg, "StrictHostKeyChecking=yes")) "StrictHostKeyChecking=accept-new" else arg);
+        _ = try std.process.run(gpa, io, .{ .argv = first.items });
+        if (!try hasPin(io, gpa, known_hosts, alias)) return why.refuse(
+            "{s}: could not establish a host key pin; check that the machine is reachable",
+            .{alias},
+        );
+    }
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(gpa, &.{
         "ssh-agent", try std.process.executablePathAlloc(io, gpa), "_ssh-agent",
@@ -33,6 +45,13 @@ pub fn start(
     try argv.appendSlice(gpa, ssh);
     const err = std.process.replace(io, .{ .argv = argv.items });
     return why.refuse("ssh-agent: {s}", .{@errorName(err)});
+}
+
+fn hasPin(io: Io, gpa: Allocator, known_hosts: []const u8, alias: []const u8) !bool {
+    const pin = try std.process.run(gpa, io, .{
+        .argv = &.{ "ssh-keygen", "-F", alias, "-f", known_hosts },
+    });
+    return pin.term == .exited and pin.term.exited == 0;
 }
 
 /// Run by ssh-agent, whose fresh socket is inherited through SSH_AUTH_SOCK.
@@ -54,7 +73,7 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     const login = try gpa.print("{s}@{s}", .{ args[2], args[1] });
     const root = try gpa.print("{s}>root@{s}", .{ args[1], args[1] });
     try add.appendSlice(gpa, &.{
-        "ssh-add", "-c", "-t", "20h", "-H", args[0], "-h", login, "-h", root,
+        "ssh-add", "-t", "20h", "-H", args[0], "-h", login, "-h", root,
     });
     try add.appendSlice(gpa, args[3..split]);
     var child = try std.process.spawn(io, .{ .argv = add.items });

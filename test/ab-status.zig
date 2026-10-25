@@ -41,13 +41,32 @@ pub fn main(init: std.process.Init) !void {
     var anchor: [64]u8 = @splat(0);
     var pcr: [64]u8 = @splat(0);
     var protected = false;
+    var cached = false;
     if (boot.tpm) {
         const key = try tpm.keyAt(io, gpa, "");
-        var device = try tpm.Device.open(io);
-        defer device.close();
-        anchor = std.fmt.bytesToHex(try device.anchor(key), .lower);
-        pcr = std.fmt.bytesToHex(try device.pcr11(), .lower);
-        protected = tpm.protected(io, gpa, boot.release, "/boot/state");
+        if (tpm.Device.open(io)) |opened| {
+            var device = opened;
+            defer device.close();
+            anchor = std.fmt.bytesToHex(try device.anchor(key), .lower);
+            pcr = std.fmt.bytesToHex(try device.pcr11(), .lower);
+            protected = tpm.protected(io, gpa, boot.release, "/boot/state");
+        } else |err| switch (err) {
+            // A root SSH session may not use the TPM (forms/sshd's Landlock
+            // layer): read what posture recorded at boot.
+            error.AccessDenied => {
+                const saved = try bootReport(io, gpa);
+                const state = saved.tpm orelse return error.NoBootTpmState;
+                if (state.anchor.len != anchor.len or state.pcr11.len != pcr.len)
+                    return error.BadBootTpmState;
+                @memcpy(&anchor, state.anchor);
+                @memcpy(&pcr, state.pcr11);
+                for (saved.checks) |c| if (std.mem.eql(u8, c.id, "boot-rollback-protected")) {
+                    protected = std.mem.eql(u8, c.result, "pass");
+                };
+                cached = true;
+            },
+            else => return err,
+        }
     }
     const output = try std.json.Stringify.valueAlloc(gpa, .{
         .boot_id = std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/random/boot_id"), "\n"),
@@ -62,9 +81,28 @@ pub fn main(init: std.process.Init) !void {
         .rollback_protected = protected,
         .tpm_anchor = if (boot.tpm) anchor[0..] else "",
         .pcr11 = if (boot.tpm) pcr[0..] else "",
+        .cached = cached,
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, output);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+/// BootReport is what ab-status needs of posture's report at boot.
+const BootReport = struct {
+    tpm: ?struct { anchor: []const u8, pcr11: []const u8 } = null,
+    checks: []const struct { id: []const u8, result: []const u8 },
+};
+
+fn bootReport(io: std.Io, gpa: std.mem.Allocator) !BootReport {
+    const file = try std.Io.Dir.cwd().openFile(io, "/run/werewolf/posture.json", .{});
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var r = file.readerStreaming(io, &buf);
+    const json = try r.interface.allocRemaining(gpa, .limited(16 << 20));
+    return std.json.parseFromSliceLeaky(BootReport, gpa, json, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
 }
 
 fn read(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]const u8 {

@@ -12,9 +12,9 @@ the service refetches cloud config each minute and updates accounts on changes
 
 A cloud image has no config disk, but every cloud carries user data. This is how a
 machine on GCP, AWS, Hetzner or Azure gets its hostname and root's ssh keys without
-cloud-init: GCP's `user-data` attribute, AWS's user data, Hetzner's user_data, or
-Azure's userData. init runs cloud-metadata once at boot, after the network is up and
-before fence sets the network policy, when no config tar was found on a disk or seed.
+cloud-init: GCP's `user-data`, AWS's user data, Hetzner's user_data, or Azure's
+userData. With no disk or seed config, init runs it after networking, before fence sets
+policy.
 
 ## Goals
 
@@ -24,8 +24,7 @@ before fence sets the network policy, when no config tar was found on a disk or 
 
 ## Non-Goals
 
-- cloud-init. `#cloud-config` users, packages and scripts are not applied.
-- Clouds werewolf does not know. Adding one is a row in the provider table.
+cloud-init scripts, users or packages, or clouds absent from the provider table.
 
 ## Detailed design
 
@@ -93,7 +92,6 @@ means a pax header, a link, or an owner never reaches init.
 
 - **Bounded:** at most 27 seconds, or 47 on AWS, when the server is down.
 - **Fails safe:** no config means no keys, not a broken config; init boots on.
-- **Says why:** a failure is logged with its cause (refused, timed out, an
-  HTTP status, a token refused, an answer not GCP's). The fetcher passes it
-  as a byte and a number, never text, and the parent puts it in words.
+- **Says why:** logs refusals, timeouts, HTTP errors and provider mismatches.
+  The fetcher passes a byte and number; the parent puts it in words.
 - **Tested:** `make check-cloud`: all four clouds, a hostile one, and none.

@@ -102,24 +102,33 @@ pub const cap = struct {
     pub const net_admin: u32 = 1 << 12;
     pub const net_raw: u32 = 1 << 13;
     pub const login: u32 = 1 << 31;
+    /// login_set is sshd's and every root session's, which cannot regain
+    /// what sshd lacks (docs/design/ssh-hardening.md). sshd binds port 22,
+    /// chroots its pre-auth child, signals it, gives a pty to its user and
+    /// becomes them; an operator also reads any file fence lets through,
+    /// reboots and reads the kernel's log. Not kept: DAC_OVERRIDE, so root
+    /// changes only what it owns or a file's mode lets it, never a
+    /// service's data; FSETID, as no file is setuid; SYS_RESOURCE, as sshd
+    /// only lowers limits; SYS_TTY_CONFIG, as vhangup is never allowed
+    /// (lib/seal.zig); AUDIT_WRITE, as sshd is built without audit or PAM.
     pub const login_set: u64 = (1 << 0) | // CHOWN
-        (1 << 1) | // DAC_OVERRIDE
         (1 << 2) | // DAC_READ_SEARCH
         (1 << 3) | // FOWNER
-        (1 << 4) | // FSETID
         (1 << 5) | // KILL
         (1 << 6) | // SETGID
         (1 << 7) | // SETUID
         (1 << 10) | // NET_BIND_SERVICE
         (1 << 18) | // SYS_CHROOT
         (1 << 22) | // SYS_BOOT
-        (1 << 24) | // SYS_RESOURCE
-        (1 << 26) | // SYS_TTY_CONFIG
-        (1 << 29) | // AUDIT_WRITE
         (@as(u64, 1) << 34); // SYSLOG
     /// A developer SSH session may start a nested leash, which drops the
-    /// capability bounding set again before running a test driver.
-    pub const developer_login_set: u64 = login_set | (1 << 8); // SETPCAP
+    /// capability bounding set again before running a test driver, may
+    /// give it more open files than the session has, and may change the
+    /// files of the services it tests.
+    pub const developer_login_set: u64 = login_set |
+        (1 << 1) | // DAC_OVERRIDE
+        (1 << 8) | // SETPCAP
+        (1 << 24); // SYS_RESOURCE
 };
 
 /// Mount is a `data` line: a directory under /data/share/NAME, bound

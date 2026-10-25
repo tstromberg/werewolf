@@ -154,6 +154,12 @@ fn pollStart(log: *Log) !void {
         "/bin/ash"
     else
         "/sbin/nologin";
+    // The key types sshd must see verified, read before the publisher's
+    // Landlock leaves it only the account directories.
+    const verify = readFrom(gpa, linux.AT.FDCWD, people.verify_path) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
     var network: [2]i32 = undefined;
     var publish: [2]i32 = undefined;
     var lifetime: [2]i32 = undefined;
@@ -237,6 +243,7 @@ fn pollStart(log: *Log) !void {
             home_dir,
             ledger_dir,
             shell,
+            verify,
         ) catch |err| {
             arena.deinit();
             log.event("error", .{ .step = "publish", .@"error" = @errorName(err) });
@@ -406,6 +413,7 @@ fn applyUsers(
     home_dir: i32,
     ledger_dir: i32,
     shell: []const u8,
+    verify: []const u8,
 ) !void {
     const identities = try people.loadLedger(gpa, ledger_dir);
     const c = try people.applyReserved(gpa, .{
@@ -444,19 +452,22 @@ fn applyUsers(
         c.made,
         0o600,
     );
-    const root_keys = try std.mem.concat(gpa, u8, &.{ base, c.root_keys });
+    const all_root = try std.mem.concat(gpa, u8, &.{ base, c.root_keys });
+    const root_keys = try people.verified(gpa, all_root, verify);
     try putFile(keys_dir, "root", root_keys, 0o600);
     for (c.removed) |name| {
         const rc = linux.unlinkat(keys_dir, nameZ(name), 0);
         if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .NOENT)
             return error.KeyRemovalFailed;
     }
+    // Root owns each keys file and its person reads it by group: a person
+    // must not add a key to it, nor an option such as no-touch-required.
     for (c.keys) |k| {
         const name = nameZ(k.name);
-        try putFile(keys_dir, name, k.text, 0o600);
+        try putFile(keys_dir, name, try people.verified(gpa, k.text, verify), 0o640);
         const id = k.id;
         if (linux.errno(
-            linux.fchownat(keys_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
+            linux.fchownat(keys_dir, name, 0, id, linux.AT.SYMLINK_NOFOLLOW),
         ) != .SUCCESS) {
             _ = linux.unlinkat(keys_dir, name, 0);
             return error.KeyOwnershipFailed;

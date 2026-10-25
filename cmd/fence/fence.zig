@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     var kept_buf: [caps.len][]const u8 = undefined;
     const kept = dropCaps(&kept_buf) catch |err| fail(&log, err);
     var out: [max_entries][]const u8 = undefined;
-    var text: [max_entries * 24]u8 = undefined;
+    var text: [max_entries * 32]u8 = undefined;
     log.event(
         "fence",
         .{
@@ -220,6 +220,8 @@ const Udp = struct { port: u16, uid: u32, lan: bool = false };
 const Connect = struct {
     /// uid is null for every user.
     uid: ?u32,
+    /// uid_last widens uid into a range, as for `:people`. Null is uid alone.
+    uid_last: ?u32 = null,
     proto: Proto,
     /// port is 0 for ICMP, which has no ports, and for any.
     port: u16,
@@ -354,6 +356,7 @@ const Policy = struct {
                 w.print("{d}", .{u}) catch return out[0..i]
             else
                 w.writeAll("all") catch return out[0..i];
+            if (c.uid_last) |u| w.print("-{d}", .{u}) catch return out[0..i];
             w.print(" {s}", .{@tagName(c.proto)}) catch return out[0..i];
             if (c.any)
                 w.writeAll(" any") catch return out[0..i]
@@ -369,10 +372,11 @@ const Policy = struct {
 };
 
 /// parsePolicy parses `listen tcp PORT [loopback|lan]`, `listen UID udp PORT [lan]`,
-/// `connect UID|all PROTO [PORT] [public|lan]`, `metadata UID`, `dns UID`,
+/// `connect UIDS|all PROTO [PORT] [public|lan]`, `metadata UID`, `dns UID`,
 /// `dns-direct UID`
-/// and `lookup UID ...` lines; the rest of a lookup line is unwound's to
-/// check. Only a named user's UDP accepts lan. Anything else is BadPolicy.
+/// and `lookup UIDS ...` lines, where UIDS is a uid or a range, FIRST-LAST;
+/// the rest of a lookup line is unwound's to check. Only a named user's
+/// UDP accepts lan. Anything else is BadPolicy.
 fn parsePolicy(text: []const u8) !Policy {
     var p: Policy = .{};
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -413,7 +417,8 @@ fn parsePolicy(text: []const u8) !Policy {
             }
         } else if (std.mem.eql(u8, key, "connect")) {
             const who = words.next() orelse return error.BadPolicy;
-            const uid: ?u32 = if (std.mem.eql(u8, who, "all")) null else try user(who);
+            const uids: ?dns.Uids = if (std.mem.eql(u8, who, "all")) null else try .parse(who);
+            const uid = if (uids) |u| u.first else null;
             const proto = std.meta.stringToEnum(
                 Proto,
                 words.next() orelse "",
@@ -427,12 +432,14 @@ fn parsePolicy(text: []const u8) !Policy {
                 if (std.mem.eql(u8, word, "any")) {
                     // One user, TCP. `all` would open every program. UDP
                     // any is not a scan's replies.
-                    if (proto != .tcp or uid == null) return error.BadPolicy;
+                    if (proto != .tcp or uid == null or
+                        uids.?.last != uid.?) return error.BadPolicy;
                     any = true;
                 } else pnum = try port(word);
             }
             p.connect[p.nconnect] = .{
                 .uid = uid,
+                .uid_last = if (uids) |u| if (u.last != u.first) u.last else null else null,
                 .proto = proto,
                 .port = pnum,
                 .any = any,
@@ -457,11 +464,11 @@ fn parsePolicy(text: []const u8) !Policy {
             }
             p.nconnect += 1;
         } else if (std.mem.eql(u8, key, "dns")) {
-            try p.dns.add(try user(words.next() orelse ""));
+            try p.dns.add(.one(try user(words.next() orelse "")));
         } else if (std.mem.eql(u8, key, "dns-direct")) {
-            try p.dns_direct.add(try user(words.next() orelse ""));
+            try p.dns_direct.add(.one(try user(words.next() orelse "")));
         } else if (std.mem.eql(u8, key, "lookup")) {
-            try p.lookups.add(try user(words.next() orelse ""));
+            try p.lookups.add(try .parse(words.next() orelse ""));
             if (words.next() == null) return error.BadPolicy;
             continue;
         } else if (std.mem.eql(u8, key, "metadata")) {
@@ -588,7 +595,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .from_here = true,
             .src = &dns.label_ips[n],
             .dst = &dns.resolver,
-            .uid = id,
+            .uid = id.first,
+            .uid_last = id.last,
         });
         rules.add(.{
             .priority = pref.label_forged,
@@ -604,7 +612,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .table = dns.labelTable(n),
             .from_here = true,
             .dst = &dns.resolver,
-            .uid = id,
+            .uid = id.first,
+            .uid_last = id.last,
         });
     }
     if (family == linux.AF.INET) rules.add(.{
@@ -623,6 +632,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = c.proto,
         .dport = c.port,
         .uid = c.uid,
+        .uid_last = c.uid_last,
     });
     if (family == linux.AF.INET and p.local_validator) {
         for ([_]Proto{ .udp, .tcp }) |proto| rules.add(.{
@@ -687,6 +697,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .proto = .tcp,
             .dport = c.port,
             .uid = c.uid,
+            .uid_last = c.uid_last,
         });
         rules.add(.{
             .priority = pref.loopback_refuse,
@@ -695,6 +706,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .proto = .tcp,
             .dport = c.port,
             .uid = c.uid,
+            .uid_last = c.uid_last,
         });
     };
     rules.add(.{
@@ -728,7 +740,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dport = port_number,
     });
     for (p.connect[0..p.nconnect]) |c| {
-        if (c.loopback or c.uid == null or !p.dns_direct.has(c.uid.?) or c.any or
+        if (c.loopback or c.uid == null or c.uid_last != null or
+            !p.dns_direct.has(c.uid.?) or c.any or
             (c.proto != .udp and c.proto != .tcp) or
             (c.port != 53 and c.port != 853)) continue;
         const r: Rule = .{
@@ -759,6 +772,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .proto = c.proto,
             .dport = if (c.proto == .icmp or c.any) null else c.port,
             .uid = c.uid,
+            .uid_last = c.uid_last,
         };
         if (c.lan) rules.onLan(r, p.lan, c.port) else rules.add(r);
     }
@@ -1366,7 +1380,7 @@ test "loopback-only TCP grants do not open an Internet port" {
         fn action(rules: []const Rule, uid: u32, destination: []const u8, port_number: u16) u8 {
             for (rules) |r| {
                 if (r.proto != null and r.proto != .tcp) continue;
-                if (r.uid != null and r.uid.? != uid) continue;
+                if (r.uid) |u| if (uid < u or uid > (r.uid_last orelse u)) continue;
                 if (r.dport != null and (port_number < r.dport.? or
                     port_number > (r.dport_last orelse r.dport.?))) continue;
                 if (r.sport != null and r.sport.? != 40000) continue;
@@ -1413,7 +1427,7 @@ test "policies" {
     try std.testing.expectEqual(null, p.connect[2].uid);
     try std.testing.expectEqual(.icmp, p.connect[3].proto);
     var out: [max_entries][]const u8 = undefined;
-    var text: [max_entries * 24]u8 = undefined;
+    var text: [max_entries * 32]u8 = undefined;
     const t = p.connectText(&out, &text);
     try std.testing.expectEqualStrings("0 tcp 443", t[0]);
     try std.testing.expectEqualStrings("all udp 53", t[2]);
@@ -1423,7 +1437,11 @@ test "policies" {
     const pt = pub_.connectText(&out, &text);
     try std.testing.expectEqualStrings("207 tcp 443 public", pt[0]);
     const names = try parsePolicy("dns 0\ndns 69\ndns 0\n");
-    try std.testing.expectEqualSlices(u32, &.{ 0, 69 }, names.dns.ids[0..names.dns.len]);
+    try std.testing.expectEqualSlices(
+        dns.Uids,
+        &.{ .one(0), .one(69) },
+        names.dns.ids[0..names.dns.len],
+    );
     const none = try parsePolicy("");
     try std.testing.expectEqual(0, none.nlisten + none.nconnect + none.nmetadata);
     for ([_][]const u8{
@@ -1617,7 +1635,7 @@ fn udpAction(
         if (r.from_here and !outgoing) continue;
         if (outgoing and r.table == RT_TABLE_LOCAL) continue;
         if (r.proto != null and r.proto != .udp) continue;
-        if (r.uid != null and r.uid != uid) continue;
+        if (r.uid) |u| if (uid < u or uid > (r.uid_last orelse u)) continue;
         if (r.sport != null and r.sport != source) continue;
         if (r.dport) |first| if (destination < first or destination >
             (r.dport_last orelse first)) continue;
@@ -1882,7 +1900,11 @@ test "IPv6: the same rules, its metadata address, and ICMPv6 sent by anyone" {
 test "lookup users reach unwound from their own labels; DNS elsewhere is refused" {
     const p = try parsePolicy("lookup 1001 a.example A\nconnect 207 udp 53\n" ++
         "lookup 1002 * A unfiltered\nlookup 1001 b.example TXT\ndns 54\n");
-    try std.testing.expectEqualSlices(u32, &.{ 1001, 1002 }, p.lookups.ids[0..p.lookups.len]);
+    try std.testing.expectEqualSlices(
+        dns.Uids,
+        &.{ .one(1001), .one(1002) },
+        p.lookups.ids[0..p.lookups.len],
+    );
     var rules: [max_rules]Rule = undefined;
     const r = plan(p, linux.AF.INET, &rules);
     // Own label, any forged loopback source, the kernel's pick, then no one.
@@ -1926,6 +1948,40 @@ test "lookup users reach unwound from their own labels; DNS elsewhere is refused
     try std.testing.expectEqual(4, refusals);
     try std.testing.expectError(error.BadPolicy, parsePolicy("lookup 1001\n"));
     try std.testing.expectError(error.BadPolicy, parsePolicy("lookup x a.example A\n"));
+}
+
+test "a range of uids, as :people, connects and looks up as one user" {
+    const p = try parsePolicy("connect 500-60000 tcp 443\nconnect 0 tcp 443\n" ++
+        "lookup 500-60000 * A unfiltered\nlookup 0 * A\n");
+    var out: [max_entries][]const u8 = undefined;
+    var text: [max_entries * 32]u8 = undefined;
+    try std.testing.expectEqualStrings("500-60000 tcp 443", p.connectText(&out, &text)[0]);
+    try std.testing.expectEqualStrings("0 tcp 443", p.connectText(&out, &text)[1]);
+    var rules: [max_rules]Rule = undefined;
+    var labelled: usize = 0;
+    var allowed = false;
+    var buf: [256]u8 = undefined;
+    for (plan(p, linux.AF.INET, &rules)) |r| {
+        if (r.uid != 500) continue;
+        try std.testing.expectEqual(60000, r.uid_last.?);
+        try std.testing.expect(hasAttr(
+            ruleMessage(&buf, 1, RTM_NEWRULE, r),
+            FRA_UID_RANGE,
+            std.mem.sliceAsBytes(&[2]u32{ 500, 60000 }),
+        ));
+        if (r.priority == pref.label_own or r.priority == pref.label_pick) labelled += 1;
+        if (r.priority == pref.out_allow and r.dport == 443) allowed = true;
+    }
+    try std.testing.expectEqual(2, labelled);
+    try std.testing.expect(allowed);
+    for ([_][]const u8{
+        "connect 500-60000 tcp any\n",
+        "connect 60000-500 tcp 443\n",
+        "connect 500- tcp 443\n",
+        "lookup 500-60000 * A\nlookup 600 a.example A\n",
+        "dns 500-60000\n",
+        "metadata 500-60000\n",
+    }) |bad| try std.testing.expectError(error.BadPolicy, parsePolicy(bad));
 }
 
 test "a DNS service reaches only its declared direct upstream ports" {

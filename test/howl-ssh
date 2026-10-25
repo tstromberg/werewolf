@@ -31,6 +31,8 @@ print({{'{{{{.Name}}}}': 'werewolf-run', '{{{{.SSHLocalPort}}}}': '60022',
 ''')
     (binaries / 'ssh').write_text(f'''#!{sys.executable}
 import json, os, pathlib, sys
+if 'PubkeyAuthentication=no' in sys.argv:
+    sys.exit(255)
 pathlib.Path(os.environ['SSH_RECORD']).write_text(json.dumps(sys.argv[1:]))
 pathlib.Path(os.environ['SSH_RECORD'] + '.socket').write_text(os.environ.get('SSH_AUTH_SOCK', ''))
 sys.exit(int(os.environ.get('SSH_STATUS', '0')))
@@ -49,6 +51,19 @@ sys.exit(int(os.environ.get('ADD_STATUS', '0')))
     (binaries / 'ssh-keygen').write_text(f'''#!{sys.executable}
 import os, sys
 sys.exit(int(os.environ.get('PIN_STATUS', '0')))
+''')
+    (binaries / 'gcloud').write_text(f'''#!{sys.executable}
+import sys
+args = sys.argv[1:]
+if args[:2] == ['config', 'get-value']:
+    print({{'project': 'test-project', 'compute/zone': 'us-central1-a'}}[args[2]])
+elif 'instances' in args and 'describe' in args:
+    print({{'value(labels.werewolf-form)': 'playground',
+           'get(networkInterfaces[0].accessConfigs[0].natIP)': '203.0.113.20'}}[args[-1]])
+elif 'firewall-rules' in args and 'describe' in args:
+    print('werewolf-run-allow')
+else:
+    sys.exit('unexpected gcloud call: ' + repr(args))
 ''')
     for binary in binaries.iterdir():
         binary.chmod(0o755)
@@ -82,6 +97,22 @@ sys.exit(int(os.environ.get('PIN_STATUS', '0')))
     assert argv[-1] == 'missing@127.0.0.1', argv
     for bad in ['@werewolf-run', 'root@', 'root@@werewolf-run', 'root@../werewolf-run']:
         assert run(bad, status=1) is None
+
+    # GCP uses the same default account as Lima, including when the engine
+    # comes from the machine record. Root requires an explicit USER@NAME.
+    argv = run('--on', 'gcp')
+    assert argv[-1] == local + '@203.0.113.20', argv
+    argv = run('root@werewolf-run', '--on', 'gcp')
+    assert argv[-1] == 'root@203.0.113.20', argv
+    argv = run('--on=gcp', 'alice@werewolf-run', '--', 'id', '-u')
+    assert argv[-3:] == ['alice@203.0.113.20', 'id', '-u'], argv
+    (machine / 'engine').write_text('gcp')
+    assert run()[-1] == local + '@203.0.113.20'
+    assert run('werewolf-run')[-1] == local + '@203.0.113.20'
+    argv = run(status=255, SSH_STATUS='255')
+    assert argv[-1] == local + '@203.0.113.20', argv
+    (machine / 'engine').write_text('lima')
+
     (machine / 'dev').write_text('custom\n')
     (machine / 'dev-address').write_text('192.168.64.40')
     argv = run()
@@ -110,10 +141,10 @@ sys.exit(int(os.environ.get('PIN_STATUS', '0')))
     assert Path(str(record) + '.socket').read_text() == '/test/dedicated-agent'
     added, socket = json.loads(add_record.read_text())
     assert socket == '/test/dedicated-agent'
-    assert added[:4] == ['-c', '-t', '20h', '-H'], added
+    assert added[:3] == ['-t', '20h', '-H'], added
     assert added[-2:] == list(map(str, keys)), added
     assert 'alice@werewolf-run' in added and 'werewolf-run>root@werewolf-run' in added
-    assert added[4].endswith('/known_hosts'), added
+    assert added[3].endswith('/known_hosts'), added
     assert run(*flags, status=1, ADD_STATUS='1') is None
     assert agent_record.exists() and add_record.exists()
     assert run(*flags, status=1, PIN_STATUS='1') is None
@@ -129,11 +160,17 @@ sys.exit(int(os.environ.get('PIN_STATUS', '0')))
         (home / '.ssh' / (name + '.pub')).write_text(kind + ' AAAA test\n')
         if name != 'orphan':
             (home / '.ssh' / name).write_text('test private stub')
+    # Lima uses its own login identity when it matches the requested account;
+    # don't load unrelated local FIDO credentials into an agent.
     argv = run()
+    assert not add_record.exists()
+    assert argv[argv.index('-i') + 1] == '/test/lima-key', argv
+    # Other providers use the local security key in the constrained agent.
+    argv = run('--on', 'firecracker')
     added, socket = json.loads(add_record.read_text())
     assert added[-1] == str(home / '.ssh/fido'), added
     assert 'software' not in ' '.join(added) and 'orphan' not in ' '.join(added)
-    assert argv[argv.index('-i') + 1] == '/test/lima-key', argv
+    assert 'StrictHostKeyChecking=yes' in argv and 'GlobalKnownHostsFile=/dev/null' in argv
     argv = run('--no-agent')
     assert not agent_record.exists() and '-a' in argv and '-A' not in argv
 

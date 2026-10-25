@@ -85,8 +85,57 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
-    const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
+    return ensureImageWithAuthority(io, gpa, p, form, arch, disk, work, null, .workload, why);
+}
+
+pub const BootKind = @import("secureboot.zig").BootKind;
+
+/// A protected machine owns PK and KEK separately from its code-signing db.
+/// The authority also participates in the image identity, so an image enrolled
+/// for another machine can never be reused merely because its disk matches.
+pub fn ensureImageWithAuthority(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    authority: ?[]const u8,
+    kind: BootKind,
+    why: *howl.Why,
+) ![]const u8 {
+    if (kind == .bootstrap) {
+        if (authority == null) return error.MissingBootstrapAuthority;
+        _ = try @import("secureboot.zig").bootstrapCertificate(io, gpa, disk, work, arch, why);
+    } else _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    var digest = try images.sha256(io, disk);
+    const code = try gpa.print("{s}/boot.der", .{work});
+    const owner = if (authority) |cert| blk: {
+        const path = try gpa.print("{s}/owner.der", .{work});
+        try howl.run(
+            io,
+            why,
+            &.{ "openssl", "x509", "-in", cert, "-outform", "DER", "-out", path },
+        );
+        const der = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096));
+        const vendor = try Dir.cwd().readFileAlloc(io, code, gpa, .limited(4096));
+        const owner_key = try @import("tpm").firmware.certificateKey(der);
+        const vendor_key = try @import("tpm").firmware.certificateKey(vendor);
+        if (std.mem.eql(
+            u8,
+            owner_key.modulus,
+            vendor_key.modulus,
+        )) return error.SharedBootAuthority;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(&digest);
+        hash.update(der);
+        var combined: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        hash.final(&combined);
+        digest = std.fmt.bytesToHex(combined, .lower);
+        break :blk path;
+    } else code;
+    const name = try images.name(gpa, form, arch, &digest);
     if (ask(
         io,
         gpa,
@@ -145,11 +194,11 @@ pub fn ensureImage(
         "--guest-os-features",
         "UEFI_COMPATIBLE,GVNIC",
         "--platform-key-file",
-        try gpa.print("{s}/boot.der", .{work}),
+        owner,
         "--key-exchange-key-file",
-        try gpa.print("{s}/boot.der", .{work}),
+        owner,
         "--signature-database-file",
-        try gpa.print("{s}/boot.der", .{work}),
+        code,
         "--labels",
         try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         // Store the image in the zone's region, not GCP's default
@@ -279,6 +328,39 @@ pub fn address(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
         "--format",
         "get(networkInterfaces[0].accessConfigs[0].natIP)",
     });
+}
+
+/// ensureSshReachable opens only TCP 22 to this host when the machine has no
+/// Howl firewall rule yet. The rule is the same name delete already removes.
+pub fn ensureSshReachable(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    why: *howl.Why,
+) !void {
+    const rule = try gpa.print("{s}-allow", .{name});
+    if (ask(io, gpa, p, &.{
+        "compute", "firewall-rules", "describe", rule, "--format", "value(name)",
+    }) != null) return;
+
+    const ip = std.process.run(gpa, io, .{ .argv = &.{
+        "curl", "-fsS", "-m", "10", "https://checkip.amazonaws.com",
+    } }) catch |err| return why.refuse("cannot determine this host's public IP: {s}", .{
+        @errorName(err),
+    });
+    const source = try gpa.print("{s}/32", .{std.mem.trim(u8, ip.stdout, " \r\n")});
+    if (ip.term != .exited or ip.term.exited != 0 or !validSource(source))
+        return why.refuse("cannot determine this host's public IPv4 address", .{});
+    for (try openArgs(gpa, p, name, &.{22}, source)) |argv|
+        try howl.run(io, why, argv);
+}
+
+fn validSource(source: []const u8) bool {
+    const slash = std.mem.findScalar(u8, source, '/') orelse return false;
+    if (!std.mem.eql(u8, source[slash + 1 ..], "32")) return false;
+    _ = Io.net.Ip4Address.parse(source[0..slash], 0) catch return false;
+    return true;
 }
 
 /// console returns the instance's serial console output.

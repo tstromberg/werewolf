@@ -1378,10 +1378,15 @@ pub fn logged(p: *Posture) !void {
     const on_record = try refusedExecLogged(p, &probe_detail);
     // Ask audit to stop only if it reads locked, or is unreadable for lack
     // of the capability that stopping also needs. Unlocked audit, as on
-    // other distributions, would really stop.
-    const stopped: ?[]const u8 = if (!p.root)
+    // other distributions, would really stop. A root SSH session may not
+    // open netlink (forms/sshd's pledge): it takes boot's result, or else
+    // judges the record alone, as any other caller does.
+    const status: ?audit.Error!u32 = if (p.root) audit.enabledNow() else null;
+    const filtered = if (status) |s| (if (s) |_| false else |err| err == error.Filtered) else false;
+    const asks = status != null and !filtered;
+    const stopped: ?[]const u8 = if (!asks)
         null
-    else if (audit.enabledNow()) |now|
+    else if (status.?) |now|
         if (now == audit.locked) askToStop() else "audit is not locked"
     else |err| switch (err) {
         error.Refused => askToStop(),
@@ -1389,27 +1394,30 @@ pub fn logged(p: *Posture) !void {
     };
     const how = "running / as a program, which every kernel refuses, leaves its audit record " ++
         "(type=1300, success=no) in the kernel log";
-    try p.add(.{
+    const exec_log: posture.Check = .{
         .id = "kernel-exec-log",
         .area = "kernel",
         .name = "Refused execs logged, for good",
         .why = "An intruder's first step, running something the machine refuses, leaves a " ++
             "line in the kernel's log that nothing on the machine can prevent or stop.",
-        .how = if (p.root) how ++ ", and asking the kernel to stop auditing is refused" else how,
+        .how = if (asks) how ++ ", and asking the kernel to stop auditing is refused" else how,
         .observed = probe_detail,
         .comparison = if (on_record) |seen| if (!seen)
             probe_detail
         else if (stopped) |reason| try p.gpa.print(
             "/dev/kmsg: matched; AUDIT_SET = {s}, want denied",
             .{reason},
-        ) else "/dev/kmsg: matched child execve, type=1300, success=no; audit " ++
-            "locked" else probe_detail,
+        ) else if (asks)
+            "/dev/kmsg: matched child execve, type=1300, success=no; audit locked"
+        else
+            "/dev/kmsg: matched child execve, type=1300, success=no" else probe_detail,
         .result = if (on_record) |seen| if (seen and stopped == null) .pass else .fail else .skip,
         .detail = if (on_record == null or !on_record.?)
             probe_detail
         else
             stopped orelse "",
-    });
+    };
+    if (filtered) try p.fromBoot(exec_log) else try p.add(exec_log);
     // Audit, lockdown, Yama and Landlock refusals are notices (level 5),
     // which reach the console only at console_loglevel 6 or more. The
     // console must be one a cloud captures, serial or hypervisor, not a

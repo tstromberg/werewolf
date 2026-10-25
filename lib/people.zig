@@ -29,6 +29,34 @@ pub const Files = struct {
 /// Keys is a person's keys file: its name, and its lines.
 pub const Keys = struct { name: []const u8, text: []const u8, id: u32 = 0 };
 
+/// verify_path holds the key types a machine's sshd must see verified, one
+/// a line, from form.yaml's sshd: verify-required-keys (lib/sshd.zig).
+pub const verify_path = "/usr/share/werewolf/sshd-verify-required";
+
+/// verified returns a keys file's text with `verify-required` before each
+/// key whose type policy names (verify_path's contents): sshd then takes
+/// that key's signature only if its authenticator verified the person.
+/// A line that starts with anything else, an option included, stays.
+pub fn verified(gpa: Allocator, text: []const u8, policy: []const u8) ![]const u8 {
+    if (mem.trim(u8, policy, " \t\n").len == 0) return text;
+    var out: std.ArrayList(u8) = .empty;
+    var lines = mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(gpa, '\n');
+        first = false;
+        var words = mem.tokenizeAny(u8, line, " \t");
+        const kind = words.next() orelse "";
+        var types = mem.tokenizeAny(u8, policy, " \t\n");
+        while (types.next()) |t| if (mem.eql(u8, t, kind)) {
+            try out.appendSlice(gpa, "verify-required ");
+            break;
+        };
+        try out.appendSlice(gpa, line);
+    }
+    return out.items;
+}
+
 /// Change is what apply asks for: the account files as they become, the
 /// names made (the next apply's `made`), each person's keys file, the
 /// admins' keys to add to root's, the names that went, and why any line
@@ -50,12 +78,17 @@ pub const Source = enum { people, nocloud };
 pub const Identity = struct { source: Source, name: []const u8, id: u32 };
 pub const NoCloud = struct { name: []const u8, id: u32, keys: []const u8 };
 
-/// userId returns a person's uid and gid in [2^16, 2^30). The fixed FNV-1a
-/// mapping is stable across machines; the durable identity table still checks
-/// every collision before this ID can own a file.
+/// ids are the uid ranges, first and last, people's accounts take: NoCloud's
+/// logins, then userId's. A form's `:people` network grant is these
+/// (lib/compose.zig net), so the build refuses any other account in them.
+pub const ids = [_][2]u32{ .{ 500, 60000 }, .{ 1 << 16, (1 << 30) - 1 } };
+
+/// userId returns a person's uid and gid in [2^16, 2^30), ids[1]. The fixed
+/// FNV-1a mapping is stable across machines; the durable identity table still
+/// checks every collision before this ID can own a file.
 pub fn userId(name: []const u8) u32 {
-    const span: u64 = (1 << 30) - (1 << 16);
-    return (1 << 16) + @as(u32, @intCast((@as(u64, std.hash.Fnv1a_32.hash(name)) * span) >> 32));
+    const span: u64 = ids[1][1] + 1 - ids[1][0];
+    return ids[1][0] + @as(u32, @intCast((@as(u64, std.hash.Fnv1a_32.hash(name)) * span) >> 32));
 }
 
 /// parse reads the users file. A line that is not one goes to refused.
@@ -137,7 +170,7 @@ pub fn applyReserved(
 
     if (boot) {
         if (nocloud) |nc| {
-            if (validNoCloudName(nc.name) and nc.id >= 500 and nc.id <= 60000 and
+            if (validNoCloudName(nc.name) and nc.id >= ids[0][0] and nc.id <= ids[0][1] and
                 !conflicts(records.items, .nocloud, nc.name, nc.id) and
                 !hasEntry(passwd.items, nc.name) and !hasEntry(group.items, nc.name) and
                 !hasEntry(shadow.items, nc.name) and
@@ -513,7 +546,8 @@ pub fn parseLedger(gpa: Allocator, data: []const u8) ![]const Identity {
         const gid = std.fmt.parseInt(u32, gid_text, 10) catch return error.BadLedger;
         if (mem.eql(u8, name, "root") or uid != gid or
             (source == .people and (!isName(name) or uid != userId(name))) or
-            (source == .nocloud and (!validNoCloudName(name) or uid < 500 or uid > 60000)))
+            (source == .nocloud and (!validNoCloudName(name) or uid < ids[0][0] or
+                uid > ids[0][1])))
             return error.BadLedger;
         for (out.items) |r| if (mem.eql(u8, r.name, name) or r.id == uid) return error.BadLedger;
         if (out.items.len == max_identities) return error.BadLedger;
@@ -894,5 +928,26 @@ test "boot refuses a reserved identity that collides with an image account" {
     try testing.expectError(
         error.AccountConflict,
         applyReserved(gpa, base, &records, "", "/bin/ash", null, true),
+    );
+}
+
+test verified {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const ed = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t tom@yubikey";
+    const p256 = "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNh tom@mac";
+    const text = ed ++ "\n" ++ p256 ++ "\n";
+    const policy = "sk-ssh-ed25519@openssh.com\n";
+    const once = try verified(gpa, text, policy);
+    try std.testing.expectEqualStrings("verify-required " ++ ed ++ "\n" ++ p256 ++ "\n", once);
+    // Root's file gains admins' keys after the image's: each pass is the same.
+    try std.testing.expectEqualStrings(once, try verified(gpa, once, policy));
+    try std.testing.expectEqualStrings(text, try verified(gpa, text, ""));
+    try std.testing.expectEqualStrings("", try verified(gpa, "", policy));
+    // A type is matched whole, never as a prefix of the line.
+    try std.testing.expectEqualStrings(
+        "sk-ssh-ed25519@openssh.comX AAAA\n",
+        try verified(gpa, "sk-ssh-ed25519@openssh.comX AAAA\n", policy),
     );
 }

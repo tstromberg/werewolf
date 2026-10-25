@@ -16,7 +16,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 
 | Key | Meaning |
 | --- | --- |
-| `exec`, `user`, `pledge` | required, once: the program and arguments; the user (never root); the promises (`lib/seal.zig`) |
+| `exec`, `user`, `pledge` | required, once: the program and arguments; the user (root only for sshd's `caps login`); the promises (`lib/seal.zig`) |
 | `before PROGRAM ARG...` | run first, in order, confined; each must exit 0 |
 | `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port from 1 to 1023 grants `CAP_NET_BIND_SERVICE`. A form's `listen tcp/0 loopback` permits a kernel-assigned temporary port, without publishing it or granting connects. `listen udp/PORT` is fence's to hold (Landlock names TCP alone), and leash's only for a low port's capability. `connect PATH` names a UNIX socket it may reach (Landlock ABI 9), beyond its own and those beneath what it writes |
 | `read` / `write PATH...` | paths it may read / write, beyond the floor. `data HOST IMAGE read\|write`, on an image, binds `/data/share/NAME/...` there: one service owns it, its group may read, a second writer is named in an ACL, and other may nothing |
@@ -32,9 +32,9 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 
 ## Goals
 
-- No service runs as root, or with a capability its file does not name: a low port keeps
-  `CAP_NET_BIND_SERVICE`; `caps` keeps `net_raw` and `net_admin` only where the machine
-  allows `packet` and `netadmin`.
+- No service but sshd ([ssh-hardening](../../docs/design/ssh-hardening.md)) runs as
+  root or with a capability its file does not name: a low port keeps the one to bind it;
+  `caps` keeps `net_raw` and `net_admin` only where the machine allows them.
 - A service reaches only the files, programs, ports and calls it declares.
 - Its process tree is bounded (memory, 4096 tasks) and killed when it stops.
 - A bad file never half-starts a service: it parks and logs why.

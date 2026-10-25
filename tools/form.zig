@@ -245,7 +245,8 @@ test "every bundled form compiles its network policy" {
         var users: std.StringHashMapUnmanaged(void) = .empty;
         try users.put(gpa, "root", {});
         try users.put(gpa, "_unwoundnet", {});
-        var next_uid: u32 = 1000;
+        // Service users' uids are hashes in [2^30, 2^31), beyond people's.
+        var next_uid: u32 = 1 << 30;
         for (lines) |line| {
             var words = std.mem.tokenizeAny(u8, line, " \t\n");
             const key = words.next() orelse continue;
@@ -253,7 +254,9 @@ test "every bundled form compiles its network policy" {
                 !is(key, "listen") and !is(key, "metadata") and
                 !is(key, "dns-direct")) continue;
             const user = words.next() orelse continue;
-            if (is(user, "all") or is(user, "tcp") or users.contains(user)) continue;
+            // :all and :people are no accounts; tcp/PORT is a listen's port.
+            if (user[0] == ':' or std.mem.startsWith(u8, user, "tcp/") or
+                users.contains(user)) continue;
             try users.put(gpa, user, {});
             try passwd.appendSlice(gpa, try gpa.print(
                 "{s}:x:{d}:{d}::/var/empty:/sbin/nologin\n",
