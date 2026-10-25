@@ -4,7 +4,7 @@
 # boot their exact disk and direct image without Secure Boot or TPM.
 # The copies must match byte for byte and the form's own tests must pass.
 # A secure target is published only when its
-# exact bundle has passed the fourteen lifecycle gates on a runner that can
+# exact bundle has passed the twelve lifecycle gates on a runner that can
 # boot it: hosted KVM for qemu/x86_64; for arm64, the self-hosted runners
 # named by the WEREWOLF_ARM64_KVM_RUNNER (qemu) and WEREWOLF_LIMA_RUNNER
 # (macOS) repository variables, each a JSON list of runner labels.
@@ -315,13 +315,23 @@ jobs:
         run: sudo test/ci-setup
       - name: Build native host admission tool
         run: make howl
+      # The candidate follows its signed public channel. Prove this tree's A/B
+      # updates separately, with disposable authority and no production secrets.
+      - name: Prove independent updates, rollback and TPM-floor recovery
+        run: |
+          keys="$RUNNER_TEMP/update-check"
+          mkdir -p "$keys"
+          # howl manages a fresh IPE identity and matching test kernel here;
+          # it also prepares the stock Melange builder when running on macOS.
+          XDG_DATA_HOME="$keys/data" \
+            python3 test/check-independent-updates build/host/howl updates "$PROVIDER"
       - name: Gate each form's exact production downloads and A/B recovery
         env:
           WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
           WEREWOLF_PROTECTED_IMAGE_KEY: ${{ secrets.WEREWOLF_PROTECTED_IMAGE_KEY }}
         run: |
           python3 release/with-protected-keys python3 release/form-images gate lifecycle gated \
-            --provider "$PROVIDER" --arch "$ARCH" --forms "$FORMS"
+            --provider "$PROVIDER" --arch "$ARCH" --forms "$FORMS" --updates updates
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
@@ -339,6 +349,9 @@ jobs:
             build/lifecycle/**/evidence.jsonl
             build/lifecycle/**/result.json
             build/lifecycle/**/storage-fault.json
+            updates/*.log
+            updates/evidence.jsonl
+            updates/result.json
 
   publish:
     needs: [plan, resolve, build, check, gate, legacy-check]

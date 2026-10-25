@@ -476,14 +476,16 @@ def gates(environ, focused=False, shards=SHARDS):
     return dict(include=include)
 
 
-def gate(lifecycle, output, provider, arch, selected):
+def gate(lifecycle, output, provider, arch, selected, updates):
     """Download a shard once; admit each passing form independently."""
     if provider == 'qemu':
         native(arch)
     if not selected or len(selected) != len(set(selected)) or \
             any(not supports_gate(form, provider) for form in selected):
         raise ValueError('invalid lifecycle gate forms')
-    lifecycle, output = Path(lifecycle), Path(output)
+    lifecycle, output, updates = Path(lifecycle), Path(output), Path(updates).resolve()
+    if not (updates / 'result.json').is_file():
+        raise ValueError('missing independent update evidence')
     output.mkdir(parents=True, exist_ok=False)
     failed = False
     for form in selected:
@@ -493,9 +495,8 @@ def gate(lifecycle, output, provider, arch, selected):
             continue
         logs = Path('build/lifecycle') / form
         try:
-            candidates = [initial, *(initial.with_name(provider + '-update-' + str(n)) for n in (1, 2))]
-            run([sys.executable, 'release/authorize-protected', HOWL, provider, *candidates])
-            run([sys.executable, 'test/check-published-lifecycle', HOWL, *candidates, logs])
+            run([sys.executable, 'release/authorize-protected', HOWL, provider, initial])
+            run([sys.executable, 'test/check-published-lifecycle', HOWL, provider, initial, updates, logs])
             destination = output / form
             destination.mkdir()
             shutil.move(str(initial), destination / 'bundle')
@@ -806,6 +807,7 @@ def main():
     gate_parser.add_argument('--provider', choices=('qemu', 'lima'), required=True)
     gate_parser.add_argument('--arch', choices=catalog.ARCHES, required=True)
     gate_parser.add_argument('--forms', required=True)
+    gate_parser.add_argument('--updates', required=True)
     resolve_parser = commands.add_parser('resolve')
     resolve_parser.add_argument('arch', choices=catalog.ARCHES)
     resolve_parser.add_argument('shard', type=int)
@@ -834,7 +836,7 @@ def main():
             raise ValueError('invalid lifecycle gate shards')
         print(json.dumps(gates(os.environ, focused, args.shards)))
     elif args.command == 'gate':
-        return gate(args.lifecycle, args.output, args.provider, args.arch, args.forms.split(','))
+        return gate(args.lifecycle, args.output, args.provider, args.arch, args.forms.split(','), args.updates)
     elif args.command == 'resolve':
         if not 1 <= args.shard <= args.shards <= 32:
             raise ValueError('invalid form image shard')

@@ -36,6 +36,7 @@ if provider not in ('lima', 'qemu'):
     sys.exit('check-independent-updates: provider must be lima or qemu')
 arch = 'aarch64' if os.uname().machine in ('arm64', 'aarch64') else 'x86_64'
 howl = str(Path(howl).resolve())
+source_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
 work = Path(output).resolve()
 work.mkdir(parents=True, mode=0o700, exist_ok=False)
 os.umask(0o077)
@@ -109,7 +110,8 @@ def ok(what):
 
 
 def ssh(command, label, **kwargs):
-    return run([howl, 'ssh', 'root@' + name, '--', command], label, **kwargs)
+    # Use the fixture identity through our SSH wrapper, never the runner's agent.
+    return run([howl, 'ssh', 'root@' + name, '--no-agent', '--', command], label, **kwargs)
 
 
 def status():
@@ -199,17 +201,25 @@ def processes(pattern):
     return [int(line.split(None, 1)[0]) for line in lines if pattern in line]
 
 
-def power_off():
+def power_off(stopped=False):
     """Cut the machine's power, as a host crash would: the VM and its TPM die at once,
     and the TPM's NV keeps what it last committed."""
     if provider == 'lima':
         home = Path(os.environ.get('LIMA_HOME', Path.home() / '.lima')) / name
-        vm = int((home / 'qemu.pid').read_text())
+        pidfile = home / 'qemu.pid'
         tpm = processes('--tpmstate dir=' + str(home / 'swtpm'))
+        if not stopped and len(tpm) != 1:
+            raise RuntimeError('power cut requires exactly one owned TPM process')
     else:
-        vm = int((machine / 'qemu.pid').read_text())
-        tpm = [int((machine / 'authority/tpm.pid').read_text())]
-    for pid in [vm, *tpm]:
+        pidfile = machine / 'qemu.pid'
+        tpmfile = machine / 'authority/tpm.pid'
+        tpm = [int(tpmfile.read_text())] if tpmfile.exists() or not stopped else []
+    # Refusing a retired disk may already have stopped QEMU and removed its
+    # pidfile. Real floor-increment cuts still require live ownership records.
+    vm = [int(pidfile.read_text())] if pidfile.exists() or not stopped else []
+    for pid in [*vm, *tpm]:
+        if pid <= 1:
+            raise RuntimeError('invalid owned process ID')
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -344,7 +354,7 @@ try:
             time.sleep(2)
         restoring.result()
     ok('a restored disk holding retired A is refused by stage0')
-    power_off()
+    power_off(stopped=True)
     os.replace(saved, disk)
     restart('restored')
     c = wait_boot('C', 3, 2)
@@ -362,6 +372,10 @@ try:
     ssh('/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=60)
     wait_boot('C', 3, 3, trial['boot_id'])
     ok('a failed trial of E falls back to C at floor 3')
+    evidence = dict(format='werewolf-update-evidence/1', provider=provider, arch=arch,
+                    commit=source_commit, passed=True, checks=dict(ab_upgrade=True, operator_rollback=True,
+                    unhealthy_fallback=True, retirement_cuts=True))
+    (work / 'result.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print('pass   independent-updates: %d checks on %s' % (len(passed), provider), flush=True)
 finally:
     if server:

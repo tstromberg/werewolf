@@ -18,8 +18,9 @@ set -eu
 dir=$CHECK/update-$FORM
 rm -rf "$dir/claim" "$dir/slots" "$dir/slots.img" "$dir/b"
 mkdir -p "$dir/claim/usr/share/werewolf" "$dir/slots/slot/a"
-# linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
-awk -F. '{ split($3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $1, $2, z[1] - 1, z[2] }' \
+# Keep the installed package name and claim an older version. Kernel versions
+# need not have three dotted components (linux-werewolf-7.3-r7, for example).
+awk '{ if (!sub(/-[0-9][^-]*-r[0-9]+$/, "-0.0.0-r0")) exit 1; print }' \
 	"$OUT/meta/usr/share/werewolf/kernel" >"$dir/claim/usr/share/werewolf/kernel"
 printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
 claimed=usr/share/werewolf/kernel

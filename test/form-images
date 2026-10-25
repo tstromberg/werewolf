@@ -524,11 +524,15 @@ class Images(unittest.TestCase):
                 logs.mkdir(parents=True)
                 images.write(logs / 'gates.json', {'passed': True})
         output = self.root / 'gated'
+        updates = self.root / 'updates'
+        images.write(updates / 'result.json', {})
+        with patch.object(images, 'native'), self.assertRaisesRegex(ValueError, 'update evidence'):
+            images.gate(lifecycle, self.root / 'no-evidence', 'qemu', 'x86_64', ['minimal'], self.root / 'missing')
         previous = Path.cwd()
         os.chdir(self.root)
         try:
             with patch.object(images, 'native'), patch.object(images, 'run', side_effect=run) as called:
-                self.assertTrue(images.gate(lifecycle, output, 'qemu', 'x86_64', ['minimal', 'prod-ssh', 'playground']))
+                self.assertTrue(images.gate(lifecycle, output, 'qemu', 'x86_64', ['minimal', 'prod-ssh', 'playground'], updates))
         finally:
             os.chdir(previous)
         self.assertEqual(3, called.call_count)
@@ -537,7 +541,7 @@ class Images(unittest.TestCase):
         self.assertTrue((output / 'prod-ssh/gates.json').is_file())
         self.assertTrue((lifecycle / 'minimal/qemu/production').is_file())
         with patch.object(images, 'native'), patch.object(images, 'run') as called:
-            self.assertFalse(images.gate(lifecycle, self.root / 'unchanged', 'qemu', 'x86_64', ['playground']))
+            self.assertFalse(images.gate(lifecycle, self.root / 'unchanged', 'qemu', 'x86_64', ['playground'], updates))
             called.assert_not_called()
 
     def test_focused_resolution_only_locks_playground(self):
