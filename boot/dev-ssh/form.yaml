@@ -1,10 +1,8 @@
 packages: [openssh-server, openssh-sftp-server]
 programs: [dhcp-client, sh-shim]
 allow: [pty]
-paths:
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
+prune:
+  - usr/bin/unix_chkpwd
 accounts:
   groups:
     - groupname: _netcfg
