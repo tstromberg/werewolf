@@ -940,8 +940,7 @@ pub const Update = struct {
             "open a download",
         ));
         errdefer _ = linux.close(fd);
-        const ca = try @import("retire.zig").fetchAuthority(u, url);
-        const said = saidOf(try workers.fetch(u, url, fd, maximum, ca)) catch |err| {
+        const said = saidOf(try workers.fetch(u, url, fd, maximum)) catch |err| {
             u.detail = url;
             return err;
         };

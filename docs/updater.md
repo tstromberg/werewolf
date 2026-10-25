@@ -1,14 +1,13 @@
 # The updater
 
-`/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current.
-It asks werewolf's repositories and Wolfi for anything newer than the
-running image, builds the other slot from it on the machine (werewolf's
-programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
-boots that slot once, and records what changed and which CVEs that fixes.
-Enrolled IPE images fetch signed prebuilt slots instead
-([prebuilt-images.md](design/prebuilt-images.md)); protected published
-images take them from a host service that polls the vendor channel
-([form-images.md](form-images.md#downloading-images)). The policy
+`/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current. It asks
+werewolf's repositories and Wolfi for anything newer than the running image, builds the
+other slot from it on the machine (werewolf's programs and forms are packages:
+[custom-updates.md](design/custom-updates.md)), boots that slot once, and records what
+changed and which CVEs that fixes. Enrolled IPE images fetch signed prebuilt slots
+instead ([prebuilt-images.md](design/prebuilt-images.md)); protected images take them
+from their channel themselves, and the mount broker raises the TPM floor before a slot
+is overwritten ([independent-updates.md](design/independent-updates.md)). The policy
 below decides when any staged slot boots. It is one Zig program,
 `cmd/slot-update/slot-update.zig`, in `minimal` and so every form.
 

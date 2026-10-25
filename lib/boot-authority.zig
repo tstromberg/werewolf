@@ -1,104 +1,9 @@
-//! Portable TPM authority from authenticated firmware, with separately pinned code trust.
+//! Boot certificate parsing: the RSA key of the X.509 certificate howl enrolls
+//! in firmware, from bounded, strictly checked DER.
 const std = @import("std");
 const apk = @import("apk");
 const mem = std.mem;
-const Sha256 = std.crypto.hash.sha2.Sha256;
-const vars = "/sys/firmware/efi/efivars/";
-const global = "-8be4df61-93ca-11d2-aa0d-00e098032b8c";
-const database = "-d719b2cb-3d3a-4596-a3bc-dad00e67656f";
-pub const max_variable = 16 << 10;
-// EFI_CERT_X509_GUID, in the firmware's mixed-endian GUID representation.
-const x509 = [_]u8{
-    0xa1,
-    0x59,
-    0xc0,
-    0xa5,
-    0xe4,
-    0x94,
-    0xa7,
-    0x4a,
-    0x87,
-    0xb5,
-    0xab,
-    0x15,
-    0x5c,
-    0x2b,
-    0xf0,
-    0x72,
-};
-
-pub const Variables = struct {
-    secure: []const u8,
-    setup: []const u8,
-    pk: []const u8,
-    kek: []const u8,
-    db: []const u8,
-};
-
-/// No mutable config supplies the signer or code certificate pin.
-pub fn load(io: std.Io, gpa: mem.Allocator, vendor: [32]u8) !apk.Key {
-    const secure = read(io, gpa, vars ++ "SecureBoot" ++ global) catch |err| switch (err) {
-        error.FileNotFound => return error.InsecureFirmware,
-        else => return err,
-    };
-    const setup = read(io, gpa, vars ++ "SetupMode" ++ global) catch |err| switch (err) {
-        error.FileNotFound => return error.InsecureFirmware,
-        else => return err,
-    };
-    try mode(secure, 1);
-    try mode(setup, 0);
-    return key(.{
-        .secure = secure,
-        .setup = setup,
-        .pk = try read(io, gpa, vars ++ "PK" ++ global),
-        .kek = try read(io, gpa, vars ++ "KEK" ++ global),
-        .db = try read(io, gpa, vars ++ "db" ++ database),
-    }, vendor);
-}
-
-fn read(io: std.Io, gpa: mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    // efivarfs may report zero size. Read the stream and reject an extra byte.
-    const data = try gpa.alloc(u8, max_variable + 1);
-    const n = try file.readPositionalAll(io, data, 0);
-    if (n > max_variable) return error.BadFirmwareAuthority;
-    return data[0..n];
-}
-
-pub fn key(v: Variables, vendor: [32]u8) !apk.Key {
-    try mode(v.secure, 1);
-    try mode(v.setup, 0);
-    const owner = try certificate(v.pk);
-    if (!mem.eql(u8, owner, try certificate(v.kek))) return error.ForeignFirmwareAuthority;
-    const code = try certificate(v.db);
-    var digest: [32]u8 = undefined;
-    Sha256.hash(code, &digest, .{});
-    if (!mem.eql(u8, &digest, &vendor)) return error.ForeignBootTrust;
-    const authority = try certificateKey(owner);
-    const publisher = try certificateKey(code);
-    if (mem.eql(u8, authority.modulus, publisher.modulus)) return error.SharedBootAuthority;
-    return authority;
-}
-
-fn mode(raw: []const u8, expected: u8) !void {
-    if (raw.len != 5 or raw[4] != expected or
-        mem.readInt(u32, raw[0..4], .little) != 6) return error.InsecureFirmware;
-}
-
-/// Exactly one authenticated X.509 list with one certificate; reject extra trust.
-pub fn certificate(raw: []const u8) ![]const u8 {
-    if (raw.len < 4 + 28 + 16 + 1 or raw.len > max_variable)
-        return error.BadFirmwareAuthority;
-    if (mem.readInt(u32, raw[0..4], .little) != 0x27 or
-        !mem.eql(u8, raw[4..20], &x509)) return error.BadFirmwareAuthority;
-    const list_size = mem.readInt(u32, raw[20..24], .little);
-    const header_size = mem.readInt(u32, raw[24..28], .little);
-    const signature_size = mem.readInt(u32, raw[28..32], .little);
-    if (list_size != raw.len - 4 or header_size != 0 or
-        signature_size != raw.len - 32) return error.BadFirmwareAuthority;
-    return raw[48..];
-}
+const max_certificate = 16 << 10;
 
 const Element = struct { tag: u8, body: []const u8 };
 const Der = struct {
@@ -147,9 +52,11 @@ fn validateDer(data: []const u8, depth: u8) !void {
     }
 }
 
-/// Firmware authenticates this trust anchor; no clock or CA discovery chooses a key.
+/// certificateKey returns the RSA key of one DER X.509 certificate, refusing
+/// any malformed, trailing or unsupported encoding. No clock or CA discovery
+/// chooses a key.
 pub fn certificateKey(raw: []const u8) !apk.Key {
-    if (raw.len == 0 or raw.len > max_variable - 48) return error.BadAuthorityCertificate;
+    if (raw.len == 0 or raw.len > max_certificate) return error.BadAuthorityCertificate;
     try validateDer(raw, 0);
     var top: Der = .{ .data = raw };
     var cert: Der = .{ .data = try top.take(0x30) };
@@ -206,21 +113,9 @@ pub fn certificateKey(raw: []const u8) !apk.Key {
     return .{ .modulus = modulus, .exponent = exponent };
 }
 
-fn fixture(gpa: mem.Allocator, der: []const u8) ![]u8 {
-    const raw = try gpa.alloc(u8, 48 + der.len);
-    @memset(raw, 0);
-    mem.writeInt(u32, raw[0..4], 0x27, .little);
-    @memcpy(raw[4..20], &x509);
-    mem.writeInt(u32, raw[20..24], @intCast(raw.len - 4), .little);
-    mem.writeInt(u32, raw[28..32], @intCast(raw.len - 32), .little);
-    @memcpy(raw[48..], der);
-    return raw;
-}
-
 const owner_der = @embedFile("testdata/boot-authority/owner.der");
-const vendor_der = @embedFile("testdata/boot-authority/vendor.der");
 
-test "firmware authority agrees with independent OpenSSL SPKI and pins separate boot trust" {
+test "certificate keys agree with independent OpenSSL SPKI" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -228,51 +123,7 @@ test "firmware authority agrees with independent OpenSSL SPKI and pins separate 
     const parsed = try certificateKey(owner_der);
     try std.testing.expectEqualSlices(u8, expected.modulus, parsed.modulus);
     try std.testing.expectEqualSlices(u8, expected.exponent, parsed.exponent);
-    const pk = try fixture(gpa, owner_der);
-    const db = try fixture(gpa, vendor_der);
-    var digest: [32]u8 = undefined;
-    Sha256.hash(vendor_der, &digest, .{});
-    var v: Variables = .{
-        .secure = &.{ 6, 0, 0, 0, 1 },
-        .setup = &.{ 6, 0, 0, 0, 0 },
-        .pk = pk,
-        .kek = pk,
-        .db = db,
-    };
-    try std.testing.expectEqualSlices(u8, expected.modulus, (try key(v, digest)).modulus);
-    try std.testing.expectError(error.ForeignBootTrust, key(v, @splat(0)));
-    v.kek = db;
-    try std.testing.expectError(error.ForeignFirmwareAuthority, key(v, digest));
-    v.kek = pk;
-    v.db = pk;
-    Sha256.hash(owner_der, &digest, .{});
-    try std.testing.expectError(error.SharedBootAuthority, key(v, digest));
-    v.secure = &.{ 6, 0, 0, 0, 0 };
-    try std.testing.expectError(error.InsecureFirmware, key(v, digest));
-    v.secure = &.{ 6, 0, 0, 0, 1 };
-    v.setup = &.{ 6, 0, 0, 0, 1 };
-    try std.testing.expectError(error.InsecureFirmware, key(v, digest));
-}
-
-test "single-certificate firmware variables reject every truncation, extra trust and attributes" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const pk = try fixture(gpa, owner_der);
-    for (0..pk.len) |i| try std.testing.expectError(
-        error.BadFirmwareAuthority,
-        certificate(pk[0..i]),
-    );
-    const doubled = try mem.concat(gpa, u8, &.{ pk, pk[4..] });
-    try std.testing.expectError(error.BadFirmwareAuthority, certificate(doubled));
-    for ([_]usize{ 0, 4, 20, 24, 28 }) |at| {
-        const bad = try gpa.dupe(u8, pk);
-        bad[at] ^= 1;
-        try std.testing.expectError(error.BadFirmwareAuthority, certificate(bad));
-    }
-    const two = try mem.concat(gpa, u8, &.{ pk, pk[32..] });
-    mem.writeInt(u32, two[20..24], @intCast(two.len - 4), .little);
-    try std.testing.expectError(error.BadFirmwareAuthority, certificate(two));
+    _ = try certificateKey(@embedFile("testdata/boot-authority/vendor.der"));
 }
 
 test "certificate parsing rejects every truncation, trailing bytes and malformed DER" {

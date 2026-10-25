@@ -16,6 +16,7 @@ const phase_seal = @import("seal.zig");
 const phase_age = @import("age.zig");
 const broker = @import("broker");
 const cmdline = @import("cmdline");
+const tpm = @import("tpm");
 
 pub const mount_bin = "/usr/lib/werewolf/mount";
 
@@ -46,10 +47,15 @@ pub fn main(init: std.process.Init) !void {
 
     m.filesystems();
     m.seed();
-    if (std.mem.eql(u8, init.environ_map.get("WEREWOLF_ROLLBACK") orelse "", "checked"))
+    // stage0 admitted this release at or above its TPM floor; record what it
+    // found for posture, and only in the form it writes.
+    if (init.environ_map.get("WEREWOLF_ROLLBACK")) |found| if (tpm.Marker.parse(found) != null)
         try std.Io.Dir.cwd().writeFile(
             init.io,
-            .{ .sub_path = "/run/werewolf/rollback-checked", .data = "checked\n" },
+            .{
+                .sub_path = tpm.Marker.path,
+                .data = try std.mem.concat(m.gpa, u8, &.{ found, "\n" }),
+            },
         );
     // stage0 checked the line by the same rules, so a refusal here means
     // the line changed under it.

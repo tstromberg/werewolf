@@ -250,21 +250,6 @@ pub fn write(
     // The boot partition holds root.erofs under slot/a/.
     const erofs = try b.path("{s}/slot/a/root.erofs", .{root});
     try b.copy(try b.path("{s}/root.erofs", .{slot_dir}), erofs);
-    if (b.spec.boot_state orelse b.env.get("WEREWOLF_BOOT_STATE")) |file| {
-        const pubkey = b.spec.tpm_pub orelse return error.TpmSignerRequired;
-        const key = try @import("apk").parseKey(b.gpa, try b.read(pubkey, 8192));
-        const raw = try b.read(file, @import("tpm").record_size + 513);
-        const record = try @import("tpm").bundle(key, raw);
-        const release = try b.read(try b.path("{s}/release.id", .{slot_dir}), 33);
-        if (release.len != 32 or !std.mem.eql(u8, release, &record.retained) or
-            !std.mem.eql(u8, &record.retained, &record.candidate) or
-            !std.mem.eql(u8, &record.previous, &@as([32]u8, @splat(0))))
-            return error.WrongFactoryBootState;
-        const journal = try b.path("{s}/state", .{root});
-        try Dir.cwd().createDirPath(b.io, journal);
-        try Dir.cwd().setFilePermissions(io, journal, .fromMode(0o700), .{});
-        try b.put(journal, "0", raw);
-    }
     if (b.spec.ipe_updates != null) {
         const rdir = try b.path("{s}/slot/a", .{root});
         const proof = try b.path("{s}/prebuilt/{t}", .{ b.p.out, arch });

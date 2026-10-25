@@ -21,7 +21,7 @@ def check(howl, expected, provider, assets):
     with tempfile.TemporaryDirectory(prefix='ww-public-download-check-') as cache:
         request = dict(source=metadata['source'], cache=cache, form=image['form'], arch=image['image']['arch'],
             provider=provider, boot_certificate=str(trust / 'boot.crt'), image_certificate=str(trust / 'image.crt'),
-            channel='https://%s:%d/%s' % ('192.168.5.2' if provider == 'lima' else '10.0.2.2', metadata['permit_port'], image['form']))
+            channel='%s/%s/%s' % (metadata['source'], image['form'], provider))
         bundle = downloads.download(request, lambda path: downloads.native(howl, 'head', path, request),
             lambda path: downloads.native(howl, 'verify', path, request), dict(validator='public-mirror-check'))
         if downloads.sha(bundle / 'boot.json') != downloads.sha(expected / 'boot.json'):

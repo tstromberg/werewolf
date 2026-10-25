@@ -212,33 +212,14 @@ pub fn slotMeta(manifest: EspArtifact, signature: EspArtifact, cmdline_file: Esp
     try espOk(w.buffered());
 }
 
-/// slotState copies the staged boot.permit into /state/{position} on the
-/// boot filesystem, checking it against its digest.
-pub fn slotState(position: u1, permit: EspArtifact) !void {
-    var buf: [256]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("slot-state p={d} k={d}:{s}", .{ position, permit.size, permit.sha256 });
-    try espOk(w.buffered());
-}
-
-/// SlotJournal is a parsed slot-state request.
-pub const SlotJournal = struct { position: u1, permit: EspArtifact };
-
-/// parseSlotState parses a slot-state request line.
-pub fn parseSlotState(line: []const u8) !SlotJournal {
-    var it = std.mem.tokenizeScalar(u8, line, ' ');
-    if (!std.mem.eql(u8, it.next() orelse return error.BadRequest, "slot-state"))
-        return error.BadRequest;
-    const p_tok = it.next() orelse return error.BadRequest;
-    const k_tok = it.next() orelse return error.BadRequest;
-    if (it.next() != null or p_tok.len != 3 or !std.mem.startsWith(u8, p_tok, "p=") or
-        !std.mem.startsWith(u8, k_tok, "k=")) return error.BadRequest;
-    const position: u1 = switch (p_tok[2]) {
-        '0' => 0,
-        '1' => 1,
-        else => return error.BadRequest,
-    };
-    return .{ .position = position, .permit = try parseArtifact(k_tok[2..]) };
+/// floor has the broker raise the running release's TPM floor to its index,
+/// which retires every older release, and returns the floor. The broker takes
+/// the index from stage0's checked command line, never from the caller.
+pub fn floor() !u64 {
+    var out: [64]u8 = undefined;
+    const answer = try call(.updater, "floor", &out);
+    const digits = std.mem.cutPrefix(u8, answer, "ok n=") orelse return error.BadAnswer;
+    return std.fmt.parseUnsigned(u64, digits, 10) catch error.BadAnswer;
 }
 
 /// parseSlotRoot parses a slot-root request line.
@@ -498,11 +479,6 @@ test "slot requests carry only digests and declarations" {
     ));
     try testing.expectEqual(2, meta.signature.size);
     try testing.expectError(error.BadRequest, parseSlotMeta("slot-meta a=1:" ++ hex));
-
-    const st = try parseSlotState(try std.mem.print(&buf, "slot-state p=1 k=42:{s}", .{hex}));
-    try testing.expectEqual(@as(u1, 1), st.position);
-    try testing.expectEqual(42, st.permit.size);
-    try testing.expectError(error.BadRequest, parseSlotState("slot-state p=2 k=42:" ++ hex));
 }
 
 /// Request a clean update reboot through the fixed runit flags.

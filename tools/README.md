@@ -59,6 +59,13 @@ verifies it. It parses the PE's own headers, keeps their alignments, and
 refuses what is not an arm64 PE32+ stub; the section headers it adds go in
 the room before the first section's data, where the loader reads them.
 
+## tpm-floor
+
+`tpm-floor boot|raise|read|handle ...` drives `lib/tpm.zig`'s release floor against a
+swtpm endpoint (a port on 127.0.0.1, or `unix:PATH`), as stage0 and the mount broker
+drive `/dev/tpmrm0`. `make check-tpm-floor` builds it as `build/host/tpm-floor` for
+`test/check-tpm-floor`.
+
 ## doc-check
 
 `doc-check FILE.md...` runs for `make lint`. It fails on a relative link or

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Supervise an enrolled local swtpm without granting its control socket to a guest."""
+"""Supervise a local machine's swtpm without granting its control socket to a guest."""
 import fcntl
 import json
 import os
@@ -31,10 +31,9 @@ def serve(authority, directory, backend):
     os.umask(0o077)
     with (authority / 'tpm-service.lock').open('a+b') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Enrollment is deliberately separate; this service never creates TPM state.
+        # A new machine's TPM starts empty: its first boot makes it its own.
         state = authority / 'swtpm'
-        if not (authority / 'enrolled').is_file() or not (state / 'tpm2-00.permall').is_file():
-            raise ValueError('missing enrolled TPM state')
+        state.mkdir(mode=0o700, exist_ok=True)
         directory.mkdir(mode=0o700, exist_ok=True)
         check(directory)
         for name in ['service.sock', 'tpm.sock', 'data.sock']:

@@ -4,12 +4,13 @@ import shutil
 
 
 def arguments(howl, form, arch, kernel, key, cert, build, channel, serial,
-              boot_key=None, boot_cert=None, tpm_pub=None, *, app=None,
-              goals=('prebuilt', 'qcow2'), disk_args=None):
+              boot_key=None, boot_cert=None, tpm=False, *, app=None,
+              goals=('prebuilt', 'qcow2'), disk_args=None, index=1):
     form, build = Path(form), Path(build)
     args = [str(howl), '_build', '--with', str(form), '--arch', arch,
             '--build', str(build), '--ipe-kernel', str(kernel), '--ipe-key', str(key),
-            '--ipe-cert', str(cert), '--ipe-updates', channel, '--image-serial', serial]
+            '--ipe-cert', str(cert), '--ipe-updates', channel, '--image-serial', serial,
+            '--image-index', str(index)]
     disabled = []
     if boot_key:
         if not boot_cert:
@@ -17,8 +18,8 @@ def arguments(howl, form, arch, kernel, key, cert, build, channel, serial,
         args += ['--boot-key', str(boot_key), '--boot-cert', str(boot_cert), '--boot-native']
     else:
         disabled.append('secureboot')
-    if tpm_pub:
-        args += ['--tpm-pub', str(tpm_pub)]
+    if tpm:
+        args += ['--tpm']
     else:
         disabled.append('tpm')
     if disabled:

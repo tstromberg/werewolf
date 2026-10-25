@@ -1075,11 +1075,8 @@ fn restrict(p: Policy) !void {
             "/run/howl-dev",
             sandbox.execute | sandbox.read_file,
         );
-    // Root's posture/updater use the resource manager on TPM-gated boots.
-    // Service domains still narrow their device access independently.
-    if (linux.errno(linux.access("/run/werewolf/rollback-checked", linux.F_OK)) == .SUCCESS and
-        linux.errno(linux.access("/usr/share/werewolf/tpm/protocol", linux.F_OK)) == .SUCCESS)
-        try allowPath(ruleset, linux.AT.FDCWD, "/dev/tpmrm0", device);
+    // No service gets the TPM: stage0 checked its floor before handover, and
+    // the mount broker, outside this domain, alone raises it.
     // Allow the writable binds under each image root (cmd/init/oci.zig).
     // Landlock judges a path by where it is mounted, not where a bind came
     // from, so /run's and /data's rules do not cover them.

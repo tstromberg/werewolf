@@ -16,8 +16,8 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     .{ "boot-sig-enforced", "/sys/module/module/parameters/sig_enforce" },
     .{
         "boot-rollback-protected",
-        "/dev/tpmrm0: protected release authorization; /proc/cmdline: release and slots;" ++
-            " /boot/state; /run/werewolf/rollback-checked",
+        "/dev/tpmrm0: present; /run/werewolf/rollback-checked: stage0's floor and index;" ++
+            " /proc/cmdline: werewolf.channel and werewolf.index",
     },
     .{
         "kernel-lockdown",
@@ -324,8 +324,8 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         "boot-rollback-protected",
         Brief{
             .label = "Rollback protection",
-            .expr = "TPM A/B release authorization",
-            .want = "protected + boot matched",
+            .expr = "TPM release floor",
+            .want = "index >= floor, this boot's",
         },
     },
     .{

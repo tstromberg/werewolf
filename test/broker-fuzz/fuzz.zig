@@ -11,8 +11,7 @@ test "fuzz broker wire parsers" {
             "\n",
         "owner-channel",
         "reboot extra",
-        "slot-state p=0 k=1:" ++
-            hash,
+        "floor",
         "slot-root k=18446744073709551616:" ++ hash,
         "slot-decl c=" ++ hash ++
             " n=-",
@@ -49,7 +48,6 @@ fn probe(_: void, smith: *t.Smith) !void {
 }
 
 fn parse(input: []const u8) !void {
-    _ = broker.parseSlotState(input) catch null;
     _ = broker.parseSlotRoot(input) catch null;
     _ = broker.parseSlotDecl(input) catch null;
     _ = broker.parseSlotMeta(input) catch null;

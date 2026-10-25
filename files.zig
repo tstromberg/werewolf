@@ -11,9 +11,15 @@ pub const build_helper = @embedFile("tools/build-helper");
 pub const build_helper_template = @embedFile("boot/build-helper.yaml");
 pub const native_firmware = @embedFile("tools/native-firmware");
 pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
+/// microsoft_uefi_cas sign other vendors' loaders; Azure's UEFI CA
+/// template trusts them and howl revokes them (boot/microsoft/README.md).
+pub const microsoft_uefi_cas = [_][]const u8{
+    @embedFile("boot/microsoft/microsoft-corporation-uefi-ca-2011.der"),
+    @embedFile("boot/microsoft/microsoft-uefi-ca-2023.der"),
+    @embedFile("boot/microsoft/microsoft-option-rom-uefi-ca-2023.der"),
+};
 pub const local_tpm = @embedFile("tools/local-tpm");
 pub const bhyve_network = @embedFile("tools/bhyve-network");
-pub const local_publisher = @embedFile("tools/local-publisher");
 pub const owner_control = @embedFile("tools/owner-control");
 pub const boot_download = @embedFile("tools/boot-download");
 pub const protected_trust = @embedFile("release/protected/trust.json");

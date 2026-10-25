@@ -67,8 +67,10 @@ def check(howl, target, work):
         raise RuntimeError('public image did not report a committed protected boot')
 
     def authority():
-        return {name: hashlib.sha256((machine / 'authority' / name).read_bytes()).hexdigest()
-                for name in ('permit.key', 'permit.pub', 'factory.permit', 'credentials/owner.auth', 'credentials/lockout.auth')}
+        # The host keeps no TPM authority: only the enrolled boot certificate and the
+        # machine's profile, which neither a repeat nor a resume may replace.
+        return {name: hashlib.sha256((machine / name).read_bytes()).hexdigest()
+                for name in ('boot.crt', 'authority/profile.json')}
 
     try:
         listing = json.loads(run([howl, 'forms', '--published', '--arch', arch, '--json'], 'discovery').stdout)
@@ -79,7 +81,7 @@ def check(howl, target, work):
         run(create, 'download-and-boot')
         first = status()
         profile = json.loads((machine / 'authority/profile.json').read_text())
-        downloaded = Path(profile['bootstrap']['directory']) / 'boot.json'
+        downloaded = Path(profile['bundle']['directory']) / 'boot.json'
         if catalog.sha(downloaded) != target['descriptor'] or \
                 profile['spec']['boot_key'] is not None or profile['spec']['ipe_key'] is not None:
             raise RuntimeError('consumer did not use the expected vendor-signed public image')
@@ -92,14 +94,14 @@ def check(howl, target, work):
         run(create, 'resume')
         resumed = status(first['boot_id'])
         if authority() != keys:
-            raise RuntimeError('public resume replaced enrollment or TPM owner custody')
+            raise RuntimeError('public resume replaced the enrollment')
         run([howl, 'delete', 'public-image', '--on', 'qemu'], 'cleanup')
         if machine.exists():
             raise RuntimeError('public consumer cleanup left the machine behind')
         (work / 'result.json').write_text(json.dumps(dict(target=target, public_download=True,
             source_free_consumer=True, guest_test_additions=False, first_boot=first['boot_id'],
             resumed_boot=resumed['boot_id'], retained_authority=True, authenticated_update_check=True,
-            scope='Public R2 discovery, native admission, protected boots and update-channel check; full A/B updates are gated before publication'), indent=2) + '\n')
+            scope='Public R2 discovery, native admission, protected boots and the machine\'s own check of the public channel'), indent=2) + '\n')
         successful = True
         print('pass: public %s/qemu/%s discovery, protected boot, reuse, update check and resume' % (form, arch), flush=True)
     finally:

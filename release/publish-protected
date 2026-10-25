@@ -55,6 +55,15 @@ class Store:
             os.replace(incoming, destination)
 
 
+def advances(previous, current, old_descriptor, new_descriptor):
+    """A new release takes a later index of its channel than the head it replaces; a
+    machine's TPM floor rises by these indices and never falls."""
+    if old_descriptor == new_descriptor:
+        return
+    if current['image']['index'] <= previous['image'].get('index', 0):
+        raise ValueError('a published release must take a later channel index')
+
+
 def publish(howl, bundle, report, provider, store, trust='release/protected', release_assets=None):
     downloads = preparation.downloads
     with tempfile.TemporaryDirectory(prefix='ww-protected-publication-') as temporary:
@@ -64,7 +73,7 @@ def publish(howl, bundle, report, provider, store, trust='release/protected', re
         pins = Path(trust).resolve()
         metadata = json.loads((pins / 'trust.json').read_text())
         request = dict(source=metadata['source'], cache='unused', form=plan['form'], provider=provider,
-            arch=plan['arch'], channel='https://%s:%d/%s' % ('192.168.5.2' if provider == 'lima' else '10.0.2.2', metadata['permit_port'], plan['form']),
+            arch=plan['arch'], channel='%s/%s/%s' % (metadata['source'], plan['form'], provider),
             boot_certificate=str(pins / 'boot.crt'), image_certificate=str(pins / 'image.crt'))
         old = work / 'previous'
         old.mkdir()
@@ -85,6 +94,7 @@ def publish(howl, bundle, report, provider, store, trust='release/protected', re
             floor = dict(serial=previous['image']['serial'], build=previous['image']['build'],
                          descriptor=downloads.sha(accepted / 'boot.json'))
             downloads.freshness(current, plan['descriptor'], floor, time.time())
+            advances(previous, current, floor['descriptor'], plan['descriptor'])
         if had_signature and not had_head:
             if (old / 'boot.json.sig').read_bytes() != (Path(bundle) / 'boot.json.sig').read_bytes():
                 raise ValueError('incomplete boot publication is not this candidate')
@@ -105,6 +115,7 @@ def publish(howl, bundle, report, provider, store, trust='release/protected', re
             floor = dict(serial=previous['image']['serial'], build=previous['image']['build'],
                          descriptor=downloads.sha(old / 'boot.json'))
             downloads.freshness(current, plan['descriptor'], floor, time.time())
+            advances(previous, current, floor['descriptor'], plan['descriptor'])
         # Check immutable collisions before changing any head. Overwriting a key
         # under the same content identity is refused, even with publication access.
         for entry in plan['files']:
@@ -125,6 +136,10 @@ def publish(howl, bundle, report, provider, store, trust='release/protected', re
         store.upload(namespace + '/latest/accepted-head.json', receipt, False)
         for name in ('boot.json.sig', 'boot.json'):
             key = namespace + '/latest/' + name
+            store.upload(key, work / 'public' / key, False)
+        # The update head last: every machine on the channel takes it.
+        for name in ('latest.json.sig', 'latest.json'):
+            key = namespace + '/' + name
             store.upload(key, work / 'public' / key, False)
         return plan
 

@@ -32,7 +32,7 @@ GPT, two partitions; every GUID, UUID, serial number and time is fixed.
 | Partition | Holds |
 | --- | --- |
 | EFI system, FAT32, 256 MiB | systemd-boot at the removable-media path (`EFI/BOOT/BOOTAA64.EFI` or `BOOTX64.EFI`), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz` and `stage0.zst` |
-| ext4 (`/boot`), the rest | `slot/{a,b}/root.erofs`, `state/{0,1}`; init adds `data/`, which is bind-mounted at `/data` |
+| ext4 (`/boot`), the rest | `slot/{a,b}/root.erofs`; init adds `data/`, which is bind-mounted at `/data` |
 
 The removable-media path needs no NVRAM entry, so the disk boots wherever it is
 attached. stage0 finds the ext4 partition by `werewolf.slots=UUID`. systemd-boot sorts

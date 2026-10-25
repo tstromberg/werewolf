@@ -14,18 +14,18 @@ It detects werewolf by `/usr/share/werewolf`; other distributions run generic
 checks (`docs/posture.md`).
 
 `posture [--extended] [--attack] [--no-cache] [--verbose] [--json | --line | --summary]`
-prints text, JSON with why and how, `posture: fail=ID,ID pass=N skip=N {JSON}`, or one
-line of state (`NOMINAL`, `EXPECTED GAPS`, `DEGRADED`), counts and the failures, and
-exits 1 if any check fails. `--extended` adds what werewolf skips by choice (wiping
-freed memory, forced CPU mitigations, strict reverse-path filtering; docs/security.md).
-Playground's logins run `--summary` (`/etc/profile.d/posture.sh`): amber `gap` for a
-declared weakness, red `FAIL` for an unexpected one, rows cut to the terminal's width,
-no colour with `NO_COLOR` or `TERM=dumb`. Text shows `source = value, want expectation`
-for a failure, at most two rows an item; `--json` keeps all of `source`, `expected`,
-`observed` and `comparison`. `--verbose` streams phases, timings and walk progress to
-stderr. A check this run's confinement stops, as a root SSH session's (netlink, the TPM,
-leashing, the attacks' lock), takes boot's result from `/run/werewolf/posture.json`,
-named `(cached)`, `"cached": true`; `--no-cache` skips it. Boot's holds the TPM's state.
+prints text, JSON with why and how, `posture: fail=ID,ID pass=N skip=N {JSON}`, or the
+login summary playground shows (`/etc/profile.d/posture.sh`): form, release and kernel;
+state (`nominal`, `expected gaps`, `degraded`) and counts; a red `✗` row for each
+unexcused failure; one line of declared gaps. It exits 1 if any check fails.
+`--extended` adds what werewolf skips by choice (wiping freed memory, forced CPU
+mitigations, strict reverse-path filtering; docs/security.md). Text shows `source =
+value, want expectation` for a failure, at most two rows an item; `--json` keeps all of
+`source`, `expected`, `observed` and `comparison`. `--verbose` streams phases, timings
+and walk progress to stderr. A check citing a file this run may not read, one a root SSH
+session cannot make (netlink, leashing, the attacks' lock), or one a run
+without root skips takes boot's result from `/run/werewolf/posture.json`, named
+`(cached)`; `--no-cache` leaves it skipped. Boot's holds stage0's TPM floor record.
 
 ## Goals
 

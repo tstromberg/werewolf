@@ -34,10 +34,9 @@ descriptor only over the updater's existing private socketpair. Fence continues 
 deny other programs access to that device. The updater retains uid 77, no
 capabilities, Landlock, seccomp and its existing authenticated broker operations.
 
-Requests contain a correlation ID and one fixed operation, with a hash allowed only
-for `try`. Oversized frames are discarded; requests select no executable or path.
-Status is guest diagnostics, not independent attestation. Release acceptance also
-compares the observed TPM PCR and protected authorization with the signed bundle.
+Requests contain a correlation ID and one fixed operation, with a hash allowed only for
+`try`. Oversized frames are discarded; requests select no executable or path. Status is
+guest diagnostics, not independent attestation.
 
 The QEMU lifecycle test uses this production interface on unmodified signed images.
 Its unhealthy trial receives real disk write errors after startup, must remain

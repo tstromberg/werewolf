@@ -218,9 +218,12 @@ def resolve(arch, shard, shards, output, focused=False):
             target['legacy_status'] = 'unchanged' if unchanged and os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
             rows = [previous.get((form, provider, arch), {}) for provider in catalog.PROVIDERS[arch]]
             settled = all(r.get('inputs') == digest and r.get('status') in catalog.SETTLED for r in rows)
+            # Each release takes the next index of its channel, never one used: the TPM
+            # floor of every machine on it rises by these (docs/design/independent-updates.md).
+            target['index'] = 1 + max([r.get('latest', {}).get('index', 0) for r in rows] + [0])
             target['status'] = 'unchanged' if settled and os.environ.get('FORM_IMAGES_FORCE') != '1' else 'build'
             write(snapshot / 'input.json', dict(chain=chain,
-                  **{k: target[k] for k in ('form', 'arch', 'inputs', 'commit', 'serial')}))
+                  **{k: target[k] for k in ('form', 'arch', 'inputs', 'commit', 'serial', 'index')}))
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             print('form-images: %s/%s resolution failed: %s' % (form, arch, error), file=sys.stderr, flush=True)
         write(output / 'plan.json', plan)
@@ -228,14 +231,15 @@ def resolve(arch, shard, shards, output, focused=False):
 
 
 def bundles(target):
-    """Each provider's bundle, plus the two updates a gated form's lifecycle installs."""
+    """Each provider's bundle, plus the two updates a gated form's lifecycle installs,
+    the next releases of its channel."""
     start = datetime.datetime.strptime(target['serial'], '%Y%m%dT%H%M%SZ')
     for provider in catalog.PROVIDERS[target['arch']]:
-        yield provider, provider, target['serial']
+        yield provider, provider, target['serial'], target['index']
         if supports_gate(target['form'], provider):
             for n in (1, 2):
                 later = (start + datetime.timedelta(seconds=n)).strftime('%Y%m%dT%H%M%SZ')
-                yield '%s-update-%d' % (provider, n), provider, later
+                yield '%s-update-%d' % (provider, n), provider, later, target['index'] + n
 
 
 def supports_gate(form, provider):
@@ -295,10 +299,10 @@ def build_one(target, snapshot, output):
     install_locks(snapshot)
     os.environ['WEREWOLF_FORM_INPUTS'] = str(snapshot)
     output.mkdir(parents=True)
-    for name, provider, serial in bundles(target):
+    for name, provider, serial, index in bundles(target):
         work = Path('build/protected-images') / (arch + '-' + provider) / form
         try:
-            builder.build(form, provider, arch, serial, output / name)
+            builder.build(form, provider, arch, serial, index, output / name)
             if (work / (form + '-ipe') / 'meta/usr/share/werewolf/dev').exists():
                 raise ValueError('development images cannot be published')
         finally:
@@ -326,7 +330,7 @@ def keep(target, output):
     write(output.parent / (target['form'] + '.files.json'), digests(output))
     if target['form'] in GATED:
         return
-    for name, _, _ in bundles(target):
+    for name, _, _, _ in bundles(target):
         descriptor = (output / name / 'boot.json').read_bytes()
         shutil.rmtree(output / name)
         (output / name).mkdir()
@@ -400,9 +404,10 @@ def check_one(target, snapshot, first, second, output, lifecycle):
     form, arch = target['form'], target['arch']
     same(form, first, second)
     descriptors = {}
-    for name, _, serial in bundles(target):
+    for name, _, serial, index in bundles(target):
         manifest = json.loads(catalog.read(first / name / 'boot.json'))
-        if (manifest['form'], manifest['image']['arch'], manifest['image']['serial']) != (form, arch, serial):
+        if (manifest['form'], manifest['image']['arch'], manifest['image']['serial'],
+                manifest['image']['index']) != (form, arch, serial, index):
             raise ValueError('bundle differs from its resolved target: ' + name)
         descriptors[name] = catalog.sha(first / name / 'boot.json')
     install_locks(snapshot)
@@ -416,7 +421,7 @@ def check_one(target, snapshot, first, second, output, lifecycle):
     write(output / 'tests.json', dict(format='werewolf-form-tests/1', bundles=descriptors,
           checks={name: True for name in sorted(CHECKS)}, **{k: target[k] for k in ('form', 'arch', 'inputs')}))
     if form in GATED:
-        for name, _, _ in bundles(target):
+        for name, _, _, _ in bundles(target):
             shutil.copytree(first / name, lifecycle / form / name)
 
 
@@ -701,9 +706,10 @@ def publish(snapshots, verified, gated_targets, listing, store, focused=False):
             if store.bucket.startswith('s3://'):
                 mirror.check(str(HOWL), target['bundle'], target['provider'], assets)
             signed = json.loads(catalog.read(assets / (name.replace('/', '-') + '-downloads.json'), 4 << 20))
+            head = json.loads(catalog.read(Path(target['bundle']) / 'boot.json', 4 << 20))
             published[name] = dict(serial=signed['serial'], commit=signed['provenance']['commit'],
                                    descriptor=signed['descriptor'], object=name + '/objects/' + signed['descriptor'],
-                                   size=signed['files']['disk.qcow2']['size'])
+                                   size=signed['files']['disk.qcow2']['size'], index=head['image']['index'])
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             print('form-images: %s publication failed: %s' % (name, error), file=sys.stderr, flush=True)
     # The GitHub release carries every exported target, so it follows R2 only

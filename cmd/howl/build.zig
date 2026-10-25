@@ -87,25 +87,38 @@ pub const Spec = struct {
     boot_key: ?[]const u8 = null,
     boot_cert: ?[]const u8 = null,
     boot_native: bool = false,
-    tpm_pub: ?[]const u8 = null,
-    /// Read machine authority from authenticated firmware; code trust stays pinned in the root.
-    tpm_firmware: bool = false,
-    boot_state: ?[]const u8 = null,
+    /// tpm makes a root whose boot requires its channel's TPM floor: the
+    /// signed UKI names werewolf.channel and werewolf.index, and stage0
+    /// enrolls or checks the TPM (docs/design/independent-updates.md).
+    tpm: bool = false,
+    /// image_index is the release's place in its channel: 1, 2, 3, ...
+    image_index: u64 = 1,
     update_ca: ?[]const u8 = null,
     update_port: ?u16 = null,
-    permit_host: ?[]const u8 = null,
-    permit_port: ?u16 = null,
 
     /// lacks returns the protections s's image is made without: Secure Boot
-    /// with no boot key, the TPM with no signer or firmware word, IPE with no
-    /// kernel. A provider may give one --disable named, as QEMU signs for
+    /// with no boot key, the TPM unless asked for, IPE with no kernel. A provider may give one
+    /// --disable named, as QEMU signs for
     /// Secure Boot regardless.
     pub fn lacks(s: Spec) cmdline.Protections {
         var d: cmdline.Protections = .empty;
         if (s.boot_key == null) d.insert(.secureboot);
-        if (s.tpm_pub == null and !s.tpm_firmware) d.insert(.tpm);
+        if (!s.tpm) d.insert(.tpm);
         if (s.ipe_kernel == null) d.insert(.ipe);
         return d;
+    }
+
+    /// channelId is the release channel's identity: its update URL's, or,
+    /// for an image that follows none, its form's alone, so a TPM that
+    /// knows one form's counter refuses another's image.
+    pub fn channelId(s: Spec) [32]u8 {
+        if (s.ipe_updates) |url| return @import("prebuilt").channelId(url);
+        var id: [32]u8 = undefined;
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update("werewolf-local:");
+        h.update(std.fs.path.basename(std.mem.trimEnd(u8, s.form, "/")));
+        h.final(&id);
+        return id;
     }
 
     pub fn devSuffix(s: Spec) []const u8 {
@@ -177,10 +190,8 @@ const BuildOptions = struct {
     boot_key: ?[]const u8 = null,
     boot_cert: ?[]const u8 = null,
     boot_native: bool = false,
-    tpm_pub: ?[]const u8 = null,
-    tpm_firmware: bool = false,
-    permit_host: ?[]const u8 = null,
-    permit_port: ?u16 = null,
+    tpm: bool = false,
+    image_index: u64 = 1,
 };
 
 /// buildOptions parses build's command line: FORM, --build, and -o, --arch,
@@ -205,8 +216,8 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.boot_native = true;
             continue;
         }
-        if (std.mem.eql(u8, args[i], "--tpm-firmware")) {
-            o.tpm_firmware = true;
+        if (std.mem.eql(u8, args[i], "--tpm")) {
+            o.tpm = true;
             continue;
         }
         const a, const v = try howl.flagValue(args, &i, why);
@@ -235,22 +246,17 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.boot_key = v;
         } else if (std.mem.eql(u8, a, "--boot-cert")) {
             o.boot_cert = v;
-        } else if (std.mem.eql(u8, a, "--tpm-pub")) {
-            o.tpm_pub = v;
-        } else if (std.mem.eql(u8, a, "--permit-host")) {
-            o.permit_host = v;
-        } else if (std.mem.eql(u8, a, "--permit-port")) {
-            o.permit_port = std.fmt.parseUnsigned(u16, v, 10) catch
-                return why.refuse("--permit-port requires a nonzero port", .{});
+        } else if (std.mem.eql(u8, a, "--image-index")) {
+            o.image_index = cmdline.releaseIndex(v) orelse
+                return why.refuse("--image-index {s}: a release index, 1 or more", .{v});
         } else if (std.mem.eql(u8, a, "--format")) {
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
             "{s}: build takes --build, --disable, --on, -o, --arch, --format, --app, " ++
                 "--ipe-kernel, " ++
-                "--ipe-key, --ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert " ++
-                "and --boot-native, --tpm-pub, --tpm-firmware, --permit-host and " ++
-                "--permit-port\n{s}",
+                "--ipe-key, --ipe-cert, --ipe-updates, --image-serial, --image-index, " ++
+                "--boot-key, --boot-cert, --boot-native and --tpm\n{s}",
             .{ a, howl.usage },
         );
     }
@@ -258,7 +264,7 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
         o.ipe_cert != null or o.ipe_updates != null or o.image_serial != null)) or
         (o.disabled.contains(.secureboot) and
             (o.boot_key != null or o.boot_cert != null or o.boot_native)) or
-        (o.disabled.contains(.tpm) and (o.tpm_pub != null or o.tpm_firmware)))
+        (o.disabled.contains(.tpm) and o.tpm))
         return why.refuse("--disable names a protection the other flags give", .{});
     if (o.on) |on| if ((on != .lima and on != .qemu) or !o.disabled.eql(.empty)) return why.refuse(
         "--on {t}: a protected build's bundle is for lima or qemu; a disk without --on is for " ++
@@ -293,24 +299,26 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     });
     if (o.disabled.eql(.empty)) {
         // Every protection, as create deploys it: a bundle any machine on
-        // the provider enrolls, signed with the user's own keys.
+        // the provider enrolls, signed with the user's own keys, following
+        // the channel its builder serves.
         const provider = o.on orelse if (@import("builtin").os.tag == .macos) .lima else .qemu;
+        const channel = o.ipe_updates orelse return why.refuse(
+            "a protected bundle follows an update channel: --ipe-updates URL, where you " ++
+                "serve it; or give up what it needs: --disable=" ++ howl.every_protection,
+            .{},
+        );
         const out = try gpa.print("{s}/{s}-{t}-{s}", .{ dir, f, provider, a });
         try Dir.cwd().createDirPath(io, dir);
         Dir.cwd().deleteTree(io, out) catch {};
-        _ = try @import("local-secure.zig").localBundle(
+        try @import("local-secure.zig").localBundle(
             io,
             gpa,
             &steps,
             .{ .form = ref, .app = o.app, .local = o.local },
             provider,
             o.arch,
-            try @import("local-secure.zig").localChannel(
-                gpa,
-                try std.process.currentPathAlloc(io, gpa),
-                "_build",
-                f,
-            ),
+            channel,
+            o.image_index,
             out,
             why,
         );
@@ -344,10 +352,8 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .update_port = if (o.ipe_updates) |url| (try std.Uri.parse(url)).port orelse 443 else null,
         .image_serial = o.image_serial,
         .boot_key = o.boot_key orelse howl.environ.get("WEREWOLF_BOOT_KEY"),
-        .tpm_pub = o.tpm_pub orelse howl.environ.get("WEREWOLF_TPM_PUB"),
-        .tpm_firmware = o.tpm_firmware,
-        .permit_host = o.permit_host,
-        .permit_port = o.permit_port,
+        .tpm = o.tpm,
+        .image_index = o.image_index,
         .boot_cert = o.boot_cert orelse if (o.boot_key != null or
             howl.environ.get("WEREWOLF_BOOT_KEY") != null)
             howl.environ.get("WEREWOLF_BOOT_CRT") orelse "release/boot.crt"
@@ -506,7 +512,9 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
         "[--kernel-rootfs TAR | --ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
-        "[--ipe-updates URL --image-serial UTC] [--verbose] image|slot|disk|qcow2|prebuilt...";
+        "[--ipe-updates URL --image-serial UTC [--image-index N]] [--boot-key KEY " ++
+        "--boot-cert CERT [--boot-native [--tpm]]] [--update-ca PEM] [--verbose] " ++
+        "image|slot|disk|qcow2|prebuilt...";
     var spec: Spec = .{ .form = "", .arch = undefined };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -522,8 +530,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
             spec.dev_shell = false;
         } else if (std.mem.eql(u8, args[i], "--boot-native")) {
             spec.boot_native = true;
-        } else if (std.mem.eql(u8, args[i], "--tpm-firmware")) {
-            spec.tpm_firmware = true;
+        } else if (std.mem.eql(u8, args[i], "--tpm")) {
+            spec.tpm = true;
         } else if (std.mem.eql(u8, args[i], "--published")) {
             spec.published = true;
         } else if (std.mem.startsWith(u8, args[i], "-")) {
@@ -558,13 +566,11 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 spec.boot_key = v;
             } else if (std.mem.eql(u8, flag, "--boot-cert")) {
                 spec.boot_cert = v;
-            } else if (std.mem.eql(u8, flag, "--tpm-pub")) {
-                spec.tpm_pub = v;
-            } else if (std.mem.eql(u8, flag, "--permit-host")) {
-                spec.permit_host = v;
-            } else if (std.mem.eql(u8, flag, "--permit-port")) {
-                spec.permit_port = std.fmt.parseUnsigned(u16, v, 10) catch
-                    return why.refuse("--permit-port requires a nonzero port", .{});
+            } else if (std.mem.eql(u8, flag, "--image-index")) {
+                spec.image_index = cmdline.releaseIndex(v) orelse
+                    return why.refuse("--image-index {s}: a release index, 1 or more", .{v});
+            } else if (std.mem.eql(u8, flag, "--update-ca")) {
+                spec.update_ca = v;
             } else if (std.mem.eql(u8, flag, "--disk")) {
                 spec.disk_path = v;
             } else if (std.mem.eql(u8, flag, "--disk-mib")) {
@@ -936,7 +942,7 @@ fn unnamed(gpa: Allocator, s: Spec) !?[]const u8 {
         try w.writer.writeAll(if (first) " " else "; ");
         try w.writer.writeAll(switch (p) {
             .secureboot => "a boot key (--boot-key, or WEREWOLF_BOOT_KEY)",
-            .tpm => "the TPM (--tpm-firmware or --tpm-pub, with a boot key and IPE updates)",
+            .tpm => "the TPM (--tpm, with a boot key, native boot and IPE)",
             .ipe => "IPE (--ipe-kernel, --ipe-key and --ipe-cert)",
         });
         first = false;
@@ -954,9 +960,9 @@ test unnamed {
     try testing.expect(s.lacks().eql(.full));
     try testing.expectEqualStrings(
         "the image would be made without secureboot, tpm, ipe, which --disable does not " ++
-            "name. Give a boot key (--boot-key, or WEREWOLF_BOOT_KEY); the TPM (--tpm-firmware " ++
-            "or --tpm-pub, with a boot key and IPE updates); IPE (--ipe-kernel, --ipe-key and " ++
-            "--ipe-cert), or give them up: --disable=secureboot,tpm,ipe",
+            "name. Give a boot key (--boot-key, or WEREWOLF_BOOT_KEY); the TPM (--tpm, with " ++
+            "a boot key, native boot and IPE); IPE (--ipe-kernel, --ipe-key and --ipe-cert), or " ++
+            "give them up: --disable=secureboot,tpm,ipe",
         (try unnamed(gpa, s)).?,
     );
     // QEMU signs a machine --disable gave all three up for: it lacks two.
@@ -969,11 +975,10 @@ test unnamed {
     s.ipe_kernel = "k.tar";
     try testing.expectEqualStrings(
         "the image would be made without tpm, which --disable does not name. Give the TPM " ++
-            "(--tpm-firmware or --tpm-pub, with a boot key and IPE updates), or give them up: " ++
-            "--disable=tpm",
+            "(--tpm, with a boot key, native boot and IPE), or give them up: --disable=tpm",
         (try unnamed(gpa, s)).?,
     );
-    s.tpm_firmware = true;
+    s.tpm = true;
     try testing.expectEqual(null, try unnamed(gpa, s));
     try testing.expect(s.lacks().eql(.empty));
 }
@@ -986,16 +991,10 @@ fn validateIpe(s: Spec) !void {
     if (s.disabled.contains(.ipe) and (s.ipe_kernel != null or s.ipe_key != null or
         s.ipe_cert != null or s.ipe_updates != null or s.image_serial != null))
         return error.DisabledIpeGiven;
-    if (s.disabled.contains(.tpm) and (s.tpm_pub != null or s.tpm_firmware))
-        return error.DisabledTpmGiven;
-    if ((s.permit_host == null) != (s.permit_port == null)) return error.BadPermitTransport;
-    if (s.permit_host) |host| {
-        if (!s.tpm_firmware or s.permit_port.? == 0 or
-            (!std.mem.eql(u8, host, "192.168.5.2") and
-                !std.mem.eql(u8, host, "10.0.2.2"))) return error.BadPermitTransport;
-    }
-    if ((s.tpm_pub != null or s.tpm_firmware) and (!s.boot_native or s.boot_key == null or
-        s.ipe_kernel == null or s.ipe_updates == null)) return error.TpmNeedsSignedNativeIpeUpdates;
+    if (s.disabled.contains(.tpm) and s.tpm) return error.DisabledTpmGiven;
+    if (s.tpm and (!s.boot_native or s.boot_key == null or s.ipe_kernel == null))
+        return error.TpmNeedsSignedNativeIpe;
+    if (s.image_index == 0) return error.BadReleaseIndex;
     if ((s.boot_key == null) != (s.boot_cert == null)) return error.BootKeyAndCertificateRequired;
     if (s.boot_native and s.boot_key == null) return error.NativeBootNeedsSigner;
     const fields = [_]?[]const u8{ s.ipe_kernel, s.ipe_key, s.ipe_cert };
@@ -1031,28 +1030,35 @@ test "unpublished kernels cannot silently replace the signed IPE profile" {
     try t.expectError(error.TestKernelNeedsIpeDisabled, validateIpe(s));
 }
 
-test "portable firmware authority requires the complete protected profile" {
+test "the TPM floor requires the complete protected profile" {
     const t = std.testing;
-    var s: Spec = .{ .form = "minimal", .arch = .aarch64, .tpm_firmware = true };
-    try t.expectError(error.TpmNeedsSignedNativeIpeUpdates, validateIpe(s));
+    var s: Spec = .{ .form = "minimal", .arch = .aarch64, .tpm = true };
+    try t.expectError(error.TpmNeedsSignedNativeIpe, validateIpe(s));
     s.boot_native = true;
     s.boot_key = "vendor.key";
     s.boot_cert = "vendor.crt";
     s.ipe_kernel = "kernel.tar";
     s.ipe_key = "policy.key";
     s.ipe_cert = "policy.crt";
+    try validateIpe(s);
     s.ipe_updates = "https://images.example/secure";
     s.image_serial = "20261013T120000Z";
     try validateIpe(s);
-    s.permit_host = "192.168.5.2";
-    try t.expectError(error.BadPermitTransport, validateIpe(s));
-    s.permit_port = 8443;
-    try validateIpe(s);
-    s.permit_host = "203.0.113.1";
-    try t.expectError(error.BadPermitTransport, validateIpe(s));
-    s.permit_host = "192.168.5.2";
+    s.image_index = 0;
+    try t.expectError(error.BadReleaseIndex, validateIpe(s));
+    s.image_index = 1;
     s.boot_native = false;
-    try t.expectError(error.TpmNeedsSignedNativeIpeUpdates, validateIpe(s));
+    try t.expectError(error.TpmNeedsSignedNativeIpe, validateIpe(s));
+    // A channel's identity is its URL's; an image without one is its form's.
+    const followed = s.channelId();
+    s.ipe_updates = null;
+    try t.expect(!std.mem.eql(u8, &followed, &s.channelId()));
+    s.form = "forms/minimal/";
+    try t.expectEqualSlices(
+        u8,
+        &(Spec{ .form = "minimal", .arch = .x86_64 }).channelId(),
+        &s.channelId(),
+    );
 }
 
 test "IPE builds require all signing inputs and have separate output paths" {

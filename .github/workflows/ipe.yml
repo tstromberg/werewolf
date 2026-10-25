@@ -68,40 +68,19 @@ jobs:
           make IPE=1 check-image-updater
           make IPE=1 check-image-updater-uki
           make IPE=1 check-ab-qemu
-      - name: Protected TPM policy
-        run: |
-          make build/host/tpm-policy build/host/tpm-bootstrap
-          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
-          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
-          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment
-          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-recovery
-          python3 test/check-cloud-tpm-activation
-      - name: Build pinned measured stub
+      - name: TPM release floor against swtpm
+        run: make check-tpm-floor
+      - name: Build pinned stub
         run: |
           sh tools/build-tpm-stub build/tpm-stub
           echo "UKI_STUB=$PWD/build/tpm-stub/linux.efi.stub" >> "$GITHUB_ENV"
-      - name: Protected TPM guest and power cuts
+      - name: Independent updates, rollback, power cuts and a restored disk
         env:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
-        run: make IPE=1 check-tpm-guest
-      - name: Signed firmware authority and trust substitutions
         run: |
-          make build/host/uki
-          arch=$(uname -m)
-          python3 test/check-boot-authority --arch "$arch" \
-            --kernel "build/ipe-kernel/$arch/rootfs.tar" --stub "$UKI_STUB" \
-            --output "build/$arch/ipe/check/boot-authority"
-      - name: Signed rootless TPM bootstrap
-        env:
-          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
-          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
-        run: make IPE=1 check-tpm-bootstrap-guest
-      - name: Secured QEMU CLI lifecycle and power cuts
-        env:
-          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
-          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
-        run: make IPE=1 check-secure-qemu
+          export WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$(uname -m)/rootfs.tar"
+          make IPE=1 PROVIDER=qemu check-independent-updates
       - name: Keep console logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -114,15 +93,5 @@ jobs:
             build/*/ipe/check/provider-ab-qemu/*.log
             build/*/ipe/check/provider-ab-qemu/fixture-*/*.log
             build/*/ipe/check/provider-ab-qemu/phases.json
-            build/*/ipe/check/tpm-guest/fixture.log
-            build/*/ipe/check/tpm-guest/factory.log
-            build/*/ipe/check/tpm-guest/guest/*.log
-            build/*/ipe/check/tpm-guest/guest/*.status
-            build/*/ipe/check/tpm-guest/guest/evidence.jsonl
-            build/*/ipe/check/tpm-bootstrap/*.log
-            build/*/ipe/check/tpm-bootstrap/manifest.json
-            build/*/ipe/check/tpm-bootstrap/quote.msg
-            build/*/ipe/check/tpm-bootstrap/quote.sig
-            build/*/ipe/check/boot-authority/*.log
-            build/*/ipe/check/secure-qemu/*.log
-            build/*/ipe/check/secure-qemu/evidence.jsonl
+            build/*/ipe/check/independent-updates/*.log
+            build/*/ipe/check/independent-updates/evidence.jsonl

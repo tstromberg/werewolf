@@ -9,7 +9,7 @@ carry the passing images from this same three-form set.
 
 | Profile | Boot requirements | Artifact |
 | --- | --- | --- |
-| `secure-boot` | Enrolled UEFI Secure Boot, IPE, persistent TPM and host permit service | `FORM-PROVIDER-ARCH-secure-boot.qcow2` |
+| `secure-boot` | Enrolled UEFI Secure Boot, IPE and a TPM release floor; updates itself from its channel | `FORM-PROVIDER-ARCH-secure-boot.qcow2` |
 | `legacy-boot` | Ordinary UEFI or direct kernel/initramfs boot; no Secure Boot or TPM | `FORM-ARCH-legacy-boot.qcow2` |
 
 Both profiles retain sandboxing and verified roots. Legacy boot also disables
@@ -17,7 +17,7 @@ IPE enforcement; its manifest explicitly records all three disabled protections.
 A signed download authenticates its files, not the platform's boot environment.
 `howl run` defaults to secure boot and never substitutes a legacy image.
 
-Secure targets publish only after their exact bundles pass all fourteen protected
+Secure targets publish only after their exact bundles pass all twelve protected
 lifecycle gates. QEMU covers all three published forms through a host-private owner
 channel; Lima currently covers `playground` through SSH. Each target requires a
 configured gate runner and passing evidence. Legacy targets require reproducibility,
@@ -43,11 +43,14 @@ releases are immutable. The signed image serials and source provenance stay inta
 Already published bundles reuse their verified signed exports, including the original
 release notes, rather than regenerating files under an immutable object identity.
 
-Protected R2 heads keep their existing namespace for installed clients. Legacy
-objects and signed release floors live under `legacy-boot/FORM/ARCH`; they never
-write protected heads. `boot-profiles.json` is the signed inventory of both profiles;
-`index.json` remains the protected-only catalog. See [form images](form-images.md)
-for enrollment, provider runners, release notes and reproduction inputs.
+Protected R2 heads keep their namespace, `boot/v1/FORM/PROVIDER/ARCH`, which also holds
+what installed machines' updaters fetch: each release, at its channel's next index,
+replaces `latest.json` and adds `BUILD/` ([independent
+updates](design/independent-updates.md)). Legacy objects and signed release floors live
+under `legacy-boot/FORM/ARCH`; they never write protected heads. `boot-profiles.json` is
+the signed inventory of both profiles; `index.json` remains the protected-only catalog.
+See [form images](form-images.md) for enrollment, provider runners, release notes and
+reproduction inputs.
 
 Both download-manifest signatures use the committed `release/protected/image.crt`
 identity. Secure Boot code uses the separate `release/protected/boot.crt` authority;

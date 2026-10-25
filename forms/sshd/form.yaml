@@ -20,10 +20,6 @@ accounts:
       homedir: /var/empty
       shell: /sbin/nologin
 
-# Password authentication is unused; remove its helper if a dependency brings it.
-prune:
-  - usr/bin/unix_chkpwd
-
 # Taken back of werewolf's defaults (lib/allow.zig): pseudo-terminals,
 # for ssh logins; prod-ssh and playground take them with this form.
 allow: [pty]

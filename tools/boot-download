@@ -110,10 +110,13 @@ def validate_request(request):
         raise ValueError('unsupported protected download target')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', request['form']):
         raise ValueError('download requires a named published form; custom images require --build')
-    gateway = '192.168.5.2' if request['provider'] == 'lima' else '10.0.2.2'
+    # Machines follow werewolf's public channel for the form and provider themselves
+    # (docs/design/independent-updates.md); a mirror serves its bundles, not its channel.
     channel = urlsplit(request['channel'])
-    if channel.scheme != 'https' or channel.hostname != gateway or not channel.port or channel.username or channel.password or channel.query or channel.fragment:
-        raise ValueError('protected channel must use the declared provider gateway')
+    if channel.scheme != 'https' or not channel.hostname or channel.username or channel.password or \
+            channel.query or channel.fragment or \
+            not channel.path.endswith('/%s/%s' % (request['form'], request['provider'])):
+        raise ValueError('protected channel must be the published one for this form and provider')
 
 
 class HTTPSOnly(urllib.request.HTTPRedirectHandler):
@@ -351,12 +354,7 @@ def download(request, admit, verify, validator, transport=fetch, now=None):
                     os.link(obj, target)
                     if name != 'disk.img.zst':
                         os.link(obj, immutable / name)
-                proof = verify(staging)
-                for name, value in [('release.id', proof['release']), ('pcr11', proof['pcr'])]:
-                    raw = bytes(value)
-                    if len(raw) != 32:
-                        raise ValueError('invalid native verification result')
-                    (slot / name).write_bytes(raw)
+                verify(staging)
                 # Mirror top-level heads for publisher compatibility.
                 for name in ('latest.json', 'latest.json.sig'):
                     os.link(public / name, staging / name)
@@ -378,7 +376,7 @@ def complete(bundle, validator):
             return False
         public = 'prebuilt/' + image['arch'] + '/'
         required = {'boot.json', 'boot.json.sig', 'disk.img.zst', 'latest.json', 'latest.json.sig',
-                    'slot/release.id', 'slot/pcr11', public + 'latest.json', public + 'latest.json.sig'}
+                    public + 'latest.json', public + 'latest.json.sig'}
         required.update('slot/' + name for name in FILES)
         required.update(public + image['build'] + '/' + name for name in FILES)
         if receipt['validator'] != validator or set(receipt['files']) != required:
@@ -395,7 +393,7 @@ def native(howl, operation, directory, request):
     args = [howl, '_boot-image', operation, str(directory), request['boot_certificate'],
             request['image_certificate'], request['channel'], request['arch']]
     if operation == 'head':
-        args.extend([request['form'], request['provider']])
+        args.append(request['form'])
     result = subprocess.run(args, capture_output=True)
     if result.returncode:
         # Native diagnostics name the failed check, never include private credentials.

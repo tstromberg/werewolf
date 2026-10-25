@@ -105,6 +105,7 @@ def boot(label, refused=False):
                         required = expected
                         assert failures <= expected and required <= failures, failures
                         assert b'Secure Boot enforced outside setup mode' in seen
+                        assert b"Secure Boot admits only this image's signer" in seen
                         assert b'native UKI selected slot a' in seen
                         assert re.search(rb'slot a:[^\r\n]*verified', seen)
                         return

@@ -23,7 +23,7 @@ packages. Enrolled IPE machines fetch signed slots; unenrolled IPE holds updates
 | `slot-update.zig` | daemon, `check`, `outcome`, the plans, the log |
 | `stage.zig` | settings, tiers feed, `attempt`, `pending`, lock, reboot |
 | `slot.zig` | building and installing the other slot; new roots (`Root`) |
-| `images.zig` | authenticated prebuilt delivery and retained slot proof |
+| `images.zig` | authenticated prebuilt delivery: the running channel, a later index, a UKI naming that release; retained slot proof |
 | `../../lib/apk.zig` | checking apk's cache before root's apk reads it; RSA keys |
 | `cve.zig` | CVE fetcher and reader children; coordinator checks of their lines |
 | `tiers.zig` | the signed CVE tiers feed; tiering an update's fixes |
@@ -53,12 +53,12 @@ service's root-only control socket; nothing mounts without the supervised update
   armed is rebooted into, and `outcome` does not judge it yet.
 - **Arming order.** Disarm, write, sync, arm, then fsync `attempt`. A cut before
   `attempt` costs one boot; reversing the order misjudges an untried build.
-- **The ESP and the slots stay detached.** The broker disarms, installs, arms and
-  inspects the other slot: it checks the size and SHA-256 of what the updater staged in
-  `work/slot` (`vmlinuz`, `stage0.zst`, optional `uki.efi`, the command line) before
-  copying, writes the loader entry, and reads the digests back through `esp-inspect`;
-  `slot-root`, `slot-decl`, `slot-meta` and `slot-state` check digests the same way on a
-  detached mount. Reads use stage0's read-only `/boot`.
+- **The ESP and the slots stay detached.** The broker disarms the other slot, raises the
+  TPM floor to the running index, then installs, arms and inspects it: it checks the
+  size and SHA-256 of what the updater staged in `work/slot` (`vmlinuz`, `stage0.zst`,
+  optional `uki.efi`, the command line) before copying, writes the loader entry, and
+  reads the digests back through `esp-inspect`; `slot-root`, `slot-decl` and `slot-meta`
+  check digests the same way on a detached mount. Reads use stage0's read-only `/boot`.
 - **Nothing goes backwards.** Packages and the kernel never get older (apk's order); the
   feed never older than `cve-tiers.json.serial`. Signatures are verified before parsing.
 - **apk reads only what a key vouched for.** Index signatures, package control (index

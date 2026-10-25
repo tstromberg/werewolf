@@ -36,8 +36,8 @@ class Publication(unittest.TestCase):
         self.root = Path(temporary.name)
         self.trust = self.root / 'trust'
         self.trust.mkdir()
-        (self.trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
-            source='https://vendor.test/boot/v1', permit_port=9443)))
+        (self.trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/2',
+            source='https://vendor.test/boot/v1')))
         self.store = RecordingStore(self.root / 'store')
         self.namespace = self.root / 'store/playground/lima/aarch64'
         self.a = self.bundle('a', 0)
@@ -48,12 +48,13 @@ class Publication(unittest.TestCase):
         native.start()
         self.addCleanup(native.stop)
 
-    def bundle(self, name, minute):
+    def bundle(self, name, minute, index=None):
         bundle = self.root / name
         bundle.mkdir()
         serial = (datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0) +
                   datetime.timedelta(minutes=minute)).strftime('%Y%m%dT%H%M%SZ')
-        manifest = dict(form='playground', image=dict(arch='aarch64', build=name * 64, serial=serial))
+        manifest = dict(form='playground', image=dict(arch='aarch64', build=name * 64, serial=serial,
+                                                      index=minute + 1 if index is None else index))
         (bundle / 'boot.json').write_text(json.dumps(manifest))
         (bundle / 'boot.json.sig').write_bytes(downloads.sha(bundle / 'boot.json').encode())
         (bundle / 'disk.img.zst').write_bytes(b'disk:' + name.encode())
@@ -67,14 +68,15 @@ class Publication(unittest.TestCase):
         return bundle
 
     def admit(self, howl, operation, directory, request):
+        self.assertEqual('https://vendor.test/boot/v1/playground/lima', request['channel'])
+        head = Path(directory) / 'boot.json'
         if operation == 'head':
             self.assertEqual('lima', request['provider'])
-            head = Path(directory) / 'boot.json'
             if (Path(directory) / 'boot.json.sig').read_bytes() != downloads.sha(head).encode():
                 raise ValueError('test head signature differs')
             return json.loads(head.read_text())
         self.assertEqual('verify', operation)
-        return {}
+        return dict(manifest=json.loads(head.read_text()))
 
     def report(self, bundle):
         return dict(format='werewolf-boot-gates/1', descriptor=downloads.sha(bundle / 'boot.json'),
@@ -84,12 +86,18 @@ class Publication(unittest.TestCase):
         return publisher.publish('howl', bundle, report or self.report(bundle), 'lima', self.store, self.trust)
 
     def test_objects_precede_atomic_floor_and_both_heads(self):
-        self.publish(self.a)
-        self.assertEqual(10, sum(immutable for _, immutable in self.store.writes))
-        self.assertTrue(all(immutable for _, immutable in self.store.writes[:-3]))
-        self.assertEqual(['accepted-head.json', 'boot.json.sig', 'boot.json'],
-                         [key.rsplit('/', 1)[1] for key, _ in self.store.writes[-3:]])
+        plan = self.publish(self.a)
+        self.assertEqual(15, sum(immutable for _, immutable in self.store.writes))
+        self.assertTrue(all(immutable for _, immutable in self.store.writes[:-5]))
+        # The update head goes last: every machine on the channel takes it.
+        self.assertEqual(['latest/accepted-head.json', 'latest/boot.json.sig', 'latest/boot.json',
+                          'latest.json.sig', 'latest.json'],
+                         [key.removeprefix('playground/lima/aarch64/') for key, _ in self.store.writes[-5:]])
+        for entry in plan['files']:
+            self.assertEqual(entry['sha256'], downloads.sha(self.root / 'store' / entry['key']))
         self.assertEqual((self.a / 'boot.json').read_bytes(), (self.namespace / 'latest/boot.json').read_bytes())
+        self.assertEqual((self.a / 'prebuilt/aarch64/latest.json').read_bytes(),
+                         (self.namespace / 'latest.json').read_bytes())
 
     def test_missing_lifecycle_gate_writes_nothing(self):
         report = self.report(self.a)
@@ -99,13 +107,18 @@ class Publication(unittest.TestCase):
         self.assertEqual([], self.store.writes)
         self.assertFalse(self.namespace.exists())
 
+    def heads(self):
+        heads = {path.name: path.read_bytes() for path in (self.namespace / 'latest').iterdir()}
+        heads.update({name: (self.namespace / name).read_bytes() for name in ('latest.json', 'latest.json.sig')})
+        return heads
+
     def test_object_failure_keeps_previous_heads_and_floor(self):
         self.publish(self.a)
-        previous = {path.name: path.read_bytes() for path in (self.namespace / 'latest').iterdir()}
+        previous = self.heads()
         self.store.fail = '/root.erofs'
         with self.assertRaises(OSError):
             self.publish(self.b)
-        self.assertEqual(previous, {path.name: path.read_bytes() for path in (self.namespace / 'latest').iterdir()})
+        self.assertEqual(previous, self.heads())
         self.store.fail = None
         self.publish(self.b)
 
@@ -131,8 +144,45 @@ class Publication(unittest.TestCase):
         self.publish(self.b)
         self.assertEqual((self.b / 'boot.json').read_bytes(), (self.namespace / 'latest/boot.json').read_bytes())
 
+    def test_cut_before_the_update_head_keeps_machines_on_the_previous_release_until_retried(self):
+        self.publish(self.a)
+        self.store.fail = 'aarch64/latest.json'
+        with self.assertRaises(OSError):
+            self.publish(self.b)
+        self.assertEqual((self.b / 'boot.json').read_bytes(), (self.namespace / 'latest/boot.json').read_bytes())
+        self.assertEqual((self.a / 'prebuilt/aarch64/latest.json').read_bytes(),
+                         (self.namespace / 'latest.json').read_bytes())
+        with self.assertRaisesRegex(ValueError, 'older'):
+            self.publish(self.a)
+        self.store.fail = None
+        self.publish(self.b)
+        self.assertEqual((self.b / 'prebuilt/aarch64/latest.json').read_bytes(),
+                         (self.namespace / 'latest.json').read_bytes())
+
+    def test_published_release_must_take_a_later_channel_index(self):
+        self.publish(self.b)
+        self.store.writes.clear()
+        for name, index in (('d', 2), ('e', 1)):
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(ValueError, 'later channel index'):
+                    self.publish(self.bundle(name, 2, index))
+                self.assertEqual([], self.store.writes)
+        self.publish(self.bundle('f', 3, 3))
+        self.assertEqual(3, json.loads((self.namespace / 'latest/boot.json').read_text())['image']['index'])
+
+    def test_head_without_an_index_precedes_every_indexed_release(self):
+        # A head published before channel indices counts as index 0.
+        head = self.namespace / 'latest/boot.json'
+        head.parent.mkdir(parents=True)
+        head.write_text(json.dumps(dict(form='playground', image=dict(arch='aarch64', build='9' * 64,
+                                                                     serial='20260101T000000Z'))))
+        (head.parent / 'boot.json.sig').write_bytes(downloads.sha(head).encode())
+        self.publish(self.a)
+        self.assertEqual((self.a / 'boot.json').read_bytes(), (self.namespace / 'latest/boot.json').read_bytes())
+
     def test_first_publication_cut_can_be_retried(self):
-        for failure in ('/latest/boot.json.sig', '/latest/boot.json'):
+        for failure in ('/latest/boot.json.sig', '/latest/boot.json',
+                        'aarch64/latest.json.sig', 'aarch64/latest.json'):
             with self.subTest(failure=failure):
                 store = RecordingStore(self.root / ('first-' + failure.rsplit('/', 1)[1]))
                 store.fail = failure
@@ -156,7 +206,8 @@ class Publication(unittest.TestCase):
         self.publish(self.a)
         self.store.writes.clear()
         self.publish(self.a)
-        self.assertEqual(3, len(self.store.writes))
+        self.assertEqual(5, len(self.store.writes))
+        self.assertFalse(any(immutable for _, immutable in self.store.writes))
         self.publish(self.b)
         with self.assertRaisesRegex(ValueError, 'older'):
             self.publish(self.a)

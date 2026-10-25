@@ -144,6 +144,10 @@ class ProtectedRelease(unittest.TestCase):
             changed = dict(valid, **{field: value})
             with self.assertRaises(ValueError):
                 publisher.gates(changed, {'image': {'arch': 'aarch64'}}, '1' * 64, 'lima')
+        # Protocol v2 evidence named gates v3 no longer has; exactly these gates are accepted.
+        changed = dict(valid, checks=dict(valid['checks'], shared_issuer=True, independent_owners=True))
+        with self.assertRaises(ValueError):
+            publisher.gates(changed, {'image': {'arch': 'aarch64'}}, '1' * 64, 'lima')
 
     def test_preparation_admits_before_atomic_layout_and_retains_immutable_objects(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -151,7 +155,7 @@ class ProtectedRelease(unittest.TestCase):
             bundle, trust, output = root / 'bundle', root / 'trust', root / 'public'
             bundle.mkdir()
             trust.mkdir()
-            manifest = dict(form='playground', image=dict(arch='aarch64', build='2' * 64,
+            manifest = dict(form='playground', image=dict(arch='aarch64', build='2' * 64, index=3,
                 serial=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')))
             (bundle / 'boot.json').write_text(json.dumps(manifest))
             (bundle / 'boot.json.sig').write_bytes(b'signed-boot-head')
@@ -163,12 +167,18 @@ class ProtectedRelease(unittest.TestCase):
             head.mkdir(parents=True)
             (head / 'latest.json').write_bytes(b'signed-image-head')
             (head / 'latest.json.sig').write_bytes(b'signed-image-signature')
-            (trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
-                source='https://vendor.test/boot/v1', permit_port=9443)))
             descriptor = publisher.downloads.sha(bundle / 'boot.json')
             report = dict(format='werewolf-boot-gates/1', descriptor=descriptor, arch='aarch64', provider='lima',
                           checks={name: True for name in publisher.GATES})
             with patch.object(publisher.downloads, 'native', return_value=manifest) as native:
+                # Protocol v2 trust named a host permit service; v3 trust is the mirror alone.
+                (trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
+                    source='https://vendor.test/boot/v1', permit_port=9443)))
+                with self.assertRaises(ValueError):
+                    publisher.prepare('howl', bundle, report, 'lima', output, trust)
+                native.assert_not_called()
+                (trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/2',
+                    source='https://vendor.test/boot/v1')))
                 invalid = copy.deepcopy(report)
                 invalid['checks']['unhealthy_fallback'] = False
                 with self.assertRaises(ValueError):
@@ -178,13 +188,26 @@ class ProtectedRelease(unittest.TestCase):
                 native.reset_mock()
                 plan = publisher.prepare('howl', bundle, report, 'lima', output, trust)
                 self.assertEqual(['head', 'verify'], [call.args[1] for call in native.call_args_list])
+                # The bundle must belong to the channel machines follow on the mirror.
+                self.assertEqual({'https://vendor.test/boot/v1/playground/lima'},
+                                 {call.args[3]['channel'] for call in native.call_args_list})
             self.assertEqual(descriptor, plan['descriptor'])
-            self.assertEqual(10, sum(entry['immutable'] for entry in plan['files']))
-            self.assertEqual(2, sum(not entry['immutable'] for entry in plan['files']))
+            self.assertEqual(('werewolf-boot-upload/2', 3), (plan['format'], plan['index']))
+            # Only the signed boot and update heads change in place; every other object is immutable.
+            self.assertEqual({'playground/lima/aarch64/' + name for name in
+                              ('latest/boot.json', 'latest/boot.json.sig', 'latest.json', 'latest.json.sig')},
+                             {entry['key'] for entry in plan['files'] if not entry['immutable']})
+            self.assertEqual(15, sum(entry['immutable'] for entry in plan['files']))
             objects = output / 'playground/lima/aarch64/objects' / descriptor
             self.assertEqual(b'compressed-disk', (objects / 'disk.img.zst').read_bytes())
             self.assertEqual((bundle / 'boot.json').read_bytes(),
                              (output / 'playground/lima/aarch64/latest/boot.json').read_bytes())
+            # Machines update from CHANNEL/ARCH/latest.json and CHANNEL/ARCH/BUILD/FILE.
+            channel = output / 'playground/lima/aarch64'
+            self.assertEqual(b'signed-image-head', (channel / 'latest.json').read_bytes())
+            self.assertEqual(b'signed-image-signature', (channel / 'latest.json.sig').read_bytes())
+            for name in publisher.downloads.FILES:
+                self.assertEqual(name.encode(), (channel / ('2' * 64) / name).read_bytes())
 
 
 if __name__ == '__main__':

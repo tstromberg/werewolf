@@ -5,7 +5,7 @@ const policy = @import("update-policy");
 const mem = std.mem;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-pub const format = "werewolf-image/1";
+pub const format = "werewolf-image/2";
 pub const metadata = "/usr/share/werewolf/image-update";
 pub const max_manifest = 1 << 20;
 pub const max_artifact: u64 = 8 << 30;
@@ -55,7 +55,12 @@ pub const Manifest = struct {
     packages: []const Package,
     advisories: []const policy.Advisory = &.{},
     declaration: ?[]const u8 = null,
-    boot_context: ?[]const u8 = null,
+    /// channel_id is the channel's 32-byte identity in hex, as the signed
+    /// UKI's werewolf.channel carries it: the TPM counter it selects stays
+    /// the machine's wherever the channel is mirrored.
+    channel_id: []const u8,
+    /// index is the release's place in its channel: 1, 2, 3, ... Never reused.
+    index: u64,
     files: Files,
 
     pub fn artifact(m: Manifest, name: []const u8) ?Artifact {
@@ -64,6 +69,14 @@ pub const Manifest = struct {
     }
 };
 pub const Floor = struct { serial: []const u8, build: []const u8 };
+
+/// channelId is the identity a publisher gives the channel at url, when it
+/// gives none of its own: SHA-256 of the URL.
+pub fn channelId(url: []const u8) [32]u8 {
+    var id: [32]u8 = undefined;
+    Sha256.hash(url, &id, .{});
+    return id;
+}
 pub const Identity = struct { channel: []const u8, arch: []const u8 };
 
 /// Authenticate bytes before JSON parsing. A signature authorizes a whole
@@ -97,8 +110,7 @@ pub fn check(m: Manifest, identity: Identity) !void {
     _ = policy.parseSerial(m.serial) catch return error.BadImageSerial;
     if (!hex(m.root_hash) or !hex(m.build)) return error.BadImageHash;
     if (m.declaration) |d| if (!hex(d)) return error.BadImageHash;
-    if (m.boot_context) |c| if (!hex(c) or m.files.@"uki.efi" == null)
-        return error.BadImageBootContext;
+    if (!hex(m.channel_id) or m.index == 0) return error.BadImageRelease;
     if (m.kernel.len == 0 or m.kernel.len > 256 or
         !printable(m.kernel)) return error.BadImageKernel;
     inline for (names) |n| if (m.artifact(n)) |a| {
@@ -352,6 +364,7 @@ fn printable(s: []const u8) bool {
 }
 
 const testing = std.testing;
+const sample_channel: [64]u8 = @splat('a');
 fn fixture() Manifest {
     const a: Artifact = .{
         .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -363,6 +376,8 @@ fn fixture() Manifest {
         .channel = "https://example.test/shop",
         .arch = "aarch64",
         .serial = "20261011T000000Z",
+        .channel_id = &sample_channel,
+        .index = 1,
         .build = "",
         .root_hash = "0000000000000000000000000000000000000000000000000000000000000" ++
             "000",
@@ -411,6 +426,12 @@ test "signed image identity and complete artifact contract" {
     m.ipe = false;
     try testing.expectError(error.NotAnIpeImage, check(m, identity));
     m.ipe = true;
+    m.index = 0;
+    try testing.expectError(error.BadImageRelease, check(m, identity));
+    m.index = 1;
+    m.channel_id = &@as([64]u8, @splat('A'));
+    try testing.expectError(error.BadImageRelease, check(m, identity));
+    m.channel_id = &sample_channel;
     m.files.@"stage0.zst".size = 0;
     try testing.expectError(error.BadImageArtifact, check(m, identity));
     m.files.@"stage0.zst".size = 2;

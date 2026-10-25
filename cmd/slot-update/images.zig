@@ -4,6 +4,7 @@ const apk = @import("apk");
 const ipe = @import("ipe");
 const signed = @import("prebuilt");
 const broker = @import("broker");
+const cmdline = @import("cmdline");
 const m = @import("slot-update.zig");
 const Dir = m.Dir;
 const Update = m.Update;
@@ -76,6 +77,36 @@ fn fresh(u: *Update, image: signed.Manifest) !void {
     );
 }
 
+/// release requires image to be a release of this machine's channel, as
+/// the running UKI names it, and an update to come later in it. Without a
+/// channel the machine has no TPM floor, and the serial floor alone holds.
+fn release(u: *Update, image: signed.Manifest, newer: bool) !void {
+    const channel = u.cmd.channel orelse return;
+    if (!std.mem.eql(u8, image.channel_id, &std.fmt.bytesToHex(channel, .lower)))
+        return error.WrongImageChannel;
+    if (newer and image.index <= u.cmd.index.?) return error.OlderImage;
+}
+
+/// ukiRelease requires the staged UKI's signed command line to name the
+/// release its manifest names: the identity stage0 will hold to the floor.
+fn ukiRelease(u: *Update, image: signed.Manifest) !void {
+    if (u.cmd.channel == null) return;
+    if (image.files.@"uki.efi" == null) return error.MissingImageUki;
+    const binary = try Dir.cwd().readFileAlloc(
+        u.io,
+        work ++ "/slot/uki.efi",
+        u.gpa,
+        .limited(512 << 20),
+    );
+    const line = try @import("uki").section(binary, ".cmdline") orelse return error.BadCmdline;
+    var bad: cmdline.Failure = .{};
+    const parsed = cmdline.parse(std.mem.trimEnd(u8, line, "\x00"), &bad) orelse
+        return error.BadCmdline;
+    const channel = parsed.channel orelse return error.WrongReleaseIdentity;
+    if (!std.mem.eql(u8, &std.fmt.bytesToHex(channel, .lower), image.channel_id) or
+        parsed.index.? != image.index) return error.WrongReleaseIdentity;
+}
+
 pub fn plan(u: *Update, arch: []const u8) !?m.Plan {
     u.step = "image-manifest";
     const id = try identity(u, arch);
@@ -105,6 +136,7 @@ pub fn plan(u: *Update, arch: []const u8) !?m.Plan {
     }
     // A bad image remains bad; fetch no payload and advance no floor for it.
     if (u.isBad(image.build)) return error.ImageRolledBack;
+    try release(u, image, true);
     u.step = "image-files";
     try Dir.cwd().deleteTree(u.io, work ++ "/slot");
     try Dir.cwd().createDirPath(u.io, work ++ "/slot");
@@ -117,6 +149,7 @@ pub fn plan(u: *Update, arch: []const u8) !?m.Plan {
         try signed.matches(a, got.size, &got.sha256);
     };
     _ = try signed.cmdline(try u.read(work ++ "/slot/cmdline"));
+    try ukiRelease(u, image);
     // The installer rehashes these files before taking writable mounts.
     u.image = .{ .manifest = image, .data = data, .signature = sig };
     return .{
@@ -139,6 +172,7 @@ pub fn requireInstall(u: *Update) !void {
         v.signature,
     );
     try fresh(u, image);
+    try release(u, image, true);
     if (image.files.@"uki.efi" == null) {
         if (Dir.cwd().access(u.io, work ++ "/slot/uki.efi", .{})) |_|
             return error.UnselectedImageUki
@@ -156,6 +190,7 @@ pub fn requireInstall(u: *Update) !void {
         try signed.matches(a, got.size, got.sha256);
     };
     _ = try signed.cmdline(try u.read(work ++ "/slot/cmdline"));
+    try ukiRelease(u, image);
     try u.writeReplacing(
         floor_path,
         try std.json.Stringify.valueAlloc(
@@ -184,7 +219,9 @@ pub fn verifyOther(
     );
     if (u.isBad(image.build)) return error.ImageRolledBack;
     if (!rollback) try fresh(u, image);
-    try @import("retire.zig").requireOther(u, image);
+    // stage0 refuses a release below the floor; an operator's try may
+    // pick an older one of this channel, and an automatic boot a later one.
+    try release(u, image, !rollback);
     if (expected) |e| if (!std.mem.eql(u8, e, image.build)) return error.WrongStagedImage;
     if (contents) try checkEspInstalled(u, image, rdir);
     return image;

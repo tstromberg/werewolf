@@ -27,23 +27,22 @@ source builds and are excluded from image publication.
 run alongside full builds. A shared publication lock protects the catalog;
 other targets keep their status, inputs and previous release.
 
-A changed form is built by `release/build-protected` for each provider of
-its architecture, with the dedicated boot and image keys: signed UEFI
-boot, IPE, a verified root and TPM-anchored A/B updates, nothing given up.
-A provider's gateway is baked into the verified root, so each form,
-provider and architecture is its own image. Two independent native Linux
-runners build it, with no restored compiled output, and the bundles must
-match byte for byte: each runner records every file's SHA-256, and only a
-form with gates ships its bundles on to later jobs. The form must then meet its
-[form integration coverage](testing.md#form-integration-coverage) and pass
-`howl test --with FORM --arch ARCH`; `tests.json` records both, with the
-descriptor of each bundle they cover. None of these jobs holds the
-signature that admits a bundle.
+A changed form is built by `release/build-protected` for each provider of its
+architecture, with the dedicated boot and image keys: signed UEFI boot, IPE, a verified
+root and the TPM floor, nothing given up, at its channel's next release index, one past
+the last published. A provider's gateway is baked into the verified root, so each form,
+provider and architecture is its own image. Two independent native Linux runners build
+it, with no restored compiled output, and the bundles must match byte for byte: each
+runner records every file's SHA-256, and only a form with gates ships its bundles on to
+later jobs. The form must then meet its [form integration
+coverage](testing.md#form-integration-coverage) and pass `howl test --with FORM --arch
+ARCH`; `tests.json` records both, with the descriptor of each bundle they cover. None of
+these jobs holds the signature that admits a bundle.
 
 Each gate job downloads one shard and judges its forms independently; a failed form
 retains its evidence while other forms can publish. Unchanged forms need no
 authorization or boot. For each changed target, it authorizes three candidates with the
-image key, on the runner that boots them, and runs all fourteen [lifecycle
+image key, on the runner that boots them, and runs all twelve [lifecycle
 gates](design/protected-downloads.md) on the exact files
 (`test/check-published-lifecycle`). QEMU drives all three published forms through the
 production host-private owner channel, with no guest SSH or added test code. Its
@@ -59,19 +58,18 @@ signs a separate `werewolf-legacy-downloads/1` manifest with
 `boot_profile: legacy-boot`; it cannot be admitted as a protected boot descriptor.
 Its immutable objects and release floor live under `legacy-boot/FORM/ARCH`.
 
-Both profiles enter one `base-images-SERIAL` GitHub release. Changed images
-(`minimal`, `prod-ssh`, `playground`) are attached and listed in R2.
-All assets receive attestations and R2 parity checks before the draft becomes
-public. Signed package changes compare each target with its own last published
-inventory, and GitHub generates the included PR and contributor notes. The old scheduled
-image publisher is retired. `boot-profiles.json` is the signed inventory of both
-profiles; `index.json` preserves the protected catalog used by existing clients.
-After publication, native QEMU runners use a fresh source-free consumer to discover
-each new image in the signed public catalog, download it from R2, verify its
-protected boot, repeat the command, check its authenticated update channel, and
-stop/resume it with the same owner authority. This adds no guest shell or test code;
-the full two-update A/B and power-cut sequence runs before publication.
-The HTML catalog labels the profiles separately.
+Both profiles enter one `base-images-SERIAL` GitHub release. Changed images (`minimal`,
+`prod-ssh`, `playground`) are attached and listed in R2. All assets receive attestations
+and R2 parity checks before the draft becomes public. Signed package changes compare
+each target with its own last published inventory, and GitHub generates the included PR
+and contributor notes. The old scheduled image publisher is retired.
+`boot-profiles.json` is the signed inventory of both profiles; `index.json` preserves
+the protected catalog used by existing clients. After publication, native QEMU runners
+use a fresh source-free consumer to discover each new image in the signed public
+catalog, download it from R2, verify its protected boot, repeat the command, check its
+authenticated update channel, and stop and resume it. This adds no guest shell or test
+code; the full two-update A/B and power-cut sequence runs before publication. The HTML
+catalog labels the profiles separately.
 
 | Target | Gate runner |
 | --- | --- |
@@ -79,14 +77,12 @@ The HTML catalog labels the profiles separately.
 | qemu/aarch64 | self-hosted Linux arm64 with KVM, named by the `WEREWOLF_ARM64_KVM_RUNNER` variable |
 | lima/aarch64 | self-hosted macOS arm64 with Lima, named by the `WEREWOLF_LIMA_RUNNER` variable |
 
-Each repository variable is a JSON list of runner labels, such as
-`["self-hosted", "macOS", "ARM64", "werewolf-lima"]`; the dedicated label
-keeps the gate off unrelated machines. A target with no runner is built
-and tested but not published. A self-hosted gate runner holds the image
-key during the job, so it serves this repository alone (the workflow never
-runs for pull requests). It keeps what `test/ci-setup` installs, and Lima
-on macOS. New enrollments forward the signed guest endpoint to a private Unix socket;
-no host TCP port is reserved, and separate consumer state can run concurrently.
+Each repository variable is a JSON list of runner labels, such as `["self-hosted",
+"macOS", "ARM64", "werewolf-lima"]`; the dedicated label keeps the gate off unrelated
+machines. A target with no runner is built and tested but not published. A self-hosted
+gate runner holds the image key during the job, so it serves this repository alone (the
+workflow never runs for pull requests). It keeps what `test/ci-setup` installs, and Lima
+on macOS. Separate consumer state can run concurrently.
 
 A target that fails its profile's checks is not published; the others are, and
 the catalog keeps the last published release beside the failed attempt.
@@ -101,6 +97,8 @@ no production secrets and no upload.
 boot/v1/index.html                                 browse every form
 boot/v1/index.json                                 catalog, signed by the image key
 boot/v1/FORM/index.html                            targets, downloads and status
+boot/v1/FORM/PROVIDER/ARCH/latest.json[.sig]       the channel machines update from
+boot/v1/FORM/PROVIDER/ARCH/BUILD/                  each release's slot files
 boot/v1/FORM/PROVIDER/ARCH/latest/boot.json[.sig]  signed boot head
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/     immutable bundle: slot, disk.img.zst,
     disk.qcow2, heads, gates.json, tests.json, inputs.tar.gz, packages.json,
@@ -150,9 +148,9 @@ A `base-images-SERIAL` release carries `FORM-PROVIDER-ARCH-secure-boot.qcow2`
 signature against `release/protected/image.crt`, then verify the file hashes and
 GitHub build attestations before importing a disk.
 
-Importing a secure disk creates no firmware enrollment, TPM state or host permit
-service: use `howl` for protected deployment. Its host service polls every five
-minutes, and the guest follows its [update policy](updater.md#when-an-update-boots).
+Importing a secure disk does not enroll its firmware: use `howl` for protected
+deployment. The machine's own updater then follows its channel, and its [update
+policy](updater.md#when-an-update-boots) decides when a release boots.
 Legacy boot uses the package updater and carries no protected enrollment.
 
 ### Installing a particular version
@@ -172,4 +170,4 @@ artifacts. An explicit version has a separate cache floor, so it can install an 
 image without lowering the latest channel's floor. It requires the download path;
 `--build` and `--disable` cannot be combined with it. Use a new machine name to test
 upgrades: existing enrollments retain their rollback protection. The version selects
-the initial image; the host service still polls the latest channel for image updates.
+the initial image; the machine's updater still follows its channel to the latest.

@@ -27,13 +27,16 @@ def published_kernel(arch, pins, output):
         os.replace(incoming, output)
 
 
-def build(form, provider, arch, serial, output):
+def build(form, provider, arch, serial, index, output):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', form) or provider not in ('lima', 'qemu'):
         raise ValueError('invalid protected form or provider')
     if arch not in ('aarch64', 'x86_64') or platform.machine() != arch or platform.system() != 'Linux':
         raise ValueError('CI builds require a native Linux runner for the requested architecture')
     if provider == 'lima' and arch != 'aarch64':
         raise ValueError('protected Lima currently requires arm64')
+    index = int(index)
+    if index < 1:
+        raise ValueError('a release index is 1 or more')
     output = Path(output).resolve()
     if output.exists():
         raise ValueError('protected output already exists')
@@ -72,10 +75,9 @@ def build(form, provider, arch, serial, output):
         stub = builder.cached(cache / arch / ('stub-' + pin), pin, 'linux.efi.stub',
                               lambda path: builder.stub(tree, cache, arch, path))
     env = dict(os.environ, UKI_STUB=str(stub))
-    host = '192.168.5.2' if provider == 'lima' else '10.0.2.2'
+    # Machines follow the public mirror themselves (docs/design/independent-updates.md).
     trust = json.loads(Path('release/protected/trust.json').read_text())
-    port = trust['permit_port']
-    channel = 'https://%s:%d/%s' % (host, port, form)
+    channel = '%s/%s/%s' % (trust['source'], form, provider)
     work = Path('build/protected-images').resolve() / (arch + '-' + provider) / form
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     disk = work / 'disk.raw'
@@ -87,15 +89,14 @@ def build(form, provider, arch, serial, output):
     howl = str(Path('build/host/howl').resolve())
     args = [howl, '_build', '--with', form, '--arch', arch, '--build', str(work),
         '--ipe-kernel', str(kernel), '--ipe-key', str(key), '--ipe-cert', str(cert),
-        '--ipe-updates', channel, '--image-serial', serial, '--boot-key', str(boot_key),
-        '--boot-cert', str(boot_cert), '--boot-native', '--tpm-firmware', '--permit-host', host,
-        '--permit-port', str(port), '--disk', str(disk), '--disk-args', disk_args, 'disk']
+        '--ipe-updates', channel, '--image-serial', serial, '--image-index', str(index),
+        '--boot-key', str(boot_key), '--boot-cert', str(boot_cert), '--boot-native', '--tpm',
+        '--disk', str(disk), '--disk-args', disk_args, 'disk']
     subprocess.run(args, env=env, check=True)
     slot = work / (form + '-ipe')
     producer = dict(form=form, arch=arch, disk=str(disk), slot=str(slot / 'slot'),
         head=str(slot / 'prebuilt' / arch), output=str(output), image_key=str(key),
-        image_certificate=str(cert), boot_certificate=str(boot_cert), channel=channel,
-        permit_host=host, permit_port=port)
+        image_certificate=str(cert), boot_certificate=str(boot_cert), channel=channel)
     config = work / 'seal.json'
     config.write_text(json.dumps(producer))
     try:
@@ -112,8 +113,8 @@ def build(form, provider, arch, serial, output):
 if __name__ == '__main__':
     os.umask(0o077)
     try:
-        if len(sys.argv) != 6:
-            raise ValueError('usage: build-protected FORM PROVIDER ARCH SERIAL OUTPUT')
+        if len(sys.argv) != 7:
+            raise ValueError('usage: build-protected FORM PROVIDER ARCH SERIAL INDEX OUTPUT')
         build(*sys.argv[1:])
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         sys.exit('build-protected: protected build failed; no unsigned output is published')

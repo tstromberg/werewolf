@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise authenticated download ordering, failure recovery and cache floors."""
+import copy
 import datetime
 import hashlib
 import importlib.machinery
@@ -44,9 +45,10 @@ class Downloads(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.request = dict(source='https://vendor.test/boot/v1', cache=str(self.root / 'cache'),
             boot_certificate=str(self.trust / 'vendor.crt'), image_certificate=str(self.trust / 'vendor.crt'),
-            channel='https://192.168.5.2:9443/playground', form='playground', arch='aarch64', provider='lima')
+            channel='https://vendor.test/boot/v1/playground/lima', form='playground', arch='aarch64', provider='lima')
         image = json.loads(Path('lib/testdata/prebuilt/image.json').read_text())
-        image.update(arch='aarch64', channel=self.request['channel'], boot_context='1' * 64)
+        image.update(arch='aarch64', channel=self.request['channel'], index=1,
+                     channel_id=hashlib.sha256(self.request['channel'].encode()).hexdigest())
         self.payloads = {name: ('fixture:' + name).encode() for name in downloads.FILES}
         image['files'] = {name: dict(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
                           for name, raw in self.payloads.items()}
@@ -57,9 +59,9 @@ class Downloads(unittest.TestCase):
         der = subprocess.check_output(['openssl', 'x509', '-in', str(self.trust / 'vendor.crt'), '-outform', 'DER'])
         disk = b'compressed-disk-fixture'
         self.payloads['disk.img.zst'] = disk
-        self.manifest = dict(format='werewolf-boot/1', form='playground', image=image,
+        self.manifest = dict(format='werewolf-boot/2', form='playground', image=image,
             disk=dict(size=len(disk), sha256=hashlib.sha256(disk).hexdigest()), raw_size=8 << 30,
-            boot_certificate=hashlib.sha256(der).hexdigest(), permit_host='192.168.5.2', permit_port=9443, pcr11='2' * 64)
+            boot_certificate=hashlib.sha256(der).hexdigest())
         self.manifest['configuration'] = dict(form='playground', interface=dict(files=[], settings=[]),
             ports=[22], dhcp=True, ssh='files', lima_managed=True)
         self.calls, self.urls, self.verifications = [], [], []
@@ -99,7 +101,8 @@ class Downloads(unittest.TestCase):
         self.verifications.append(str(directory))
         if self.fault == 'verify':
             raise ValueError('PE admission refused')
-        return dict(release=[1] * 32, pcr=[2] * 32)
+        # howl _boot-image verify prints only the verified descriptor.
+        return dict(manifest=json.loads((Path(directory) / 'boot.json').read_text()))
 
     def download(self, now=None):
         return downloads.download(self.request, self.admit, self.verify, self.validator,
@@ -114,7 +117,8 @@ class Downloads(unittest.TestCase):
         self.assertEqual(first, self.download())
         self.assertEqual(count, len(self.calls))
         self.assertEqual(1, len(self.verifications))
-        self.assertEqual(bytes([1] * 32), (first / 'slot/release.id').read_bytes())
+        # The slot is the signed release alone: no host-computed release id or PCR 11.
+        self.assertEqual(sorted(downloads.FILES), sorted(path.name for path in (first / 'slot').iterdir()))
         self.assertEqual((first / 'slot/vmlinuz').stat().st_ino,
                          (first / 'prebuilt/aarch64' / self.manifest['image']['build'] / 'vmlinuz').stat().st_ino)
 
@@ -217,19 +221,20 @@ class Downloads(unittest.TestCase):
         self.assertEqual('playground', self.admit(candidate)['form'])
 
     def test_profile_form_and_provider_fail_before_artifacts(self):
-        for name, value, reason in [('form', 'prod', 'WrongBootForm'),
-                                  ('permit_host', '10.0.2.2', 'WrongBootProvider')]:
-            saved = self.manifest[name]
-            self.manifest[name] = value
-            if name == 'form':
-                self.manifest['configuration']['form'] = value
+        original = copy.deepcopy(self.manifest)
+        # The provider is part of the signed channel a release belongs to.
+        qemu = 'https://vendor.test/boot/v1/playground/qemu'
+        for change, reason in [(dict(form='prod', configuration=dict(original['configuration'], form='prod')),
+                                'WrongBootForm'),
+                               (dict(image=dict(original['image'], channel=qemu,
+                                                channel_id=hashlib.sha256(qemu.encode()).hexdigest())),
+                                'WrongImageChannel')]:
+            self.manifest = dict(original, **change)
             self.publish()
             with self.assertRaisesRegex(ValueError, reason):
                 self.download()
-            self.manifest[name] = saved
-            if name == 'form':
-                self.manifest['configuration']['form'] = saved
         self.assertEqual(['boot.json.sig', 'boot.json'] * 2, self.calls)
+        self.assertEqual([], self.floors())
 
     def test_interruption_and_native_admission_leave_floor_unchanged_then_retry(self):
         for fault in ('disk.img.zst', 'verify'):
@@ -254,7 +259,7 @@ class Downloads(unittest.TestCase):
         original = self.floors()[0].read_bytes()
         for serial in ('20261012T000000Z', '20261013T000000Z'):
             self.manifest['image']['serial'] = serial
-            self.manifest['pcr11'] = '3' * 64
+            self.manifest['image']['index'] = 2
             self.publish()
             with self.assertRaisesRegex(ValueError, 'older|reused'):
                 self.download(self.now + 301)
@@ -262,10 +267,18 @@ class Downloads(unittest.TestCase):
 
     def test_changing_mirrors_cannot_reset_the_accepted_floor(self):
         self.download()
+        original = self.floors()[0].read_bytes()
+        # A mirror serves werewolf's channel; the floor belongs to the channel, so an
+        # older head from another mirror is refused like any other.
         self.request['source'] = 'https://other-mirror.test/boot/v1'
         self.manifest['image']['serial'] = '20261012T000000Z'
         self.publish()
-        with self.assertRaisesRegex(ValueError, 'older'):
+        with self.assertRaisesRegex(ValueError, 'older protected boot release'):
+            self.download(self.now + 301)
+        self.assertEqual(original, self.floors()[0].read_bytes())
+        # Nor can a mirror's own channel take releases signed for werewolf's.
+        self.request['channel'] = 'https://other-mirror.test/boot/v1/playground/lima'
+        with self.assertRaisesRegex(ValueError, 'WrongImageChannel'):
             self.download(self.now + 301)
         self.assertEqual(1, len(self.floors()))
 
@@ -290,7 +303,7 @@ class Downloads(unittest.TestCase):
 
     def test_changed_cache_and_validator_require_readmission(self):
         first = self.download()
-        (first / 'slot/pcr11').write_bytes(bytes([9] * 32))
+        (first / 'boot.json.sig').write_bytes(b'changed cache')
         self.download()
         self.assertEqual(2, len(self.verifications))
         self.validator['version'] = 'new-validator'

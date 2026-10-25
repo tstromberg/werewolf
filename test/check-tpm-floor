@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Check lib/tpm.zig's release floor against swtpm, as an attacker with the device would.
+
+tpm-floor (tools/tpm-floor.zig) runs the code stage0 and the mount broker run. Raw TPM
+commands play guest root afterwards: everything that would lower, lock, clear, redefine or
+take over the counter must be refused, and incrementing it must be allowed. Partial
+enrollments, made command by command, must complete on the next boot; a TPM someone else
+owns must be refused."""
+import os
+import pathlib
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+probe = str(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else 'build/host/tpm-floor').resolve())
+swtpm_binary = shutil.which('swtpm')
+if not swtpm_binary:
+    sys.exit('check-tpm-floor: needs swtpm')
+CHANNEL = 'ab' * 32
+OTHER = 'cd' * 32
+OWNER, LOCKOUT, ENDORSEMENT, PLATFORM, PW = 0x40000001, 0x4000000a, 0x4000000b, 0x4000000c, 0x40000009
+ATTRIBUTES = 0x02040014
+
+
+def handle(channel):
+    raw = bytes.fromhex(channel)
+    return 0x01500000 | raw[0] << 8 | raw[1]
+
+
+H = handle(CHANNEL)
+
+
+class Tpm:
+    def __init__(self, work):
+        self.work = work
+        self.process = None
+
+    def start(self):
+        # A start is a power-on: Startup(CLEAR) re-enables the platform hierarchy.
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        self.port = listener.getsockname()[1]
+        listener.close()
+        self.process = subprocess.Popen([
+            swtpm_binary, 'socket', '--tpm2', '--tpmstate', 'dir=' + str(self.work),
+            '--server', 'type=tcp,port=%d' % self.port,
+            '--ctrl', 'type=tcp,port=%d' % (self.port + 1),
+            '--flags', 'not-need-init,startup-clear'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            try:
+                socket.create_connection(('127.0.0.1', self.port), timeout=5).close()
+                return
+            except OSError:
+                time.sleep(.05)
+        raise RuntimeError('swtpm did not start')
+
+    def stop(self):
+        self.process.kill()
+        self.process.wait()
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+    def call(self, code, handles=(), auth=None, params=b''):
+        body = b''.join(struct.pack('>I', h) for h in handles)
+        if auth is not None:
+            secret = b'' if auth is True else auth
+            area = struct.pack('>IH', PW, 0) + b'\0' + struct.pack('>H', len(secret)) + secret
+            body += struct.pack('>I', len(area)) + area
+        body += params
+        data = struct.pack('>HII', 0x8002 if auth is not None else 0x8001, 10 + len(body), code) + body
+        # swtpm serves one client at a time; tpm-floor connects between calls.
+        with socket.create_connection(('127.0.0.1', self.port), timeout=10) as sock:
+            sock.sendall(data)
+            head = b''
+            while len(head) < 10:
+                head += sock.recv(10 - len(head))
+            tag, size, rc = struct.unpack('>HII', head)
+            rest = b''
+            while len(rest) < size - 10:
+                rest += sock.recv(size - 10 - len(rest))
+        if tag == 0x8002 and rc == 0:
+            n = struct.unpack('>I', rest[:4])[0]
+            rest = rest[4:4 + n]
+        return rc, rest
+
+    def probe(self, *args, ok=True):
+        endpoint = str(self.port)
+        command = [probe, args[0], endpoint, *args[1:]]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        if ok and result.returncode:
+            raise RuntimeError(' '.join(command) + ': ' + result.stderr)
+        if not ok and result.returncode == 0:
+            raise RuntimeError(' '.join(command) + ' succeeded')
+        return result.stdout.strip() + result.stderr.strip()
+
+
+def sized(data):
+    return struct.pack('>H', len(data)) + data
+
+
+def public(h, attributes=ATTRIBUTES):
+    return struct.pack('>IHI', h, 0xb, attributes) + sized(b'') + struct.pack('>H', 8)
+
+
+def define(tpm, h, auth=True):
+    return tpm.call(0x12a, [OWNER], auth, sized(b'') + sized(public(h)))[0]
+
+
+def increment(tpm, h):
+    return tpm.call(0x134, [h, h], True)[0]
+
+
+def value(tpm, h):
+    rc, data = tpm.call(0x14e, [h, h], True, struct.pack('>HH', 8, 0))
+    if rc:
+        raise RuntimeError('NV_Read refused: 0x%x' % rc)
+    return struct.unpack('>Q', data[2:10])[0]
+
+
+def change_auth(tpm, hierarchy, new, auth=True):
+    return tpm.call(0x129, [hierarchy], auth, sized(new))[0]
+
+
+def clear_control(tpm, hierarchy, disable):
+    return tpm.call(0x127, [hierarchy], True, bytes([disable]))[0]
+
+
+passed = 0
+
+
+def check(label, condition):
+    global passed
+    if not condition:
+        raise RuntimeError('check-tpm-floor: ' + label)
+    passed += 1
+
+
+def fresh(root, label):
+    work = root / label
+    work.mkdir()
+    tpm = Tpm(work)
+    tpm.start()
+    return tpm
+
+
+with tempfile.TemporaryDirectory(prefix='ww-tpm-floor-') as directory:
+    root = pathlib.Path(directory)
+    # A fresh TPM enrolls on first boot, at this release's index.
+    tpm = fresh(root, 'enroll')
+    check('first boot enrolls at its index', tpm.probe('boot', CHANNEL, '5') == 'floor 5')
+    check('the counter is written at its index', tpm.probe('read', CHANNEL) == 'written 5')
+    rc, data = tpm.call(0x169, [H])
+    check('the public area is exact', rc == 0 and data[2:2 + 14] == public(H, ATTRIBUTES | 1 << 29))
+    # Guest root holds the device: nothing it sends may lower or take the counter.
+    tpm.restart()
+    tpm.probe('boot', CHANNEL, '5')
+    refusals = {
+        'undefine as owner': (0x122, [OWNER, H], True, b''),
+        'undefine as platform': (0x122, [PLATFORM, H], True, b''),
+        'undefine special': (0x11f, [H, PLATFORM], True, b''),
+        'clear as lockout': (0x126, [LOCKOUT], True, b''),
+        'clear as platform': (0x126, [PLATFORM], True, b''),
+        'enable clear as platform': (0x127, [PLATFORM], True, b'\0'),
+        'enable clear as lockout': (0x127, [LOCKOUT], True, b'\0'),
+        'reopen the platform hierarchy': (0x121, [PLATFORM], True, struct.pack('>IB', PLATFORM, 1)),
+        'empty owner password': (0x129, [OWNER], True, sized(b'')),
+        'empty lockout password': (0x129, [LOCKOUT], True, sized(b'')),
+        'owner policy': (0x12e, [OWNER], True, sized(b'\1' * 32) + struct.pack('>H', 0xb)),
+        'redefine the counter': (0x12a, [OWNER], True, sized(b'') + sized(public(H))),
+        'write-lock the counter': (0x138, [H, H], True, b''),
+        'global write lock': (0x135, [OWNER], True, b''),
+        'write the counter': (0x137, [H, H], True, sized(b'\0' * 8) + struct.pack('>H', 0)),
+        'read-lock the counter': (0x14f, [H, H], True, b''),
+        'change the counter password': (0x13b, [H], True, sized(b'x')),
+    }
+    for label, (code, handles, auth, params) in refusals.items():
+        rc, _ = tpm.call(code, handles, auth, params)
+        check(label + ' is refused', rc != 0)
+    check('refusals left the floor', tpm.probe('read', CHANNEL) == 'written 5')
+    check('anyone may increment', increment(tpm, H) == 0 and value(tpm, H) == 6)
+    check('the broker raises to an index', tpm.probe('raise', CHANNEL, '9') == 'floor 9')
+    check('raising never lowers', tpm.probe('raise', CHANNEL, '4') == 'floor 9')
+    # Boot refuses a release below the floor and admits one at or above it.
+    check('a retired release is refused', 'RollbackRefused' in tpm.probe('boot', CHANNEL, '8', ok=False))
+    check('the floor release boots', tpm.probe('boot', CHANNEL, '9') == 'floor 9')
+    check('a later release boots without raising', tpm.probe('boot', CHANNEL, '12') == 'floor 9')
+    check('another channel finds no counter', 'ForeignTpm' in tpm.probe('boot', OTHER, '50', ok=False))
+    # Power-on re-enables the platform hierarchy; boot closes it again.
+    tpm.restart()
+    tpm.probe('boot', CHANNEL, '9')
+    rc, _ = tpm.call(0x126, [PLATFORM], True)
+    check('platform clear after boot is refused', rc != 0)
+    tpm.stop()
+
+    # Enrollment cut at each step completes on the next boot, with the same result.
+    for cut in ['defined', 'incremented', 'clear-disabled', 'lockout-set']:
+        tpm = fresh(root, 'cut-' + cut)
+        check(cut + ': define', define(tpm, H) == 0)
+        if cut != 'defined':
+            for _ in range(3):
+                increment(tpm, H)
+        if cut in ('clear-disabled', 'lockout-set'):
+            check(cut + ': clear control', clear_control(tpm, LOCKOUT, 1) == 0)
+        if cut == 'lockout-set':
+            check(cut + ': lockout', change_auth(tpm, LOCKOUT, os.urandom(32)) == 0)
+        tpm.restart()
+        check(cut + ': next boot completes', tpm.probe('boot', CHANNEL, '3') == 'floor 3')
+        check(cut + ': owner is sealed', change_auth(tpm, OWNER, b'') != 0)
+        tpm.stop()
+
+    # A TPM someone else owns, or whose lockout they hold with clear enabled, is refused.
+    tpm = fresh(root, 'owned')
+    change_auth(tpm, OWNER, b'someone')
+    check('an owned TPM is refused', 'ForeignTpm' in tpm.probe('boot', CHANNEL, '1', ok=False))
+    tpm.stop()
+    tpm = fresh(root, 'lockout')
+    change_auth(tpm, LOCKOUT, b'someone')
+    check('a foreign lockout is refused', 'ForeignTpm' in tpm.probe('boot', CHANNEL, '1', ok=False))
+    tpm.stop()
+    tpm = fresh(root, 'policy')
+    rc, _ = tpm.call(0x12e, [OWNER], True, sized(b'\1' * 32) + struct.pack('>H', 0xb))
+    check('owner policy set', rc == 0)
+    check('an owner policy is refused',
+          'UnprotectedTpmHierarchy' in tpm.probe('boot', CHANNEL, '1', ok=False))
+    tpm.stop()
+    tpm = fresh(root, 'squatter')
+    rc = tpm.call(0x12a, [OWNER], True, sized(b'') + sized(public(H, ATTRIBUTES | 1 << 1)))[0]
+    check('a squatter defines the handle', rc == 0)
+    check('a different index at the handle is refused',
+          'WrongTpmCounter' in tpm.probe('boot', CHANNEL, '1', ok=False))
+    tpm.stop()
+    # A new counter starts above every counter undefined before it, so an undefined and
+    # redefined counter never comes back lower: enrollment then admits only releases at
+    # or above it.
+    tpm = fresh(root, 'ahead')
+    other = handle(OTHER)
+    define(tpm, other)
+    for _ in range(7):
+        increment(tpm, other)
+    check('an unowned TPM lets its counter go', tpm.call(0x122, [OWNER, other], True)[0] == 0)
+    check('a counter ahead of the release enrolls but refuses it',
+          'RollbackRefused' in tpm.probe('boot', CHANNEL, '3', ok=False))
+    check('the TPM is sealed regardless', change_auth(tpm, OWNER, b'') != 0)
+    check('a release at the counter boots', tpm.probe('boot', CHANNEL, '8') == 'floor 8')
+    tpm.stop()
+
+print('pass   tpm-floor: %d checks' % passed)

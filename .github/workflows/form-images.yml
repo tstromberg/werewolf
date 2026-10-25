@@ -72,7 +72,7 @@ jobs:
       - name: Check the shared CLI, signing and publication machinery
         run: |
           sudo test/ci-setup
-          make -j2 _test/cmd/howl/howl.zig _test/local-publisher _test/release-signing _test/howl-smoke _test/howl-lock
+          make -j2 _test/cmd/howl/howl.zig _test/boot-images _test/release-signing _test/howl-smoke _test/howl-lock
       - id: matrix
         env:
           ARM64_KVM_RUNNER: ${{ vars.WEREWOLF_ARM64_KVM_RUNNER }}

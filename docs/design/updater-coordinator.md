@@ -59,14 +59,14 @@ descriptor; membership in `tty` permits ordinary session broadcasts.
 
 Boot artifacts stay root-owned, with group 77 read/traverse access and no group write
 permission. Staged images are also private to this group. The broker publishes this
-through its detached mount; `/boot` stays read-only. Only the operator policy and signed
-public machine transport receive group read access under `/run/config`; other files
-keep their existing permissions. IPE inspection uses preopened read-only descriptors.
+through its detached mount; `/boot` stays read-only. Only the operator policy receives
+group read access under `/run/config`; other files keep their existing permissions. IPE
+inspection uses preopened read-only descriptors.
 
-TPM machines give group 77 read/write access to the resource-manager device. Only
-the coordinator receives a device grant; no worker sees the host device tree.
-Each operation still opens its own resource-manager session. Existing signed
-retirement and rollback checks authorize TPM changes.
+No service, the coordinator included, gets the TPM device. Before overwriting the
+inactive slot the coordinator asks the mount broker's `floor` operation, which takes
+no argument, to raise the channel's counter to the running release's index; no
+worker sees the host device tree.
 
 ## Drawbacks
 

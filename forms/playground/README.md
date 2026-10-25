@@ -19,7 +19,7 @@ howl run
 ```
 
 Howl downloads a protected image for x86_64 QEMU on Linux or arm64 Lima on macOS,
-authenticates it, and enrolls the VM with Secure Boot and a persistent TPM.
+authenticates it, and enrolls the VM with Secure Boot and a TPM its first boot takes.
 Use `howl ssh` to connect, `howl stop` to stop it, and `howl run` to resume it.
 `howl run --build` builds from the checkout with local signing credentials.
 
@@ -31,8 +31,7 @@ verification instructions](../../docs/form-images.md#downloading-images)
 before using a standalone disk. Other forms and hosts have different [image
 availability](../../docs/forms-catalog.md#images-and-downloads).
 
-Howl keeps vendor code signatures separate from the machine's owner keys.
-Its host service fetches authenticated vendor updates; the guest stages signed
-A/B slots according to its [update policy](../../docs/updater.md).
-Keep the host service and the machine's enrollment and TPM state. Importing the
-qcow2 alone does not create them or provide the complete protected deployment.
+The machine fetches signed vendor updates from werewolf's public channel itself and
+stages A/B slots according to its [update policy](../../docs/updater.md); no host
+service takes part. Keep the machine's firmware variables and TPM state. Importing the
+qcow2 alone does not enroll them or provide the complete protected deployment.

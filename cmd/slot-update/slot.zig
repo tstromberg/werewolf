@@ -277,10 +277,8 @@ fn installEsp(u: *Update, build: []const u8) !void {
         const rc = linux.fchmodat(linux.AT.FDCWD, path, 0o640);
         if (linux.errno(rc) != .NOENT) _ = try u.sys(rc, "publish staged artifact");
     }
-    // Every install moves its slot files and TPM state through the broker's
-    // detached mounts and reads through stage0's read-only /boot mount.
-    var retirement = try @import("retire.zig").prepare(u);
-    defer if (retirement) |*prepared| prepared.close();
+    // Every install moves its slot files through the broker's detached
+    // mounts and reads through stage0's read-only /boot mount.
 
     // Remove the other slot's entries and attempt first, so nothing boots
     // it while its files change. vfat has no journal, so sync the deletes
@@ -297,8 +295,17 @@ fn installEsp(u: *Update, build: []const u8) !void {
     };
     errdefer broker.espDisarm() catch {};
     linux.sync();
+    // Retire the slot about to be overwritten, and every release older than
+    // this one, before a byte of it changes: the broker raises this
+    // channel's TPM floor to the running release's index.
+    if (u.cmd.channel != null) {
+        const floor = broker.floor() catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
+        try u.record(.{ .event = "floor", .floor = floor, .index = u.cmd.index.? });
+    }
     // copyChecked goes through a temporary name, so each file is whole or absent.
-    if (retirement) |*prepared| try prepared.apply();
     const root_art = if (u.image) |v|
         v.manifest.files.@"root.erofs"
     else

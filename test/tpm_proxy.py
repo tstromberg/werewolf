@@ -1,4 +1,4 @@
-"""Proxy QEMU's swtpm control/data sockets to cut one retirement command precisely."""
+"""Proxy QEMU's swtpm control/data sockets to cut one TPM floor increment precisely."""
 import array
 from pathlib import Path
 import socket
@@ -109,9 +109,10 @@ class Proxy:
         try:
             while not self.closed:
                 command = self.packet(client)
-                retirement = (int.from_bytes(command[6:10], 'big') == 0x136 and
-                              int.from_bytes(command[10:14], 'big') == 0x01500021)
-                selected = self.select(command) if self.select else retirement
+                # NV_Increment of a werewolf release floor (lib/tpm.zig).
+                increment = (int.from_bytes(command[6:10], 'big') == 0x134 and
+                             int.from_bytes(command[10:14], 'big') >> 16 == 0x0150)
+                selected = self.select(command) if self.select else increment
                 mode = self.mode if selected else None
                 if mode == 'before' and self.gate():
                     return
@@ -121,7 +122,7 @@ class Proxy:
                     self.observe(command, response)
                 if mode == 'after':
                     if int.from_bytes(response[6:10], 'big'):
-                        raise RuntimeError('retirement refused before cut')
+                        raise RuntimeError('increment refused before cut')
                     if self.gate():
                         return
                 client.sendall(response)

@@ -7,9 +7,6 @@ const B = @import("build.zig").B;
 const Dir = std.Io.Dir;
 
 pub const Keys = struct { key: []const u8, cert: []const u8 };
-pub const BootKind = enum { workload, bootstrap };
-pub const bootstrap_loader_config = "timeout 0\neditor no\nauto-entries no\nauto-firmware no\n";
-pub const bootstrap_loader_entry = "title Werewolf TPM bootstrap\nuki /EFI/Linux/bootstrap.efi\n";
 
 pub fn signer(
     io: std.Io,
@@ -257,15 +254,16 @@ pub fn image(b: *B) !void {
         "out/tools/stubs/{t}/linux.efi.stub",
         .{b.spec.arch},
     );
-    if ((b.spec.tpm_pub != null or b.spec.tpm_firmware) and b.env.get("UKI_STUB") == null)
-        return b.fail(
-            "TPM boot requires UKI_STUB with TPM measurement enabled; Alpine's default stub " ++
-                "disables it",
-            .{},
-        );
+    // A TPM image's UKI names its release: stage0 holds it to the channel's
+    // floor (lib/tpm.zig).
+    const channel = b.spec.channelId();
+    const release = if (b.spec.tpm)
+        try b.path("werewolf.channel={x} werewolf.index={d}", .{ &channel, b.spec.image_index })
+    else
+        "";
     const options = try b.path("{s}/uki.options", .{slot});
-    const wanted = try b.path("native {any}\n{s}\n", .{
-        b.spec.boot_native, try std.mem.join(b.gpa, " ", b.spec.disk.args),
+    const wanted = try b.path("native {any}\n{s}\nrelease {s}\n", .{
+        b.spec.boot_native, try std.mem.join(b.gpa, " ", b.spec.disk.args), release,
     });
     const previous = std.Io.Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(8192)) catch "";
     if (!std.mem.eql(u8, wanted, previous)) try b.write(options, wanted);
@@ -293,7 +291,7 @@ pub fn image(b: *B) !void {
         "werewolf.native=1 werewolf.secure=1"
     else
         "werewolf.slot=a";
-    const prefix = try b.path("{s} {s} init=/init panic=10 {s} {s} {s} " ++
+    const line = try b.path("{s} {s} init=/init panic=10 {s} {s} {s} " ++
         "werewolf.slots={s} werewolf.esp=57E1-F000\x00", .{
         base,
         @import(
@@ -301,37 +299,9 @@ pub fn image(b: *B) !void {
         ).consoles(b.spec.arch),
         extra,
         identity,
-        if (b.spec.tpm_pub != null or b.spec.tpm_firmware) "werewolf.tpm=2" else "",
+        release,
         @import("disk.zig").root_uuid,
     });
-    const line = if (b.spec.tpm_pub != null or b.spec.tpm_firmware) blk: {
-        const signed = @import("prebuilt");
-        var hashes: [3][32]u8 = undefined;
-        for ([3][]const u8{ "root.erofs", "vmlinuz", "stage0.zst" }, 0..) |name, i| {
-            const file = try signed.hashFile(b.io, b.gpa, try b.path("{s}/{s}", .{ slot, name }));
-            _ = try std.fmt.hexToBytes(&hashes[i], file.sha256);
-        }
-        const Sha256 = std.crypto.hash.sha2.Sha256;
-        var hash = Sha256.init(.{});
-        hash.update("werewolf.boot-context/2\x00");
-        var stub_hash: [32]u8 = undefined;
-        Sha256.hash(stub, &stub_hash, .{});
-        hash.update(&stub_hash);
-        hash.update(prefix);
-        const context = hash.finalResult();
-        const id = @import("tpm").releaseId(
-            @tagName(b.arch),
-            hashes[0],
-            hashes[1],
-            hashes[2],
-            context,
-        );
-        try b.write(try b.path("{s}/release.id", .{slot}), &id);
-        try b.write(try b.path("{s}/boot.context", .{slot}), &context);
-        break :blk try b.path("{s} werewolf.release={x}\x00", .{
-            std.mem.trimEnd(u8, prefix, "\x00"), &id,
-        });
-    } else prefix;
     const unsigned = try b.path("{s}/uki.efi.unsigned", .{slot});
     try b.write(
         unsigned,
@@ -352,10 +322,6 @@ pub fn image(b: *B) !void {
         .{},
     );
     try b.rename(temp, target);
-    if (b.spec.tpm_pub != null or b.spec.tpm_firmware) try b.write(
-        try b.path("{s}/pcr11", .{slot}),
-        &try uki.pcr11(try b.read(target, 512 << 20)),
-    );
     try Dir.cwd().deleteFile(b.io, unsigned);
     try b.done(target, began);
 }
@@ -387,74 +353,5 @@ pub fn certificate(
     try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = embedded.verify_boot_disk });
     defer Dir.cwd().deleteFile(io, helper) catch {};
     try howl.run(io, why, &.{ "sh", helper, @tagName(arch), disk, cert, work });
-    return cert;
-}
-
-/// Read back the actual fallback UKI from an isolated enrollment disk.
-/// Workloads and images with disabled protections cannot use this path.
-pub fn bootstrapCertificate(
-    io: std.Io,
-    gpa: std.mem.Allocator,
-    disk: []const u8,
-    work: []const u8,
-    arch: howl.Arch,
-    why: *howl.Why,
-) ![]const u8 {
-    const cert = try gpa.print("{s}/boot.crt", .{std.fs.path.dirname(disk) orelse "."});
-    const raw = try gpa.print("{s}/verify-bootstrap.raw", .{work});
-    const binary = try gpa.print("{s}/verify-bootstrap.efi", .{work});
-    defer std.Io.Dir.cwd().deleteFile(io, raw) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, binary) catch {};
-    try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
-    try howl.run(io, why, &.{
-        "mcopy",                                                                         "-i",
-        try gpa.print(
-            "{s}@@1048576",
-            .{raw},
-        ),
-        if (arch == .aarch64) "::/EFI/BOOT/BOOTAA64.EFI" else "::/EFI/BOOT/BOOTX64.EFI", binary,
-    });
-    var bytes = try std.Io.Dir.cwd().readFileAlloc(io, binary, gpa, .limited(256 << 20));
-    if (try uki.section(bytes, ".cmdline") == null) {
-        // Old cloud firmware can require the normal signed boot-manager
-        // path. Admit only its fixed, editor-free bootstrap entry, and
-        // authenticate both executable files against the same code trust.
-        try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", cert, "-in", binary });
-        const esp = try gpa.print("{s}@@1048576", .{raw});
-        for ([_]struct { []const u8, []const u8 }{
-            .{ "::/loader/loader.conf", bootstrap_loader_config },
-            .{ "::/loader/entries/bootstrap.conf", bootstrap_loader_entry },
-        }) |item| {
-            const path = try gpa.print("{s}/verify-bootstrap.conf", .{work});
-            defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-            try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, item[0], path });
-            if (!std.mem.eql(
-                u8,
-                try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024)),
-                item[1],
-            ))
-                return error.BadBootstrapImage;
-        }
-        try howl.run(io, why, &.{ "mcopy", "-o", "-i", esp, "::/EFI/Linux/bootstrap.efi", binary });
-        bytes = try std.Io.Dir.cwd().readFileAlloc(io, binary, gpa, .limited(256 << 20));
-    }
-    const line = try @import("uki").section(
-        bytes,
-        ".cmdline",
-    ) orelse return error.BadBootstrapImage;
-    var bad: @import("cmdline").Failure = .{};
-    const boot = @import("cmdline").parse(std.mem.trimEnd(u8, line, "\x00"), &bad) orelse
-        return error.BadBootstrapImage;
-    if (!boot.bootstrap or !boot.secure or !boot.native or boot.recovery or
-        boot.disable.count() != 0) return error.BadBootstrapImage;
-    _ = try @import("uki").pcr11(bytes);
-    try howl.run(io, why, &.{ "osslsigncode", "verify", "-CAfile", cert, "-in", binary });
-    try howl.run(io, why, &.{
-        "openssl", "x509", "-in", cert, "-outform", "DER", "-out",
-        try gpa.print(
-            "{s}/boot.der",
-            .{work},
-        ),
-    });
     return cert;
 }

@@ -86,36 +86,41 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 
 | Provider | Werewolf Secure Boot | Caveats |
 |---|---|---|
-| QEMU | Verified, x86_64 and arm64 | Linux default includes host custody and persistent TPM; x86 needs SMM |
-| AWS EC2 | Firmware verified, arm64 | Protected default blocked pending TPM custody; NitroTPM alone is insufficient |
-| Google Compute Engine | Protected factory boot and both SSH accounts verified, arm64 | Internal bootstrap/handover passed; normal create, downloads and cloud update transport remain gated |
-| Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
-| Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
+| QEMU | Verified, x86_64 and arm64 | Linux default; persistent swtpm the guest takes on first boot; x86 needs SMM |
+| AWS EC2 | Protected `--build` deployment | NitroTPM taken on first boot; werewolf publishes no AMIs yet |
+| Google Compute Engine | Protected `--build` deployment | Shielded VM vTPM taken on first boot; C4, C4A and N4 boot from Hyperdisk; no published images yet |
+| Azure Trusted Launch | Protected `--build` deployment | vTPM taken on first boot; keeps Microsoft's PK and revokes its CAs in dbx so only our signer boots; no published images yet |
+| Lima QEMU | Verified, arm64 Mac | Default takes signed protected downloads; local `--build` signs with your keys |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
 | bhyve | Manual enrollment verified on bilbo, x86_64; unsupported on arm64 | Protected howl deployment remains gated; ARM64 runs experimentally but has an unresolved virtio TX soak failure ([status](testing-live.md#bhyve)) |
 | Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
 
-New `howl create` machines on AWS, GCP and Azure use signed loaders and UKIs. The host
-retains the boot signer; public certificates enroll the provider's firmware. Uploading a
-release requires its `FORM-ARCH-boot.crt` beside the disk. Both the actual loader and
-UKI must verify against it before a cloud image is made. Azure uses a specialized
-gallery image with custom UEFI keys and Trusted Launch. Arm defaults use Cobalt
+New `howl create --build` machines on AWS, GCP and Azure use signed loaders and UKIs.
+The host retains the boot signer. On AWS and GCP the image's boot certificate is the
+firmware's whole PK, KEK and db. Uploading a release requires its `FORM-ARCH-boot.crt`
+beside the disk. Both the actual loader and UKI must verify against it before a cloud
+image is made. Every provider's firmware must admit the image's signer and nothing
+else; stage0 reads the EFI `db` and `dbx` and refuses handover unless the certificates
+`db` admits, less those `dbx` revokes, are exactly the image's own.
+
+Azure keeps Microsoft's platform key, because a gallery image that brings its own PK
+boots in setup mode, which stage0 refuses, and Microsoft does not support a custom PK
+beside a template. So the gallery version takes the Microsoft UEFI CA template, adds the
+image's boot certificate to `db`, and revokes in `dbx` the Microsoft UEFI CAs that
+template trusts (`boot/microsoft/`), which sign every other vendor's loader. Net
+firmware trust is the image's signer alone, as on AWS and GCP. Arm defaults use Cobalt
 `Standard_D2ps_v6`; older Arm sizes lack Trusted Launch ([supported
-sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch)). West
-US 2 x86 boot passed once on `Standard_D2s_v5`, but a fresh retry with identical
-enrollment reported `SecureBoot=1, SetupMode=1`. Cobalt Arm reported that state with
-both key sizes. Stage0 refuses it; reliable Azure deployment remains blocked despite
-successful gallery enrollment. For x86 diagnostics, pass `--arch x86_64 --size
-Standard_D2s_v5`.
+sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch)). For
+x86, pass `--arch x86_64 --size Standard_D2s_v5`.
 
 `WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` select an existing signing identity.
 Otherwise cloud builds keep one in howl's data directory, `$XDG_DATA_HOME/howl`
-(`~/.local/share/howl`)'s `keys/boot/ARCH`. Signed machines hold updates until enrolled
-in a matching signed image channel; locally composing an unsigned replacement cannot
-preserve the verified boot chain. IPE channels also need the kernel, policy signer,
-`IPE_UPDATES` and `IMAGE_SERIAL` ([prebuilt images](design/prebuilt-images.md)). TPM
-presence alone does not prevent rollback; provisioning protected rollback state remains
-separate work.
+(`~/.local/share/howl`)'s `keys/boot/ARCH`. A machine's first boot makes the vTPM its
+own and holds its channel's floor ([independent
+updates](design/independent-updates.md)). Signed machines hold updates until they follow
+a matching signed image channel, which the builder serves: `IPE_UPDATES` names it and
+`IMAGE_INDEX` the release's index ([prebuilt images](design/prebuilt-images.md));
+locally composing an unsigned replacement cannot preserve the verified boot chain.
 
 ## Separation
 

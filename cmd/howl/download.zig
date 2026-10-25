@@ -10,21 +10,21 @@ const Allocator = std.mem.Allocator;
 const Trust = struct {
     format: []const u8,
     source: []const u8,
-    permit_port: u16,
 };
 
 /// trust is howl's embedded protected trust (release/protected/trust.json).
 fn trust(gpa: Allocator) !Trust {
     const t = try std.json.parseFromSliceLeaky(Trust, gpa, files.protected_trust, .{});
-    if (!std.mem.eql(u8, t.format, "werewolf-boot-trust/1") or t.permit_port == 0)
-        return error.BadProtectedTrust;
+    if (!std.mem.eql(u8, t.format, "werewolf-boot-trust/2")) return error.BadProtectedTrust;
+    try @import("prebuilt").channel(t.source);
     return t;
 }
 
-/// permitPort is the host port every protected machine takes its updates
-/// and permits from, whether werewolf or the user built its image.
-pub fn permitPort(gpa: Allocator) !u16 {
-    return (try trust(gpa)).permit_port;
+/// channel is the update channel werewolf's published images of form for
+/// provider follow: static files on its public mirror, which every machine
+/// fetches for itself (docs/design/independent-updates.md).
+pub fn channel(gpa: Allocator, form: []const u8, provider: howl.Platform) ![]const u8 {
+    return gpa.print("{s}/{s}/{t}", .{ (try trust(gpa)).source, form, provider });
 }
 
 pub fn latest(
@@ -63,15 +63,13 @@ pub fn selected(
     try howl.writePrivate(io, gpa, image, files.protected_image_certificate, why);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const config = try gpa.print("{s}/{s}/{s}-{t}-{t}.json", .{ cwd, root, form, provider, arch });
-    const channel = try gpa.print("https://{s}:{d}/{s}", .{
-        if (provider == .lima) "192.168.5.2" else "10.0.2.2", t.permit_port, form,
-    });
+    const followed = try channel(gpa, form, provider);
     try howl.writePrivate(io, gpa, config, try std.json.Stringify.valueAlloc(gpa, .{
         .source = howl.environ.get("WEREWOLF_BOOT_MIRROR") orelse t.source,
         .cache = try gpa.print("{s}/build/boot-cache", .{cwd}),
         .boot_certificate = try gpa.print("{s}/{s}", .{ cwd, code }),
         .image_certificate = try gpa.print("{s}/{s}", .{ cwd, image }),
-        .channel = channel,
+        .channel = followed,
         .form = form,
         .provider = @tagName(provider),
         .arch = @tagName(arch),
@@ -87,7 +85,7 @@ pub fn selected(
         .{std.mem.trim(u8, result.stderr, "\n ")},
     );
     const request = try std.json.parseFromSliceLeaky(boot.Request, gpa, result.stdout, .{});
-    if (!std.mem.eql(u8, request.channel, channel)) return error.WrongImageChannel;
+    if (!std.mem.eql(u8, request.channel, followed)) return error.WrongImageChannel;
     return request;
 }
 
