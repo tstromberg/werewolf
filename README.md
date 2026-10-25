@@ -1,4 +1,4 @@
-# Werewolf Linux — Secure-by-default VMs
+# Werewolf Linux — Secure-by-default VMs [EXPERIMENTAL]
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
