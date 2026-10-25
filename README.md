@@ -2,20 +2,19 @@
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-Most Linux hardening assumes the attacker never gets root. Werewolf assumes they already
-have it, and makes sure it doesn't help them.
+**So immutable that if you don't declare the exploit in advance, it can't execute.**
 
-Werewolf Linux is an experiment with a blunt goal: the most unhackable Linux or UNIX
-system ever shipped. It's a declarative, immutable VM distro where every service is
-presumed compromised, and root holds none of the keys that matter. We checked every
-Linux vulnerability CISA lists as [exploited in the
-wild](docs/cve-mitigation-survey.md) since its catalog began in 2021. Of those 49, none
-would have worked against Werewolf; 48 are blocked outright, and one is only partly
-mitigated, by choice.
+Werewolf Linux is an experiment with a simple goal: the most secure Linux VM environment ever shipped.
+
+Inspired by NixOS, ChromeOS, OpenBSD, and NanoVMs it takes the idea of a declarative, immutable  
+distro to the extreme. In a production environment, not even root can drop a persistent backdoor, 
+unless it's been declared in advance. Our protections would have prevented 48 of 49
+[CISA known-exploited Linux vulnerabilities](docs/cve-mitigation-survey.md) (we've intentionally
+not addressed the last one due to performance impacts).
 
 ## The ten craziest things we did
 
-1. **Root isn't in charge.** Before any service starts, the machine is sealed with
+1. **Root isn't omnipotent.** Before any service starts, the machine is sealed with
    seccomp and Landlock rules that fix each service's system calls, files and ports, and
    nobody, root included, can loosen them.
 2. **New code can't run.** The root filesystem is read-only and verified block by block,
@@ -28,26 +27,24 @@ mitigated, by choice.
 5. **glibc, neutered.** Our glibc ignores `LD_PRELOAD`, `GLIBC_TUNABLES` and loader
    audit hooks and loads no external NSS or iconv modules, closing the doors used by
    Looney Tunables, PwnKit and the xz backdoor.
-6. **Interpreters that say no.** Our Python, Java, PHP and Node.js refuse to run as
+6. **Hardened interpreters.** Our Python, Java, PHP and Node.js refuse to run as
    root, and each gates its favorite exploit tricks (`eval`, scripts on writable disk,
    native code, deserialization) behind root-held allowances.
-7. **DNS on a leash.** Each service resolves only the names its form declares, the
-   kernel says who asked, and wildcard grants refuse tunnel-shaped names, with domains
-   younger than 30 days next on the list.
-8. **A firewall per service.** Every packet a form doesn't declare is dropped in both
+7. **DNS on a leash.** Each service resolves only domains its form declares, with
+   filtering against newly registered domains, OOB domains, and tunnel shapes by default.
+9. **A firewall per service.** Every packet a form doesn't declare is dropped in both
    directions, and the raw-socket capabilities to get around that are gone.
-9. **Kernel settings stay set.** Root can't write `/proc/sys`, ptrace a process or read
+10. **Kernel settings stay set.** Root can't write `/proc/sys`, ptrace a process or read
    kernel memory, and an oops reboots the machine rather than run a damaged kernel.
-10. **Exploited bugs get 15 minutes.** Machines check hourly and boot a fix for anything
+11. **Exploited bugs get 15 minutes.** Machines check for updates hourly and boot a fix for anything
     on CISA's exploited list within 15 minutes, into a signed spare slot that rolls back
     on its own if it fails.
 
-The fine print: you must trust the hypervisor, your application's bugs are still yours,
-and every host but QEMU, Lima and, with `--build`, GCP, AWS and Azure currently needs
-`--disable=secureboot,tpm,ipe`. The [security guide](docs/security.md) covers every
-control and its limits.
+The [security guide](docs/security.md) covers every control and its limits.
 
 ## Try it
+
+This will run a Werewolf "playground" image under a local VM:
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
@@ -55,17 +52,31 @@ make install
 howl run
 ```
 
-`howl run` boots a signed playground image under QEMU or an arm64 Mac's Lima; `--build`
-builds from source with your own keys. `howl` also deploys to FreeBSD, NetBSD, Proxmox,
-AWS, GCP and Azure ([Secure Boot status](docs/cloud.md#signed-boot)).
+Want to deploy a production Python app to GCP instead?
 
-A **form** declares a VM's software and permissions. Browse the
-[catalog](docs/forms-catalog.md) (`howl forms`), start with
-[Caddy](forms/caddy/README.md) or [PostgreSQL](forms/postgresql/README.md), [build your
-own](docs/forms.md), or follow a tutorial: [Python](examples/python/README.md),
-[PHP](examples/php/README.md), [Node.js](examples/nodejs/README.md),
-[Go](examples/go/README.md), [Rust](examples/rust/README.md), [ASP.NET
-Core](examples/aspnet/README.md).
+```sh
+howl run --with prod-ssh --on gcp
+```
+
+Supported providers include: AWS, GCP, Azure, Firecracker, Lima, QEMU, bhyve
+
+## Forms
+
+As locking down complex services isn't for the faint of heart, we have a catalog of
+[hardened forms](docs/forms-catalog.md) that Werewolf can take: for example:
+
+- [Caddy](forms/caddy/README.md)
+- [PostgreSQL](forms/postgresql/README.md)
+- [Plex](forms/plex/README.md)
+
+We also have general-purpose runtime forms to quickly deploy a hardened app in your preferred language:
+
+- [ASP.NET Core](examples/aspnet/README.md)
+- [Go](examples/go/README.md)
+- [Node.js](examples/nodejs/README.md)
+- [Python](examples/python/README.md)
+- [PHP](examples/php/README.md)
+- [Rust](examples/rust/README.md)
 
 ## Get involved
 
