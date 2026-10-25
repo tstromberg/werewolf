@@ -2,15 +2,33 @@
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-**What if we actually just used the security features the Linux kernel provides -- by default?**
+**What if we actually just used the security features the Linux kernel provides -- by
+default?**
 
-Werewolf Linux is an experiment with a simple goal: creating the most secure VM environment ever built.
+Werewolf Linux is an experiment with a simple goal: creating the most secure VM
+environment ever built.
 
-Inspired by NixOS, ChromeOS, OpenBSD, and NanoVMs it takes the idea of a declarative, immutable distro to the extreme. 
+Inspired by NixOS, ChromeOS, OpenBSD, and NanoVMs it takes the idea of a declarative,
+immutable distro to the extreme.
 
-Out of the-box, Werewolf ships with all manner of modern Linux security controls enabled, such as [Landlock](https://docs.kernel.org/userspace-api/landlock.html), [Seccomp-BPF](https://www.kernel.org/doc/html/v4.19/userspace-api/seccomp_filter.html), [dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html), [IPE](https://docs.kernel.org/admin-guide/LSM/ipe.html), [EROFS](https://docs.kernel.org/filesystems/erofs.html), [MDWE](https://man7.org/linux/man-pages/man2/pr_set_mdwe.2const.html), [KASLR](https://man7.org/linux/man-pages/man2/pr_set_mdwe.2const.html), [YAMA](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html), and [A/B system updates](https://source.android.com/docs/core/ota/ab). It aims to make it impossible to drop a persistent backdoor - even as root. To further frustrate would-be attackers, we've hardened dependencies like glibc, runtimes like PHP and Python, and reduced our attack surface so much that our production images generally don't include a shell. 
+Out of the-box, Werewolf ships with all manner of modern Linux security controls
+enabled, such as [Landlock](https://docs.kernel.org/userspace-api/landlock.html),
+[Seccomp-BPF](https://www.kernel.org/doc/html/v4.19/userspace-api/seccomp_filter.html),
+[dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html),
+[IPE](https://docs.kernel.org/admin-guide/LSM/ipe.html),
+[EROFS](https://docs.kernel.org/filesystems/erofs.html),
+[MDWE](https://man7.org/linux/man-pages/man2/pr_set_mdwe.2const.html),
+[KASLR](https://man7.org/linux/man-pages/man2/pr_set_mdwe.2const.html),
+[YAMA](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html), and [A/B
+system updates](https://source.android.com/docs/core/ota/ab). It aims to make it
+impossible to drop a persistent backdoor - even as root. To further frustrate would-be
+attackers, we've hardened dependencies like glibc, runtimes like PHP and Python, and
+reduced our attack surface so much that our production images generally don't include a
+shell.
 
-In a survey of [CISA known-exploited Linux vulnerabilities](docs/cve-mitigation-survey.md), Werewolf would have prevented 48 of 49 exploits.
+In a survey of [CISA known-exploited Linux
+vulnerabilities](docs/cve-mitigation-survey.md), Werewolf would have prevented 48 of 49
+exploits.
 
 ## The ten craziest things we did
 
@@ -31,14 +49,15 @@ In a survey of [CISA known-exploited Linux vulnerabilities](docs/cve-mitigation-
    root, and each gates its favorite exploit tricks (`eval`, scripts on writable disk,
    native code, deserialization) behind root-held allowances.
 7. **DNS on a leash.** Each service resolves only domains its form declares, with
-   filtering against newly registered domains, OOB domains, and tunnel shapes by default.
+   filtering against newly registered domains, OOB domains, and tunnel shapes by
+   default.
 9. **A firewall per service.** Every packet a form doesn't declare is dropped in both
    directions, and the raw-socket capabilities to get around that are gone.
 10. **Kernel settings stay set.** Root can't write `/proc/sys`, ptrace a process or read
    kernel memory, and an oops reboots the machine rather than run a damaged kernel.
-11. **Exploited bugs get 15 minutes.** Machines check for updates hourly and boot a fix for anything
-    on CISA's exploited list within 15 minutes, into a signed spare slot that rolls back
-    on its own if it fails.
+11. **Exploited bugs get 15 minutes.** Machines check for updates hourly and boot a fix
+    for anything on CISA's exploited list within 15 minutes, into a signed spare slot
+    that rolls back on its own if it fails.
 
 The [security guide](docs/security.md) covers every control and its limits.
 
@@ -69,7 +88,8 @@ As locking down complex services isn't for the faint of heart, we have a catalog
 - [PostgreSQL](forms/postgresql/README.md)
 - [Plex](forms/plex/README.md)
 
-We also have general-purpose runtime forms to quickly deploy a hardened app in your preferred language:
+We also have general-purpose runtime forms to quickly deploy a hardened app in your
+preferred language:
 
 - [ASP.NET Core](examples/aspnet/README.md)
 - [Go](examples/go/README.md)
