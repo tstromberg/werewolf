@@ -127,6 +127,46 @@ suites:
             expect:
               exit: 0
               stdout: "0\n"
+      - name: extensions
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: |
+                CREATE EXTENSION IF NOT EXISTS pg_trgm;
+                CREATE EXTENSION IF NOT EXISTS pgcrypto;
+                CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+                SELECT similarity('werewolf', 'werewolf')::int || '/' ||
+                       length(encode(digest('abc', 'sha256'), 'hex')) || '/' ||
+                       length(uuid_generate_v4()::text);
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout: "1/64/36\n"
+      - name: jit
+        steps:
+          - exec:
+              argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
+                     -h, /run/svc/postgres, -U, postgres, -d, postgres]
+              stdin: |
+                SET jit_above_cost=0;
+                EXPLAIN (ANALYZE, FORMAT JSON)
+                SELECT sum(i) FROM generate_series(1, 10000) AS i;
+              env:
+                LC_ALL: C
+                PGCONNECT_TIMEOUT: '3'
+                PGOPTIONS: -c statement_timeout=5000
+                PGAPPNAME:
+                  run: true
+            expect:
+              exit: 0
+              stdout:
+                contains: '"JIT"'
   - name: test-postgres-denied
     user: nobody
     policy:

@@ -305,7 +305,7 @@ class Protocol(unittest.TestCase):
                                self.plan, self.context)
 
     def test_complete(self):
-        self.assertEqual(self.validate(self.records), 13)
+        self.assertEqual(self.validate(self.records), 15)
 
     def test_kernel_interleaving_inside_and_after_json(self):
         lines = ['werewolf-test: ' + json.dumps(r) + '\r\n' for r in self.records]
@@ -315,7 +315,7 @@ class Protocol(unittest.TestCase):
                     interrupted = list(lines)
                     line = interrupted[index]
                     interrupted[index] = line[:offset] + '[ 16.429304] audit: type=1302 denied\r\n' + line[offset:]
-                    self.assertEqual(native.validate(''.join(interrupted), self.plan, self.context), 13)
+                    self.assertEqual(native.validate(''.join(interrupted), self.plan, self.context), 15)
 
     def test_non_kernel_trailing_data_still_fails(self):
         lines = ['werewolf-test: ' + json.dumps(r) for r in self.records]
@@ -327,7 +327,7 @@ class Protocol(unittest.TestCase):
         name = 'test-postgres'
         records = [r for r in self.records if r.get('suite') == name or r.get('event') == 'complete']
         text = 'other service: ready\n' + '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
-        self.assertEqual(native.validate(text, self.plan, self.context, only_driver=name), 7)
+        self.assertEqual(native.validate(text, self.plan, self.context, only_driver=name), 9)
         with self.assertRaises(ValueError):
             native.validate(text, self.plan, self.context, only_driver='missing')
 
@@ -880,7 +880,7 @@ class RunIdentity(unittest.TestCase):
                         return
                     native.run('postgresql', 'x86_64', [])
                 report = json.loads((root / 'check/postgresql-native/results.json').read_text())
-                self.assertEqual([phase['cases'] for phase in report['phases']], [13, 12])
+                self.assertEqual([phase['cases'] for phase in report['phases']], [15, 14])
                 if update:
                     self.assertEqual(report['verify_config'], native.digest(fixture))
             finally:
