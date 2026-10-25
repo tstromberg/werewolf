@@ -8,7 +8,7 @@ only if both succeed.
 
 ## Background
 
-The `postgresql` form (and `demo`, built on it) runs the latest stable PostgreSQL as the
+The `postgresql` form (and `demo`, built on it) runs PostgreSQL 18 as the
 `postgres` user, for local clients over a UNIX socket. The server needs a
 cluster before it will start, and a form's roles, schemas and grants must be
 in it. Distros do this with a shell script; werewolf has no shell. leash runs
