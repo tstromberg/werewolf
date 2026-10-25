@@ -14,7 +14,20 @@ pub const Header = struct { version: u8 = 1, mode: Mode, id: []const u8, digest:
 pub const Totals = struct { files: u64 = 0, bytes: u64 = 0 };
 
 pub fn syncDir(io: Io, dir: Dir) !void {
-    try (File{ .handle = dir.handle, .flags = .{ .nonblocking = false } }).sync(io);
+    // Non-iterable directory handles use O_PATH on Linux, which fsync rejects.
+    var readable = try dir.openDir(io, ".", .{ .iterate = true });
+    defer readable.close(io);
+    try (File{ .handle = readable.handle, .flags = .{ .nonblocking = false } }).sync(io);
+}
+
+test "directory sync accepts non-iterable handles" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try syncDir(io, tmp.dir);
+    // Syncing must not consume the caller's handle.
+    try tmp.dir.writeFile(io, .{ .sub_path = "after-sync", .data = "still open" });
+    try syncDir(io, tmp.dir);
 }
 
 // NONBLOCK closes the stat/open race with FIFOs; NOFOLLOW closes it with links.
@@ -381,7 +394,13 @@ const Fixture = struct {
         var nonce: [32]u8 = undefined;
         try std.testing.io.randomSecure(&nonce);
         const id = std.fmt.bytesToHex(nonce, .lower);
-        try writeHeader(std.testing.io, a, f.source, manifest, .{ .mode = mode, .id = &id, .digest = &digest });
+        try writeHeader(
+            std.testing.io,
+            a,
+            f.source,
+            manifest,
+            .{ .mode = mode, .id = &id, .digest = &digest },
+        );
         return id;
     }
 };
@@ -615,11 +634,20 @@ test "opening a FIFO as input refuses without blocking" {
     const io = std.testing.io;
     var f = try Fixture.init();
     defer f.deinit();
-    if (linux.errno(linux.mknodat(f.source.handle, "fifo", linux.S.IFIFO | 0o600, 0)) != .SUCCESS) return error.MakeFifo;
+    if (linux.errno(linux.mknodat(
+        f.source.handle,
+        "fifo",
+        linux.S.IFIFO | 0o600,
+        0,
+    )) != .SUCCESS) return error.MakeFifo;
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) return error.Fork;
     if (pid == 0) {
-        const file = openRegular(io, f.source, "fifo") catch |err| linux.exit_group(if (err == error.ImportFileType) 0 else 2);
+        const file = openRegular(
+            io,
+            f.source,
+            "fifo",
+        ) catch |err| linux.exit_group(if (err == error.ImportFileType) 0 else 2);
         file.close(io);
         linux.exit_group(1);
     }
@@ -628,7 +656,8 @@ test "opening a FIFO as input refuses without blocking" {
         const result = linux.waitpid(@intCast(pid), &status, linux.W.NOHANG);
         if (result == pid) {
             const termination: u32 = @bitCast(status);
-            if (!linux.W.IFEXITED(termination) or linux.W.EXITSTATUS(termination) != 0) return error.FifoAccepted;
+            if (!linux.W.IFEXITED(termination) or
+                linux.W.EXITSTATUS(termination) != 0) return error.FifoAccepted;
             return;
         }
         if (linux.errno(result) != .SUCCESS) return error.Wait;

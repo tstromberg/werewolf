@@ -20,13 +20,7 @@ prune:
   - usr/bin/bash
   - usr/bin/perl
   - usr/bin/perl5.44.0
-
-paths:
-  # PAM's password helper, setgid shadow, arrives through MariaDB's PAM
-  # plugin's library. Nothing here authenticates with a password.
-  - path: /usr/bin/unix_chkpwd
-    type: permissions
-    permissions: 0o755
+  - usr/bin/unix_chkpwd  # No UNIX password authentication.
 
 # The check speaks SQL with MariaDB's own client.
 dev:

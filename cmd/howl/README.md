@@ -46,9 +46,10 @@ The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata l
 **Engines.** Protected defaults are Lima (macOS) and QEMU (Linux), which download a
 [protected image](../../docs/design/published-secure-boot.md). Clouds take protected
 `--build` images: werewolf publishes none yet. Other providers and `--dev` require
-[disabling protections](../../docs/security.md#protections-a-machine-can-be-made-without).
-Missing tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU
-and Lima-managed).
+[disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without). Missing
+tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and
+Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -66,25 +67,8 @@ their images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`): a build uploads once
 delete keeps the image. Cloud ports start closed; `--allow-from me|CIDR` opens the
 form's ports at creation, and `howl ssh` opens only GCP TCP 22 to this host when needed.
 
-**SSH.** `howl ssh` and `howl ssh NAME` log in as your local username, including
-on GCP. `run` and `create` default to `--add-current-user=auto`: when `users`
-is absent, an SSH-enabled form gets your local account and the public keys in
-`~/.ssh` its SSH policy accepts. `--add-current-user=yes` adds it alongside
-configured users; an existing account declaration wins. `no` disables the addition.
-An explicit empty `users` map or config file disables `auto`. Lima keeps its
-NoCloud account for all modes; developer SSH keeps its root-only login.
-The generated account has no implicit `admin` grant. `pack --on TARGET` uses
-the same default; `pack` without a target adds the account only with `yes`.
-Use `howl ssh root@NAME` for root, including `root@werewolf-run` for the unnamed
-run machine. `howl
-ssh USER@NAME -- COMMAND...` selects another account. Connections to Lima's NoCloud
-account also offer Lima's identity key. A missing account or failed login does not fall
-back to root. Developer SSH only accepts root, so use `root@NAME` for a `--dev` VM.
-Local FIDO keys enter a dedicated, destination-constrained 20-hour agent;
-`--identity KEY` selects keys, `--no-agent` skips forwarding. First use pins
-the host key with an authentication-free SSH handshake. GCP opens TCP 22 to
-the current public IP when no Howl SSH firewall rule exists. See
-[su](../../forms/ssh-su/README.md).
+**SSH.** See [Howl SSH connections](../../docs/design/howl-ssh.md) for account
+defaults, developer access, forwarded agents and cloud firewall behavior.
 
 **Second create.** The machine keeps its disk and takes the new config. Protected
 machines admit a repeated `--import DIR` only when it matches the chosen init snapshot;

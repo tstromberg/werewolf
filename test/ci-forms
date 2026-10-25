@@ -60,7 +60,9 @@ def run(group, arch, shard):
     env = dict(os.environ)
     for key in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL', 'GNUMAKEFLAGS', 'MAKEFILES', 'SHARD'):
         env.pop(key, None)
-    make = ['make', '--no-print-directory', '-j1', 'ARCH=' + arch, 'BUILD=build/' + arch]
+    # These fixtures boot kernels directly; the protected image pipeline gates EFI/TPM.
+    make = ['make', '--no-print-directory', '-j1', 'ARCH=' + arch, 'BUILD=build/' + arch,
+            'DISABLE=secureboot,tpm,ipe']
     subprocess.run(make + ['build/host/form'], env=env, check=True)
     names = subprocess.check_output(['build/host/form', 'for-arch', arch], env=env, text=True).splitlines()
     names = selected(names, shard)

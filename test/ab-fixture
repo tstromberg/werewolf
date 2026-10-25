@@ -54,6 +54,7 @@ form.mkdir()
 packages: [openssl, caddy-werewolf]
 sshd:
   pubkey-accepted-algorithms: ssh-ed25519
+  allow-agent-forwarding: "no"
 services:
   ab-https:
     exec: /usr/bin/caddy run --config /usr/share/ab/Caddyfile --adapter caddyfile
