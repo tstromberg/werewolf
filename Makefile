@@ -257,7 +257,8 @@ $(PROGRAMS)/plex-loopback/usr/lib/werewolf/plex-loopback.so: forms/plex/lib/plex
 	ln -sfn libc.so $(PROGRAMS)/plex-loopback/usr/lib/plexmediaserver/lib/ld-musl-$(ARCH).so.1
 
 # howl makes programs before it builds an image.
-programs: $(foreach p,$(CMDS),$(call program_bin,$(p))) $(foreach c,$(FORM_CMDS),$(call form_bin,$(c)))
+programs: $(foreach p,$(CMDS),$(call program_bin,$(p))) $(foreach c,$(FORM_CMDS),$(call form_bin,$(c))) \
+	$(PROGRAMS)/plex-loopback/usr/lib/werewolf/plex-loopback.so
 
 # Manuals travel in the same overlay and APK as their executable. Keeping them
 # as separate targets lets a documentation edit rebuild an image without Zig.
