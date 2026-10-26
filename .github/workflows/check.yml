@@ -24,7 +24,9 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # Includes cold tool installation, all unit tests, updater fixtures and
+    # the DNS/unwound namespace checks; their own deadlines stay bounded.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -193,8 +195,8 @@ jobs:
             build/*/check/*-native/results.json
           retention-days: 3
 
-  # arm64's whole check, as x86_64's: hosted arm runners have no KVM, so this
-  # job boots werewolf's kernel and every form under KVM on the self-hosted
+  # arm64's whole check, as x86_64's: hosted arm runners have no KVM, so these
+  # jobs boot werewolf's kernel and every form under KVM on the self-hosted
   # runner vars.WEREWOLF_ARM64_CHECK_RUNNER names (a JSON list of labels).
   # Outside contributors' pull requests skip it and check x86_64 alone; when
   # the runner is offline, the job waits for it. It is never form-images' runner, which holds the protected image
@@ -208,10 +210,15 @@ jobs:
     if: >-
       vars.WEREWOLF_ARM64_CHECK_RUNNER != '' && (github.event_name == 'push' ||
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # The fallback is never used (the if needs the variable); it keeps an unset
     # variable from failing the workflow should runs-on be evaluated anyway.
     runs-on: ${{ fromJSON(vars.WEREWOLF_ARM64_CHECK_RUNNER || '["ubuntu-26.04-arm"]') }}
-    # This job builds and boots the entire catalog, including cold source builds.
+    # A cold catalog can exceed one six-hour job. Every form still gets
+    # both configured and shell-free boots; platform checks run in shard 1.
     timeout-minutes: 360
     steps:
       - name: Make leftover build workspaces removable
@@ -259,20 +266,23 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/**') }}-${{ matrix.shard }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
-      - name: Boot and check every group
-        # Complete and clean each form before the next. Platform checks
-        # still share CPUs within the declared guest memory budget.
+      - name: Boot and check this catalog shard
+        # Complete and clean each form before the next.
         run: |
           make build/host/ci-forms
-          ARCH=aarch64 SHARD='' build/host/ci-forms all
+          ARCH=aarch64 SHARD='${{ matrix.shard }}/4' build/host/ci-forms all
+      - name: Boot and check platform groups
+        if: matrix.shard == 1
+        # Share CPUs within the declared guest memory budget.
+        run: |
           jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs platform boots at once"
           make -k -j"$jobs" DISABLE=secureboot,tpm,ipe check-platform
-      # arm64's only job saves its melange packages, as the check job's
+      # Each arm64 shard saves its melange packages, as the check job's
       # forms jobs do x86_64's: saved even when a check fails.
       - name: Save melange packages
         if: >-
@@ -288,7 +298,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: check-vm-arm64
+          name: check-vm-arm64-${{ matrix.shard }}
           path: |
             build/lock/*.lock.json
             build/*/check/ci-forms-*.json

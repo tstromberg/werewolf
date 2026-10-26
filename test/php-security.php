@@ -29,7 +29,10 @@ case 'privileges':
 case 'network':
     $errno = 0;
     $error = '';
-    $listen = @stream_socket_server('tcp://127.0.0.1:19800', $errno, $error);
+    // The runtime removes listener functions unless the service allows them.
+    // When present, the socket policy must still refuse this TCP listener.
+    $listen = function_exists('stream_socket_server')
+        ? @stream_socket_server('tcp://127.0.0.1:19800', $errno, $error) : false;
     $connect = @stream_socket_client('tcp://127.0.0.1:80', $errno, $error, 1);
     $ok = $listen === false && $connect === false;
     if (is_resource($listen)) fclose($listen);

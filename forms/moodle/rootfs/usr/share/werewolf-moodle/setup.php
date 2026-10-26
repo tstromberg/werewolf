@@ -27,6 +27,21 @@ function say(string $what): void {
     fwrite(STDOUT, "moodle-setup: $what\n");
 }
 
+// Cron must not load Moodle while installation or upgrade is changing its
+// defaults: even a refused run can cache an incomplete core configuration.
+if ($argc === 2 && $argv[1] === 'ready') {
+    if (file_put_contents(RUN . '/ready', "ready\n") !== 6 || !chmod(RUN . '/ready', 0640)) {
+        fail('cannot publish the ready mark');
+    }
+    exit(0);
+}
+if ($argc !== 1) {
+    fail('usage: setup.php [ready]');
+}
+if (file_exists(RUN . '/ready') && !unlink(RUN . '/ready')) {
+    fail('cannot clear the ready mark');
+}
+
 $site = json_decode((string) @file_get_contents(RUN . '/site.json'), true);
 if (!is_array($site) || empty($site['base-url'])) {
     fail('no base-url in the settings (' . RUN . '/site.json)');
