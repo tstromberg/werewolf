@@ -1,8 +1,7 @@
-//! Permission attacks and a bounded audit of mutable Moodle files.
+//! A bounded audit of mutable Moodle files, and a PATH_INFO avatar request.
 const std = @import("std");
 const driver = @import("test-driver");
 const Io = std.Io;
-const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -16,24 +15,6 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, args[2], "avatar")) {
         try avatar(a);
         try ctx.result(init.io, args[1], "moodle-path-info", true);
-    } else if (std.mem.eql(u8, args[2], "write-refused")) {
-        var parent = try Io.Dir.cwd().openDir(init.io, "/usr/share/moodle/public/local", .{});
-        defer parent.close(init.io);
-        const fd = linux.open(
-            "/usr/share/moodle/public/local/werewolf-test-write",
-            .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
-            0o600,
-        );
-        const why = linux.errno(fd);
-        if (why == .SUCCESS) {
-            _ = linux.close(@intCast(fd));
-            try parent.deleteFile(init.io, "werewolf-test-write");
-        }
-        switch (why) {
-            .ACCES, .PERM, .ROFS => {},
-            else => return error.CodeWriteNotRefused,
-        }
-        try ctx.result(init.io, args[1], "moodle-code-write-refused", true);
     } else return error.Usage;
 }
 

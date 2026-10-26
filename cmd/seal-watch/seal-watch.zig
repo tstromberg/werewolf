@@ -1,6 +1,6 @@
 //! seal-watch is the machine seal's seccomp listener. It answers each
 //! system call the seal refers to it, logs each call once, and counts
-//! refusals for seal. See README.md.
+//! refusals for seal. See seal-watch.8.
 
 const std = @import("std");
 const builtin = @import("builtin");

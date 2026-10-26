@@ -49,12 +49,12 @@ ends in `exec fence runit`, so runit stays PID 1.
 library's `system`) gets sh-shim from the `sh-shim` form: it runs one
 program with sh's words and refuses the rest. It is `/bin/sh` only where
 no package or later form gives one, and posture counts it as no shell
-([cmd/sh-shim/README.md](../../cmd/sh-shim/README.md)).
+([cmd/sh-shim/sh-shim.1.md](../../cmd/sh-shim/sh-shim.1.md)).
 
 **Service files.** A service someone else wrote is `/etc/sv/NAME/service`,
 with `run` linked to leash and `finish` to leash-reap. A line is a key and
 words, `"` groups words, and there are no escapes, variables or
-conditionals ([cmd/leash/README.md](../../cmd/leash/README.md) lists the
+conditionals ([cmd/leash/leash.8.md](../../cmd/leash/leash.8.md) lists the
 directives). The build parses each file as leash does (`lib/compose.zig`).
 Every service in `/etc/sv` starts at boot: a machine without one is
 another form. Per-machine values come as files in the config tar or as

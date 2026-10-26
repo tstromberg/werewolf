@@ -1,6 +1,9 @@
 # PHP on werewolf
 
-Run a PHP website with nginx and PHP-FPM, each under its own user.
+Run a PHP website with nginx and PHP-FPM, each under its own user. Hardened PHP
+omits PCRE2 JIT, OPcache JIT and executable huge-page copying, so PHP runs under
+Memory-Deny-Write-Execute (MDWE). Regex matching and OPcache bytecode caching remain
+available.
 
 Install the [build tools](../README.md#build-host), then run these commands
 from the repository root.

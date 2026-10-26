@@ -1,5 +1,5 @@
 //! slot builds the other slot from packages and installs it, arming one try.
-//! Update in slot-update.zig re-exports these as its methods. See README.md.
+//! Update in slot-update.zig re-exports these as its methods. See slot-update.8.
 
 const std = @import("std");
 const apk = @import("apk");

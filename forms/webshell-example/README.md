@@ -17,7 +17,7 @@ interpreters and direct command execution without a shell shim.
 The execution is real, and the leash bounds it, not an empty image: the form
 ships coreutils and net-tools on purpose.
 
-- `/bin/sh` is [sh-shim](../../cmd/sh-shim/README.md), which runs one
+- `/bin/sh` is [sh-shim](../../cmd/sh-shim/sh-shim.1.md), which runs one
   program and refuses `&&`, pipes and `$`.
 - The service's `run` line names the programs it may exec (`id`, `uname`,
   `cat`, `ls` and a few more). Landlock refuses every other file at exec:

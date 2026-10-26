@@ -1,5 +1,5 @@
 //! leash-reap is a leashed service's ./finish. It kills whatever is left in
-//! the service's cgroup and waits for it to die. See README.md.
+//! the service's cgroup and waits for it to die. See leash-reap.8.
 
 const std = @import("std");
 const linux = std.os.linux;

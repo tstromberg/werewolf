@@ -131,19 +131,20 @@ suites:
               status: 404
               body:
                 absent: UP
-          - listeners: tcp
+          # Each port on loopback and no other address, IPv4 or IPv6.
+          - listeners:
+              protocol: tcp
+              port: 8180
             expect:
-              contains:
-                - address: 127.0.0.1
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
                   port: 8180
-                - address: 127.0.0.1
-                  port: 9180
-              absent:
-                - address: 0.0.0.0
-                  port: 8180
-                - address: 0.0.0.0
-                  port: 9180
-                - address: '::'
-                  port: 8180
-                - address: '::'
+          - listeners:
+              protocol: tcp
+              port: 9180
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
                   port: 9180

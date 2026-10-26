@@ -16,7 +16,7 @@ wizard.
 ## Background
 
 leash puts each service in its own cgroup with `memory.max` and
-`pids.max` ([cmd/leash](../../cmd/leash/README.md)); init delegates the
+`pids.max` ([cmd/leash](../../cmd/leash/leash.8.md)); init delegates the
 memory and pids controllers under `/run/cgroup/svc`. Nothing limits CPU:
 a Sidekiq queue flooded by federation, a Minecraft tick loop or a
 Jellyfin transcode can take every CPU from nginx, sshd and the updater.

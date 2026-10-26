@@ -34,6 +34,13 @@ suites:
                 min: 65536
               capabilities: [net_bind_service]
               no_new_privileges: true
+      # No control socket anywhere beneath haproxy's run directory.
+      - name: haproxy-no-sockets
+        steps:
+          - tree: /run/svc/haproxy
+            expect:
+              type:
+                not_equals: socket
   - name: haproxy-wire
     source: driver.zig
     mode: wire
@@ -41,5 +48,5 @@ suites:
     policy:
       pledge: stdio rpath inet
     cases:
-      seed: [haproxy-proxies, haproxy-httpoxy, haproxy-slow, haproxy-no-sockets]
-      verify: [haproxy-proxies, haproxy-httpoxy, haproxy-slow, haproxy-no-sockets]
+      seed: [haproxy-proxies, haproxy-httpoxy, haproxy-slow]
+      verify: [haproxy-proxies, haproxy-httpoxy, haproxy-slow]

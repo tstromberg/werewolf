@@ -1,6 +1,6 @@
 //! dhcp-client gets an IPv4 address from the network's DHCP server and keeps
 //! it: `dhcp up NIC` gets a lease, `dhcp keep` renews it. An unprivileged
-//! engine parses the wire; its parent applies leases. See README.md.
+//! engine parses the wire; its parent applies leases. See dhcp-client.8.
 
 const std = @import("std");
 const linux = std.os.linux;

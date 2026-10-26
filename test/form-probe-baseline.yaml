@@ -953,7 +953,7 @@ replacements:
   haproxy:
     haproxy-setup:
       - test-haproxy/haproxy-setup
-      - test-haproxy-wire/haproxy-no-sockets
+      - test-haproxy/haproxy-no-sockets
   opencanary:
     oc-host-key:
       - test-opencanary/oc-host-key
@@ -977,7 +977,7 @@ replacements:
     squid-config:
       - test-squid/squid-config
       - test-squid/squid-listeners
-      - test-squid-policy/squid-no-control-socket
+      - test-squid/squid-no-control-socket
       - test-squid-policy/squid-resolver
     squid-listeners:
       - test-squid/squid-listeners

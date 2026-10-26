@@ -8,17 +8,17 @@
 base: nginx
 
 packages:
-  - php-8.5-fpm
+  # Policy revision 16 compiles out the executable-memory features required
+  # to run PHP under MDWE. Refuse an older package during image assembly.
+  - php-8.5-fpm>=8.5.12-r16000
 
-# Taken back of werewolf's defaults (lib/allow.zig): PCRE2 compiles each
-# pattern to machine code.
-allow: [jit]
+# Hardened PHP omits PCRE2 JIT, OPcache JIT and executable huge-page copying.
+# Regex matching and OPcache bytecode caching run under MDWE.
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs the application, which is what this form is for
-  kernel-write-xor-execute: PCRE2, PHP's regular expressions, compiles each pattern to machine code (allow jit)
 
 services:
   # nginx, as its own user: it may bind :80 and no other port, read its

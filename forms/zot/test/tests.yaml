@@ -1,6 +1,6 @@
 version: 1
-packages:
-  - crane
+# The registry's own API, as any client speaks it: blobs and a manifest go
+# up by POST and PUT and come back by GET (test/config holds the image).
 suites:
   - name: zot-ca
     readiness: true
@@ -37,9 +37,9 @@ suites:
       alice-auth: /run/config/tests/zot-alice-auth
       bob-auth: /run/config/tests/zot-bob-auth
       layer: /run/config/tests/zot-layer
-    policy:
-      run:
-        - /usr/bin/crane
+      evil: /run/config/tests/zot-evil
+      config: /run/config/tests/zot-config
+      manifest: /run/config/tests/zot-manifest
     cases:
       - name: zot-user
         steps:
@@ -70,22 +70,59 @@ suites:
                   fixture: alice-auth
             expect:
               status: 404
+      # alice pushes app/hello:1: its layer and config, each in one POST,
+      # then its manifest.
       - name: zot-push
         steps:
-          - exec:
-              argv:
-                - /usr/bin/crane
-                - append
-                - -f
-                - /run/config/tests/zot-layer
-                - -t
-                - localhost/app/hello:1
-              env:
-                DOCKER_CONFIG: /run/config/tests/zot-alice
-                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
-                HOME: /tmp
+          - fetch:
+              url: https://localhost/v2/app/hello/blobs/uploads/?digest=sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Content-Type: application/octet-stream
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: alice-auth
+              body:
+                fixture: layer
+                raw: true
             expect:
-              exit: 0
+              status: 201
+            timeout: 30s
+          - fetch:
+              url: https://localhost/v2/app/hello/blobs/uploads/?digest=sha256:54f50b1bad2a431eaa5d58e755c177a99a3dd4d5d832d11e83da424fde011bef
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Content-Type: application/octet-stream
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: alice-auth
+              body:
+                fixture: config
+                raw: true
+            expect:
+              status: 201
+            timeout: 30s
+          - fetch:
+              url: https://localhost/v2/app/hello/manifests/1
+              method: PUT
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Content-Type: application/vnd.docker.distribution.manifest.v2+json
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: alice-auth
+              body:
+                fixture: manifest
+                raw: true
+            expect:
+              status: 201
+              headers:
+                docker-content-digest: sha256:5e6f08e0ab47233594b3894ca531ab20cf9a5afe6986007f460ebabfd9597385
             timeout: 30s
           - file: /data/svc/zot/app/hello/index.json
             expect:
@@ -137,18 +174,16 @@ suites:
               body:
                 step: manifest
                 body: true
-          - exec:
-              argv:
-                - /usr/bin/crane
-                - blob
-                - localhost/app/hello@sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
-              env:
-                DOCKER_CONFIG: /run/config/tests/zot-bob
-                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
-                HOME: /tmp
+          - fetch:
+              url: https://localhost/v2/app/hello/blobs/sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
             expect:
-              exit: 0
-              stdout:
+              status: 200
+              body:
                 fixture: layer
                 raw: true
             timeout: 30s
@@ -163,42 +198,29 @@ suites:
               connect_rules: []
       - name: zot-stranger-pull
         steps:
-          - exec:
-              argv:
-                - /usr/bin/crane
-                - digest
-                - localhost/app/hello:1
-              env:
-                DOCKER_CONFIG: /run/config/tests/zot-none
-                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
-                HOME: /tmp
+          - fetch:
+              url: https://localhost/v2/app/hello/manifests/1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Accept: application/vnd.docker.distribution.manifest.v2+json
             expect:
-              exit:
-                min: 1
-                max: 255
-              stderr:
-                contains: UNAUTHORIZED
+              status: 401
+              json:
+                /errors/0/code: UNAUTHORIZED
             timeout: 30s
       - name: zot-stranger-push
         steps:
-          - exec:
-              argv:
-                - /usr/bin/crane
-                - append
-                - -f
-                - /run/config/tests/zot-layer
-                - -t
-                - localhost/app/evil:1
-              env:
-                DOCKER_CONFIG: /run/config/tests/zot-none
-                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
-                HOME: /tmp
+          - fetch:
+              url: https://localhost/v2/app/evil/blobs/uploads/?digest=sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Content-Type: application/octet-stream
+              body:
+                fixture: layer
+                raw: true
             expect:
-              exit:
-                min: 1
-                max: 255
-              stderr:
-                contains: '401'
+              status: 401
             timeout: 30s
           - file: /data/svc/zot/app/evil
             expect:
@@ -225,24 +247,24 @@ suites:
                   count: 1
                 /layers/0/digest: sha256:7ca39bea2d880a3b1395e3ea542111553f8e046eef601177013fb7c18d6aa901
             name: manifest
-          - exec:
-              argv:
-                - /usr/bin/crane
-                - append
-                - -f
-                - /run/config/tests/zot-evil
-                - -t
-                - localhost/app/hello:1
-              env:
-                DOCKER_CONFIG: /run/config/tests/zot-bob
-                SSL_CERT_FILE: /data/svc/caddy/pki/authorities/local/root.crt
-                HOME: /tmp
+          # bob only pulls: his first upload to app/hello is refused.
+          - fetch:
+              url: https://localhost/v2/app/hello/blobs/uploads/?digest=sha256:9d95cea2d7ebcb77ebea797c61fe775c903388ba5c3ad3626aeb61f0165a5c69
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              headers:
+                Content-Type: application/octet-stream
+              authorization:
+                scheme: Basic
+                credentials:
+                  fixture: bob-auth
+              body:
+                fixture: evil
+                raw: true
             expect:
-              exit:
-                min: 1
-                max: 255
-              stderr:
-                contains: DENIED
+              status: 403
+              json:
+                /errors/0/code: DENIED
             timeout: 30s
           - fetch:
               url: https://localhost

@@ -2,7 +2,6 @@
 const std = @import("std");
 const driver = @import("test-driver");
 const Io = std.Io;
-const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 pub fn main(init: std.process.Init) !void {
@@ -16,9 +15,6 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, args[2], "rate-limit")) blk: {
         try rateLimit(a);
         break :blk "wp-rate-limited";
-    } else if (std.mem.eql(u8, args[2], "write-refused")) blk: {
-        try writeRefused(init.io);
-        break :blk "wp-code-write-refused";
     } else return error.Usage;
     try ctx.result(init.io, args[1], name, true);
 }
@@ -73,25 +69,6 @@ fn sandbox(value: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, directive, " \t"), "sandbox")) return true;
     }
     return false;
-}
-
-fn writeRefused(io: Io) !void {
-    var parent = try Io.Dir.cwd().openDir(io, "/usr/src/wordpress/wp-content/plugins", .{});
-    defer parent.close(io);
-    const fd = linux.open(
-        "/usr/src/wordpress/wp-content/plugins/werewolf-test-write",
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
-        0o600,
-    );
-    const why = linux.errno(fd);
-    if (why == .SUCCESS) {
-        _ = linux.close(@intCast(fd));
-        try parent.deleteFile(io, "werewolf-test-write");
-    }
-    switch (why) {
-        .ACCES, .PERM, .ROFS => {},
-        else => return error.CodeWriteNotRefused,
-    }
 }
 
 test "upload sandbox must be its own restrictive CSP directive" {

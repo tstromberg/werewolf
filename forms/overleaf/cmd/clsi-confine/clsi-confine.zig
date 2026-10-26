@@ -80,7 +80,7 @@ fn confine(a: mem.Allocator, m: std.process.Init.Minimal) !noreturn {
         "no_new_privs",
     );
     // TeX compiles nothing as it runs, unlike clsi's Node.
-    sandbox.refuseExecGain();
+    try sandbox.refuseExecGain();
     try rules.restrict();
 
     const env = try environment(a, m.environ.block.slice, cache);

@@ -142,16 +142,33 @@ suites:
             expect:
               body:
                 matches: "(^|\n)forwarded_for delete(\n|$)"
+          # ICP, HTCP and SNMP are closed on every address, loopback too.
+          - listeners: all
+            expect:
+              absent:
+                - port: 3130
+                - port: 4827
+                - port: 3401
+      # No control socket anywhere beneath Squid's run directory.
+      - name: squid-no-control-socket
+        steps:
+          - tree: /run/svc/squid
+            expect:
+              type:
+                not_equals: socket
+      # Squid on 3128 and nothing else outside loopback; the resolver, unwound's,
+      # on 127.0.0.53 (UDP: squid-resolver).
       - name: squid-listeners
         steps:
-          - listeners:
-              protocol: tcp
-              port: 3128
+          - listeners: tcp
             expect:
               equals:
                 - protocol: tcp
                   address: 0.0.0.0
                   port: 3128
+                - protocol: tcp
+                  address: 127.0.0.53
+                  port: 53
       - name: squid-unlisted
         steps:
           - exec:
@@ -294,8 +311,6 @@ suites:
       pledge: stdio rpath inet
     cases:
       seed:
-        - squid-no-control-socket
         - squid-resolver
       verify:
-        - squid-no-control-socket
         - squid-resolver

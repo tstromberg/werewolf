@@ -1,5 +1,5 @@
 //! reboot and poweroff stop the machine cleanly through runit's stage 3, then
-//! restart it or turn it off. One program serves both names. See README.md.
+//! restart it or turn it off. One program serves both names. See reboot.8.
 
 const std = @import("std");
 const linux = std.os.linux;

@@ -1,5 +1,5 @@
 //! iface-up brings a network interface up, optionally with an address and a
-//! default route. See README.md.
+//! default route. See iface-up.8.
 //!
 //!     iface-up NIC                          bring NIC up (lo, say)
 //!     iface-up NIC ADDR/PREFIX [GATEWAY]    and give it ADDR, and a default route

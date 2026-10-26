@@ -1,6 +1,6 @@
 //! posture measures a Linux machine's security posture and reports each
 //! check as passed, failed or skipped, as text, JSON or one console line.
-//! On werewolf it also runs once a boot as a service. See README.md.
+//! On werewolf it also runs once a boot as a service. See posture.8.
 const attacks = @import("attacks.zig");
 const boot = @import("boot.zig");
 const cmdline = @import("cmdline");

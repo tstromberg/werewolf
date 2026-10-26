@@ -910,6 +910,12 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         }, .env = env }}, .{});
         if (!ran.ok) return steps.fail("make programs failed");
     }
+    // Manuals are installed beside binaries by make programs. Track their
+    // contents too, so a documentation-only edit invalidates the overlay.
+    var manuals: std.ArrayList([]const u8) = .empty;
+    for (b.overlay) |dir|
+        try rootfsInputs(io, gpa, try b.path("{s}/usr/share/man", .{dir}), &manuals);
+    b.bins = try mem.concat(gpa, []const u8, &.{ b.bins, manuals.items });
     try packages.kernel(&b);
     if (!image_goals and !goals.lock) return;
     try packages.apkoConfig(&b, config);

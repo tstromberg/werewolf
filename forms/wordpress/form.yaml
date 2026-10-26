@@ -40,7 +40,6 @@ packages:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs WordPress
-  kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
 
 services:
   # nginx, as its own user: it may bind :80 and no other port, read its

@@ -4,5 +4,5 @@
 # nginx starts, leashed, and stays up.
 
 seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
-unseen  service-down      leash: \{"event":"(down|retry(?![^\r\n]*"why":"waiting for syslogd"))"
+up  service-down
 unseen  nginx-failed      \[(emerg|alert|crit)\]

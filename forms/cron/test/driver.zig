@@ -1,11 +1,18 @@
-//! Run real supercronic jobs through sh-shim, under the cron account and pledge.
+//! Run real supercronic jobs through sh-shim, under the cron service as it
+//! ships: leash reads a copy of /etc/sv/cron/service that differs only in
+//! its crontab and in letting this program run as the job.
 const std = @import("std");
 const driver = @import("test-driver");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-const directory = "/data/svc/test-cron-jobs";
 const program = "/usr/lib/werewolf/test-cron-jobs";
+/// name is the copy's service: leash takes it from its directory's name.
+const name = "cron-check";
+const descriptor = "/run/cron-check/" ++ name;
+const crontab = "/run/svc/" ++ name ++ "/crontab";
+const directory = "/data/svc/" ++ name;
+const log_path = "/run/cron-check/log";
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -19,10 +26,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len != 4) return error.Usage;
     const ctx = try driver.Run.load(io, a, args[3]);
-    if (std.mem.eql(u8, args[2], "prepare")) {
-        try Io.Dir.cwd().deleteTree(io, directory);
-        try ctx.result(io, args[1], "cron-fixture-clean", true);
-    } else if (std.mem.eql(u8, args[2], "jobs")) {
+    if (std.mem.eql(u8, args[2], "jobs")) {
         try jobs(io, a);
         try ctx.result(io, args[1], "cron-job-runs", true);
     } else if (std.mem.eql(u8, args[2], "audit")) {
@@ -37,33 +41,52 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn jobs(io: Io, a: Allocator) !void {
-    var dir = try Io.Dir.cwd().openDir(io, directory, .{});
-    defer dir.close(io);
-    const crontab = try a.print(
-        "SHELL=/usr/lib/werewolf/sh-shim\n" ++
-            "* * * * * * * {s} job ran\n" ++
+    const cwd = Io.Dir.cwd();
+    for ([_][]const u8{ "/run/cron-check", "/run/svc/" ++ name, directory }) |d|
+        try cwd.deleteTree(io, d);
+    try cwd.createDirPath(io, descriptor);
+    try cwd.createDirPath(io, "/run/svc/" ++ name);
+    try cwd.writeFile(io, .{
+        .sub_path = crontab,
+        .data = "SHELL=/usr/lib/werewolf/sh-shim\n" ++
+            "* * * * * * * " ++ program ++ " job ran\n" ++
             "* * * * * * * /usr/bin/zstd -V\n" ++
-            "* * * * * * * {s} job shell-ran && {s} job shell-ran\n",
-        .{ program, program, program },
-    );
-    try dir.writeFile(io, .{ .sub_path = "crontab", .data = crontab });
-    var log = try dir.createFile(io, "cron.log", .{});
+            "* * * * * * * " ++ program ++ " job shell-ran && " ++ program ++ " job shell-ran\n",
+    });
+    // The shipped policy, unchanged but for the crontab and the one program.
+    const shipped = try driver.system.read(io, a, "/etc/sv/cron/service");
+    if (std.mem.count(u8, shipped, "/etc/cron/crontab") != 1) return error.CrontabUnnamed;
+    try cwd.writeFile(io, .{
+        .sub_path = descriptor ++ "/service",
+        .data = try std.mem.concat(a, u8, &.{
+            try std.mem.replaceOwned(u8, a, shipped, "/etc/cron/crontab", crontab),
+            "run " ++ program ++ "\n",
+        }),
+    });
+    var log = try cwd.createFile(io, log_path, .{});
     defer log.close(io);
-    var daemon = try std.process.spawn(io, .{
-        .argv = &.{ "/usr/bin/supercronic", "-json", "-no-reap", directory ++ "/crontab" },
-        .cwd = .{ .path = directory },
+    var leash = try std.process.spawn(io, .{
+        .argv = &.{"/usr/lib/werewolf/leash"},
+        .cwd = .{ .path = descriptor },
         .stdin = .ignore,
         .stdout = .{ .file = log },
         .stderr = .{ .file = log },
     });
-    defer daemon.kill(io);
+    defer {
+        // Ends supercronic and every job, as runit's down would.
+        cwd.writeFile(
+            io,
+            .{ .sub_path = "/run/cgroup/svc/" ++ name ++ "/cgroup.kill", .data = "1" },
+        ) catch {};
+        leash.kill(io);
+    }
     const stop = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
     while (true) {
         var attempt: std.heap.ArenaAllocator = .init(a);
         defer attempt.deinit();
         const gpa = attempt.allocator();
-        const body = try driver.system.read(io, gpa, directory ++ "/cron.log");
-        const marker: ?Io.File = dir.openFile(io, "ran", .{}) catch |err| blk: {
+        const body = try driver.system.read(io, gpa, log_path);
+        const marker: ?Io.File = cwd.openFile(io, directory ++ "/ran", .{}) catch |err| blk: {
             if (err != error.FileNotFound) return err;
             break :blk null;
         };

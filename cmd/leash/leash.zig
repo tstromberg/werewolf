@@ -1,7 +1,7 @@
 //! leash starts a service someone else wrote as its own user, confined by
 //! Landlock, a seccomp pledge and a cgroup. /etc/sv/NAME/run links to it, and
 //! it reads /etc/sv/NAME/service. Run by /etc/sv/NAME/narrow/PROGRAM, it
-//! starts that program on a narrower leash. See README.md.
+//! starts that program on a narrower leash. See leash.8.
 
 const std = @import("std");
 const allowances = @import("allow");
@@ -371,7 +371,8 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "caps net_admin: this machine does not allow netadmin", .{});
     dropTo(user, groups, keep, login) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
-    if (!login and !usesJit(s)) sandbox.refuseExecGain();
+    if (!login and !usesJit(s)) sandbox.refuseExecGain() catch |err|
+        l.fail(.park, "Memory-Deny-Write-Execute: {s}", .{sandbox.whyNot(gpa, err)});
 
     // --- leashed --------------------------------------------------------------
 
@@ -558,7 +559,8 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
 
     check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) catch
         l.fail(.park, "no_new_privs: refused", .{});
-    sandbox.refuseExecGain();
+    sandbox.refuseExecGain() catch |err|
+        l.fail(.park, "Memory-Deny-Write-Execute: {s}", .{sandbox.whyNot(gpa, err)});
     const rules = sandbox.Ruleset.init(.{ .sockets = true }) catch |err|
         l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     for (narrow_floor) |f| allow(rules, f.path, f.access, .optional) catch {};
@@ -865,8 +867,8 @@ fn allowExecSet(
     }
 }
 
-/// usesJit reports whether s runs a JIT compiler (PostgreSQL's LLVM, PHP's
-/// PCRE2/OPcache, Ruby's FFI callbacks, the JVM, .NET, BEAM, Wasmtime, or Node
+/// usesJit reports whether s runs a JIT compiler (PostgreSQL's LLVM,
+/// Ruby's FFI callbacks, the JVM, .NET, BEAM, Wasmtime, or Node
 /// without --jitless), or an
 /// OCI image on a machine that allowed jit. Every other service sets
 /// Memory-Deny-Write-Execute on itself even when the machine allowed jit.
@@ -885,7 +887,7 @@ fn usesJit(s: service.Service) bool {
 fn isJitProgram(path: []const u8) bool {
     const base = std.fs.path.basename(path);
     for ([_][]const u8{
-        "postgres", "php",      "php-fpm", "java", "dotnet", "beam.smp", "erl", "node", "nodejs",
+        "postgres", "java",     "dotnet",  "beam.smp", "erl", "node", "nodejs",
         "ruby",     "jellyfin", "postdoc",
     }) |jit| {
         if (std.mem.eql(u8, base, jit)) return true;
@@ -1375,8 +1377,14 @@ test usesJit {
     try testing.expect(!usesJit(s));
     s.exec = &.{ "/usr/bin/supercronic", "/etc/cron/crontab" };
     s.run = &.{"/usr/bin/php"};
-    try testing.expect(usesJit(s));
+    try testing.expect(!usesJit(s));
     s.run = &.{};
+    // Hardened PHP has neither PCRE2 nor OPcache JIT, including on a machine
+    // where another service allowed JIT and init could not set MDWE globally.
+    for ([_][]const u8{ "/usr/bin/php", "/usr/bin/php-fpm" }) |program| {
+        s.exec = &.{program};
+        try testing.expect(!usesJit(s));
+    }
     for ([_][]const u8{
         "/usr/bin/ruby",
         "/usr/lib/jellyfin/jellyfin",

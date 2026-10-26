@@ -1,7 +1,7 @@
 //! service-config renders a service's settings into the file its daemon reads.
 //! leash runs it as `service-config DIR [NAME]` at each start of a service with
 //! settings; NAME, for a service in an image's tree, whose DIR is its /tmp.
-//! See README.md.
+//! See service-config.8.
 
 const std = @import("std");
 const settings = @import("settings");

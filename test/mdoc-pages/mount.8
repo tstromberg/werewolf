@@ -1,0 +1,56 @@
+.Dd October 25, 2026
+.Dt MOUNT 8
+.Os Werewolf
+.Sh NAME
+.Nm mount
+.Nd attach filesystems without relaxing mount restrictions
+.Sh SYNOPSIS
+.Nm
+.Fl t Ar type
+.Op Fl o Ar options
+.Ar source target
+.Nm
+.Fl Fl bind
+.Ar source target
+.Nm
+.Fl o Ar remount Ns Op ,options
+.Ar target
+.Sh DESCRIPTION
+The Werewolf
+.Nm
+utility mounts, binds and remounts the filesystems used during boot.
+It is normally called by
+.Xr init 8 .
+It does not read fstab, probe filesystem types, resolve labels or
+configure loop devices.
+.Pp
+Supported types are proc, sysfs, securityfs, cgroup2, devtmpfs, devpts,
+tmpfs, ext4 and iso9660.
+Targets are restricted to the boot filesystem locations beneath
+.Pa /proc , /sys , /dev , /run , /tmp , /var/tmp , /data , /boot , /mnt
+and
+.Pa /oci .
+Mounts over the root, /etc or /usr are refused.
+Paths must be absolute, without dot components, and are resolved without symlinks.
+.Pp
+New mounts are nosuid and noexec, with nodev except for device filesystems
+and nosymfollow except for proc, sysfs and devtmpfs.
+The symfollow option withholds nosymfollow from a new mount or bind.
+Binds retain the source's restrictions.
+Remounts only add restrictions; rw and symfollow are refused on remount.
+The suid, dev, exec and strictatime options are refused.
+.Pp
+Mounts are built and restricted while detached, then attached.
+The utility keeps CAP_SYS_ADMIN alone and installs a system call filter
+before performing mount operations.
+After
+.Xr fence 8 ,
+ordinary processes cannot mount even through this utility.
+.Sh EXIT STATUS
+.Ex -std
+Successful operations produce no output.
+Failures include the kernel's reason when available.
+.Sh SEE ALSO
+.Xr fence 8 ,
+.Xr init 8 ,
+.Xr mount-broker 8

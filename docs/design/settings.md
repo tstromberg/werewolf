@@ -51,7 +51,7 @@ the declared keys of the image's file, so its policy (Tailscale's
 
 At each start leash runs `service-config` as the service, before any
 `before` line, with the image's declarations on its stdin
-([cmd/service-config](../../cmd/service-config/README.md)). A refusal
+([cmd/service-config](../../cmd/service-config/service-config.8.md)). A refusal
 parks the service with one line naming the setting and reason, never the
 value, which `howl pack` already showed its user.
 

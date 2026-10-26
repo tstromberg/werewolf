@@ -1,6 +1,6 @@
 //! runit-stage is runit's three stages, run as /etc/runit/1, 2 and 3. Stage 1
 //! does nothing, stage 2 runs runsvdir, and stage 3 stops the services and
-//! has the mount broker unmount /data. See README.md.
+//! has the mount broker unmount /data. See runit-stage.8.
 
 const std = @import("std");
 const Io = std.Io;

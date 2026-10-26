@@ -41,7 +41,7 @@ Each control holds until a reboot. [security.md](../security.md) has more.
 | fence's Landlock domain | writing `/proc/sys`, mounting, opening devices | `files-system-writes`, `files-device-reads` |
 | `hidepid=invisible`; memory filesystems `noexec` | seeing others' processes; running what one wrote | `processes-hidden`, `files-exec-refused` |
 | Command line, from the image's arch and allowances (`lib/compose.zig`): `proc_mem.force_override=never`, `slab_nomerge`, `page_alloc.shuffle=1`, and KVM kept off without `kvm` (`kvm-arm.mode=none`; on x86 `initcall_blacklist=vt_init,svm_init`); debugfs, IPv6 and 32-bit emulation are not built | what has no runtime switch | `kernel-cmdline` |
-| leash, for services someone else wrote ([README](../../cmd/leash/README.md)); werewolf's root programs separate themselves ([programs.md](../programs.md)) | a service reaching past its grant | `processes-services-leashed`, `processes-leash-attack` |
+| leash, for services someone else wrote ([manual](../../cmd/leash/leash.8.md)); werewolf's root programs separate themselves ([programs.md](../programs.md)) | a service reaching past its grant | `processes-services-leashed`, `processes-leash-attack` |
 | Audit of refused execs, locked (`lib/audit.zig`) | an intruder's first step unrecorded | `kernel-exec-log` |
 
 **The seal** passes a call only if a promise allows it, werewolf's own or a

@@ -3,7 +3,8 @@
 # its domain, localhost, for which Caddy's own CA signs, and two users,
 # alice, who pushes, and bob, who only pulls; their passwords are
 # werewolf-check-alice and werewolf-check-bob (htpasswd -nbBC 10 made
-# these lines), which test/checks signs in with.
+# these lines), which the tests sign in with, and the image they push: one
+# layer, its config and its manifest, whose digests tests.yaml names.
 set -eu
 mkdir -p "$1/zot" "$1/caddy"
 umask 077
@@ -14,18 +15,12 @@ EOT
 echo '{"pushers":["alice"]}' >"$1/zot/settings.json"
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
 
-# crane reads fixed credentials; all network activity still goes through TLS.
 mkdir -p "$1/tests"
-for user in alice bob none; do
-	mkdir -p "$1/tests/zot-$user"
-	if [ "$user" = none ]; then
-		printf '%s\n' '{"auths":{}}' >"$1/tests/zot-$user/config.json"
-	else
-		auth=$(printf '%s' "$user:werewolf-check-$user" | base64 | tr -d '\n')
-		printf '{"auths":{"localhost":{"auth":"%s"}}}\n' "$auth" \
-			>"$1/tests/zot-$user/config.json"
-		printf '%s' "$auth" >"$1/tests/zot-$user-auth"
-	fi
+for user in alice bob; do
+	printf '%s' "$user:werewolf-check-$user" | base64 | tr -d '\n' >"$1/tests/zot-$user-auth"
 done
-cp "$(dirname "$0")/layer.tar.gz" "$1/tests/zot-layer"
-cp "$(dirname "$0")/evil.tar.gz" "$1/tests/zot-evil"
+t=$(dirname "$0")
+cp "$t/layer.tar.gz" "$1/tests/zot-layer"
+cp "$t/evil.tar.gz" "$1/tests/zot-evil"
+cp "$t/image-config.json" "$1/tests/zot-config"
+cp "$t/image-manifest.json" "$1/tests/zot-manifest"

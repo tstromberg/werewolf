@@ -17,6 +17,18 @@ suites:
             await: 120s
       - name: ph-local
         steps:
+          # fence answers DNS from the machine's own networks alone: 53 is
+          # listened on for the LAN, never publicly.
+          - file: /usr/share/werewolf/net
+            expect:
+              body:
+                matches: "(^|\n)listen tcp 53 lan(\n|$)"
+                not_matches: "(^|\n)listen tcp 53(\n|$)"
+          - file: /usr/share/werewolf/net
+            expect:
+              body:
+                matches: "(^|\n)listen [0-9]+ udp 53 lan(\n|$)"
+                not_matches: "(^|\n)listen [0-9]+ udp 53(\n|$)"
           - file: /data/svc/pi-hole/etc/pihole/pihole.toml
             expect:
               body:

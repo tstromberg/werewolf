@@ -17,6 +17,7 @@ net:
 packages:
   - bash
   - busybox-full
+  - man-db                 # reads the mdoc manuals installed with guest programs
   - python-3.15
 
 # SSH-backed su, taking ed25519 key files too: Lima's own, and ~/.ssh's.

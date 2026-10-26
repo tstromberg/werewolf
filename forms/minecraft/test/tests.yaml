@@ -20,12 +20,23 @@ suites:
           - file: /data/svc/minecraft/server.properties
             expect:
               body:
-                contains_all:
-                  - "white-list=true\n"
-                  - "enforce-whitelist=true\n"
-                  - "online-mode=true\n"
-                  - "enable-rcon=false\n"
-                  - "enable-query=false\n"
+                matches: "(^|\n)white-list=true\n"
+          - file: /data/svc/minecraft/server.properties
+            expect:
+              body:
+                matches: "(^|\n)enforce-whitelist=true\n"
+          - file: /data/svc/minecraft/server.properties
+            expect:
+              body:
+                matches: "(^|\n)online-mode=true\n"
+          - file: /data/svc/minecraft/server.properties
+            expect:
+              body:
+                matches: "(^|\n)enable-rcon=false\n"
+          - file: /data/svc/minecraft/server.properties
+            expect:
+              body:
+                matches: "(^|\n)enable-query=false\n"
           - file: /data/svc/minecraft/eula.txt
             expect:
               body:

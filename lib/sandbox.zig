@@ -130,7 +130,7 @@ pub fn dropWith(id: u32, root: ?[*:0]const u8, groups: []const linux.gid_t) !voi
     const none = [2]CapSets{ .{}, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&none)), "capset");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
-    refuseExecGain();
+    try refuseExecGain();
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
     tie.keep();
 }
@@ -152,7 +152,7 @@ pub fn dropKeeping(id: u32, keep: u32) !void {
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
-    refuseExecGain();
+    try refuseExecGain();
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
     // Changing uid resets dumpability, including for inherited role sockets.
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
@@ -170,18 +170,19 @@ pub fn keepOnly(keep: u32) !void {
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
-    refuseExecGain();
+    try refuseExecGain();
     tie.keep();
 }
 
 /// refuseExecGain sets Memory-Deny-Write-Execute on this process, which its
 /// children inherit and none can undo. On a machine that allowed jit for one
 /// service, init could not set it on PID 1; every helper and non-JIT service
-/// sets it here.
-pub fn refuseExecGain() void {
+/// sets it here. Failure stops confinement rather than leaving executable
+/// memory writable.
+pub fn refuseExecGain() !void {
     const PR_SET_MDWE = 65;
     const PR_MDWE_REFUSE_EXEC_GAIN = 1;
-    _ = linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0);
+    _ = try sys(linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0), "memory-deny-write-execute");
 }
 
 /// bound drops every capability not in keep from the bounding set. EINVAL
@@ -478,7 +479,7 @@ pub const Filter = struct {
             linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
             "no_new_privs",
         );
-        refuseExecGain();
+        try refuseExecGain();
         _ = try sys(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &prog), "seccomp");
     }
 

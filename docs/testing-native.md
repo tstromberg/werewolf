@@ -104,15 +104,15 @@ still counts, the paths it matches. `content: {absent: X}` or `{contains_none: [
 refuses literal or fixture bytes in each regular file; `mode: {not_matches: '[2367]$'}`
 refuses world-writable entries. `write` opens its path for writing as the suite's user,
 creating it exclusively, or with `existing: true` untruncated; `errno` is `EACCES`,
-`EPERM`, `EROFS` or `one_of` them. Success removes its file and fails. Leashed, it needs
-`wpath` and a `read` grant over the path. A `tcp` `exchange` lists `send` (text or
-reference), `pause: 1s` (to `60s`), `expect` and a last `close`. An `expect` waits until
-the reply since the last send holds its `prefix`, `contains` and `matches`, failing once
-it cannot or the stream ends. `close: eof`, `reset` or both needs the server to close
-with no byte past what the last `expect` saw: anchor it with `$`. `tls: verify` checks
-`ca` (else the system's CAs) and the host; `insecure`, neither. `squat: SERVICE`, run as
-root with `/usr/bin/sv` and `/usr/bin/drill` in `policy.run`, stops a DNS service,
-proves a socket on its port cannot send off the VM, restores it and awaits an answer.
+`EPERM`, `EROFS` or `one_of` them, and leashed (`wpath`, a `read` grant) only `EROFS`:
+its own sandbox refuses the rest. Success removes its file and fails. A `tcp` `exchange`
+lists `send` (text or reference), `pause: 1s` (to `60s`), `expect` and a last `close`.
+An `expect` waits until the reply since the last send holds its `prefix`, `contains`
+and `matches`, failing once it cannot or the stream ends. `close: eof`, `reset` or both
+needs the server to close with no byte past what the last `expect` saw: anchor it with
+`$`. `tls: verify` checks `ca` (else the system's CAs) and the host; `insecure`,
+neither. `squat: SERVICE` (root, `/usr/bin/sv`, `/usr/bin/drill` in `policy.run`) stops
+a DNS service, proves its port cannot send off the VM, restores it and awaits an answer.
 
 ## HTTP workflows
 

@@ -37,7 +37,7 @@ published third-party packages. See [the design](docs/design/package-promotion.m
 
 | Path | What lives there |
 |---|---|
-| `cmd/NAME/` | one program per job, written in Zig, each with a README on how it works |
+| `cmd/NAME/` | one program per job, written in Zig; guest commands have mdoc manual pages |
 | `cmd/howl/` | `howl`, the command users build and run machines with |
 | `lib/` | code the programs share: sandboxing, seccomp promises, verity, forms |
 | `../packages/CATEGORY/NAME/` | recipes or Wolfi derivations, maintenance metadata, patches, locks and tests |
@@ -61,8 +61,12 @@ commands. Python and Go appear only where a form runs them.
 2. Before you push, run `make test`, `make lint` (`make fix` repairs most of it) and
    `make check`. CI runs `make check` on x86_64 and arm64;
    [docs/testing.md](docs/testing.md) explains each check.
-3. A new program gets a README on the [design doc template](docs/design/TEMPLATE.md)
-   (100 lines at most), and unit tests beside its code (`test "..." {}`).
+3. A guest command gets a [Markdown manual](docs/manuals.md) beside its source, named
+   `NAME.1.md` for user commands or `NAME.8.md` for administration and boot helpers.
+   Describe its invocation, options, files and operational limits; `make man-lint`
+   compiles it to NetBSD-style mdoc and checks the result. The build installs manuals
+   with their programs in `/usr/share/man`, including in APKs. Host tools keep READMEs.
+   Put unit tests beside the code (`test "..." {}`).
 4. A larger change starts as a design doc in `docs/design/`, on the same template.
 5. Service and application forms need at least five distinct integration cases
    covering useful behavior and refusals. Run `make form-coverage` to inspect
@@ -78,9 +82,11 @@ Three people set the bar:
   what it doesn't need before it touches untrusted input, and fails closed.
 - **Comments, as Rob Pike would write them:** concise, and only where the
   code can't say why. Don't restate the code. If an explanation runs past
-  a few lines, it belongs in the program's README.
+  a few lines, it belongs in the program's manual or a design document.
 - **Documentation, as Wietse Venema would write it:** clear, concise and
-  readable. No unnecessary words or sentences. READMEs and design docs use
+  readable. No unnecessary words or sentences. Manuals compile to mdoc semantic macros
+  and conventional sections (NAME, SYNOPSIS, DESCRIPTION, FILES, SEE ALSO),
+  with one sentence per source line where practical. READMEs and design docs use
   [the template](docs/design/TEMPLATE.md)'s headings; a README stays within
   100 lines, a design doc within 120, any other doc in docs/ within 175, and
   every line within 88 columns (`make fix` rewraps prose).

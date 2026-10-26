@@ -29,7 +29,7 @@ const min_data_key = settings.min_data_key;
 /// when the config has a data.key. A disk is formatted only while blkid finds
 /// it blank, since /data may hold the only copy of something. When it cannot
 /// use a disk, /data is an empty read-only tmpfs and /run/werewolf/nodata says
-/// why (see README.md).
+/// why (see init.8.md).
 pub fn data(m: *Machine) void {
     mkdir("/data", 0o755);
     if (m.cmd.slots != null and m.mountSource("/boot") != null) {

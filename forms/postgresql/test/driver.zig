@@ -41,8 +41,8 @@ fn policy(io: Io, gpa: std.mem.Allocator, ctx: driver.Run, suite: []const u8) !v
     };
     try ctx.result(io, suite, "shim-policy", linux.errno(n) == .SUCCESS and
         std.mem.eql(u8, link[0..n], "/usr/lib/werewolf/sh-shim") and no_preload and
-        std.mem.indexOf(u8, service, "run /usr/lib/werewolf/sh-shim\n") != null and
-        std.mem.indexOf(u8, service, "run /usr/bin/locale\n") != null);
+        hasLine(service, "run /usr/lib/werewolf/sh-shim") and
+        hasLine(service, "run /usr/bin/locale"));
     const child = "/usr/lib/werewolf/test-postgres-policy shim-child";
     for ([_][]const u8{
         child ++ " < /dev/null",
@@ -80,4 +80,20 @@ fn policy(io: Io, gpa: std.mem.Allocator, ctx: driver.Run, suite: []const u8) !v
         refused.term.exited == 126 and absent and
         std.mem.indexOf(u8, refused.stderr, "refused: only trailing /dev/null redirects") != null);
     try ctx.result(io, suite, "no-tcp-listener", try driver.tcpPrivate(io, gpa, 5432, false));
+}
+
+/// hasLine reports whether text holds line as one whole line: a grant
+/// commented out, or another's that ends in it, is not the grant.
+fn hasLine(text: []const u8, line: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |l| if (std.mem.eql(u8, l, line)) return true;
+    return false;
+}
+
+test "a grant is a whole line" {
+    const service = "exec /usr/bin/postgres\n# run /usr/bin/locale\n" ++
+        "run /usr/lib/werewolf/sh-shim\n";
+    try std.testing.expect(hasLine(service, "run /usr/lib/werewolf/sh-shim"));
+    try std.testing.expect(!hasLine(service, "run /usr/bin/locale"));
+    try std.testing.expect(!hasLine("xrun /usr/bin/locale\n", "run /usr/bin/locale"));
 }

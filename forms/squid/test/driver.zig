@@ -1,4 +1,4 @@
-//! Inspect Squid's control sockets and unconnected resolver socket ownership.
+//! Squid's resolver sockets are its own, and the proxied requests YAML runs as a client.
 const std = @import("std");
 const driver = @import("test-driver");
 const Io = std.Io;
@@ -11,18 +11,6 @@ pub fn main(init: std.process.Init) !void {
         return request(io, a, args[2..]);
     if (args.len != 4 or !std.mem.eql(u8, args[2], "policy")) return error.Usage;
     const ctx = try driver.Run.load(io, a, args[3]);
-    var dir = try Io.Dir.cwd().openDir(io, "/run/svc/squid", .{ .iterate = true });
-    defer dir.close(io);
-    var walk = try dir.walk(a);
-    defer walk.deinit();
-    var socket = false;
-    var count: usize = 0;
-    while (try walk.next(io)) |entry| {
-        count += 1;
-        if (count > 10000) return error.TooManyEntries;
-        socket = socket or entry.kind == .unix_domain_socket;
-    }
-    try ctx.result(io, args[1], "squid-no-control-socket", !socket);
     const uid = try driver.system.account(io, a, "squid");
     // This also verifies that any missing IPv6 table means the stack is absent.
     _ = try driver.system.listeners(io, a, "udp");

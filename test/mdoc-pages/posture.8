@@ -1,0 +1,79 @@
+.Dd October 25, 2026
+.Dt POSTURE 8
+.Os Werewolf
+.Sh NAME
+.Nm posture
+.Nd report the running machine's protections
+.Sh SYNOPSIS
+.Nm
+.Op Fl Fl extended
+.Op Fl Fl attack
+.Op Fl Fl no-cache
+.Op Fl Fl verbose
+.Op Fl Fl json | Fl Fl line | Fl Fl summary
+.Sh DESCRIPTION
+The
+.Nm
+utility checks kernel protections, processes, filesystems and network policy.
+It reports passes, failures and checks it cannot perform, with reasons.
+On Werewolf it also checks the machine seal and service confinement.
+Other Linux systems receive the applicable generic checks.
+.Pp
+The options are as follows:
+.Bl -tag -width "--no-cache"
+.It Fl Fl extended
+Include protections Werewolf deliberately leaves optional, such as forced
+CPU mitigations and wiping freed memory.
+.It Fl Fl attack
+Run additional intrusion probes.
+These expect the kernel to refuse access; use only when testing is intended.
+.It Fl Fl no-cache
+Do not use the boot report for checks this invocation cannot perform.
+Report those checks as skipped.
+.It Fl Fl verbose
+Write phases, timings and walk progress to standard error.
+.It Fl Fl json
+Write JSON, including the source, expected value, observation and comparison.
+.It Fl Fl line
+Write one line with failure identifiers, counts and JSON.
+.It Fl Fl summary
+Print the login summary: identity, state, counts and declared gaps.
+.El
+.Pp
+Without a format option, output is human-readable text.
+Results taken from the boot report are marked as cached.
+Running as root permits more checks; some checks require the boot service's
+context even when the caller is root.
+.Pp
+When invoked as
+.Pa /etc/sv/posture/run ,
+.Nm
+waits for services to settle, writes the boot report and login message,
+then takes itself down.
+Checks may leave refusal records in the kernel log and console.
+.Sh ENVIRONMENT
+.Bl -tag -width WEREWOLF_CHECK
+.It Ev WEREWOLF_CHECK
+The value 1 enables intrusion probes, as does the kernel argument
+.Li werewolf.check=1 .
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /run/werewolf/posture.json
+Boot report used for cached results.
+.It Pa /run/werewolf/motd
+Boot login message.
+.It Pa /usr/share/werewolf/weaknesses
+Failures the image declares and excuses.
+.El
+.Sh EXIT STATUS
+The exit status is 1 if any check fails, including an excused failure,
+and 0 if no check fails.
+Invalid arguments produce status 2.
+.Sh EXAMPLES
+.Dl posture --summary
+.Dl posture --json
+.Sh SEE ALSO
+.Xr fence 8 ,
+.Xr leash 8 ,
+.Xr seal 8

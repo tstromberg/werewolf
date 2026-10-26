@@ -5,5 +5,5 @@
 
 seen    caddy-leashed     leash: \{"event":"start","service":"caddy"
 seen    caddy-serving     "msg":"serving initial configuration"
-unseen  service-down      leash: \{"event":"(down|retry(?![^\r\n]*"why":"waiting for syslogd"))"
+up  service-down
 unseen  caddy-error       "level":"error"

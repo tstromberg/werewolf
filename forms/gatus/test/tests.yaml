@@ -8,7 +8,10 @@ suites:
             await: 60s
             expect:
               user: gatus
+              uid:
+                min: 65536
               capabilities: []
+              no_new_privileges: true
       - name: gatus-health
         steps:
           - fetch:

@@ -517,7 +517,7 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     // mkfs.erofs gives / the builder's uid and mode 0777, which sshd's
     // StrictModes rightly refuses keys under. Then, if the image takes the
     // sh shim, /bin/sh as a link to it, which a package's sh, mksh's,
-    // or a form's replaces (cmd/sh-shim/README.md).
+    // or a form's replaces (cmd/sh-shim/sh-shim.1.md).
     const mtree = try b.path("{s}/root.mtree", .{out});
     const head = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n";
     const sh =

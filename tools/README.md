@@ -66,6 +66,13 @@ swtpm endpoint (a port on 127.0.0.1, or `unix:PATH`), as stage0 and the mount br
 drive `/dev/tpmrm0`. `make check-tpm-floor` builds it as `build/host/tpm-floor` for
 `test/check-tpm-floor.zig`.
 
+## mdoc
+
+`mdoc FILE.[1-9].md` compiles [manual Markdown](../docs/manuals.md) to BSD mdoc
+on standard output. It runs only on the build host, needs no libraries beyond Zig's
+standard library, and emits nothing if the source is invalid. `make manpages`
+builds and installs the manuals; `make man-lint` checks them with mandoc.
+
 ## doc-check
 
 `doc-check FILE.md...` runs for `make lint`. It fails on a relative link or

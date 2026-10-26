@@ -1,7 +1,7 @@
 # unwound: DNS permissions and audit
 
 This is the original design draft. The [implementation plan](unwound-plan.md)
-and [program README](../../cmd/unwound/README.md) describe the shipped local
+and [command manual](../../cmd/unwound/unwound.8.md) describe the shipped local
 behavior; deferred ideas below are not implemented.
 
 ## Summary
