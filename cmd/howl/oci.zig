@@ -126,19 +126,95 @@ fn crane(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) ![]const u
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(gpa, "crane");
     try argv.appendSlice(gpa, args);
-    const r = std.process.run(gpa, io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_config),
-        .stderr_limit = .limited(64 << 10),
-    }) catch |err| return why.refuse(
-        "crane: {s}; crane pulls images, and tools/install-deps installs it",
-        .{@errorName(err)},
-    );
-    if (r.term != .exited or r.term.exited != 0) return why.refuse(
-        "crane {s} {s}: {s}",
-        .{ args[args.len - 2], args[args.len - 1], lastLine(r.stderr) },
-    );
-    return r.stdout;
+    return runCrane(io, gpa, argv.items, why);
+}
+
+fn runCrane(io: Io, gpa: Allocator, argv: []const []const u8, why: *Why) ![]const u8 {
+    for (0..4) |attempt| {
+        const r = std.process.run(gpa, io, .{
+            .argv = argv,
+            .environ_map = howl.environ,
+            .stdout_limit = .limited(max_config),
+            .stderr_limit = .limited(64 << 10),
+        }) catch |err| return why.refuse(
+            "crane: {s}; crane pulls images, and tools/install-deps installs it",
+            .{@errorName(err)},
+        );
+        if (r.term == .exited and r.term.exited == 0) return r.stdout;
+        // GHCR's short burst limits can outlast crane's own retries. Keep
+        // the same arguments and bound our backoff; other refusals fail now.
+        if (attempt < 3 and rateLimited(r.stderr)) {
+            try io.sleep(.fromSeconds(@as(i64, 1) << @intCast(attempt)), .awake);
+            continue;
+        }
+        return why.refuse(
+            "crane {s} {s}: {s}",
+            .{ argv[argv.len - 2], argv[argv.len - 1], lastLine(r.stderr) },
+        );
+    }
+    unreachable;
+}
+
+fn rateLimited(stderr: []const u8) bool {
+    for ([_][]const u8{
+        "TOOMANYREQUESTS",
+        "429 Too Many Requests",
+        "unexpected status code 429",
+    }) |message|
+        if (std.mem.find(u8, stderr, message) != null) return true;
+    return false;
+}
+
+test "crane retries burst limits, bounds repeated limits, and preserves other refusals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "crane",
+        .flags = .{ .permissions = .fromMode(0o755) },
+        .data = "#!/bin/sh\nn=0; if [ -e \"$STATE\" ]; then read n < \"$STATE\"; fi\n" ++
+            "n=$((n + 1)); printf '%s' \"$n\" > \"$STATE\"\n" ++
+            "if [ \"$MODE\" = recover ] && [ \"$n\" -gt 1 ]; then printf '%s' 'pinned-config'; " ++
+            "exit 0; fi\n" ++
+            "printf '%s\\n' \"$FAILURE\" >&2\nexit 1\n",
+    });
+    var env: std.process.Environ.Map = .init(gpa);
+    try env.put("PATH", root);
+    const saved = howl.environ;
+    defer howl.environ = saved;
+    howl.environ = &env;
+    const cases = .{
+        .{ "recover", "TOOMANYREQUESTS: retry-after: 693.976µs", "2" },
+        .{ "limited", "unexpected status code 429", "4" },
+        .{ "refused", "UNAUTHORIZED: authentication required", "1" },
+    };
+    inline for (cases) |case| {
+        try env.put("MODE", case[0]);
+        try env.put("FAILURE", case[1]);
+        try env.put("STATE", try gpa.print("{s}/{s}", .{ root, case[0] }));
+        var why: Why = .{};
+        const result = runCrane(
+            io,
+            gpa,
+            &.{ try gpa.print("{s}/crane", .{root}), "config", "example.invalid/pinned" },
+            &why,
+        );
+        if (comptime std.mem.eql(u8, case[0], "recover")) {
+            const text = result catch |err| {
+                std.debug.print("{s}\n", .{why.text});
+                return err;
+            };
+            try std.testing.expectEqualStrings("pinned-config", text);
+        } else try std.testing.expectError(error.Refused, result);
+        try std.testing.expectEqualStrings(
+            case[2],
+            try tmp.dir.readFileAlloc(io, case[0], gpa, .limited(16)),
+        );
+    }
 }
 
 fn lastLine(text: []const u8) []const u8 {

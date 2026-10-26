@@ -1355,10 +1355,10 @@ fn writeRefusal(t: *Tests) !void {
     const cwd = Io.Dir.cwd();
     for ([_][]const u8{ "locked", "open" }) |name|
         try cwd.createDirPath(io, try t.gpa.print("{s}/{s}", .{ t.root, name }));
-    var locked = try cwd.openDir(io, try t.gpa.print("{s}/locked", .{t.root}), .{});
-    defer locked.close(io);
-    try locked.setPermissions(io, .fromMode(0o500));
-    defer locked.setPermissions(io, .fromMode(0o700)) catch {};
+    const locked = try t.gpa.print("{s}/locked", .{t.root});
+    // Linux's non-iterating directory handle is O_PATH, which fchmod refuses.
+    try cwd.setFilePermissions(io, locked, .fromMode(0o500), .{});
+    defer cwd.setFilePermissions(io, locked, .fromMode(0o700), .{}) catch {};
     const r = try t.runPlan(
         \\- name: refused
         \\  steps:
