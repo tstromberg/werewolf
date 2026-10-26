@@ -310,12 +310,27 @@ const Handover = struct {
             h.panic.* = line;
             return error.Panicked;
         }
-        return mem.find(u8, text, "handing over to runit") != null;
+        const needle = "handing over to runit";
+        if (mem.find(u8, text, needle) != null) return true;
+        // Audit output can interrupt init's handover, as it can posture's line.
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        return mem.find(u8, try qemu.clean(arena.allocator(), text), needle) != null;
     }
 };
 
 /// Posture is the posture line's counts and its failing checks.
 const Posture = struct { failing: []const u8 = "", passed: u32 = 0 };
+
+test "handover survives audit records and still refuses a panic" {
+    var panic: []const u8 = "";
+    const h: Handover = .{ .panic = &panic };
+    try testing.expect(
+        try h.done("werewolf: handing ove[ 1.710329] audit: syscall=59\r\nr to runit\r\n"),
+    );
+    try testing.expect(!try h.done("werewolf: starting services\n"));
+    try testing.expectError(error.Panicked, h.done("Kernel panic - not syncing: failure\n"));
+}
 
 const Waiting = struct {
     line: *Posture,
