@@ -146,21 +146,11 @@ them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-Firecracker cannot expose UEFI Secure Boot or the TPM used for the release floor.
-Its default mode retains IPE, dm-verity, the seal and fence. Before the first boot,
-howl records the freshly built kernel, stage0 (including its root hash and signed IPE
-policy) and boot entry in `firecracker-boot.json` outside the guest. Each boot checks
-them against that record and ignores other guest-written boot entries. Missing or
-malformed records and changed boot files fail closed. Existing unprotected disks are never
-enrolled automatically. Image changes require a host rebuild; `IPE_UPDATES` and
-protected UEFI downloads selected with `--version` are refused in this mode.
-
-This host check does not supply firmware Secure Boot or a TPM: the trusted host can
-replace the record, and restoring older host state can restore an older vulnerable
-release. Keep that state outside guest access. The warning and guest command line
-name both missing protections. `--disable=secureboot,tpm` explicitly selects the same
-mode. `--disable=secureboot,tpm,ipe` selects the legacy Firecracker path, including its
-guest-controlled A/B updates, and does not pin its boot files.
+Firecracker's [host-pinned boot files](design/firecracker-boot.md) retain IPE,
+dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a TPM
+release floor: the trusted host can replace the record or restore older vulnerable
+state. Keep it outside guest access. Changed boot files fail closed; legacy mode keeps
+guest-controlled A/B updates without pinning those files.
 
 Other providers currently provide all three protections together. Without them a running
 machine keeps its seal, fence and verified root: root still cannot run a program the

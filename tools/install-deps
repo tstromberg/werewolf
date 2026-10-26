@@ -343,7 +343,7 @@ if [ -n "$missing$need_apko$need_melange$need_crane$need_zig$need_erofs$need_fc$
 	[ -z "$need_fc" ] ||
 		echo "  install firecracker $fc_version from github.com/firecracker-microvm as /usr/local/bin/firecracker"
 	[ -z "$need_stubs" ] ||
-		echo "  install systemd's EFI stubs $stub_version from Alpine into out/tools/stubs, for the UKIs a boot key signs"
+		echo "  install archived Alpine EFI stubs $stub_version into out/tools/stubs, for the UKIs a boot key signs"
 	if [ -n "$need_erofs" ]; then
 		echo "  if mkfs.erofs is then older than 1.9 or has no zstd, build erofs-utils $erofs_version"
 		show into $erofs_prefix, after: $install $erofs_deps
@@ -470,7 +470,8 @@ if [ -n "$need_stubs" ]; then
 		x86_64) stub=linuxx64.efi.stub ;;
 		esac
 		sum=$(eval "echo \$stub_sha256_$a")
-		fetch "https://dl-cdn.alpinelinux.org/alpine/edge/main/$a/systemd-efistub-$stub_version.apk" \
+		# Alpine edge removes old packages; preserve the pinned bytes, not its moving URL.
+		fetch "https://github.com/werewolf-linux/werewolf/releases/download/efi-stubs-$stub_version/systemd-efistub-$stub_version-$a.apk" \
 			"$sum" "efistub-$a.apk"
 		mkdir -p "out/tools/stubs/$a"
 		tar -xzf "$tmp/efistub-$a.apk" -C "out/tools/stubs/$a" --strip-components=5 \

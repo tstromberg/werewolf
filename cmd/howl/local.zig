@@ -913,7 +913,8 @@ pub fn createFirecracker(
         .{},
     );
     if (!firecracker.installed(io, gpa)) return why.refuse(
-        "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH (tools/install-deps)",
+        "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH " ++
+            "(tools/install-deps)",
         .{},
     );
     const root = firecracker.asRoot(io, gpa) catch
@@ -927,7 +928,13 @@ pub fn createFirecracker(
     const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
     const kept = if (Dir.cwd().access(io, disk, .{})) |_| true else |_| false;
     if (kept) {
-        const has_pin = if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }), .{})) |_| true else |err| switch (err) {
+        const has_pin = if (Dir.cwd().access(
+            io,
+            try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }),
+            .{},
+        )) |_|
+            true
+        else |err| switch (err) {
             error.FileNotFound => false,
             else => return err,
         };
