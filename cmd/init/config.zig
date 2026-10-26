@@ -201,8 +201,7 @@ pub fn accounts(m: *Machine) void {
 }
 
 fn accountFailure(step_name: []const u8) noreturn {
-    say("people: {s} failed; not handing over", .{step_name});
-    std.process.exit(1);
+    init.refuse("people: {s} failed", .{step_name});
 }
 
 fn writeAccount(m: *Machine, path: []const u8, value: []const u8, mode: u32) void {

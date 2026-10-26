@@ -60,20 +60,12 @@ pub fn main(init: std.process.Init) !void {
     // stage0 checked the line by the same rules, so a refusal here means
     // the line changed under it.
     const boot_line = m.read("/proc/cmdline");
-    if (boot_line.len == 0) {
-        say("cannot read /proc/cmdline; not handing over", .{});
-        std.process.exit(1);
-    }
+    if (boot_line.len == 0) refuse("cannot read /proc/cmdline", .{});
     var refused: cmdline.Failure = .{};
-    m.cmd = cmdline.parse(boot_line, &refused) orelse {
-        say("the command line's {s}: {s}; not handing over", .{ refused.word, refused.why });
-        std.process.exit(1);
-    };
+    m.cmd = cmdline.parse(boot_line, &refused) orelse
+        refuse("the command line's {s}: {s}", .{ refused.word, refused.why });
     phases.add("mounts", bootMs());
-    m.kernel() catch {
-        say("the kernel's protections are not all set; not handing over", .{});
-        std.process.exit(1);
-    };
+    m.kernel() catch refuse("the kernel's protections are not all set", .{});
     phases.add("sysctls", bootMs());
     // The config on disk comes first, since it may set the network; the
     // cloud's metadata needs the network.
@@ -90,10 +82,7 @@ pub fn main(init: std.process.Init) !void {
     m.data();
     phases.add("data", bootMs());
     m.accounts();
-    phase_age.start() catch |err| {
-        say("age authority unavailable: {s}; not handing over", .{@errorName(err)});
-        std.process.exit(1);
-    };
+    phase_age.start() catch |err| refuse("age authority unavailable: {s}", .{@errorName(err)});
     if (m.oci()) phases.add("oci", bootMs());
 
     // No process may dump core, so a crash leaves no copy of its memory and
@@ -103,10 +92,7 @@ pub fn main(init: std.process.Init) !void {
         say("core dumps not limited", .{});
     // The seal fails closed: PID 1 exits, the kernel panics, and the machine
     // comes back on the slot that last worked.
-    phase_seal.seal(&m) catch |err| {
-        say("not sealed: {s}; not handing over", .{@errorName(err)});
-        std.process.exit(1);
-    };
+    phase_seal.seal(&m) catch |err| refuse("not sealed: {s}", .{@errorName(err)});
     // The mount broker mounts for the few programs that must, once fence's
     // Landlock domain forbids mounting. Starting it here puts it outside that
     // domain but under the seal, with one socketpair per role. Without it
@@ -517,6 +503,19 @@ pub fn say(comptime f: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const line = std.mem.print(&buf, "werewolf: " ++ f ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
+}
+
+/// refuse says why init will not hand over and exits, which panics the
+/// kernel, so the machine comes back on the slot that last worked. As in
+/// stage0, the reason goes to /dev/kmsg at KERN_CRIT, which the kernel
+/// flushes on panic; the console tty may still be draining the UART and
+/// lose it, so it is only the fallback.
+pub fn refuse(comptime f: []const u8, args: anytype) noreturn {
+    var buf: [1024]u8 = undefined;
+    const line = std.mem.print(&buf, "<2>werewolf: " ++ f ++ "; not handing over\n", args) catch
+        std.process.exit(1);
+    if (writeErrno("/dev/kmsg", line) != .SUCCESS) _ = linux.write(1, line.ptr + 3, line.len - 3);
+    std.process.exit(1);
 }
 
 /// Phases records when each boot phase ended, in milliseconds of the boot

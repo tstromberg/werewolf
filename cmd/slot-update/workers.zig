@@ -1179,7 +1179,7 @@ fn constructionProbe(
         "4096",
         "-zzstd,level=9",
         "-C65536",
-        "-Eall-fragments,dedupe",
+        "-Eall-fragments",
         "-x-1",
         "--all-root",
         "/work/root.erofs",

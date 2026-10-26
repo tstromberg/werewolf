@@ -135,7 +135,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         "4096",
         "-zzstd,level=9",
         "-C65536",
-        "-Eall-fragments,dedupe",
+        "-Eall-fragments",
         // No xattrs, as in the build: a package's security.capability
         // would otherwise reach the image, inert only while / is nosuid.
         "-x-1",

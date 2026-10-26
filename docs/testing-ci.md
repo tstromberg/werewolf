@@ -19,6 +19,14 @@ phase by phase (kernel, disk, slot, root, init's steps, seal), and keeps it in
 `/run/werewolf/boot`. The console shows only warnings and worse (`loglevel=5`); `dmesg`
 keeps every line.
 
+## Booting on another host
+
+On an arm64 Mac, x86_64 machines boot emulated. `QEMU_HOST=HOST` boots a check's
+machines on HOST, a Linux machine with KVM that `ssh HOST` reaches, and runs the rest
+here ([test/remote-qemu.zig](../test/remote-qemu.zig)): `make check-overleaf ARCH=x86_64
+QEMU_HOST=gandalf`. HOST needs QEMU, zstd and your user in its `kvm` group; it keeps a
+copy of each file a boot takes in `~/.cache/werewolf-qemu`, sent again when it changes.
+
 ## CI
 
 [check.yml](../.github/workflows/check.yml) runs host tests on both architectures,

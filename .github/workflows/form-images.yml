@@ -323,14 +323,11 @@ jobs:
         run: |
           keys="$RUNNER_TEMP/update-check"
           mkdir -p "$keys"
-          openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 2 \
-            -subj /CN=werewolf-update-check -keyout "$keys/policy.key" -out "$keys/policy.crt"
-          chmod 600 "$keys/policy.key"
-          make WEREWOLF_IPE_CRT="$keys/policy.crt" ipe-kernel
           workload=playground
           case ",$FORMS," in *,postdoc-server,*) workload=postdoc-server ;; esac
-          XDG_DATA_HOME="$keys/data" WEREWOLF_IPE_KEY="$keys/policy.key" WEREWOLF_IPE_CRT="$keys/policy.crt" \
-            WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$ARCH/rootfs.tar" \
+          # howl manages a fresh IPE identity and matching test kernel here;
+          # it also prepares the stock Melange builder when running on macOS.
+          XDG_DATA_HOME="$keys/data" \
             build/host/check-independent-updates build/host/howl updates "$PROVIDER" "$workload"
       - name: Gate each form's exact candidate where it boots
         env:
