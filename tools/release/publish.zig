@@ -100,7 +100,7 @@ pub fn publish(
             try sys.join(s, &.{ accepted, "boot.json.sig" }),
             try catalog.unhex(s, try json.text(receipt, "signature")),
         );
-        const previous = try boot.native(s, howl, "head", accepted, request);
+        const previous = try boot.previous(s, howl, accepted, request);
         const floor = try floorOf(s, previous, &try sys.sha(s, head_path));
         _ = try boot.freshness(s, current, descriptor, floor, s.now());
         try advances(s, previous, current, floor.descriptor, descriptor);
@@ -121,7 +121,7 @@ pub fn publish(
         const old_descriptor = try sys.sha(s, old_head);
         // A prior interrupted JSON/signature update can be recovered only
         // with the signature for those exact bytes stored immutably earlier.
-        const previous = boot.native(s, howl, "head", old, request) catch |err| switch (err) {
+        const previous = boot.previous(s, howl, old, request) catch |err| switch (err) {
             error.Refused => blk: {
                 const stored = try s.gpa.print(
                     "{s}/objects/{s}/boot.json.sig",
@@ -132,7 +132,7 @@ pub fn publish(
                     stored,
                     old_signature,
                 )) return s.refuse("cannot authenticate the prior boot head", .{});
-                break :blk try boot.native(s, howl, "head", old, request);
+                break :blk try boot.previous(s, howl, old, request);
             },
             else => return err,
         };
