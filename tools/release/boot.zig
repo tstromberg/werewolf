@@ -96,7 +96,10 @@ pub fn previous(s: *Sys, howl: []const u8, dir: []const u8, r: Request) !Json {
     else
         return s.refuse("unsupported legacy publication provider", .{});
     const channel = try s.gpa.print("https://{s}:9443/{s}", .{ gateway, r.form });
-    const der = try sys.output(s, &.{ "openssl", "x509", "-in", r.boot_certificate, "-outform", "DER" });
+    const der = try sys.output(
+        s,
+        &.{ "openssl", "x509", "-in", r.boot_certificate, "-outform", "DER" },
+    );
     const certificate = sys.sha256(der);
     if (!mem.eql(u8, json.text(head, "form") catch "", r.form) or
         !mem.eql(u8, json.text(try json.field(head, "configuration"), "form") catch "", r.form) or
@@ -221,7 +224,10 @@ test "legacy publication floors require the signature and every namespace pin" {
         .build = fixture.rep('a', 64),
         .descriptor = &sys.sha256(bytes),
     };
-    try testing.expectError(error.Refused, freshness(s, good, fixture.rep('c', 64), old_floor, sys.serialTime("20261015T120000Z").?));
+    try testing.expectError(
+        error.Refused,
+        freshness(s, good, fixture.rep('c', 64), old_floor, sys.serialTime("20261015T120000Z").?),
+    );
 }
 
 test "a request names the published channel of committed trust" {
