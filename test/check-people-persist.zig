@@ -289,8 +289,12 @@ fn refused(clean: []const u8, raw: []const u8, remove_only: bool) bool {
         "people: unregistered data failed; not handing over"
     else
         "people: read identities failed; not handing over";
-    return mem.find(u8, clean, reason) != null and mem.find(u8, raw, "Kernel panic") != null and
-        mem.find(u8, clean, "handing over to runit") == null;
+    // Init writes refusals to /dev/kmsg so the panic flushes their reason.
+    // clean removes those kernel records, but still rejoins tty fragments.
+    return (mem.find(u8, clean, reason) != null or mem.find(u8, raw, reason) != null) and
+        mem.find(u8, raw, "Kernel panic") != null and
+        mem.find(u8, clean, "handing over to runit") == null and
+        mem.find(u8, raw, "handing over to runit") == null;
 }
 
 /// accounts are the checks of both kept accounts, active or retired, and
@@ -411,6 +415,22 @@ test "a damaged ledger must be refused for its reason, with a panic, before hand
     try std.testing.expect(!refused(corrupt, corrupt, false));
     const over = corrupt ++ "werewolf: up in 1s, handing over to runit\n";
     try std.testing.expect(!refused(over, over ++ panic, false));
+}
+
+test "a panic-flushed kernel refusal survives console cleaning" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const panic = "[    0.422033] Kernel panic - not syncing: Attempted to kill init!\r\n";
+    const corrupt = "[    0.422026] werewolf: people: read identities failed; not handing over\r\n";
+    const missing = "[    0.422026] werewolf: people: unregistered data failed; not handing " ++
+        "over\r\n";
+    const clean = try host.qemu.clean(arena.allocator(), corrupt ++ panic);
+    try std.testing.expect(refused(clean, corrupt ++ panic, false));
+    try std.testing.expect(refused(clean, missing ++ panic, true));
+    try std.testing.expect(!refused(clean, corrupt ++ panic, true));
+    try std.testing.expect(!refused(clean, corrupt, false));
+    const over = "[    0.5] werewolf: up in 1s, handing over to runit\r\n";
+    try std.testing.expect(!refused(clean, corrupt ++ over ++ panic, false));
 }
 
 test "the NoCloud seed asks for lima at its uid with the test key" {
