@@ -60,6 +60,8 @@ service after it is up.
 
 ### Known Quirks
 
+- Background tasks wait for installation and upgrades. Startup refreshes application
+  caches before the web and background tasks run.
 - Nobody can sign up, and there is no guest. The web installer is refused.
 - Plugins and themes come with the image. The web cannot install one.
 - No path to a program can be set from the web, so no LaTeX filter and no antivirus scan

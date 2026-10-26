@@ -78,7 +78,7 @@ suites:
             expect:
               exit: 0
               stdout: "1\n"
-            await: 165s
+            await: 600s
   - name: moodle-ca
     readiness: true
     cases:
@@ -102,7 +102,7 @@ suites:
               status: 303
               headers:
                 location: https://localhost/login/index.php
-            await: 160s
+            await: 600s
           - fetch:
               url: https://localhost/login/index.php
               ca: /data/svc/caddy/pki/authorities/local/root.crt
