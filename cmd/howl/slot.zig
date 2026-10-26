@@ -405,7 +405,7 @@ fn layerStep(
 /// link is too long for ustar, which would otherwise drop it with a mere
 /// warning (an image's node_modules has both). Its bytes depend only on
 /// the files' contents and whether each is executable: sorted, owned by
-/// root, modes 644 or 755, dated 1970 as apko dates its own files, and
+/// root, modes 644 or 755, dated 1970, and
 /// carrying nothing of the builder's (owners, extended attributes,
 /// .DS_Store). Images are made from tars alone, so no
 /// inode number or time of the build host reaches one. It reads each file
@@ -662,13 +662,23 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     try checkPrograms(b, root_tar);
     Dir.cwd().deleteFile(b.io, target) catch {};
     try checkErofs(b);
-    // -T0 dates every file and the image 1970, and the UUID is fixed
-    // (stage0 finds the image by path), so a rebuild matches.
+    // Keep package mtimes: Keycloak checks its provider JAR against the
+    // prebuilt registry. Our overlay's times are already normalised above;
+    // only the filesystem creation time and UUID need fixing here.
     const t = try b.tmp(target);
     try b.run(try mem.concat(b.gpa, []const u8, &.{
         &.{"mkfs.erofs"},
         &image.erofs_options,
-        &.{ "-T0", "-U", "00000000-0000-0000-0000-000000000000", "--tar=f", t, root_tar },
+        &.{
+            "-T0",
+            "--mkfs-time",
+            "--preserve-mtime",
+            "-U",
+            "00000000-0000-0000-0000-000000000000",
+            "--tar=f",
+            t,
+            root_tar,
+        },
     }), .{});
     try Dir.cwd().deleteFile(b.io, root_tar);
     try Dir.cwd().deleteFile(b.io, mtree);

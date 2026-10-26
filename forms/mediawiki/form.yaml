@@ -71,7 +71,9 @@ services:
   php-fpm:
     # inline: every skin renders by eval()ing the PHP that LightnCandy
     # compiles from its Mustache templates (MediaWiki's TemplateParser).
-    allow: [php:upload, php:inline, php:writable-source]
+    # deserialize: dependency caches and persisted authentication requests
+    # contain MediaWiki objects, including after a service or machine restart.
+    allow: [php:upload, php:inline, php:writable-source, php:deserialize]
     exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
       opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000 -d
       apc.shm_size=64M

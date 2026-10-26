@@ -83,6 +83,7 @@ pub const World = struct {
         try l.bind(bin, "/usr/local/bin");
         for ([_][]const u8{ "/run", "/etc", "/usr/share", "/var" }) |dir| try l.tmpfs(dir);
         try l.mkdir("/var/empty", 0o755);
+        try l.symlink("/run", "/var/run");
         try l.mkdir("/usr/share/werewolf", 0o755);
         try l.write("/usr/share/werewolf/net", policy);
         try l.mkdir("/run/werewolf", 0o755);

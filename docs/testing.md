@@ -167,8 +167,8 @@ keeps every line.
 and retaining failures, logs, locks and native results. Platform boots share CPUs within
 a memory budget; [ci-setup](../test/ci-setup) installs pinned tools.
 
-Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
-`make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.
+Hosted arm64 lacks KVM: `vm-arm64` checks all forms in four Ampere shards on
+pushes/maintainers' PRs. Shard 1 also runs `make check-platform` (the other groups).
 `make check-native` attacks roots in `systemd-nspawn` ([test/cage](../test/cage)).
 
 `make ci` copies fresh source (no `config/` or `.git`) into a 16 GiB Lima VM with KVM.

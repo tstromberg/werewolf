@@ -51,6 +51,8 @@ pages as XML from the old wiki and import them with Special:Import after this on
 
 ### Known Quirks
 
+- MediaWiki's dependency caches and persisted authentication requests contain PHP
+  objects. Only its PHP service receives the `php:deserialize` allowance.
 - The wiki installs itself before it serves. A later image runs `update.php` only when
   the code has changed.
 - Uploads are images and PDF. SVG and HTML are refused.

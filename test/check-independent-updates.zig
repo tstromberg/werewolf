@@ -649,6 +649,18 @@ const Test = struct {
         // A real power-cut proof requires both owned processes.
         try powerCutPids(pids, stopped);
         for (pids) |pid| std.posix.kill(pid, .KILL) catch {};
+        // SIGKILL is asynchronous. Until both processes have exited, create
+        // can mistake the dying QEMU for the restarted machine and return.
+        const until = host.qemu.after(t.c.io, 30);
+        for (pids) |pid| while (true) {
+            std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
+                error.ProcessNotFound => break,
+                else => return err,
+            };
+            if (Io.Clock.Timestamp.now(t.c.io, .awake).compare(.gt, until))
+                return t.c.fail("power-cut process {d} did not exit", .{pid});
+            try t.c.io.sleep(.fromMilliseconds(50), .awake);
+        };
     }
 
     /// powered is the machine's QEMU and swtpm.

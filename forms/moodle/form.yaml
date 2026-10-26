@@ -86,7 +86,9 @@ services:
     before:
       - /usr/bin/php -d memory_limit=1G -d max_input_vars=5000 /usr/share/werewolf-moodle/setup.php
       - /usr/bin/php -d memory_limit=1G -d max_input_vars=5000 /usr/share/moodle/admin/cli/upgrade.php --non-interactive
+      - /usr/bin/php -d memory_limit=1G /usr/share/moodle/admin/cli/purge_caches.php --muc
       - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/moodle
+      - /usr/bin/php /usr/share/werewolf-moodle/setup.php ready
     user: moodle
     # Its directories are its group's: cron, whose user shares it, writes
     # in them, and Caddy reaches the socket.
@@ -137,7 +139,7 @@ services:
       - /run/svc/postgres/.s.PGSQL.5432
     lookup: "*"
     run: /usr/bin/php
-    read: /etc/cron /etc/php
+    read: /etc/cron /etc/php /run/svc/moodle
     write: /data/svc/moodle
     memory: 1024
     # Background work: a quarter share of contended CPUs, so a course
