@@ -653,7 +653,7 @@ const Test = struct {
         // can mistake the dying QEMU for the restarted machine and return.
         const until = host.qemu.after(t.c.io, 30);
         for (pids) |pid| while (true) {
-            std.posix.kill(pid, .@"0") catch |err| switch (err) {
+            std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
                 error.ProcessNotFound => break,
                 else => return err,
             };
