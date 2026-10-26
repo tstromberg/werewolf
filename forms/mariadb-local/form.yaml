@@ -25,10 +25,6 @@ prune:
   - usr/bin/perl5.44.0
   - usr/bin/unix_chkpwd  # No UNIX password authentication.
 
-# The check speaks SQL with MariaDB's own client.
-dev:
-  - mariadb-12.3-client
-
 services:
     # MariaDB, as its own user, for local clients over its UNIX socket
     # alone. mariadb-init makes the data on the first start, streams
