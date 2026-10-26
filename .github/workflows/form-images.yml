@@ -29,7 +29,6 @@ on:
       - 'files.zig'
       - '.github/workflows/form-images.yml'
       - '!**/*.md'
-      - '**/*.[1-9].md'
       - 'forms/**/rootfs/**/*.md'
   workflow_dispatch:
     inputs:

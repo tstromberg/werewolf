@@ -26,7 +26,6 @@ on:
       - 'test/check-protected-*'
       - '.github/workflows/protected-images.yml'
       - '!**/*.md'
-      - '**/*.[1-9].md'
       - 'forms/**/rootfs/**/*.md'
       - '!**/__pycache__/**'
   workflow_dispatch:
