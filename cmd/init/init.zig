@@ -1,6 +1,6 @@
 //! init is PID 1 between stage0 and runit. It mounts filesystems, sets the
 //! kernel's protections, reads the config, brings up the network and /data,
-//! seals the machine, and execs fence, which becomes runit. See README.md.
+//! seals the machine, and execs fence, which becomes runit. See init.8.
 
 const std = @import("std");
 const Io = std.Io;

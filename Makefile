@@ -43,8 +43,8 @@ HOWL = build/host/howl
 FORM_REF := $(FORM)
 override FORM := $(notdir $(patsubst %/,%,$(FORM)))
 # These goals need no form tool, and install-deps runs before there is a Zig.
-FORMLESS = install-deps install uninstall howl $(HOWL) clean help \
-	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint doc-fix code-lint
+FORMLESS = install-deps install uninstall howl $(HOWL) build/host/mdoc clean help \
+	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint doc-fix man-lint code-lint
 ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
 FORM_ASK = :
 else
@@ -255,6 +255,28 @@ $(PROGRAMS)/plex-loopback/usr/lib/werewolf/plex-loopback.so: forms/plex/lib/plex
 # howl makes programs before it builds an image.
 programs: $(foreach p,$(CMDS),$(call program_bin,$(p))) $(foreach c,$(FORM_CMDS),$(call form_bin,$(c)))
 
+# Manuals travel in the same overlay and APK as their executable. Keeping them
+# as separate targets lets a documentation edit rebuild an image without Zig.
+MDOC = build/host/mdoc
+MAN_SOURCES := $(wildcard cmd/*/*.[1-9].md forms/*/cmd/*/*.[1-9].md examples/*/cmd/*/*.[1-9].md)
+MAN_PAGES := $(addprefix build/man/,$(basename $(MAN_SOURCES)))
+$(MDOC): tools/mdoc.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe $< -femit-bin=$@
+$(MAN_PAGES): build/man/%: %.md $(MDOC)
+	mkdir -p $(dir $@)
+	$(MDOC) $< >$@.tmp && mv -f $@.tmp $@
+.PHONY: manpages
+programs: manpages
+define manual
+$(2)/usr/share/man/man$(subst .,,$(suffix $(basename $(1))))/$(notdir $(basename $(1))): build/man/$(basename $(1))
+	mkdir -p $$(dir $$@)
+	cp $$< $$@
+manpages: $(2)/usr/share/man/man$(subst .,,$(suffix $(basename $(1))))/$(notdir $(basename $(1)))
+endef
+$(foreach p,$(CMDS),$(foreach m,$(wildcard cmd/$(p)/*.[1-9].md),$(eval $(call manual,$(m),$(PROGRAMS)/$(p)))))
+$(foreach c,$(FORM_CMDS),$(foreach m,$(wildcard $(c)/*.[1-9].md),$(eval $(call manual,$(m),$(PROGRAMS)/forms/$(notdir $(patsubst %/cmd/$(notdir $(c)),%,$(c)))))))
+
 VERITY_BIN = build/host/verity
 $(VERITY_BIN): tools/verity.zig lib/verity.zig
 	$(zig_check)
@@ -315,15 +337,24 @@ TEST_SK = build/host/test-sk.so
 $(TEST_SK): tools/test-sk.zig
 	$(zig_check)
 	t=$@.$$$$ && zig build-lib -dynamic -O ReleaseSafe -lc -femit-bin=$$t $< && mv -f $$t $@
+# console boots a machine with no shell and judges it from outside (test/console.zig),
+# with the native suites' regex shim.
+CONSOLE_CHECK = build/host/console
+$(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zig)
+	$(zig_check)
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe -lc test/native/regex.c $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/mdoc _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
+.PHONY: _test/mdoc
+_test/mdoc: $(MDOC)
+	sh test/mdoc $(MDOC)
 _test/ci-forms: ; zig test test/ci-forms.zig
 # CI's check jobs check forms one at a time with it (test/ci-forms.zig).
 build/host/ci-forms: test/ci-forms.zig
@@ -344,6 +375,7 @@ _test/probes:
 	zig test test/native/process.zig
 	zig test test/native/udp.zig
 	zig test -lc test/native/regex.c $(call HOST_ZIG_MODULES,test/native-host.zig)
+	zig test -lc test/native/regex.c $(call HOST_ZIG_MODULES,test/console.zig)
 	zig test test/native/driver.zig
 	zig test --dep test-driver -Mroot=test/native/stage.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
@@ -465,7 +497,7 @@ check-syslog: $(HOWL) $(call program_bin,syslogd) $(call program_bin,leash) $(SY
 		--leash $(call program_bin,leash) --work $(BUILD)/check/syslog \
 		$(if $(SYSLOG_MODULES),--modules $(SYSLOG_MODULES))
 
-_test/howl-smoke: $(HOWL)
+_test/howl-smoke: $(HOWL) $(CONSOLE_CHECK)
 	@test/howl-smoke $(HOWL) $(BUILD)
 	@$(call host_test,test/howl/run.zig) $(HOWL) test/howl/cases.yaml protections make forms ssh current-user
 	@$(call host_test,test/native-tests-regression.zig) $(HOWL)
@@ -759,7 +791,7 @@ check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
 check-bastion: check-native-tests-bastion
 # A run's host suites log in through its own forwarded port (tools/native-ssh.zig).
 NATIVE_SSH_PORT ?= $(call check_port,24200,$(notdir $(NATIVE_FORM)))
-_check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(TEST_SK) build/host/ssh-su
+_check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(TEST_SK) build/host/ssh-su
 	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(notdir $(NATIVE_FORM))$(if $(IPE),-ipe) \
 		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
@@ -821,7 +853,7 @@ check-people: $(HOWL) $(TEST_SK) | _check-shared
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-shellfree
-_check-shellfree:
+_check-shellfree: $(CONSOLE_CHECK)
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
 # A Linux check runs as root in private namespaces (test/host/netns.zig), so
@@ -884,7 +916,7 @@ check-lan: $(call program_bin,fence) $(BUILD)/check-lan
 	$(DNS_TEST_RUNNER) $(BUILD)/check-lan $(call program_bin,fence)
 
 # check-unwound runs the real fence and unwound against a fixture resolver
-# in private namespaces, as root, on Linux (cmd/unwound/README.md).
+# in private namespaces, as root, on Linux (cmd/unwound/unwound.8.md).
 .PHONY: check-unwound check-unwound-age check-unwound-age-live check-unwound-dnssec check-unwound-dnssec-mox check-unwound-tunnels check-unwound-caddy fuzz-unwound
 
 # The age writer is statically linked with a hash-pinned SQLite amalgamation.
@@ -1159,7 +1191,7 @@ help:
 	@sed -n '2,/^$$/s/^# \{0,1\}//p' Makefile
 
 # BEGIN: lint-install .
-LINTERS := yamllint-lint zig-lint doc-lint code-lint
+LINTERS := yamllint-lint zig-lint doc-lint man-lint code-lint
 FIXERS := zig-fix doc-fix
 .PHONY: lint _lint fix $(LINTERS) $(FIXERS)
 lint: _lint
@@ -1234,6 +1266,8 @@ zig-fix: $(ZIGFIX)
 	$(ZIGFIX) $(ZIG_SOURCES)
 
 DOC_SOURCES := $(shell $(call source_find,-o -path './dist',-name '*.md'))
+man-lint: $(MAN_PAGES)
+	mandoc -Tlint -Wwarning $(MAN_PAGES)
 DOC_CHECK := $(LINT_ROOT)/out/tools/doc-check
 $(DOC_CHECK): tools/doc-check.zig
 	mkdir -p $(dir $@)

@@ -12,7 +12,7 @@ server. Routing rules and Landlock, fixed in the image, enforce it.
 
 A broken-into service should reach nothing its form did not declare; a
 firewall root can reconfigure does not hold. The policy is form.yaml's
-`net` (cmd/fence/README.md), by user; the build fails on a line it cannot
+`net` (cmd/fence/fence.8.md), by user; the build fails on a line it cannot
 compile, or a service `listen` that no `net` line declares.
 
 ## Goals

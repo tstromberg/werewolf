@@ -63,10 +63,10 @@ file and the machine needs no registry.
 
 **leash `root`.** leash enters the image with `chroot`, as root, before
 any rule, so every path resolves inside it
-([cmd/leash](../../cmd/leash/README.md)). Before fence forbids mounting,
+([cmd/leash](../../cmd/leash/leash.8.md)). Before fence forbids mounting,
 init binds the service's own `/tmp`, `/run` and `/data` into the root,
 and each `write PATH` from `/data/svc/NAME/PATH`, all `noexec`
-([cmd/init](../../cmd/init/README.md)). fence lets `/oci` execute.
+([cmd/init](../../cmd/init/init.8.md)). fence lets `/oci` execute.
 
 **`loopback` on a listen.** fence served every `listen` from outside,
 so a listener was public or impossible. `listen tcp/5432 loopback`

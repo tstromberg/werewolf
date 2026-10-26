@@ -136,6 +136,10 @@ pub fn step(
         }
         if (bodies > 1) return c.fail("choose one request body", .{});
         const mutation = !plan.has(&read_only, method.string);
+        // curl reads no body for HEAD, so an assertion on one holds whatever came.
+        if (mem.eql(u8, method.string, "HEAD")) if (s.get("expect")) |e|
+            if (e == .object and (e.object.contains("body") or e.object.contains("json")))
+                return c.fail("HEAD reads no body: test its framing with tcp", .{});
         if (wait > 0 and mutation) return c.fail("await cannot repeat an HTTP mutation", .{});
         if (d.readiness and mutation)
             return c.fail("readiness requires read-only HTTP probes", .{});
@@ -213,6 +217,17 @@ pub fn step(
             return c.fail("expect must be a nonempty mapping", .{});
         try c.fields(expect, expected.get(probe).?, &.{});
         try expectations(c, probe, &expect);
+    }
+    // A leashed suite's own Landlock grants its path no write, so it refuses
+    // any create with EACCES before the machine is asked; only a read-only
+    // mount's EROFS, which the kernel returns first, is the machine's.
+    if (mem.eql(u8, probe, "write") and !mem.eql(u8, d.user, "root")) {
+        const errno = expect.object.get("errno").?;
+        if (errno != .string or !mem.eql(u8, errno.string, "EROFS"))
+            return c.fail(
+                "a leashed write proves only EROFS: its own sandbox refuses the rest",
+                .{},
+            );
     }
     var out: std.json.ObjectMap = .empty;
     try out.put(c.gpa, "name", .{ .string = name });
@@ -995,6 +1010,29 @@ test "captures select an earlier step's field its probe has" {
     ), "unknown fixture");
 }
 
+test "a HEAD response's body is not asserted: curl never reads one" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head =
+        \\          - fetch:
+        \\              url: http://127.0.0.1/
+        \\              method: HEAD
+        \\            expect:
+        \\              status: 200
+    ;
+    _ = try expectPlan(a, try web(a, head));
+    for ([_][]const u8{
+        "              body: ''",
+        "              json:\n                /a: 1",
+    }) |e|
+        try expectRefused(
+            a,
+            try web(a, try mem.concat(a, u8, &.{ head, "\n", e })),
+            "HEAD reads no body",
+        );
+}
+
 test "requests refuse injection, ambiguity and nested type errors" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1335,11 +1373,13 @@ test "writes expect a refusal, once, that the suite's sandbox does not cause" {
     const leashed = try mem.replaceOwned(u8, a, try web(a,
         \\          - write: /usr/share/app/x
         \\            expect:
-        \\              errno:
-        \\                one_of: [EACCES, EPERM, EROFS]
+        \\              errno: EROFS
     ), "    policy:\n", "    user: app\n    policy:\n      pledge: stdio rpath wpath\n" ++
         "      read: [/usr/share/app]\n");
     _ = try expectPlan(a, leashed);
+    // Its own sandbox would refuse the rest, whatever the machine allows.
+    for ([_][]const u8{ "errno: EACCES", "errno:\n                one_of: [EACCES, EROFS]" }) |e|
+        try expectRefused(a, try mem.replaceOwned(u8, a, leashed, "errno: EROFS", e), "only EROFS");
     try expectRefused(a, try mem.replaceOwned(u8, a, leashed, "rpath wpath", "rpath"), "wpath");
     try expectRefused(
         a,

@@ -13,7 +13,7 @@ instructions](https://dist.werewolf-linux.org/boot/v1/mediawiki/index.html).
 
 ### Weaknesses
 
-- PHP runs the wiki, and PCRE may compile a pattern. Both are named in `form.yaml`.
+- PHP runs the wiki, as declared in `form.yaml`.
 
 ## Getting Started
 

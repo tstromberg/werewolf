@@ -63,11 +63,24 @@ suites:
               uid: unbound
               mode: '600'
               body:
-                contains: 'name: "corp.example."'
+                matches: "(^|\n)[ \t]name: \"corp[.]example[.]\"(\n|$)"
                 occurrences:
-                  'forward-addr: 10.0.2.3': 2
+                  "forward-addr: 10.0.2.3\n": 2
                   'domain-insecure: "10.in-addr.arpa."': 1
                   'local-zone: "10.in-addr.arpa." nodefault': 1
+          # Each a whole line of the forward zone, as unbound reads it.
+          - file: /run/svc/unbound/unbound-setup.conf
+            expect:
+              body:
+                matches: "(^|\n)[ \t]forward-addr: 10[.]0[.]2[.]3\n([^\n]*\n)*[ \t]forward-addr: 10[.]0[.]2[.]3(\n|$)"
+          - file: /run/svc/unbound/unbound-setup.conf
+            expect:
+              body:
+                matches: "(^|\n)[ \t]domain-insecure: \"10[.]in-addr[.]arpa[.]\"(\n|$)"
+          - file: /run/svc/unbound/unbound-setup.conf
+            expect:
+              body:
+                matches: "(^|\n)[ \t]local-zone: \"10[.]in-addr[.]arpa[.]\" nodefault(\n|$)"
       - name: unbound-anchor
         steps:
           - file: /data/svc/unbound/root.key
@@ -80,14 +93,20 @@ suites:
           - file: /etc/unbound/unbound.conf
             expect:
               body:
+                matches: "(^|\n)[ \t]module-config: \"validator iterator\"(\n|$)"
                 occurrences:
                   'module-config: "validator iterator"': 1
                   'auto-trust-anchor-file: "/data/svc/unbound/root.key"': 1
+          - file: /etc/unbound/unbound.conf
+            expect:
+              body:
+                matches: "(^|\n)[ \t]auto-trust-anchor-file: \"/data/svc/unbound/root[.]key\"(\n|$)"
       - name: unbound-no-ctl
         steps:
           - file: /etc/unbound/unbound.conf
             expect:
               body:
+                matches: "(^|\n)[ \t]control-enable: no(\n|$)"
                 occurrences:
                   'control-enable: no': 1
           - file: /usr/bin/unbound-control
@@ -132,4 +151,4 @@ suites:
           - file: /run/svc/unbound/unbound-setup.conf
             expect:
               body:
-                not_matches: "(^|\n)[ \t\r]*(private-address|access-control):"
+                not_matches: "(^|\n)[ \t\r]*(private-address|access-control)"

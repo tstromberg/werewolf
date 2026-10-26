@@ -1,0 +1,23 @@
+#!/bin/sh
+# Compare the Markdown compiler with the original, hand-written BSD manuals.
+# Keep terminal emphasis and spacing: a text-only comparison misses bad macros.
+set -eu
+compiler=${1:-build/host/mdoc}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+for source in cmd/posture/posture.8 cmd/mount/mount.8 forms/ssh-su/cmd/su/su.1; do
+    page=${source##*/}
+    "$compiler" "$source.md" >"$work/$page"
+    mandoc -Tlint -Wwarning "$work/$page"
+    for format in ascii utf8; do
+        for width in 60 78 100; do
+            mandoc -T"$format" -Owidth="$width" "test/mdoc-pages/$page" >"$work/before"
+            mandoc -T"$format" -Owidth="$width" "$work/$page" >"$work/after"
+            if ! diff -u "$work/before" "$work/after"; then
+                echo "mdoc: $source: changed $format rendering at width $width" >&2
+                exit 1
+            fi
+        done
+    done
+done
+echo 'mdoc: BSD rendering matches at 60, 78 and 100 columns, in ASCII and UTF-8'

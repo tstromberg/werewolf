@@ -168,7 +168,7 @@ suites:
               uid: kafka
               mode: '600'
               body:
-                contains: super.users=User:ops;User:_node
+                matches: "(^|\n)super[.]users=User:ops;User:_node(\n|$)"
                 absent: werewolf-check
           - file: /run/svc/kafka/tls.pem
             expect:
@@ -189,7 +189,7 @@ suites:
             expect:
               type: file
               body:
-                contains: cluster.id=
+                matches: "(^|\n)cluster[.]id="
   # Kafka's partition logs are expected; application log files are not.
   - name: kafka-logfiles
     cases:

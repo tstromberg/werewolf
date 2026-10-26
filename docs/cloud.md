@@ -4,7 +4,7 @@ On GCP, AWS, Hetzner Cloud and Azure, a werewolf machine can take its config fro
 the cloud's metadata server: the same config tar a config disk carries,
 set as the instance's user data. `prod`, and every form on it, asks, at
 boot and then every minute: a changed config's people get their accounts
-on the running machine (cmd/cloud-metadata/README.md).
+on the running machine (cmd/cloud-metadata/cloud-metadata.8.md).
 
 On GCP, `machine.metadata-users: true` also imports instance and project
 `ssh-keys`. These keys create ordinary people; they cannot grant root or

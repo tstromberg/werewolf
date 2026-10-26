@@ -1,5 +1,5 @@
 //! mount mounts, binds and remounts the filesystems werewolf uses, and can
-//! only add restrictions to a mount, never lift them. See README.md.
+//! only add restrictions to a mount, never lift them. See mount.8.
 //!
 //!     mount -t TYPE [-o OPTIONS] SOURCE TARGET   mount SOURCE on TARGET
 //!     mount --bind SOURCE TARGET                 bind SOURCE onto TARGET

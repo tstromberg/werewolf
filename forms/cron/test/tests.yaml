@@ -1,23 +1,13 @@
 version: 1
 suites:
-  - name: cron-fixture
-    source: driver.zig
-    mode: prepare
-    user: root
-    policy:
-      pledge: stdio rpath wpath
-    cases:
-      seed: [cron-fixture-clean]
-      verify: [cron-fixture-clean]
+  # Real jobs, as root runs the shipped service: leash reads /etc/sv/cron/service
+  # with only the crontab and the job's program changed (driver.zig).
   - name: cron-jobs
     source: driver.zig
     mode: jobs
-    user: supercronic
-    memory: 64
+    user: root
     policy:
-      pledge: stdio rpath proc exec
-      read: [/etc/cron]
-      run: [/usr/bin/supercronic]
+      pledge: stdio rpath wpath proc exec
     cases:
       seed: [cron-job-runs]
       verify: [cron-job-runs]
@@ -48,16 +38,16 @@ suites:
                 matches: "(^|\n)supercronic:[^\n]*:/usr/lib/werewolf/sh-shim(\n|$)"
       - name: cron-unlisted-refused
         steps:
-          - file: /data/svc/test-cron-jobs/cron.log
+          - file: /run/cron-check/log
             expect:
               body:
                 contains: 'sh-shim: /usr/bin/zstd: permission denied'
       - name: cron-shell-refused
         steps:
-          - file: /data/svc/test-cron-jobs/cron.log
+          - file: /run/cron-check/log
             expect:
               body:
                 matches: 'sh-shim: refused: unquoted .* is shell syntax'
-          - file: /data/svc/test-cron-jobs/shell-ran
+          - file: /data/svc/cron-check/shell-ran
             expect:
               exists: false

@@ -126,7 +126,10 @@ pub fn sourceIdentity(tree: []const u8) [64]u8 {
         if (row.len == 0) continue;
         const tab = mem.findScalar(u8, row, '\t') orelse continue;
         const path = row[tab + 1 ..];
-        if ((mem.endsWith(u8, path, ".md") and mem.find(u8, path, "/rootfs/") == null) or
+        const manual = path.len >= 5 and path[path.len - 5] == '.' and
+            path[path.len - 4] >= '1' and path[path.len - 4] <= '9';
+        if ((mem.endsWith(u8, path, ".md") and !manual and
+            mem.find(u8, path, "/rootfs/") == null) or
             mem.find(u8, path, "__pycache__/") != null) continue;
         if (!first) h.update("\x00");
         h.update(row);
@@ -342,12 +345,20 @@ test "a foreign architecture is no empty successful snapshot" {
     try testing.expectEqualStrings("empty package snapshot: form", f.s.why.text);
 }
 
-test "documentation cannot invalidate published image inputs" {
+test "only documentation shipped in images invalidates published image inputs" {
     const code = "100644 blob code\tcmd/init/init.zig\x00";
-    const docs = "100644 blob docs\tcmd/init/README.md\x00";
-    const changed = "100644 blob edited\tcmd/init/README.md\x00";
+    const docs = "100644 blob docs\tcmd/howl/README.md\x00";
+    const changed = "100644 blob edited\tcmd/howl/README.md\x00";
     try testing.expectEqualStrings(&sourceIdentity(code), &sourceIdentity(code ++ docs));
     try testing.expectEqualStrings(&sourceIdentity(code ++ docs), &sourceIdentity(code ++ changed));
+    const manual = "100644 blob manual\tcmd/init/init.8.md\x00";
+    const edited_manual = "100644 blob edited\tcmd/init/init.8.md\x00";
+    try testing.expect(!mem.eql(u8, &sourceIdentity(code), &sourceIdentity(code ++ manual)));
+    try testing.expect(!mem.eql(
+        u8,
+        &sourceIdentity(code ++ manual),
+        &sourceIdentity(code ++ edited_manual),
+    ));
     try testing.expect(!mem.eql(
         u8,
         &sourceIdentity(code),

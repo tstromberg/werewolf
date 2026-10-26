@@ -1,6 +1,6 @@
 //! attacks are posture's checks that attack the machine and expect each
 //! attack refused. They run only with werewolf.check=1, --attack or
-//! WEREWOLF_CHECK=1. See README.md.
+//! WEREWOLF_CHECK=1. See posture.8.
 
 const std = @import("std");
 const Io = std.Io;

@@ -1,6 +1,6 @@
 //! cloud-metadata fetches werewolf's config tar from a cloud's metadata server
 //! and leaves a checked copy for init in /run/werewolf/cloud/config.tar.
-//! See README.md.
+//! See cloud-metadata.8.
 
 const std = @import("std");
 const linux = std.os.linux;

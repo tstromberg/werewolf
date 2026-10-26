@@ -4,7 +4,7 @@
 //!     slot-update [check]   stage the other slot if anything newer exists
 //!     slot-update outcome   after a reboot, log whether the last update held
 //!
-//! See README.md and docs/updater.md.
+//! See slot-update.8.md and docs/updater.md.
 
 const std = @import("std");
 const apk = @import("apk");

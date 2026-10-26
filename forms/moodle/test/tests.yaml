@@ -399,6 +399,12 @@ suites:
             expect:
               type: directory
               mode: '2770'
+      # PHP has no SOAP: the image ships no soap module for Moodle to load.
+      - name: moodle-no-soap
+        steps:
+          - file: /usr/lib/php/modules/soap.so
+            expect:
+              exists: false
   - name: moodle-database
     user: postgres
     policy:
@@ -484,19 +490,19 @@ suites:
         - moodle-path-info
       verify:
         - moodle-path-info
+  # Moodle adds no code: its local plugins are on the read-only root.
   - name: moodle-code-denied
-    source: driver.zig
-    mode: write-refused
     user: moodle
     policy:
       pledge: stdio rpath wpath
       read:
         - /usr/share/moodle/public/local
     cases:
-      seed:
-        - moodle-code-write-refused
-      verify:
-        - moodle-code-write-refused
+      - name: moodle-code-write-refused
+        steps:
+          - write: /usr/share/moodle/public/local/werewolf-test-write
+            expect:
+              errno: EROFS
   - name: moodle-private
     source: driver.zig
     mode: private

@@ -1,5 +1,5 @@
 //! su opens a root login through the existing SSH server. It has no
-//! privileges and accepts no SSH options or commands. See README.md.
+//! privileges and accepts no SSH options or commands. See su.1.
 
 const std = @import("std");
 const linux = std.os.linux;

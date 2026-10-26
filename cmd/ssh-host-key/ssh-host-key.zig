@@ -1,7 +1,7 @@
 //! ssh-host-key makes a leashed sshd's Ed25519 host key in /data on first boot,
 //! keeps it after, and logs its fingerprint on every start. When COPY is
 //! given, it copies the key to COPY (or makes it there for this boot alone
-//! when /data is unavailable or on RAM). See README.md.
+//! when /data is unavailable or on RAM). See ssh-host-key.8.
 //!
 //!     ssh-host-key KEY [COPY [KNOWN_HOSTS]]
 

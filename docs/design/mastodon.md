@@ -49,7 +49,7 @@ sha256 and followed by melange's `update:`
 form is `base: ruby` with `[postgresql, valkey, caddy]`
 ([docs/forms.md](../forms.md#bundles-one-form-taking-several)); and
 `connect USER tcp/443 public`, which fence keeps off private, loopback,
-link-local and metadata addresses ([cmd/fence](../../cmd/fence/README.md)).
+link-local and metadata addresses ([cmd/fence](../../cmd/fence/fence.8.md)).
 Built for it:
 
 1. **A narrower leash for a child**: `narrow` lines give ffmpeg and
@@ -62,7 +62,7 @@ Built for it:
    taken `with` ([forms/cron](../../forms/cron/README.md)).
 4. **`cpu`** beside `memory`, so a federation flood cannot starve Caddy.
 5. **`/bin/sh -c`**, which Terrapin, Paperclip's runner, starts ffmpeg
-   through: the `sh-shim` form ([cmd/sh-shim](../../cmd/sh-shim/README.md)).
+   through: the `sh-shim` form ([cmd/sh-shim](../../cmd/sh-shim/sh-shim.1.md)).
 
 **Defaults.**
 

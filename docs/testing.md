@@ -56,8 +56,9 @@ It boots every form and a slot with native EFI under QEMU. Passing requires a su
 boot, expected [checks](../test/checks) as root, and a clean shutdown.
 
 Legacy checks add mksh, BusyBox tools and developer SSH with `DEV=1`. Shipping-image
-checks (`check-shellfree-<form>`) use [test/boot](../test/boot) to judge posture and
-expected console output (`forms/<form>/test/console`) without running guest commands.
+checks (`check-shellfree-<form>`) and native runs boot by
+[test/console.zig](../test/console.zig), running nothing on the machine. It judges
+posture and `test/console`: `seen`/`unseen` POSIX EREs, `up [SERVICE]` (stays up).
 
 Checks attack lockdown, memory access, one-way sysctls, setuid, undeclared listeners,
 execution from `/tmp`, and `nobody` writing `/run`, seeing others' processes or planting
@@ -113,7 +114,7 @@ quality. `make check-apps` tests HTTP for `-app` forms and `php` using
 
 [posture](posture.md) judges a machine's settings and the attacks on them, once, the way
 its owner would; with `werewolf.check=1`, which only `make check` sets, it also makes
-the attacks that write to the kernel log. test/boot waits for its line and fails the
+the attacks that write to the kernel log. The console waits for its line and fails the
 machine unless the failing checks are exactly the weaknesses its form.yaml excuses, plus
 what [test/posture-known](../test/posture-known) gives every DEV=1 build or the
 architecture. A known failure that starts passing fails too, until the list and the docs

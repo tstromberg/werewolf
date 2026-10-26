@@ -1,6 +1,6 @@
 //! debug-shell gives a passwordless root shell on the serial console, but
 //! only on a DEV=1 build booted with werewolf.debug=1; otherwise it parks.
-//! runsv also runs it as control/t to stop the shell. See README.md.
+//! runsv also runs it as control/t to stop the shell. See debug-shell.8.
 
 const std = @import("std");
 const Io = std.Io;

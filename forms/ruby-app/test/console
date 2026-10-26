@@ -4,4 +4,4 @@
 
 seen    app-waits         leash: \{"event":"down","service":"app","why":"requires /usr/lib/app/main\.rb, which is not there"\}
 unseen  app-leashed       leash: \{"event":"start","service":"app"
-unseen  app-retried       leash: \{"event":"retry(?![^\r\n]*"why":"waiting for syslogd")","service":"app"
+up  app-retried       app

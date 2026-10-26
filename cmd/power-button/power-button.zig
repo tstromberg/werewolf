@@ -1,5 +1,5 @@
 //! power-button turns the hypervisor's power-button press into a clean
-//! poweroff. It watches the input devices. See README.md.
+//! poweroff. It watches the input devices. See power-button.8.
 
 const std = @import("std");
 const sandbox = @import("sandbox");

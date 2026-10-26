@@ -7,7 +7,7 @@ suites:
           - file: /run/svc/valkey/override.conf
             expect:
               body:
-                contains: "maxmemory 64mb\n"
+                matches: "(^|\n)maxmemory 64mb(\n|$)"
       - name: valkey-uncapped
         steps:
           - file: /run/cgroup/svc/valkey/memory.max
@@ -80,6 +80,7 @@ suites:
               stdout:
                 contains:
                   run: true
+                matches: "^[0-9a-f]{32}\n$"
           - exec:
               argv: [/usr/bin/valkey-cli, --raw, -e, -h, 127.0.0.1, -p, '6379', del, integration]
               env:

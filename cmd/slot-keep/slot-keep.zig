@@ -1,7 +1,7 @@
 //! slot-keep makes this boot's slot the loader's default once every service
 //! has run for a minute, /data works, the updater is ready, and posture
 //! fails nothing the image does not excuse. Until then stage0's deadman
-//! reboots into the last good slot. See README.md.
+//! reboots into the last good slot. See slot-keep.8.
 
 const std = @import("std");
 const Io = std.Io;

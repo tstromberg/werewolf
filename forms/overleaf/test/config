@@ -1,10 +1,33 @@
 #!/bin/sh
 # forms/overleaf/test/config DIR: the overleaf form's config for make
 # check, in DIR: its base URL, https://localhost, for which Caddy's own CA
-# signs, and its administrator, whose password test/checks signs in with.
+# signs, its administrator, whose password tests.yaml signs in with, and a
+# project the compile case uploads. The project's main.tex tries what a
+# document should not: a command through \write18, and a read of a file
+# outside its own directory. clsi-confine and shell_escape refuse both.
 set -eu
-mkdir -p "$1/overleaf" "$1/caddy"
+mkdir -p "$1/overleaf" "$1/caddy" "$1/tests/overleaf"
 umask 077
 printf '%s' werewolf-check-pass-1 >"$1/overleaf/admin-password"
 echo '{"base-url":"https://localhost","admin-email":"admin@example.com"}' >"$1/overleaf/settings.json"
 echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cat >"$work/main.tex" <<'TEX'
+\documentclass{article}
+\newread\probe
+\begin{document}
+\immediate\write18{touch pwned-overleaf}
+\openin\probe=/etc/hostname\relax
+\ifeof\probe
+  \typeout{werewolf-outside-refused}
+\else
+  \read\probe to\leak
+  \typeout{werewolf-outside-read=\leak}
+  \closein\probe
+\fi
+werewolf
+\end{document}
+TEX
+zip -q -X -j "$1/tests/overleaf/project.zip" "$work/main.tex"

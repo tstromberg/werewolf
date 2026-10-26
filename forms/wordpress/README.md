@@ -15,7 +15,6 @@ instructions](https://dist.werewolf-linux.org/boot/v1/wordpress/index.html).
 ### Weaknesses
 
 - php-fpm runs WordPress.
-- PCRE2 compiles PHP's patterns to machine code.
 
 ## Getting Started
 

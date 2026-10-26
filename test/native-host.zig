@@ -1,9 +1,10 @@
 //! native-host PLAN PHASE RESULTS runs a native test plan's host suites
-//! (test/native/host.zig) in PHASE against the machine test/boot is
-//! running, from this host as an operator's client would: OpenSSH's own ssh
-//! and sftp, through the port QEMU forwards to the machine's 22. It writes
-//! each case's result to RESULTS, a file of the host's, never through the
-//! console the machine writes, and exits 0 only if every case held.
+//! (test/native/host.zig) in PHASE against the machine the console
+//! (test/console.zig) is running, from this host as an operator's client
+//! would: OpenSSH's own ssh and sftp, through the port QEMU forwards to the
+//! machine's 22. It writes each case's result to RESULTS, a file of the
+//! host's, never through the console the machine writes, and exits 0 only
+//! if every case held.
 //!
 //! PLAN is what native-tests wrote for the run, {"run": ID, "suites": [...]}.
 //! The environment names NATIVE_SSH_PORT, NATIVE_SSH_KEYS, the prefix of

@@ -58,6 +58,7 @@ suites:
               stdout:
                 contains:
                   run: true
+                matches: "^[0-9a-f]{32}\n$"
         phases:
           - verify
       - name: valkey-works
@@ -83,6 +84,7 @@ suites:
               stdout:
                 contains:
                   run: true
+                matches: "^[0-9a-f]{32}\n$"
           - exec:
               argv: [/usr/bin/valkey-cli, --raw, -e, -s, /run/svc/valkey/valkey.sock, eval,
                      return 1, '0']

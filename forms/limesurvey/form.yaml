@@ -39,7 +39,6 @@ packages:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs LimeSurvey
-  kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
 
 check:
   memory: 2048

@@ -15,8 +15,8 @@ with: [postgresql, caddy, cron, sh-shim]
 
 packages:
   - moodle
-  - php-8.5
-  - php-8.5-fpm
+  - php-8.5>=8.5.12-r16000
+  - php-8.5-fpm>=8.5.12-r16000
   - php-8.5-ctype
   - php-8.5-curl
   - php-8.5-dom
@@ -42,7 +42,7 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs Moodle, which is what this form is for
-  kernel-write-xor-execute: PostgreSQL compiles costly queries, and PCRE2 PHP's patterns, to machine code (allow jit, from postgresql)
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code (allow jit, from postgresql); PHP retains MDWE
 
 services:
   # Caddy, as its own user, for Moodle: it may bind :80 and :443 and no

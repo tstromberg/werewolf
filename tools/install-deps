@@ -258,6 +258,8 @@ esac
 
 # Work out what to do: the packages not installed, and upstream tools that
 # are missing or not the pinned version.
+# macOS and the BSDs provide mandoc in the base system.
+[ "$(uname -s)" != Linux ] || pkgs="$pkgs mandoc"
 need_apko='' need_melange='' need_crane='' need_zig='' need_erofs='' need_fc='' need_stubs=''
 if [ -n "$zos" ]; then
 	! wants apko || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes

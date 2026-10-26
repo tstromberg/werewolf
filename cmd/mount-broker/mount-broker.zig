@@ -1,6 +1,6 @@
 //! mount-broker mounts the few filesystems root's programs need after boot,
 //! when fence's Landlock domain forbids them to mount. Callers ask over three
-//! inherited socketpairs (updater, keeper, stage). See README.md.
+//! inherited socketpairs (updater, keeper, stage). See mount-broker.8.
 
 const std = @import("std");
 const linux = std.os.linux;

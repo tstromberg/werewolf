@@ -12,13 +12,6 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(a);
     if (args.len != 4 or !std.mem.eql(u8, args[2], "wire")) return error.Usage;
     const ctx = try driver.Run.load(io, a, args[3]);
-    var dir = try Io.Dir.cwd().openDir(io, "/run/svc/haproxy", .{ .iterate = true });
-    defer dir.close(io);
-    var entries = dir.iterate();
-    var socket = false;
-    while (try entries.next(io)) |entry| socket = socket or entry.kind == .unix_domain_socket;
-    try ctx.result(io, args[1], "haproxy-no-sockets", !socket);
-
     const address: Io.net.IpAddress = .{ .ip4 = .loopback(443) };
     var server = try address.listen(io, .{});
     defer server.deinit(io);

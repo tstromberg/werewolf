@@ -1,6 +1,6 @@
 //! seal reports the machine's seccomp promises, each service's pledge, and
 //! the calls refused this boot. It changes nothing; anyone may run it.
-//! See README.md.
+//! See seal.8.
 
 const std = @import("std");
 const seal = @import("seal");

@@ -566,7 +566,8 @@ fn run(t: *Tool, f: Form, arch: []const u8, qemu: []const []const u8) !void {
 
 /// Harness is what runPlan boots with, and the shared plan it hashes.
 const Harness = struct {
-    boot: []const u8 = "test/boot",
+    /// boot judges a machine with no shell from its console (test/console.zig).
+    boot: []const u8 = "build/host/console",
     platform_plan: []const u8 = platform_plan,
     platform_driver: []const u8 = platform_driver,
 };
@@ -712,7 +713,7 @@ fn runPlan(
         );
         const host_results = try gpa.print("{s}/{s}-host.json", .{ work, @tagName(phase) });
         if (ssh) |s| if (hosts.cases(plan, phase) > 0) {
-            try env.put("HOST_STEPS", try hosts.tclList(t, &.{
+            try env.put("HOST_STEPS", try hosts.braced(t, &.{
                 hosts.runner, s.plan, @tagName(phase), host_results,
             }));
             try env.put("HOST_STEPS_TIMEOUT", try gpa.print("{d}", .{plan.timeout_seconds}));
@@ -1487,7 +1488,7 @@ const fake_boot =
 ;
 
 /// Scratch is a checkout's worth of what runPlan reads, with fakes for howl
-/// and test/boot.
+/// and the console.
 const Scratch = struct {
     tmp: testing.TmpDir,
     root: []const u8,

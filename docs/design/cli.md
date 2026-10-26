@@ -73,7 +73,7 @@ howl refuses a chain that declares a name twice; qualifying the names
 would rename a flag whenever a service is added. `--ip`/`--gw`/`--dns`
 write the `network` file, which init reads from a config disk but never
 from cloud user data ([lib/README.md](../../lib/README.md#network)). `pack`
-makes no host key: [ssh-host-key](../../cmd/ssh-host-key/README.md) makes
+makes no host key: [ssh-host-key](../../cmd/ssh-host-key/ssh-host-key.8.md) makes
 one on the machine, so its private half never leaves.
 
 ## Drawbacks

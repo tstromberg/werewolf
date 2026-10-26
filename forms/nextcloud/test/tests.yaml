@@ -312,7 +312,8 @@ suites:
               exit: 0
               stdout: "t\n"
             await: 340s
-  # A real code write as Nextcloud's account, without a setuid helper.
+  # A real code write as Nextcloud's account, without a setuid helper: its
+  # code is on the read-only root.
   - name: nextcloud-code-denied
     user: nextcloud
     policy:
@@ -324,8 +325,4 @@ suites:
         steps:
           - write: /usr/share/nextcloud/werewolf-test-write
             expect:
-              errno:
-                one_of:
-                  - EACCES
-                  - EPERM
-                  - EROFS
+              errno: EROFS

@@ -57,11 +57,11 @@ shutdown. It takes fixed requests, not paths or options, lends no mount, and ans
 only the updater, slot-keep and runit's shutdown stage, each through a descriptor init
 gave it. It is privileged code outside Landlock: code execution in it crosses the
 boundary that confines services
-([cmd/mount-broker/README.md](../cmd/mount-broker/README.md)). The DHCP renewal keeps
-`CAP_NET_ADMIN`, with Landlock on its writes; seal-watch drops root and refuses itself
-further opens; stage0 leaves deadman, a watchdog that reboots a trial slot not yet
-committed. Helpers the kernel starts itself sit outside init's seal, so init empties
-`kernel.modprobe` and `kernel.hotplug` and limits them to `CAP_SYS_BOOT`.
+([cmd/mount-broker/mount-broker.8.md](../cmd/mount-broker/mount-broker.8.md)). The DHCP
+renewal keeps `CAP_NET_ADMIN`, with Landlock on its writes; seal-watch drops root and
+refuses itself further opens; stage0 leaves deadman, a watchdog that reboots a trial
+slot not yet committed. Helpers the kernel starts itself sit outside init's seal, so
+init empties `kernel.modprobe` and `kernel.hotplug` and limits them to `CAP_SYS_BOOT`.
 
 ## What an attacker can keep or execute
 

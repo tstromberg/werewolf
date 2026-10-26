@@ -1,9 +1,9 @@
 //! host checks a tests.yaml's host suites: cases a client on the build host
 //! runs against the booted machine, as an operator's would, through the
 //! port QEMU forwards to its 22. test/native-host.zig runs them with
-//! OpenSSH's own ssh and sftp, once test/boot has the machine's posture.
-//! Their results come back in a file of the host's: the machine's console
-//! cannot speak for them. See docs/testing-native.md.
+//! OpenSSH's own ssh and sftp, once the console (test/console.zig) has the
+//! machine's posture. Their results come back in a file of the host's: the
+//! machine's console cannot speak for them. See docs/testing-host.md.
 
 const std = @import("std");
 const yaml = @import("form").yaml;

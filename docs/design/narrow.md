@@ -11,7 +11,7 @@ files, as Mastodon's ffmpeg does, then gets less than its service.
 ## Background
 
 leash confines a service and the programs it runs alike
-([cmd/leash](../../cmd/leash/README.md)). A bug in ffmpeg, which Sidekiq
+([cmd/leash](../../cmd/leash/leash.8.md)). A bug in ffmpeg, which Sidekiq
 runs on any uploaded video, gives Sidekiq's secrets, database, network and
 media to an attacker; ffmpeg needs a file in, a file out and the CPU. Only
 the verified `/usr` runs (fence), writable mounts follow no links, and

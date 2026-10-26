@@ -134,6 +134,29 @@ suites:
               stderr:
                 matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCESS_DENIED
             timeout: 30s
+          # A user Samba does not know, with no password: the bad-user path to
+          # a guest, which must be shut as well as the null session.
+          - exec:
+              argv:
+                - /usr/bin/smbclient
+                - //127.0.0.1/alice
+                - -E
+                - -m
+                - SMB3
+                - -t
+                - '20'
+                - --client-protection=encrypt
+                - -U
+                - werewolf-stranger%
+                - -c
+                - ls
+            expect:
+              exit:
+                min: 1
+                max: 255
+              stderr:
+                matches: NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCESS_DENIED
+            timeout: 30s
       - name: samba-other
         steps:
           - exec:

@@ -177,16 +177,16 @@ suites:
         - wp-rate-limited
       verify:
         - wp-rate-limited
+  # php adds no code: its plugins are on the read-only root.
   - name: wordpress-code-denied
-    source: driver.zig
-    mode: write-refused
     user: php
     policy:
       pledge: stdio rpath wpath
       read:
         - /usr/src/wordpress/wp-content/plugins
     cases:
-      seed:
-        - wp-code-write-refused
-      verify:
-        - wp-code-write-refused
+      - name: wp-code-write-refused
+        steps:
+          - write: /usr/src/wordpress/wp-content/plugins/werewolf-test-write
+            expect:
+              errno: EROFS

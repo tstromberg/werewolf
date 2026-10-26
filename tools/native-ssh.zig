@@ -1,7 +1,7 @@
 //! ssh readies a native run's host suites (test/native/host.zig): the
 //! run's keys and root's authorized_keys, the port QEMU forwards to the
-//! machine's 22, and the plan test/native-host.zig runs when test/boot
-//! starts it. Then it holds the runner's results to the plan: the runner
+//! machine's 22, and the plan test/native-host.zig runs when the console
+//! (test/console.zig) starts it. Then it holds the runner's results to the plan: the runner
 //! writes them on the host, where the machine cannot.
 
 const std = @import("std");
@@ -78,13 +78,13 @@ pub fn forwarded(t: *Tool, qemu: []const []const u8, port: []const u8) ![]const 
     return t.fail("host suites need QEMU's user network, -netdev user,id=n0", .{});
 }
 
-/// tclList is words as test/boot reads one command: each braced, so none
+/// braced is words as the console reads one command: each braced, so none
 /// may hold a brace or a backslash.
-pub fn tclList(t: *Tool, words: []const []const u8) ![]const u8 {
+pub fn braced(t: *Tool, words: []const []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (words, 0..) |word, i| {
         if (mem.findAny(u8, word, "{}\\\n") != null)
-            return t.fail("{s}: a path test/boot cannot pass on", .{word});
+            return t.fail("{s}: a path the console cannot pass on", .{word});
         try out.print(t.gpa, "{s}{{{s}}}", .{ if (i > 0) " " else "", word });
     }
     return out.items;
@@ -188,8 +188,8 @@ test "the machine's 22 is forwarded on QEMU's user network, or the run refuses" 
         error.Refused,
         forwarded(&t, &.{ "qemu", "-netdev", "tap,id=n0" }, "1"),
     );
-    try testing.expectEqualStrings("{a b} {c}", try tclList(&t, &.{ "a b", "c" }));
-    try testing.expectError(error.Refused, tclList(&t, &.{"a}b"}));
+    try testing.expectEqualStrings("{a b} {c}", try braced(&t, &.{ "a b", "c" }));
+    try testing.expectError(error.Refused, braced(&t, &.{"a}b"}));
 }
 
 test "host results count only this run's phase, every case once and passed" {

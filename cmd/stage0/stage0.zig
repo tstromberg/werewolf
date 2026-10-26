@@ -1,6 +1,6 @@
 //! stage0 is the initramfs's PID 1. It raises lockdown, loads modules,
 //! opens the root image through dm-verity, mounts it read-only as /, and
-//! execs its /init. See README.md.
+//! execs its /init. See stage0.8.
 
 const std = @import("std");
 const linux = std.os.linux;

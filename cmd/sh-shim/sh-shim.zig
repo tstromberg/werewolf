@@ -1,7 +1,7 @@
 //! sh-shim is not a shell. It runs `sh -c COMMAND` for programs that
 //! insist on one, supercronic among them, in an image that has none: it
 //! splits COMMAND into words as sh would and execs the first, and refuses
-//! anything else sh would read specially. See README.md.
+//! anything else sh would read specially. See sh-shim.1.
 
 const std = @import("std");
 const Io = std.Io;

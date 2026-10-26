@@ -29,6 +29,9 @@ pub const Machine = struct {
         /// log is created afresh and receives everything QEMU writes.
         log: []const u8,
         environ_map: ?*const std.process.Environ.Map = null,
+        /// input makes QEMU's standard input a pipe for send: the console,
+        /// and with -nographic the monitor behind Ctrl-A c.
+        input: bool = false,
     };
 
     /// start runs argv. m must not move until stop; gpa, safe to use
@@ -43,7 +46,7 @@ pub const Machine = struct {
             .child = try std.process.spawn(io, .{
                 .argv = argv,
                 .environ_map = o.environ_map,
-                .stdin = .ignore,
+                .stdin = if (o.input) .pipe else .ignore,
                 .stdout = .pipe,
                 .stderr = .pipe,
             }),
@@ -102,6 +105,19 @@ pub const Machine = struct {
         return m.until(deadline, Holds{ .needle = needle });
     }
 
+    /// send writes bytes to the machine's standard input, if it has one.
+    pub fn send(m: *Machine, bytes: []const u8) !void {
+        const in = m.child.stdin orelse return error.NoInput;
+        try in.writeStreamingAll(m.io, bytes);
+    }
+
+    /// note adds text to the log, between what QEMU writes, not to the console.
+    pub fn note(m: *Machine, text: []const u8) void {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        m.log.writeStreamingAll(m.io, text) catch {};
+    }
+
     /// console is a copy of all the machine has written so far.
     pub fn console(m: *Machine, gpa: Allocator) ![]u8 {
         m.mutex.lockUncancelable(m.io);
@@ -133,6 +149,8 @@ pub const Machine = struct {
             };
         };
         m.readers.await(m.io) catch {};
+        if (m.child.stdin) |in| in.close(m.io);
+        m.child.stdin = null;
         m.log.close(m.io);
     }
 };

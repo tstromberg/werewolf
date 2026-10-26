@@ -1,6 +1,6 @@
 //! fence sets the machine's network and file policy from the image, drops
 //! CAP_NET_ADMIN, CAP_NET_RAW and CAP_SYS_ADMIN, then execs PROGRAM:
-//! init's last step is `exec fence runit`. See README.md.
+//! init's last step is `exec fence runit`. See fence.8.
 
 const std = @import("std");
 const sandbox = @import("sandbox");

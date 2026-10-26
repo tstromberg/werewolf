@@ -27,14 +27,18 @@ suites:
                 Content-Type: application/x-www-form-urlencoded
             expect:
               status: 405
+      # HEAD answers with the status and headers alone: no byte of a body
+      # follows them before the server closes. curl reads no body for HEAD,
+      # so the conversation is raw.
       - name: java-head
         steps:
-          - fetch:
-              url: http://127.0.0.1:8080/
-              method: HEAD
-            expect:
-              status: 200
-              body: ''
+          - tcp:
+              connect: 127.0.0.1:8080
+              exchange:
+                - send: "HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n"
+                - expect:
+                    matches: "^HTTP/1\\.[01] 200 [^\r]*\r\n([^\r\n]+\r\n)*\r\n$"
+                - close: eof
       - name: java-traversal
         steps:
           - fetch:

@@ -31,7 +31,7 @@ const syntax =
     "the form";
 
 /// service_keys are the keys a service takes from the line: leash's
-/// directives (cmd/leash/README.md), `image` and `link` (lib/form.zig
+/// directives (cmd/leash/leash.8.md), `image` and `link` (lib/form.zig
 /// render), `allow`, `user` and `group`. `root` is an image's, never the line's.
 const service_keys = [_][]const u8{
     "image",  "link",   "user",   "group",  "exec",     "dir",    "listen",  "connect",

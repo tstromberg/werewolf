@@ -78,6 +78,7 @@ suites:
               stdout:
                 contains:
                   fixture: marker
+                matches: "^[0-9a-f]{64}\n$"
         phases:
           - seed
       - name: mariadb-tcp-kept
@@ -95,6 +96,7 @@ suites:
               stdout:
                 contains:
                   fixture: marker
+                matches: "^[0-9a-f]{64}\n$"
       - name: mariadb-tcp-wrong-password
         steps:
           - exec:

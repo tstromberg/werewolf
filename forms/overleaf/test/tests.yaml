@@ -106,6 +106,120 @@ suites:
               session: admin
             expect:
               status: 200
+      # A project compiles to a PDF, and the attacks its main.tex makes are
+      # refused: \write18 runs no command (shell_escape restricted), and a
+      # read of a file outside its compile directory fails (clsi-confine),
+      # so TeX reaches /etc/hostname neither to exist nor to read. No file
+      # the command would have made is left in clsi's directories.
+      - name: overleaf-write18
+        steps:
+          - name: form
+            fetch:
+              url: https://localhost/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/login
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+              headers:
+                Accept: application/json
+                X-Csrf-Token:
+                  step: form
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                email: admin@example.com
+                password:
+                  fixture: password
+            expect:
+              status: 200
+          - name: proj
+            fetch:
+              url: https://localhost/project
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+            expect:
+              status: 200
+          - name: upload
+            fetch:
+              url: https://localhost/project/new/upload
+              method: POST
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+              headers:
+                X-Csrf-Token:
+                  step: proj
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              multipart:
+                name: project.zip
+                qqfile:
+                  file: /run/config/tests/overleaf/project.zip
+                  filename: project.zip
+                  type: application/zip
+            expect:
+              status: 200
+              json:
+                /success: true
+                /project_id:
+                  matches: ^[0-9a-f]+$
+          - name: compile
+            fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+              path:
+                - project
+                - step: upload
+                  json: /project_id
+                - compile
+              method: POST
+              headers:
+                X-Csrf-Token:
+                  step: proj
+                  regex: 'name="ol-csrfToken" content="([^"]+)"'
+              json:
+                draft: false
+                check: silent
+                incrementalCompilesEnabled: false
+            expect:
+              status: 200
+              json:
+                /status: success
+          - fetch:
+              url: https://localhost
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: ol
+              path:
+                - project
+                - step: upload
+                  json: /project_id
+                - user
+                - step: compile
+                  regex: '/user/([0-9a-f]+)/build/[^"]*/output/output\.log'
+                - build
+                - step: compile
+                  regex: '/build/([^/"]+)/output/output\.log'
+                - output
+                - output.log
+            expect:
+              status: 200
+              body:
+                contains_all:
+                  - "runsystem(touch pwned-overleaf)...disabled (restricted)."
+                  - werewolf-outside-refused
+                contains_none:
+                  - werewolf-outside-read
+          # The command left no file, in either of clsi's directories.
+          - tree:
+              roots:
+                - /data/svc/clsi
+                - /run/svc/clsi
+            expect:
+              name:
+                not_matches: ^pwned-overleaf
       # Nobody claims the machine: /launchpad sends a stranger to sign in and
       # makes no administrator, and nobody signs up.
       - name: overleaf-no-claim

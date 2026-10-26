@@ -265,14 +265,6 @@ proc host {cmd {seconds 60}} {
 	return [list $status $text]
 }
 
-# A native plan's host suites log in from here, as an operator would, by
-# test/native-host.zig, which keeps their results in a file of the host's:
-# HOST_STEPS is its command, a list, and HOST_STEPS_TIMEOUT its budget.
-if {[info exists env(HOST_STEPS)] && $env(HOST_STEPS) ne ""} {
-	lassign [host $env(HOST_STEPS) $env(HOST_STEPS_TIMEOUT)] status out
-	if {$status == 0} { say ok host-steps $out } else { say FAIL host-steps $out; incr failed }
-}
-
 # For a machine that serves ssh, test from the host as an operator would:
 # root's key from the config logs in; a session cannot forward a port, which
 # would carry traffic past fence; and passwords are not offered at all. The
