@@ -1,0 +1,45 @@
+version: 1
+# prod, booted with no address anywhere, so init asks QEMU's DHCP server:
+# the lease must be applied, and dhcp-client split as
+# cmd/dhcp-client/dhcp-client.zig says. The shared network check proves the
+# address and the default route.
+form: prod
+kernel_address: false
+console:
+  - seen: lease-bound
+    matches: 'dhcp-client: \{.*"event":"bound"'
+suites:
+  - name: lease
+    cases:
+      - name: lease
+        steps:
+          - file: /run/werewolf/network/lease.json
+            expect:
+              body:
+                contains: 10.0.2.15
+      - name: local-resolver
+        steps:
+          - file: /etc/resolv.conf
+            expect:
+              link: /run/werewolf/network/resolv.conf
+          - file: /run/werewolf/network/resolv.conf
+            expect:
+              body:
+                matches: "^nameserver 127[.]0[.]0[.]53\n?$"
+      - name: upstream-resolver
+        steps:
+          - file: /run/werewolf/network/upstream
+            expect:
+              body:
+                matches: "^nameserver 10[.]0[.]2[.]3\n?$"
+  # dhcp-client is not a runit service, so no service probe reaches it: init
+  # starts its renewal before fence, outside fence's Landlock domain.
+  - name: lease-client
+    source: driver.zig
+    mode: client
+    user: root
+    policy:
+      pledge: stdio rpath wpath
+    cases:
+      seed: [engine-jailed, parent-narrowed, engine-parent-loss]
+      verify: [engine-jailed, parent-narrowed]

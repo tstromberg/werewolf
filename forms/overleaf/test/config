@@ -5,6 +5,9 @@
 # project the compile case uploads. The project's main.tex tries what a
 # document should not: a command through \write18, and a read of a file
 # outside its own directory. clsi-confine and shell_escape refuse both.
+# \pdffiledump reads as \input does but yields nothing when the open is
+# refused, where \openin and \input stop TeX; its read of main.tex shows
+# that it reads at all.
 set -eu
 mkdir -p "$1/overleaf" "$1/caddy" "$1/tests/overleaf"
 umask 077
@@ -16,16 +19,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cat >"$work/main.tex" <<'TEX'
 \documentclass{article}
-\newread\probe
 \begin{document}
 \immediate\write18{touch pwned-overleaf}
-\openin\probe=/etc/hostname\relax
-\ifeof\probe
+\edef\own{\pdffiledump length 16 {main.tex}}
+\ifx\own\empty\else\typeout{werewolf-own-read}\fi
+\edef\leak{\pdffiledump length 64 {/etc/hostname}}
+\ifx\leak\empty
   \typeout{werewolf-outside-refused}
 \else
-  \read\probe to\leak
   \typeout{werewolf-outside-read=\leak}
-  \closein\probe
 \fi
 werewolf
 \end{document}

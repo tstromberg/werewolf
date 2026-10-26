@@ -7,6 +7,7 @@ const std = @import("std");
 const yaml = @import("form").yaml;
 const checks = @import("steps.zig");
 const hosts = @import("host.zig");
+const scenarios = @import("scenario.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
@@ -60,9 +61,16 @@ pub const Plan = struct {
     drivers: []const Driver = &.{},
     /// host are the suites run from the build host (host.zig).
     host: []const hosts.Suite = &.{},
+    /// form, skip, console and kernel_address are a scenario's (scenario.zig).
+    form: ?[]const u8 = null,
+    skip: []const []const u8 = &.{},
+    console: []const scenarios.Console = &.{},
+    kernel_address: bool = true,
 };
 
 pub const HostSuite = hosts.Suite;
+pub const Console = scenarios.Console;
+pub const consoleLine = scenarios.line;
 
 /// Failure says why a plan was refused, with its file and line.
 pub const Failure = struct { text: []const u8 = "" };
@@ -140,6 +148,9 @@ pub fn form(
 ) Error!Plan {
     const path = try gpa.print("{s}/test/tests.yaml", .{dir});
     var plan = try load(io, gpa, root, path, failure);
+    if (plan.form != null or plan.skip.len > 0 or plan.console.len > 0 or !plan.kernel_address)
+        return refuse(gpa, failure, "{s}: form, skip, console and kernel_address are a " ++
+            "scenario's (test/scenarios); a form says check.skip and test/console", .{path});
     for ([_][]const u8{ "checks", "checks-again" }) |name| {
         const stat = root.statFile(io, try gpa.print("{s}/test/{s}", .{ dir, name }), .{}) catch
             continue;
@@ -168,6 +179,24 @@ pub fn form(
                 .{path},
             );
     }
+    return plan;
+}
+
+/// scenario loads the plan in dir, a scenario's directory (scenario.zig),
+/// which names the form it boots, and may have no suites of its own: the
+/// shared checks and its console lines can be all it asks.
+pub fn scenario(
+    io: Io,
+    gpa: Allocator,
+    root: Io.Dir,
+    dir: []const u8,
+    failure: *Failure,
+) Error!Plan {
+    const path = try gpa.print("{s}/tests.yaml", .{dir});
+    const plan = try load(io, gpa, root, path, failure);
+    if (plan.form == null) return refuse(gpa, failure, "{s}: a scenario names its form", .{path});
+    for (plan.drivers) |d| for (reserved) |name| if (mem.eql(u8, d.name, name))
+        return refuse(gpa, failure, "{s}: {s} is reserved for shared checks", .{ path, name });
     return plan;
 }
 
@@ -337,9 +366,9 @@ pub const Check = struct {
 
     fn plan(c: *Check, node: yaml.Node, data: Json) Error!Plan {
         c.line = 1;
-        try c.fields(data, &.{
+        try c.fields(data, &([_][]const u8{
             "version", "packages", "prune", "suites", "host", "legacy", "timeout",
-        }, &.{ "version", "suites" });
+        } ++ scenarios.keys), &.{ "version", "suites" });
         const top = data.object;
         const version = top.get("version").?;
         c.line = keyLine(node, "version");
@@ -356,6 +385,7 @@ pub const Check = struct {
             out.timeout_seconds = seconds(timeout, 1, 1800) orelse
                 return c.fail("phase timeout must be 1s..1800s", .{});
         }
+        try scenarios.read(c, node, top, &out);
         const suites = top.get("suites").?;
         c.line = keyLine(node, "suites");
         if (suites != .array or suites.array.items.len > 32)
@@ -658,7 +688,7 @@ pub fn lineOf(node: yaml.Node, fallback: usize) usize {
     return if (node == .map and node.map.len > 0) node.map[0].line else fallback;
 }
 
-fn keyLine(node: yaml.Node, key: []const u8) usize {
+pub fn keyLine(node: yaml.Node, key: []const u8) usize {
     for (node.map) |e| if (mem.eql(u8, e.key, key)) return e.line;
     return 1;
 }
@@ -1159,6 +1189,28 @@ test "a form's plan keeps retained shell checks and refuses shared names" {
     try testing.expect(mem.find(u8, failure.text, "adjacent Zig source") != null);
     try tmp.dir.writeFile(io, .{ .sub_path = "forms/app/test/driver.zig", .data = "" });
     _ = try form(io, a, tmp.dir, "forms/app", &failure);
+    // A form is itself: it names no form, and boots as forms do.
+    for ([_][]const u8{ "form: minimal\n", "kernel_address: false\n" }) |key| {
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "forms/app/test/tests.yaml",
+            .data = try mem.concat(a, u8, &.{ key, plan }),
+        });
+        try testing.expectError(error.Plan, form(io, a, tmp.dir, "forms/app", &failure));
+        try testing.expect(mem.find(u8, failure.text, "scenario's") != null);
+    }
+    // A scenario names the form it boots, and may ask nothing of its own.
+    try tmp.dir.createDirPath(io, "test/scenarios/lease");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "test/scenarios/lease/tests.yaml",
+        .data = "version: 1\nform: prod\nkernel_address: false\nsuites: []\n",
+    });
+    const s = try scenario(io, a, tmp.dir, "test/scenarios/lease", &failure);
+    try testing.expectEqualStrings("prod", s.form.?);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "test/scenarios/lease/tests.yaml",
+        .data = "version: 1\nsuites: []\n",
+    });
+    try testing.expectError(error.Plan, scenario(io, a, tmp.dir, "test/scenarios/lease", &failure));
 }
 
 test "writeJson sorts keys and keeps floats floats" {

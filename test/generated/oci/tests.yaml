@@ -1,0 +1,25 @@
+version: 1
+# check-adhoc's form: prod with nginx from its own OCI image, as howl form
+# makes one. The service's data bind is there once init is done, and the
+# age cache it was given stays read-only (the shared age-cache-protected
+# check also refuses a second view of it).
+suites:
+  - name: oci
+    cases:
+      - name: oci-data-mounted
+        steps:
+          - mount: /oci/web/data
+            expect:
+              source:
+                type: string
+      - name: age-no-oci-alias
+        steps:
+          - file: /data/svc/unwound-age/age.db
+            expect:
+              size:
+                min: 1
+          - write:
+              path: /data/svc/unwound-age/age.db
+              existing: true
+            expect:
+              errno: EROFS

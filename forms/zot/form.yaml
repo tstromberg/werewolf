@@ -14,10 +14,6 @@ packages:
 
 with: [caddy]
 
-# The check pushes and pulls with crane.
-dev:
-  - crane
-
 services:
   # zot, as its own user: it serves on loopback alone, behind Caddy, and
   # reaches nothing. Its users come from the config; missing, it parks

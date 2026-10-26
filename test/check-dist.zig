@@ -1,5 +1,5 @@
 //! check-dist QEMU... boots the actual release disk in DIST through
-//! test/boot (make check-dist). A signed release must first prove its
+//! build/host/console (test/console.zig; make check-dist). A signed release must first prove its
 //! disk, UKI and boot certificate are the bytes its manifest names; its
 //! certificate is then enrolled, and replaces the generic firmware. A
 //! form's test/config-shellfree, when it has one, makes the config disk.
@@ -105,7 +105,7 @@ fn run(c: *host.Check) !void {
     const console = c.env.get("CONSOLE") orelse "";
     var boot: std.ArrayList([]const u8) = .empty;
     try boot.appendSlice(gpa, &.{
-        "test/boot",
+        "build/host/console",
         try gpa.print("dist-{s}", .{form}),
         if (console.len > 0) console else "-",
         try c.path("dist.log"),
@@ -116,7 +116,7 @@ fn run(c: *host.Check) !void {
         &.{ "-drive", try gpa.print("file={s},format=qcow2,if=virtio", .{disk}) },
     );
     const err = std.process.replace(io, .{ .argv = boot.items, .environ_map = &c.env });
-    return c.fail("test/boot: {t}", .{err});
+    return c.fail("build/host/console: {t}", .{err});
 }
 
 /// firmwareArguments replaces generic firmware in argv, rather than adding

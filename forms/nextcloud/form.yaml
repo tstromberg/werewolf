@@ -15,8 +15,8 @@ with: [postgresql, valkey, caddy, cron, sh-shim]
 
 packages:
   - nextcloud
-  - php-8.5>=8.5.12-r16000
-  - php-8.5-fpm>=8.5.12-r16000
+  - php-8.5>=8.5.12-r17000
+  - php-8.5-fpm>=8.5.12-r17000
   - php-8.5-apcu          # the local cache
   - php-8.5-bcmath
   - php-8.5-ctype

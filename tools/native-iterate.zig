@@ -23,6 +23,7 @@ pub fn main(t: *Tool, args: []const []const u8) !void {
     if (args.len != 5 and args.len != 6) return t.fail("{s}", .{usage});
     const howl = args[0];
     const f = try t.ref(args[1]);
+    if (f.scenario) return t.fail("{s}: a scenario runs clean, not under --iterate", .{f.dir});
     const arch = args[2];
     if (!mem.eql(u8, arch, local))
         return t.fail("SSH iteration runs the host architecture, aarch64 or x86_64", .{});
@@ -289,7 +290,7 @@ fn configFor(t: *Tool, f: tests.Form, work: []const u8, fresh: bool) ![]const u8
             .{ .sub_path = key, .data = &bytes, .flags = .{ .permissions = .fromMode(0o600) } },
         );
     }
-    const fixture = try t.gpa.print("{s}/test/config", .{f.dir});
+    const fixture = try t.gpa.print("{s}/config", .{f.tests});
     if (exists(io, fixture)) try t.call(&.{ fixture, config }, .{});
     return config;
 }
@@ -306,7 +307,7 @@ fn fingerprint(t: *Tool, f: tests.Form, plan: plans.Plan, generated: []const u8)
     return digestInputs(t, Dir.cwd(), .{
         .chain = chain.items,
         .plan = plan,
-        .tests = try t.gpa.print("{s}/test", .{f.dir}),
+        .tests = f.tests,
         .generated = generated,
         .kernel = t.env.get("KERNEL_ROOTFS"),
     });
@@ -459,7 +460,7 @@ fn runDriver(
         try tests.compile(
             t,
             arch,
-            try gpa.print("{s}/test/{s}", .{ f.dir, d.source }),
+            try gpa.print("{s}/{s}", .{ f.tests, d.source }),
             out,
             has(plan.packages, "libcurl-openssl4"),
         );

@@ -21,8 +21,9 @@ Native drivers remain useful for protocols and attacks requiring custom code.
 
 ## Detailed design
 On the host, `plan.zig` and `steps.zig` validate `forms/FORM/test/tests.yaml`
-(lib/yaml.zig's plan dialect) and emit JSON for howl and `tools/native-tests.zig`,
-which builds one cached runner per architecture and source digest.
+and a scenario's `test/scenarios/NAME/tests.yaml` (lib/yaml.zig's plan dialect)
+and emit JSON for howl and `tools/native-tests.zig`, which builds one cached runner
+per architecture and source digest.
 The test stage invokes root suites directly and named-user suites through leash.
 Native sources use the same stage and result contract. See
 [the authoring guide](../../docs/testing-native.md) for the schema and examples.
@@ -42,6 +43,7 @@ Native sources use the same stage and result contract. See
 | `write.zig` | Write-opens that must be refused; one that is not is undone. |
 | `process.zig` | Service members' comm and cmdline as matchable text. |
 | `host.zig` | Host suites, which `test/native-host.zig` runs on the build host. |
+| `scenario.zig` | A scenario's keys: the form it boots, its skips, console lines, address. |
 
 Clean boots run declared readiness, startup checks, lifecycle checks and application
 suites in order. Readiness probes are read-only; failed readiness blocks restart

@@ -10,6 +10,7 @@ base: prod
 
 packages:
   - postgresql~18
+  - postgresql-contrib~18  # pg_trgm, pgcrypto, uuid-ossp and the standard extensions
   - posix-libc-utils-bin  # locale -a, without ldd or its bash dependency
 
 dev: [postgresql-client~18]  # peer-authenticated SQL checks

@@ -310,10 +310,12 @@ fn leashAttack(p: *Posture) !void {
         p.io,
         .{ .sub_path = probe_dir ++ "/service", .data = file },
     ) catch return;
+    // leash logs its start line to stdout, which is the report's.
     var child = std.process.spawn(p.io, .{
         .argv = &.{leash_bin},
         .cwd = .{ .path = probe_dir },
         .stdin = .ignore,
+        .stdout = .ignore,
     }) catch return;
     const term = child.wait(p.io) catch return;
     const ran = term == .exited and term.exited == 0x80;

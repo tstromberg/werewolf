@@ -20,9 +20,8 @@ nor a directory chosen per run.
   list and the devices; it writes only its directory and its own cache.
 - It makes no link, device or socket, connects to no TCP port or pathname socket, and
   signals nothing outside its domain.
-- The checks `overleaf-write18` and `overleaf-cross-project`
-  (forms/overleaf/test/checks) hold: `/etc/hostname` and another project's file are not
-  found.
+- The case `overleaf-write18` (forms/overleaf/test/tests.yaml) holds: a compile's read
+  of `/etc/hostname` yields nothing, where its read of its own `main.tex` does not.
 
 ## Non-Goals
 
@@ -45,6 +44,9 @@ clsi's leash, whose run list still names what latexmk may start. A refusal is a
 
 - One cache per project: fonts and formats TeX makes are made again for each, and the
   caches stay after clsi drops a project.
+- Landlock refuses opening, not looking: a document still learns which paths exist, and
+  `\input` or `\openin` of one outside the domain stops TeX with a fatal error (web2c
+  opens a file it found with `xfopen`), where TeX would otherwise read it as absent.
 
 ## Alternatives Considered
 

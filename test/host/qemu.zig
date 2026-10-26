@@ -171,7 +171,7 @@ pub fn clean(gpa: Allocator, data: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = try .initCapacity(gpa, text.len);
     var i: usize = 0;
     while (i < text.len) {
-        if (kernelRecord(text[i..], .any_space)) |len| {
+        if (kernelRecord(text[i..], .any_space) orelse dropped(text[i..])) |len| {
             i += len;
             continue;
         }
@@ -210,6 +210,16 @@ pub fn kernelRecord(text: []const u8, spacing: Spacing) ?usize {
     return end + 1;
 }
 
+/// dropped is the length of the kernel's "** N printk messages dropped **"
+/// line at the start of text, which has no time but lands inside a record
+/// as a kernel record does, or null.
+fn dropped(text: []const u8) ?usize {
+    if (!mem.startsWith(u8, text, "** ")) return null;
+    const end = mem.findScalar(u8, text, '\n') orelse return null;
+    const line = mem.trimEnd(u8, text[0..end], "\r");
+    return if (mem.endsWith(u8, line, " printk messages dropped **")) end + 1 else null;
+}
+
 fn digits(text: []const u8, start: usize) ?usize {
     var i = start;
     while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
@@ -228,6 +238,11 @@ test "clean rejoins userspace records split by kernel messages" {
         "ordinary [1, 2] data\n",
         try clean(gpa, "ordinary [1, 2] data\n"),
     );
+    // A flood of kernel messages drops some, and says so where it was.
+    try std.testing.expectEqualStrings("werewolf-test: {\"a\":1}\n", try clean(
+        gpa,
+        "werewolf-test: {\"a\":1}[ 1.43] audit: seccomp\r\n** 9 printk messages dropped **\r\n\r\n",
+    ));
     const key = "{\"event\":\"host-key\",\"key\":\"/run/svc/sshd/host-key\"," ++
         "\"fingerprint\":\"SHA256:abc123\",\"detail\":\"kept in /data\"}\n";
     const split_key = try mem.replaceOwned(

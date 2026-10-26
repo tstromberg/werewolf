@@ -1,0 +1,82 @@
+version: 1
+# test/people-form's form: prod-ssh with two people, tom an admin, from a
+# manifest's users. init makes each an account, a home and a key file from
+# the config's users file; tom's key also lets him in as root. No one logs
+# in as them here. Their shell is the image's, mksh (cmd/init/config.zig).
+suites:
+  - name: people
+    cases:
+      - name: people-accounts
+        steps:
+          - file: /etc/passwd
+            expect:
+              body:
+                matches: "(^|\n)tom:x:654612137:654612137::/data/home/tom:/bin/mksh(\n|$)"
+          - file: /etc/passwd
+            expect:
+              body:
+                matches: "(^|\n)ann:x:88825308:88825308::/data/home/ann:/bin/mksh(\n|$)"
+          - file: /etc/shadow
+            expect:
+              body:
+                matches: "(^|\n)tom:[*]:"
+          - file: /etc/group
+            expect:
+              body:
+                matches: "(^|\n)tom:x:654612137:(\n|$)"
+      - name: people-homes
+        steps:
+          - file: /data/home/tom
+            expect:
+              type: directory
+              uid: 654612137
+              gid: 654612137
+              mode: '700'
+          - file: /data/home/ann
+            expect:
+              type: directory
+              uid: 88825308
+              gid: 88825308
+              mode: '700'
+      - name: people-keys
+        steps:
+          - file: /run/werewolf/keys/tom
+            expect:
+              uid: 0
+              gid: 654612137
+              mode: '640'
+              body:
+                matches: "tom@yubikey(\n|$)"
+                absent: ann@laptop
+          - file: /run/werewolf/keys/ann
+            expect:
+              body:
+                matches: "ann@laptop(\n|$)"
+      - name: people-admin
+        steps:
+          - file: /run/werewolf/keys/root
+            expect:
+              uid: 0
+              mode: '600'
+              body:
+                matches: "tom@yubikey(\n|$)"
+                absent: ann@laptop
+      - name: people-ledger
+        steps:
+          - file: /data/.werewolf
+            expect:
+              type: directory
+              uid: 0
+              gid: 0
+              mode: '700'
+          - file: /data/.werewolf/identities
+            expect:
+              uid: 0
+              gid: 0
+              mode: '600'
+              body:
+                matches: "(^|\n)p tom 654612137 654612137(\n|$)"
+          - file: /data/.werewolf/identities
+            expect:
+              body:
+                matches: "(^|\n)p ann 88825308 88825308(\n|$)"

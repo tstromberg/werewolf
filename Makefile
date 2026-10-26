@@ -205,6 +205,9 @@ ZIG_MODULES =--dep import-data --dep sandbox --dep broker --dep dm --dep verity 
 # zig test $(call HOST_ZIG_MODULES,FILE) tests it, and $(call host_test,FILE) ARGS runs it.
 HOST_ZIG_MODULES = --dep host $(call ZIG_MODULES,$(1)) -Mhost=test/host/host.zig
 host_test = zig run -O ReleaseSafe $(call HOST_ZIG_MODULES,$(1)) --
+# console boots a machine with no shell and judges it from outside (test/console.zig),
+# with the native suites' regex shim; the checks that boot through it take it.
+CONSOLE_CHECK = build/host/console
 # Host-side programs that scripts, workflows and release tools run: test/NAME.zig is build/host/NAME.
 HOST_PROGRAMS = cloud-console cloud-posture azure-security ssh-su metadata ipe-boot \
 	check-legacy-image check-public-image check-protected-qemu check-published-lifecycle check-published-run \
@@ -215,6 +218,7 @@ $(addprefix build/host/,$(HOST_PROGRAMS)): build/host/%: test/%.zig test/publish
 # The published-image checks share test/published.zig, imported by path.
 build/host/check-public-image build/host/check-protected-qemu build/host/check-published-lifecycle build/host/check-published-run \
 	build/host/check-legacy-image: test/published.zig
+build/host/check-legacy-image: $(CONSOLE_CHECK)
 # Host-side checks' own tests, in make test: they import host and the lib modules.
 HOST_TESTS = test/metadata.zig test/check-dist.zig test/check-legacy-image.zig test/check-secureboot.zig \
 	test/check-provider-ab.zig test/ab-fixture.zig test/check-bhyve-secureboot.zig test/check-bhyve-lifecycle.zig \
@@ -337,9 +341,6 @@ TEST_SK = build/host/test-sk.so
 $(TEST_SK): tools/test-sk.zig
 	$(zig_check)
 	t=$@.$$$$ && zig build-lib -dynamic -O ReleaseSafe -lc -femit-bin=$$t $< && mv -f $$t $@
-# console boots a machine with no shell and judges it from outside (test/console.zig),
-# with the native suites' regex shim.
-CONSOLE_CHECK = build/host/console
 $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zig)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe -lc test/native/regex.c $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -739,10 +740,6 @@ check-one:
 	@mkdir -p $(CHECK)
 	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(MAKE) --no-print-directory check-$(FORM)
 
-# Repeated and overlapping posture scans, stale fixtures and log evidence.
-check-posture: | _check-shared
-	@$(CHECK_MAKE) FORM=minimal CHECK_NAME=posture FORM_CHECKS=test/checks-posture _check-form
-
 $(addprefix check-,$(filter-out bastion people $(NATIVE_TEST_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
 
 _check-legacy-%: | _check-shared
@@ -770,19 +767,32 @@ $(NATIVE_TESTS): tools/native-tests.zig tools/native-iterate.zig tools/native-co
 NATIVE_TEST_EXAMPLES := $(patsubst examples/%/test/tests.yaml,%,$(wildcard examples/*/test/tests.yaml))
 native_ref = $(if $(filter $(1),$(NATIVE_TEST_EXAMPLES)),examples/$(1),$(1))
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(filter bastion,$(FORMS_FOR_ARCH)))
-# native_check NAME,REF,VARIABLES builds REF's production image and its native
-# test image, compares them, and boots the test image with VARIABLES.
+# native_check NAME,REF,VARIABLES[,BASE] builds the production image of BASE, a
+# scenario's stock form, or else of REF, and REF's native test image, compares
+# them, and boots the test image with VARIABLES.
 define native_check
 	@$(NATIVE_TESTS) describe $(2) $(ARCH) >/dev/null
-	@$(call built,$(1)-baseline,$(MAKE) --no-print-directory FORM=$(2) DEV= DISABLE=$(CHECK_DISABLE) image)
-	PRODUCTION_OUT=$(BUILD)/$(1)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
+	@$(call built,$(or $(4),$(1))-baseline,$(MAKE) --no-print-directory FORM=$(or $(4),$(2)) DEV= DISABLE=$(CHECK_DISABLE) image)
+	PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
 	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) image)
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(1)$(if $(IPE),-ipe) \
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(IPE),-ipe) \
 		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(3) _check-native-tests
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)) $(3) _check-native-tests
 endef
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
 	$(call native_check,$*,$(call native_ref,$*))
+# A scenario (test/scenarios/NAME, docs/testing-scenarios.md) boots a stock form
+# some other way, built from that form's own production image.
+SCENARIOS := $(patsubst test/scenarios/%/tests.yaml,%,$(wildcard test/scenarios/*/tests.yaml))
+scenario_form = $(shell sed -n 's/^form: *//p' test/scenarios/$(1)/tests.yaml)
+.PHONY: check-scenarios $(addprefix check-scenario-,$(SCENARIOS))
+check-scenarios: $(addprefix check-scenario-,$(SCENARIOS))
+$(addprefix check-scenario-,$(SCENARIOS)): check-scenario-%: $(HOWL) $(NATIVE_TESTS)
+	$(call native_check,scenario-$*,test/scenarios/$*,,$(call scenario_form,$*))
+# The platform checks that are scenarios now.
+check-lease: check-scenario-lease
+check-static: check-scenario-static
+check-posture: check-scenario-posture
 # bastion's checks run on test/bastion-form's form, the bastion with two
 # users, whose keys it makes beside it: its host suites log in with them.
 check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
@@ -792,7 +802,7 @@ check-bastion: check-native-tests-bastion
 # A run's host suites log in through its own forwarded port (tools/native-ssh.zig).
 NATIVE_SSH_PORT ?= $(call check_port,24200,$(notdir $(NATIVE_FORM)))
 _check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(TEST_SK) build/host/ssh-su
-	@$(CHECK_ENV) PRODUCTION_OUT=$(BUILD)/$(notdir $(NATIVE_FORM))$(if $(IPE),-ipe) \
+	@$(CHECK_ENV) PRODUCTION_OUT=$(or $(NATIVE_PRODUCTION),$(BUILD)/$(notdir $(NATIVE_FORM)))$(if $(IPE),-ipe) \
 		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
@@ -837,19 +847,21 @@ _check-form: $(HOWL) $(TEST_SK) build/host/cloud-console build/host/ssh-su
 		test/check-form \
 		$(subst user$(,)id=n0,user$(,)id=n0$(CHECK_FWD),$(CHECK_QEMU))
 
-check-adhoc: $(HOWL) | _check-shared
+# check-adhoc's checks run on howl form's form: prod with nginx's OCI image, whose
+# pledge adds sendfile, as nginx needs (docs/applications.md).
+check-adhoc: $(HOWL) $(NATIVE_TESTS)
 	@mkdir -p $(CHECK) && rm -rf $(BUILD)/adhoc/check-oci
-	@$(HOWL) form --build --with prod --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
+	@$(HOWL) form --build --with prod --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp --services.web.pledge 'stdio rpath wpath inet unix connect listen proc sendfile' -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
-	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
-	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci FORM_CHECKS=test/checks-oci _check-form
+	@mkdir -p $(BUILD)/adhoc/check-oci/test && cp test/generated/oci/tests.yaml $(BUILD)/adhoc/check-oci/test/
+	$(call native_check,check-oci,$(BUILD)/adhoc/check-oci)
 
 # Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
 # People uses 22199, below the forms' ports, so check-cloud and check-forms can run together.
-check-people: $(HOWL) $(TEST_SK) | _check-shared
-	@test/people-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
-	@$(call built,people,$(CHECK_MAKE) FORM=$(CHECK)/people-check image)
-	@$(CHECK_MAKE) FORM=$(CHECK)/people-check CHECK_SSH=22199 _check-form
+# people's checks run on test/people-form's form: prod-ssh with two people.
+check-people: $(HOWL) $(NATIVE_TESTS)
+	@test/people-form $(CHECK) $(FORM_TOOL)
+	$(call native_check,people-check,$(CHECK)/people-check)
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-shellfree
@@ -1004,9 +1016,9 @@ fuzz-unwound:
 .PHONY: _check-prod-console-image
 _check-prod-console-image: | _check-shared check-prod
 	@$(call built,prod-console,$(CHECK_MAKE) FORM=prod image)
-check-lease check-nodata check-metadata check-people-persist: | _check-prod-console-image
+check-nodata check-metadata check-people-persist: | _check-prod-console-image
 	@$(CHECK_MAKE) FORM=prod _$@
-check-static check-verity: | _check-shared check-minimal
+check-verity: | _check-shared check-minimal
 	@$(CHECK_MAKE) FORM=minimal _$@
 check-slot: | _check-shared check-minimal
 	@$(call built,slot,$(CHECK_MAKE) FORM=minimal slot)
@@ -1041,7 +1053,7 @@ check-firecracker: build/host/cloud-console | _check-shared
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl --dep verity -Mroot=tools/verity.zig -Mverity=lib/verity.zig -femit-bin=build/x86_64/tools/verity
 	@$(CHECK_ENV) FIRECRACKER_HOST=$(FIRECRACKER_HOST) FORM_DIR=$(FC_FORM) \
 		POSTURE_KNOWN='$(POSTURE_KNOWN_X64)' test/check-firecracker
-_check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman: $(HOWL)
+_check-nodata _check-verity _check-slot _check-deadman: $(HOWL)
 	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
 _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
@@ -1082,7 +1094,7 @@ else
 	@failed=0; for f in $(filter-out $(DIST_DIRECT_FORMS),$(RELEASE_FORMS)); do \
 		$(MAKE) --no-print-directory FORM=$$f _check-dist || failed=1; done; exit $$failed
 endif
-_check-dist:
+_check-dist: $(CONSOLE_CHECK)
 	@$(UEFI_ENV) DIST=$(DIST) HOWL=$(HOWL) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) \
 		CONSOLE=$(wildcard $(FORM_DIR)/test/console) \
 		POSTURE_KNOWN="$(filter-out boot-ipe-enforced,$(POSTURE_KNOWN))" \

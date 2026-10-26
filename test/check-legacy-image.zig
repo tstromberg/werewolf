@@ -1,7 +1,7 @@
 //! check-legacy-image CANDIDATE LOGS boots the exact compatibility disk
 //! and direct-boot image of a legacy release, without Secure Boot or a
-//! TPM, through test/boot, which judges the form's own posture from the
-//! console. The candidate's manifest must first match its files.
+//! TPM, through build/host/console (test/console.zig), which judges the
+//! form's own posture from the console. The candidate's manifest must first match its files.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -145,7 +145,7 @@ fn run(c: *host.Check) !void {
         } },
     }) |mode| {
         const argv = try mem.concat(gpa, []const u8, &.{ &.{
-            "test/boot",
+            "build/host/console",
             try gpa.print("legacy-{s}-{s}", .{ form, mode.name }),
             "-",
             try gpa.print("{s}/{s}.log", .{ output, mode.name }),

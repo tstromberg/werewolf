@@ -68,6 +68,8 @@ site after this machine is up.
 - Compiles share one user, as upstream's Community Edition does, each held to its own
   project; word counts and SyncTeX are not. Give accounts to people you would trust with
   each other's drafts.
+- A document that inputs a file outside its project and TeX Live fails to compile:
+  TeX finds the file but may not open it.
 - Deleted projects are kept. Upstream's deletion cron stays off.
 - The image is about 3 GB, twice, plus MongoDB. The first boot is slow.
 

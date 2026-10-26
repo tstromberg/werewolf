@@ -8,9 +8,9 @@
 base: nginx
 
 packages:
-  # Policy revision 16 compiles out the executable-memory features required
-  # to run PHP under MDWE. Refuse an older package during image assembly.
-  - php-8.5-fpm>=8.5.12-r16000
+  # Policy revision 17 omits both JITs, executable huge-page copying and
+  # phpdbg. Refuse an older package during image assembly.
+  - php-8.5-fpm>=8.5.12-r17000
 
 # Hardened PHP omits PCRE2 JIT, OPcache JIT and executable huge-page copying.
 # Regex matching and OPcache bytecode caching run under MDWE.

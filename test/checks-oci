@@ -1,4 +1,0 @@
-# check-adhoc boots a real OCI service. Its data bind must exist after init,
-# while root under the final fence cannot create a second view of the age cache.
-ok  oci-data-mounted awk '$5 == "/oci/web/data" { found = 1 } END { exit !found }' /proc/self/mountinfo
-ok  age-no-oci-alias test -s /data/svc/unwound-age/age.db && command -v mount >/dev/null && mkdir -p /run/age-alias-check && ! mount --bind /data/svc/unwound-age /run/age-alias-check 2>/dev/null && ! sh -c 'printf x >>/data/svc/unwound-age/age.db' 2>/dev/null

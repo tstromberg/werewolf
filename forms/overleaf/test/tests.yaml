@@ -108,11 +108,17 @@ suites:
               status: 200
       # A project compiles to a PDF, and the attacks its main.tex makes are
       # refused: \write18 runs no command (shell_escape restricted), and a
-      # read of a file outside its compile directory fails (clsi-confine),
-      # so TeX reaches /etc/hostname neither to exist nor to read. No file
-      # the command would have made is left in clsi's directories.
+      # read of /etc/hostname in clsi's root, which exists and is not empty,
+      # yields nothing (clsi-confine), though the same read of the project's
+      # own main.tex does. No file the command would have made is left in
+      # clsi's directories.
       - name: overleaf-write18
         steps:
+          - file: /oci/clsi/etc/hostname
+            expect:
+              type: file
+              size:
+                min: 1
           - name: form
             fetch:
               url: https://localhost/login
@@ -209,6 +215,7 @@ suites:
               body:
                 contains_all:
                   - "runsystem(touch pwned-overleaf)...disabled (restricted)."
+                  - werewolf-own-read
                   - werewolf-outside-refused
                 contains_none:
                   - werewolf-outside-read

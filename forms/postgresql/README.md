@@ -33,6 +33,13 @@ Nothing answers on the network. A form takes this one `with` and brings its own
 database. Statements are in [PostgreSQL's SQL
 reference](https://www.postgresql.org/docs/18/sql.html).
 
+The image includes PostgreSQL contrib extensions, including `pg_trgm`, `pgcrypto`
+and `uuid-ossp`. Enable an extension in each database that needs it, for example:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh

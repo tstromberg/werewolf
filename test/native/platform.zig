@@ -212,6 +212,14 @@ fn ageCacheProtected(io: Io, a: Allocator) !void {
         const rc = linux.mount(null, path, null, linux.MS.BIND | linux.MS.REMOUNT, 0);
         if (linux.errno(rc) == .SUCCESS) return error.AgeRemounted;
     }
+    // Nor may root make a second, writable view of the cache somewhere else.
+    const alias = "/run/age-alias-check";
+    try Io.Dir.cwd().createDirPath(io, alias);
+    defer Io.Dir.cwd().deleteDir(io, alias) catch {};
+    if (linux.errno(linux.mount(directory_path, alias, null, linux.MS.BIND, 0)) == .SUCCESS) {
+        _ = linux.umount2(alias, linux.MNT.DETACH);
+        return error.AgeAliasMounted;
+    }
     const db_path: [:0]const u8 = if (std.mem.eql(u8, directory_path, "/data/svc/unwound-age"))
         "/data/svc/unwound-age/age.db"
     else

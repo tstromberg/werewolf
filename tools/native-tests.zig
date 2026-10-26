@@ -83,12 +83,19 @@ pub const Tool = struct {
         return if (value.len == 0) null else value;
     }
 
-    /// ref reads a form reference: a name in forms/, or a path to a form
-    /// directory such as examples/unifi-os.
+    /// ref reads a form reference: a name in forms/, a path to a form
+    /// directory such as examples/unifi-os, or a scenario's directory under
+    /// test/scenarios, which boots the stock form its plan names.
     pub fn ref(t: *Tool, text: []const u8) !Form {
         if (mem.findScalar(u8, text, '/') == null) {
             if (!forms.isName(text)) return t.fail("invalid form {s}", .{text});
-            return .{ .name = text, .ref = text, .dir = try t.gpa.print("forms/{s}", .{text}) };
+            const dir = try t.gpa.print("forms/{s}", .{text});
+            return .{
+                .name = text,
+                .ref = text,
+                .dir = dir,
+                .tests = try t.gpa.print("{s}/test", .{dir}),
+            };
         }
         const dir = mem.trimEnd(u8, text, "/");
         var parts = mem.splitScalar(u8, dir, '/');
@@ -97,13 +104,37 @@ pub const Tool = struct {
             return t.fail("invalid form {s}", .{text});
         const name = std.fs.path.basename(dir);
         if (!forms.isName(name)) return t.fail("invalid form {s}", .{text});
-        return .{ .name = name, .ref = dir, .dir = dir };
+        if (mem.startsWith(u8, dir, "test/scenarios/")) {
+            var failure: plans.Failure = .{};
+            const plan = plans.scenario(t.io, t.gpa, Dir.cwd(), dir, &failure) catch |err|
+                return switch (err) {
+                    error.Plan => t.fail("{s}", .{failure.text}),
+                    error.OutOfMemory => error.OutOfMemory,
+                };
+            return .{
+                .name = try t.gpa.print("scenario-{s}", .{name}),
+                .ref = plan.form.?,
+                .dir = dir,
+                .tests = dir,
+                .scenario = true,
+            };
+        }
+        return .{
+            .name = name,
+            .ref = dir,
+            .dir = dir,
+            .tests = try t.gpa.print("{s}/test", .{dir}),
+        };
     }
 
     /// formPlan is the form's own validated plan, as iteration runs it.
     pub fn formPlan(t: *Tool, f: Form) !plans.Plan {
         var failure: plans.Failure = .{};
-        return plans.form(t.io, t.gpa, Dir.cwd(), f.dir, &failure) catch |err| switch (err) {
+        const loaded = if (f.scenario)
+            plans.scenario(t.io, t.gpa, Dir.cwd(), f.dir, &failure)
+        else
+            plans.form(t.io, t.gpa, Dir.cwd(), f.dir, &failure);
+        return loaded catch |err| switch (err) {
             error.Plan => t.fail("{s}", .{failure.text}),
             error.OutOfMemory => error.OutOfMemory,
         };
@@ -123,6 +154,7 @@ pub const Tool = struct {
         var words: std.ArrayList([]const u8) = .empty;
         var it = mem.tokenizeAny(u8, skip, " \t\n");
         while (it.next()) |word| try words.append(t.gpa, word);
+        try words.appendSlice(t.gpa, plan.skip);
         return plans.boot(t.gpa, plan, platform, words.items, &failure) catch |err| switch (err) {
             error.Plan => t.fail("{s}", .{failure.text}),
             error.OutOfMemory => error.OutOfMemory,
@@ -168,11 +200,15 @@ pub const Tool = struct {
 pub const Call = struct { env: ?*const std.process.Environ.Map = null, log: ?Io.File = null };
 
 pub const Form = struct {
-    /// name is the form's name, the last part of its directory.
+    /// name is the form's name, the last part of its directory, and for a
+    /// scenario scenario-NAME.
     name: []const u8,
-    /// ref is how howl and build/host/form name it.
+    /// ref is how howl and build/host/form name it, a scenario's stock form.
     ref: []const u8,
     dir: []const u8,
+    /// tests holds its tests.yaml, config hooks and driver sources.
+    tests: []const u8,
+    scenario: bool = false,
 };
 
 fn fmtTerm(term: std.process.Child.Term) std.fmt.Alt(std.process.Child.Term, formatTerm) {
@@ -241,7 +277,7 @@ fn prepare(t: *Tool, f: Form, arch: []const u8) !void {
             });
             try t.write(try gpa.print("{s}/probes.json", .{tests}), try plans.json(gpa, probes));
         } else {
-            var source = try gpa.print("{s}/test/{s}", .{ f.dir, d.source });
+            var source = try gpa.print("{s}/{s}", .{ f.tests, d.source });
             if (has(&plans.reserved, d.name)) {
                 // The shared checks compile with their phase's cases embedded.
                 source = try gpa.print("{s}/{s}/platform.zig", .{ compile_dir, d.name });
@@ -588,7 +624,13 @@ fn runPlan(
     const kernel = t.variable("KERNEL") orelse return t.fail("KERNEL names the kernel", .{});
     const check = t.variable("CHECK") orelse return t.fail("CHECK names the check directory", .{});
     const howl = t.variable("HOWL") orelse return t.fail("HOWL names howl", .{});
-    const cmdline = t.env.get("CMDLINE") orelse "";
+    // A scenario may leave the address off the kernel command line (BOOT has
+    // none), for init to take it from the config or DHCP.
+    const cmdline = if (plan.kernel_address)
+        t.env.get("CMDLINE") orelse ""
+    else
+        t.variable("BOOT") orelse
+            return t.fail("BOOT names the kernel command line without an address", .{});
     const production = t.variable("PRODUCTION_OUT") orelse
         try gpa.print("{s}/{s}", .{ std.fs.path.dirname(out) orelse ".", f.name });
     var inputs: std.ArrayList(Input) = .empty;
@@ -596,13 +638,13 @@ fn runPlan(
         .{ .name = "kernel", .path = kernel },
         .{ .name = "image", .path = try gpa.print("{s}/initramfs.zst", .{out}) },
         .{ .name = "production_image", .path = try gpa.print("{s}/initramfs.zst", .{production}) },
-        .{ .name = "plan", .path = try gpa.print("{s}/test/tests.yaml", .{f.dir}) },
+        .{ .name = "plan", .path = try gpa.print("{s}/tests.yaml", .{f.tests}) },
         .{ .name = "platform_plan", .path = harness.platform_plan },
         .{ .name = "platform_driver", .path = harness.platform_driver },
     });
     const fixtures = [2][]const u8{
-        try gpa.print("{s}/test/config", .{f.dir}),
-        try gpa.print("{s}/test/config-again", .{f.dir}),
+        try gpa.print("{s}/config", .{f.tests}),
+        try gpa.print("{s}/config-again", .{f.tests}),
     };
     for (fixtures, [_][]const u8{ "seed_config", "verify_config" }) |path, name| {
         Dir.cwd().access(io, path, .{}) catch continue;
@@ -685,8 +727,11 @@ fn runPlan(
             );
         }
         const console = try gpa.print("{s}/console", .{work});
-        try t.write(console, "seen native-completed " ++ plans.completion ++ "\n" ++
+        var lines: std.ArrayList(u8) = .empty;
+        try lines.appendSlice(gpa, "seen native-completed " ++ plans.completion ++ "\n" ++
             "unseen native-failures werewolf-test: .*\"status\":\"fail\"\n");
+        for (plan.console) |l| try lines.appendSlice(gpa, try plans.consoleLine(gpa, l));
+        try t.write(console, lines.items);
         const log = try gpa.print("{s}/{s}.log", .{ work, @tagName(phase) });
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(gpa, &.{
@@ -907,8 +952,13 @@ pub fn consoleClean(gpa: Allocator, data: []const u8) ![]const u8 {
 }
 
 /// kernelLine is the length of `[  SECONDS.FRACTION] ...\n` at the start
-/// of t, or null.
+/// of t, or of the kernel's `** N printk messages dropped **\n`, which has
+/// no time but lands inside a record as the others do; or null.
 fn kernelLine(t: []const u8) ?usize {
+    if (mem.startsWith(u8, t, "** ")) {
+        const end = mem.findScalar(u8, t, '\n') orelse return null;
+        return if (mem.endsWith(u8, t[0..end], " printk messages dropped **")) end + 1 else null;
+    }
     if (t.len == 0 or t[0] != '[') return null;
     var i: usize = 1;
     while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
@@ -1267,6 +1317,16 @@ test "kernel interleaving preserves complete userspace records" {
         ),
     );
     try testing.expectEqualStrings("[ 1.5] no newline", try consoleClean(a, "[ 1.5] no newline"));
+    // A flood of kernel messages drops some, and says so where it was.
+    try testing.expectEqualStrings(
+        "werewolf-test: {\"event\":\"case\"}\n",
+        try consoleClean(a, "werewolf-test: {\"event\":\"case\"}[ 1.43] audit: seccomp\r\n" ++
+            "** 9 printk messages dropped **\r\n\r\n"),
+    );
+    try testing.expectEqualStrings(
+        "** not dropped **\n",
+        try consoleClean(a, "** not dropped **\n"),
+    );
 }
 
 test "drivers' grants, waits and descriptors are their own" {
@@ -1552,6 +1612,7 @@ const Scratch = struct {
             .name = "postgresql",
             .ref = "postgresql",
             .dir = try s.path("forms/postgresql"),
+            .tests = try s.path("forms/postgresql/test"),
         };
         try runPlan(&s.t, f, plan, "x86_64", &.{}, .{
             .boot = try s.path("boot"),

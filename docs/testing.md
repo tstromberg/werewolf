@@ -91,7 +91,7 @@ Other boots cover what one boot cannot:
 | `minimal` with one root byte changed (`check-verity`) | dm-verity names the block; stage0 stops before the root is mounted | `root-verified` in test/checks, for every other boot |
 | a slot that never commits (`check-deadman`) | the deadman says why and resets the machine | `werewolf.deadman`, honoured by DEV builds only |
 | `prod` behind a stand-in metadata server, as each cloud | take a good config on GCP, AWS (by session token only), Hetzner and Azure; refuse a tar with a link or `../`; ask nothing on no cloud or on Hyper-V | [test/metadata.zig](../test/metadata.zig), [test/cloud-boot](../test/cloud-boot) |
-| `prod` with no address; `minimal` with a packed one (`check-static`) | take it from DHCP, the client split as it claims; or from `howl pack --ip --gw --dns` | [test/checks-lease](../test/checks-lease), [test/checks-static](../test/checks-static) |
+| `prod` with no address; `minimal` with a packed one (`check-lease`, `check-static`) | take it from DHCP, the client split as it claims; or from `howl pack --ip --gw --dns` | scenarios: [lease](../test/scenarios/lease/tests.yaml), [static](../test/scenarios/static/tests.yaml) ([testing-scenarios.md](testing-scenarios.md)) |
 | the slot | find `root.erofs` by UUID, keep `/boot` read-only, commit its EFI entry once healthy for a minute | a 128 MiB ext4 and a FAT EFI partition with one counted entry |
 | each legacy release disk and direct image | boot without Secure Boot or a TPM, judging the exact form's posture | [test/check-legacy-image.zig](../test/check-legacy-image.zig); the shared image workflow |
 
