@@ -292,10 +292,9 @@ pub fn signed(
     return mem.concat(gpa, u8, &.{ try gzip(gpa, tar.items), member });
 }
 
-const block = 512;
+pub const block = 512;
 
-/// header appends a ustar header for path, owned by root and dated 1970, so
-/// the same files give the same member whenever they are packed.
+/// header appends ustar's header for path.
 fn header(
     gpa: Allocator,
     tar: *std.ArrayList(u8),
@@ -305,6 +304,13 @@ fn header(
     size: u64,
     link: []const u8,
 ) !void {
+    try tar.appendSlice(gpa, &try ustar(path, kind, mode, size, link));
+}
+
+/// ustar is the ustar header for path, owned by root and dated 1970, so
+/// the same files give the same tar whenever they are packed. A path or
+/// link it cannot hold is error.NameTooLong; a pax record can (pax).
+pub fn ustar(path: []const u8, kind: u8, mode: u32, size: u64, link: []const u8) ![block]u8 {
     var h: [block]u8 = @splat(0);
     // A name past 100 bytes goes in the prefix, split at a slash.
     var name = path;
@@ -334,7 +340,7 @@ fn header(
     var sum: u32 = 0;
     for (h) |b| sum += b;
     _ = try mem.print(h[148..156], "{o:0>6}\x00 ", .{sum});
-    try tar.appendSlice(gpa, &h);
+    return h;
 }
 
 /// body appends data, padded to a whole block.
@@ -344,7 +350,7 @@ fn body(gpa: Allocator, tar: *std.ArrayList(u8), data: []const u8) !void {
 }
 
 /// pax returns one PAX record, `LEN KEY=VALUE\n`, where LEN counts itself.
-fn pax(gpa: Allocator, key: []const u8, value: []const u8) ![]const u8 {
+pub fn pax(gpa: Allocator, key: []const u8, value: []const u8) ![]const u8 {
     const rest = key.len + value.len + 3;
     var len = rest + 1;
     while (std.math.log10_int(len) + 1 + rest != len) len += 1;

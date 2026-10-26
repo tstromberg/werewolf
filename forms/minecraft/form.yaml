@@ -1,5 +1,5 @@
 # minecraft: Minecraft Java Edition 26.3, the release pinned in
-# ../packages/games/minecraft/minecraft.yaml. Nothing here notices when
+# ../packages/games/minecraft/package.yaml. Nothing here notices when
 # Mojang publishes a newer server. It is the jre form, so it runs that
 # form's Java. The whitelist is the config's account names, resolved
 # with Mojang before each start. Online mode is on, and there is no
@@ -26,13 +26,13 @@ services:
   # reach Mojang over HTTPS (the whitelist's account lookup, and online
   # mode's session check) and a resolver, and write its directory.
   # minecraft-init writes server.properties, eula.txt and the whitelist
-  # first. The bundler unpacks its libraries there, not into the
-  # read-only image. The heap is under the memory limit, with room for
-  # the JVM's own. View distance is short so a small machine can
-  # generate the spawn.
+  # first. The package unpacked Mojang's bundler, so the server's jars
+  # load from the read-only image. The heap is under the memory limit,
+  # with room for the JVM's own. View distance is short so a small
+  # machine can generate the spawn.
   minecraft:
     exec: /usr/bin/java -Xms512m -Xmx1280m -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/minecraft
-      -DbundlerRepoDir=/data/svc/minecraft -jar /usr/lib/minecraft/server.jar nogui
+      @/usr/lib/minecraft/java.args nogui
     before: /usr/lib/werewolf/minecraft-init
     user: minecraft
     # netlink: the JVM lists the host's addresses.

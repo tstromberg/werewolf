@@ -42,9 +42,11 @@ by hand.
 manifest ([releases.md](../releases.md)). `run`/`create` default to protected Lima on
 macOS and QEMU on Linux, from werewolf's published image
 ([design](published-secure-boot.md)) or, with `--build`, this checkout; clouds take
-`--build` images only. `--disable=LIST` gives up protections by name (`secureboot`,
-`tpm`, `ipe`), never by default: one profile gives all three for now, so only the whole
-list is taken, and a machine's command line names what it lacks (`werewolf.disable`) for
+`--build` images only. Firecracker builds an IPE image and pins its boot files on the
+host, warning that firmware Secure Boot and TPM rollback protection are unavailable.
+`--disable=LIST` gives up protections by name (`secureboot`, `tpm`, `ipe`): Firecracker
+also accepts `secureboot,tpm`, its default limitations; other providers take the whole
+list. A machine's command line names what it lacks (`werewolf.disable`) for
 posture and the login message
 ([security](../security.md#protections-a-machine-can-be-made-without)). `create` makes a
 *machine*: source builds if stale, packs, uploads only an image the cloud lacks, starts
@@ -58,7 +60,7 @@ state.
 | Target | Choice, and why |
 | --- | --- |
 | lima | protected QEMU by default; `--disable=secureboot,tpm,ipe` uses the legacy VZ path |
-| firecracker | QEMU's UEFI disk, its supervisor in systemd-boot's place: Firecracker has no firmware, and one disk format updates everywhere |
+| firecracker | no firmware or TPM: IPE and dm-verity with host-pinned boot files by default; legacy A/B boot selection only with all three protections explicitly disabled |
 | proxmox | `qm` over ssh: the REST API has no serial log, and no address without a guest agent |
 | aws | an EBS snapshot written directly: VM Import took 6–10 minutes and a hand-made bucket and role |
 

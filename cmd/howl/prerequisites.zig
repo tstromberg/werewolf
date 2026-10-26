@@ -80,6 +80,21 @@ pub fn resolve(
     arch: howl.Arch,
     why: *howl.Why,
 ) !Inputs {
+    return resolveFor(io, gpa, steps, arch, why, true);
+}
+
+pub fn resolveIpe(io: Io, gpa: Allocator, steps: *progress.Steps, arch: howl.Arch, why: *howl.Why) !Inputs {
+    return resolveFor(io, gpa, steps, arch, why, false);
+}
+
+fn resolveFor(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    arch: howl.Arch,
+    why: *howl.Why,
+    need_stub: bool,
+) !Inputs {
     const kernel = howl.environ.get("WEREWOLF_IPE_KERNEL");
     const key = howl.environ.get("WEREWOLF_IPE_KEY");
     const cert = howl.environ.get("WEREWOLF_IPE_CRT");
@@ -88,11 +103,11 @@ pub fn resolve(
         .{},
     );
     const cwd = try std.process.currentPathAlloc(io, gpa);
-    if (external and howl.environ.get("UKI_STUB") != null) return .{
+    if (external and (!need_stub or howl.environ.get("UKI_STUB") != null)) return .{
         .kernel = try absolute(gpa, cwd, kernel.?),
         .key = try absolute(gpa, cwd, key.?),
         .cert = try absolute(gpa, cwd, cert.?),
-        .stub = try absolute(gpa, cwd, howl.environ.get("UKI_STUB").?),
+        .stub = if (need_stub) try absolute(gpa, cwd, howl.environ.get("UKI_STUB").?) else "",
     };
     const cache = try gpa.print("{s}/build/secure-cache", .{cwd});
     // The IPE signing identity is no cache: every machine made with it
@@ -121,11 +136,15 @@ pub fn resolve(
         .short = "security inputs",
     });
     var shown: Shown = .{ .io = io, .steps = steps, .scratch = cache };
-    const made = security.prepare(gpa, .{
+    const host: security.Host = .{
         .io = io,
         .env = &env,
         .runner = shown.runner(),
-    }, source, cache, @tagName(arch), identity) catch |err| return steps.fail(try gpa.print(
+    };
+    const made = (if (need_stub)
+        security.prepare(gpa, host, source, cache, @tagName(arch), identity)
+    else
+        security.prepareKernel(gpa, host, source, cache, @tagName(arch), identity.?)) catch |err| return steps.fail(try gpa.print(
         "preparing security inputs failed: {s}; see the builder dependencies in docs/testing.md",
         .{@errorName(err)},
     ));

@@ -126,16 +126,16 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         "chown the new root",
     );
     _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root, 0o755), "chmod the new root");
-    // Match the build (Makefile, EROFS_OPTS). zstd level 9 in 64 KiB
-    // clusters boots faster than larger clusters or higher levels, and
-    // builds in seconds.
+    // Match the build (lib/image.zig, erofs_options): zstd level 5 in
+    // 64 KiB clusters boots faster than larger clusters, and builds in
+    // seconds.
     try u.run(&.{
         "/usr/bin/mkfs.erofs",
         "-b",
         "4096",
-        "-zzstd,level=9",
+        "-zzstd,level=5",
         "-C65536",
-        "-Eall-fragments",
+        "-Efragments",
         // No xattrs, as in the build: a package's security.capability
         // would otherwise reach the image, inert only while / is nosuid.
         "-x-1",

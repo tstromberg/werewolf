@@ -1,12 +1,39 @@
 #!/bin/sh
 # check-persist QEMU... boots the demo as it ships three times, under UEFI,
-# on its own disk (make check-persist). PostgreSQL's data must outlive a
-# reboot (test/checks-persist) and a power cut (test/checks-persist-again),
-# and the third boot must recover (test/checks-persist-cut). QEMU... is the
-# machine with the disk; make passes UEFI_ENV (Makefile).
+# on its own disk (make check-persist), each judged from its console
+# (test/console.zig). PostgreSQL makes its cluster on /data and the page
+# stores the boot's posture; the second boot finds them, and its power is
+# cut; the third must recover, though the second's lock is left behind, and
+# find both earlier boots' postures. QEMU... is the machine with the disk;
+# make passes UEFI_ENV (Makefile).
 set -eu
 [ "$ARCH" = aarch64 ] || cp "$UEFI_VARS" "$UEFI_VARS_COPY"
-test/boot persist test/checks-persist "$CHECK/persist.log" "$@"
-POWER_CUT=1 test/boot persist-again test/checks-persist-again "$CHECK/persist-again.log" "$@"
-test/boot persist-cut test/checks-persist-cut "$CHECK/persist-cut.log" "$@"
+# The lines every boot is judged by; each boot adds its own. Every service
+# starts and none goes down, as forms/demo/test/console has it: nginx may
+# retry while it waits for the page's directory.
+shared='unseen  cluster-gone      pg-init: the cluster in /data/svc/postgres/data is gone
+unseen  data-lost         "error":"DataLost"
+seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
+seen    status-leashed    leash: \{"event":"start","service":"status"
+seen    scan-leashed      leash: \{"event":"start","service":"scan"
+seen    postgres-leashed  leash: \{"event":"start","service":"postgres"
+unseen  service-down      leash: \{"event":"down"'
+boot() { # boot NAME off|cut LINES QEMU...: ends by the power button, or a cut
+	name=$1 end=$2
+	printf '%s\n%s\n' "$3" "$shared" >"$CHECK/$name.checks"
+	shift 3
+	if [ "$end" = cut ]; then
+		CONSOLE_POWER_CUT=1 build/host/console "$name" "$CHECK/$name.checks" "$CHECK/$name.log" "$@"
+	else
+		build/host/console "$name" "$CHECK/$name.checks" "$CHECK/$name.log" "$@"
+	fi
+}
+boot persist off 'seen    cluster-made      pg-init: making the cluster in /data/svc/postgres/data
+seen    posture-stored    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":[1-9]' "$@"
+boot persist-again cut 'seen    cluster-kept      pg-init: keeping the cluster in /data/svc/postgres/data
+seen    two-boots-kept    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":([2-9]|[1-9][0-9]+)[,}]
+unseen  cluster-made      pg-init: making the cluster' "$@"
+boot persist-cut off 'seen    cluster-kept      pg-init: keeping the cluster in /data/svc/postgres/data
+seen    three-boots-kept  status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":([3-9]|[1-9][0-9]+)[,}]
+unseen  cluster-made      pg-init: making the cluster' "$@"
 echo "pass   persist            $(grep -a -c 'pg-init: removed the lock the last boot left' "$CHECK/persist-cut.log") stale lock(s) removed after the cut"

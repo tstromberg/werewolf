@@ -238,30 +238,32 @@ fn audit(c: *Coverage) ![]const Row {
             .{ .name = r.fields[0], .minimum = minimum, .reason = r.fields[2] },
         );
     }
-    const Fixture = struct { name: []const u8, cases: []const []const u8 };
+    // A fixture's cases are its scenario's, app-NAME (docs/testing-scenarios.md).
+    const Fixture = struct { name: []const u8, cases: usize };
     var fixtures: std.ArrayList(Fixture) = .empty;
     for (try records(gpa, try c.read("test/app-fixtures") orelse "")) |r| {
         const known = for (fixtures.items) |f| {
             if (mem.eql(u8, f.name, r.fields[0])) break true;
         } else false;
-        if (r.fields.len != 3 or !has(names.items, r.fields[0]) or known)
+        // Carrier, the code laid on it, and the runtime whose check boots it.
+        if (r.fields.len != 3 or !has(names.items, r.fields[0]) or
+            !has(names.items, r.fields[2]) or known)
             return c.fail("app-fixtures:{d}: invalid fixture", .{r.line});
         const source = if (mem.eql(u8, r.fields[1], "java"))
             "test/app-fixture-java/Main.java"
         else
             r.fields[1];
-        c.root.access(
-            c.io,
-            source,
-            .{},
-        ) catch return c.fail("app-fixtures:{d}: missing fixture or checks", .{r.line});
-        const stat = c.root.statFile(c.io, r.fields[2], .{}) catch null;
-        if (stat == null or
-            stat.?.kind != .file) return c.fail(
-            "app-fixtures:{d}: missing fixture or checks",
-            .{r.line},
-        );
-        try fixtures.append(gpa, .{ .name = r.fields[0], .cases = try cases(c, r.fields[2]) });
+        c.root.access(c.io, source, .{}) catch
+            return c.fail("app-fixtures:{d}: missing fixture", .{r.line});
+        const dir = try gpa.print("test/scenarios/app-{s}", .{r.fields[0]});
+        var failure: plans.Failure = .{};
+        const p = plans.scenario(c.io, gpa, c.root, dir, &failure) catch |err| switch (err) {
+            error.Plan => return c.fail("app-fixtures:{d}: {s}", .{ r.line, failure.text }),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        var n: usize = 0;
+        for (p.drivers) |d| n += distinct(d.seed, d.verify);
+        try fixtures.append(gpa, .{ .name = r.fields[0], .cases = n });
     }
     const boot = try c.read("test/boot") orelse return c.fail("no test/boot", .{});
     var rows: std.ArrayList(Row) = .empty;
@@ -276,9 +278,10 @@ fn audit(c: *Coverage) ![]const Row {
         }
         const fixture = for (fixtures.items) |f| {
             if (mem.eql(u8, f.name, name)) break f.cases;
-        } else &.{};
-        const host: []const []const u8 = if (mem.eql(u8, name, "sshd") or
-            mem.eql(u8, name, "prod-ssh"))
+        } else 0;
+        const host: []const []const u8 = if (host_cases > 0)
+            &.{}
+        else if (mem.eql(u8, name, "sshd") or mem.eql(u8, name, "prod-ssh"))
             &ssh_cases
         else if (mem.eql(u8, name, "playground"))
             &playground_cases
@@ -298,10 +301,10 @@ fn audit(c: *Coverage) ![]const Row {
         // larger suite counts until the legacy one is retired.
         try rows.append(gpa, .{
             .name = name,
-            .count = @max(own.len, native) + fixture.len + host_cases,
+            .count = @max(own.len, native) + fixture + host_cases,
             .minimum = exception.minimum,
             .own = own.len,
-            .fixture = fixture.len,
+            .fixture = fixture,
             .host = host_cases,
             .native = native,
             .reason = exception.reason,

@@ -77,17 +77,21 @@ pub fn vmlinux(gpa: Allocator, bzimage: []const u8) ![]const u8 {
 }
 
 /// erofs_options are mkfs.erofs's options for a root: zstd in 64 KiB
-/// clusters and small files packed together, which boots fastest
-/// (Makefile, root.erofs). Not dedupe, which keeps mkfs.erofs to one
-/// thread: Overleaf's root took 7 times as long, to save 0.5% of it.
-/// 4 KiB blocks, since mkfs.erofs otherwise takes the builder's page size,
-/// 16 KiB on Apple silicon, which a 4 KiB-page kernel will not mount.
+/// clusters, which a boot waits on least (userland started in half the time
+/// of LZMA's 1 MiB clusters), and files' tails, so small files whole,
+/// packed together. zstd reads as fast at any level. On Overleaf's root,
+/// level 5 compresses in two thirds of level 9's time, 4% larger; packing
+/// tails rather than whole files is a fifth faster and 1% smaller; and
+/// dedupe, which keeps mkfs.erofs to one thread, took 7 times as long to
+/// save 0.5%. 4 KiB blocks, since mkfs.erofs otherwise takes the builder's
+/// page size, 16 KiB on Apple silicon, which a 4 KiB-page kernel will not
+/// mount.
 pub const erofs_options = [_][]const u8{
     "-b",
     "4096",
-    "-zzstd,level=9",
+    "-zzstd,level=5",
     "-C65536",
-    "-Eall-fragments",
+    "-Efragments",
 };
 
 /// checkErofs refuses a mkfs.erofs that would make a bad root. Before 1.9

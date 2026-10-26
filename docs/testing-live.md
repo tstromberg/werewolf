@@ -104,6 +104,17 @@ and image (`CLOUD_KEEP=1` keeps them, with their test private keys). Logs are in
 
 ## Firecracker
 
+On a Linux/KVM host, `make check-firecracker-protected` builds a private playground
+guest using Firecracker's default IPE mode. It checks the limitation warning, active
+and locked IPE, guest reboot, stop/start, refusal of changed kernels, initrds and boot
+arguments, missing host trust, explicit protection downgrades, and delete. It needs
+Firecracker 1.17+, mtools, erofs-utils, passwordless sudo/doas and the source-build tools,
+with TUN and NAT modules available for the running host kernel. x86_64 boots the
+original bzImage to retain kernel address randomization; extracting its ELF bypasses it.
+The first run builds the local IPE kernel. Logs stay under
+`build/check/fc-protected-PID`; failures stop the guest and retain its artifacts.
+Boot files are pinned on the host; this mode takes image changes through host rebuilds.
+
 `make check-firecracker` boots the `sshd` form as a Firecracker microVM on
 `FIRECRACKER_HOST` (default `galadriel`), a Linux host with KVM, Firecracker, mtools,
 erofs-utils and passwordless `doas`. The tree, built for x86_64 here, is copied over

@@ -1,0 +1,59 @@
+version: 1
+# The Java hello-world (test/app-fixtures) on jre-app, laid as howl --app lays an
+# application: make check-jre. Every runtime's hello-world answers this one
+# contract; only its greeting and port differ.
+form: jre-app
+app: jre-app
+suites:
+  - name: jre-app
+    cases:
+      - name: app-greeting
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              status: 200
+              body:
+                matches: "^Hello from Java on werewolf!\n$"
+            await: 120s
+      - name: app-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/health
+            expect:
+              status: 200
+              body: "ok\n"
+      - name: app-not-found
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/werewolf-missing
+            expect:
+              status: 404
+      # It changes nothing, so it takes nothing but GET.
+      - name: app-method-refused
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+              method: POST
+              body: changed
+              headers:
+                Content-Type: application/x-www-form-urlencoded
+            expect:
+              status: 405
+              headers:
+                allow: GET
+      - name: app-query
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/health?probe=integration
+            expect:
+              status: 200
+              body: "ok\n"
+      - name: app-content-type
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/
+            expect:
+              headers:
+                content-type:
+                  matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$

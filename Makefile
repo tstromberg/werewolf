@@ -394,6 +394,7 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/mastodon/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/home-assistant/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/wordpress/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test -lc --dep test-driver -Mroot=forms/limesurvey/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/mediawiki/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/bugsink/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/cron/test/driver.zig -Mtest-driver=test/native/driver.zig
@@ -674,7 +675,11 @@ shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 APP_CHECK_FORMS := $(shell awk '!/^\043/ && NF { print $$1 }' test/app-fixtures)
 .PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
 check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
-$(foreach f,$(APP_CHECK_FORMS),$(eval check-$(f): check-app-$(f)))
+# A runtime is for running an application: check-RUNTIME boots its carrier
+# with the hello-world test/app-fixtures names, as howl --app lays one.
+APP_RUNTIMES := $(shell awk '!/^\043/ && NF { print $$3 ":" $$1 }' test/app-fixtures)
+APP_RUNTIME_FORMS := $(foreach r,$(APP_RUNTIMES),$(firstword $(subst :, ,$(r))))
+$(foreach r,$(APP_RUNTIMES),$(eval check-$(firstword $(subst :, ,$(r))): check-app-$(lastword $(subst :, ,$(r)))))
 check-forms:     $(addprefix check-,$(call shard,$(FORMS_FOR_ARCH))) _test/form-coverage
 check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS_FOR_ARCH)))
 # check-secureboot runs where firmware boots fast enough: an arm64 host
@@ -748,7 +753,7 @@ check-one:
 	@mkdir -p $(CHECK)
 	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(MAKE) --no-print-directory check-$(FORM)
 
-$(addprefix check-,$(filter-out bastion people $(NATIVE_TEST_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
+$(addprefix check-,$(filter-out bastion people $(NATIVE_TEST_FORMS) $(APP_RUNTIME_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
 
 _check-legacy-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
@@ -775,17 +780,23 @@ $(NATIVE_TESTS): tools/native-tests.zig tools/native-iterate.zig tools/native-co
 NATIVE_TEST_EXAMPLES := $(patsubst examples/%/test/tests.yaml,%,$(wildcard examples/*/test/tests.yaml))
 native_ref = $(if $(filter $(1),$(NATIVE_TEST_EXAMPLES)),examples/$(1),$(1))
 check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(filter bastion,$(FORMS_FOR_ARCH)))
-# native_check NAME,REF,VARIABLES[,BASE] builds the production image of BASE, a
-# scenario's stock form, or else of REF, and REF's native test image, compares
-# them, and boots the test image with VARIABLES.
-define native_check
+# native_image NAME,REF[,BASE[,APP]] builds what native_check boots: the
+# production image and the native test image (below), and boots neither.
+define native_image
 	@$(NATIVE_TESTS) describe $(2) $(ARCH) >/dev/null
-	@$(call built,$(or $(4),$(1))-baseline,$(MAKE) --no-print-directory FORM=$(or $(4),$(2)) DEV= DISABLE=$(CHECK_DISABLE) image)
-	PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
-	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) image)
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(IPE),-ipe) \
-		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)) $(3) _check-native-tests
+	@$(call built,$(or $(3),$(1))$(if $(4),-app)-baseline,$(MAKE) --no-print-directory FORM=$(or $(3),$(2)) DEV= APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+	PRODUCTION_OUT=$(BUILD)/$(or $(3),$(1))$(if $(4),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
+	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+endef
+# native_check NAME,REF,VARIABLES[,BASE[,APP]] builds the production image of
+# BASE, a scenario's stock form, or else of REF, and REF's native test image,
+# each with APP's code if given (an -app image), compares them, and boots the
+# test image with VARIABLES.
+define native_check
+$(call native_image,$(1),$(2),$(4),$(5))
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
 endef
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
 	$(call native_check,$*,$(call native_ref,$*))
@@ -795,12 +806,16 @@ SCENARIOS := $(patsubst test/scenarios/%/tests.yaml,%,$(wildcard test/scenarios/
 scenario_form = $(shell sed -n 's/^form: *//p' test/scenarios/$(1)/tests.yaml)
 .PHONY: check-scenarios $(addprefix check-scenario-,$(SCENARIOS))
 check-scenarios: $(addprefix check-scenario-,$(SCENARIOS))
+scenario_app = $(shell sed -n 's/^app: *//p' test/scenarios/$(1)/tests.yaml)
+scenario_app_dir = $(if $(call scenario_app,$(1)),$(CHECK)/apps/$(call scenario_app,$(1)))
 $(addprefix check-scenario-,$(SCENARIOS)): check-scenario-%: $(HOWL) $(NATIVE_TESTS)
-	$(call native_check,scenario-$*,test/scenarios/$*,,$(call scenario_form,$*))
+	$(if $(call scenario_app,$*),@test/app-fixture $(call scenario_app,$*) $(call scenario_app_dir,$*))
+	$(call native_check,scenario-$*,test/scenarios/$*,,$(call scenario_form,$*),$(call scenario_app_dir,$*))
 # The platform checks that are scenarios now.
 check-lease: check-scenario-lease
 check-static: check-scenario-static
 check-posture: check-scenario-posture
+check-nodata: check-scenario-nodata
 # bastion's checks run on test/bastion-form's form, the bastion with two
 # users, whose keys it makes beside it: its host suites log in with them.
 check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
@@ -827,14 +842,10 @@ $(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
 $(addprefix iterate-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): iterate-%: $(NATIVE_TESTS)
 	@$(NATIVE_TESTS) iterate '$(ITERATE_HOWL)' $(call native_ref,$*) $(ARCH) $(ITERATE) $(PHASE) $(DRIVER)
 
-# Test the actual application-carrier form with code in its verified image,
-# as well as its ordinary boot without code. A separate name avoids sharing
-# disks, configuration or logs with check-FORM under make -j.
-$(addprefix check-app-,$(APP_CHECK_FORMS)): check-app-%: | _check-shared
-	@test/app-fixture $* $(CHECK)/apps/$*
-	@$(call built,app-$*,$(CHECK_MAKE) FORM=$* APP=$(CHECK)/apps/$* image)
-	@$(CHECK_MAKE) FORM=$* APP=$(CHECK)/apps/$* CHECK_NAME=app-$* CHECK_SKIP= \
-		FORM_CHECKS=$(shell awk -v form=$* '$$1 == form { print $$3 }' test/app-fixtures) AGAIN_FORMS= _check-form
+# An application-carrier form is tested with code in its verified image, as
+# well as in its ordinary boot without: scenario app-FORM boots it with
+# test/app-fixtures' code, as howl --app supplies it.
+$(addprefix check-app-,$(APP_CHECK_FORMS)): check-app-%: check-scenario-app-%
 # Each form's ports get their own host ports, so forms boot in parallel.
 check_port = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(2)' | cut -d: -f1 | awk '{ print $(1) + $$1 }')
 # A honeypot may offer an SSH banner on 22 without operator logins.
@@ -1024,17 +1035,21 @@ fuzz-unwound:
 .PHONY: _check-prod-console-image
 _check-prod-console-image: | _check-shared check-prod
 	@$(call built,prod-console,$(CHECK_MAKE) FORM=prod image)
-check-nodata check-metadata check-people-persist: | _check-prod-console-image
+check-metadata check-people-persist: | _check-prod-console-image
 	@$(CHECK_MAKE) FORM=prod _$@
-check-verity: | _check-shared check-minimal
-	@$(CHECK_MAKE) FORM=minimal _$@
-check-slot: | _check-shared check-minimal
-	@$(call built,slot,$(CHECK_MAKE) FORM=minimal slot)
-	@$(CHECK_MAKE) FORM=minimal _check-slot
-# check-slot builds the same slot in the same place, so these follow it.
-check-deadman: | _check-shared check-minimal check-slot
-	@$(call built,deadman,$(CHECK_MAKE) FORM=minimal slot)
-	@$(CHECK_MAKE) FORM=minimal _check-deadman
+# check-verity boots minimal's own image, its root changed after the build.
+check-verity: $(HOWL) $(CONSOLE_CHECK)
+	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DEV= DISABLE=$(CHECK_DISABLE) image)
+	@$(MAKE) --no-print-directory FORM=minimal DEV= DISABLE=$(CHECK_DISABLE) _check-verity
+# check-slot boots minimal's native test image from a slot (test/check-slot).
+check-slot: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
+	$(call native_image,minimal,minimal)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DEV= DISABLE=$(CHECK_DISABLE) _check-slot
+# check-deadman boots minimal's native test image, from which alone stage0
+# takes a shorter deadman.
+check-deadman: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
+	$(call native_image,minimal,minimal)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DEV= DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -1061,8 +1076,8 @@ check-firecracker: build/host/cloud-console | _check-shared
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl --dep verity -Mroot=tools/verity.zig -Mverity=lib/verity.zig -femit-bin=build/x86_64/tools/verity
 	@$(CHECK_ENV) FIRECRACKER_HOST=$(FIRECRACKER_HOST) FORM_DIR=$(FC_FORM) \
 		POSTURE_KNOWN='$(POSTURE_KNOWN_X64)' test/check-firecracker
-_check-nodata _check-verity _check-slot _check-deadman: $(HOWL)
-	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
+_check-verity _check-slot _check-deadman: $(HOWL)
+	@$(CHECK_ENV) ARCH=$(ARCH) test/$(@:_%=%) $(CHECK_QEMU)
 _check-secureboot: $(HOWL)
 	@$(CHECK_ENV) ARCH=$(ARCH) SECUREBOOT_DIR=$(SECUREBOOT_DIR) \
 		BOOT_KEY=$(CHECK)/sb.key BOOT_CRT=$(CHECK)/sb.crt $(call host_test,test/check-secureboot.zig) \
@@ -1110,18 +1125,19 @@ _check-dist: $(CONSOLE_CHECK)
 		-nographic -smp 2 -m $(or $(call form_check,memory),2048) -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 
-# check-persist boots without EL2 (edk2 under HVF never boots) and offline; CI sets PERSIST_AFTER=.
+# check-persist boots the demo's own disk (test/check-persist) without EL2
+# (edk2 under HVF never boots) and offline; CI sets PERSIST_AFTER=.
 PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
 PERSIST_AFTER ?= check-demo
-check-persist: | _check-shared $(PERSIST_AFTER)
+check-persist: $(HOWL) $(CONSOLE_CHECK) | $(PERSIST_AFTER)
 ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
 	@echo "skip   persist            emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
 else
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
 	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
 	@rm -f $(CHECK)/persist.img
-	@$(call built,persist,$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
-	@$(CHECK_MAKE) FORM=demo _check-persist
+	@$(call built,persist,$(MAKE) --no-print-directory FORM=demo DEV= DISABLE=$(CHECK_DISABLE) disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
+	@$(MAKE) --no-print-directory FORM=demo DEV= DISABLE=$(CHECK_DISABLE) _check-persist
 endif
 _check-persist:
 	@$(UEFI_ENV) test/check-persist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
@@ -1161,6 +1177,10 @@ check-bhyve-lifecycle build-traced-stub:
 build/x86_64/tools/howl-linux: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
+
+.PHONY: check-firecracker-protected
+check-firecracker-protected: $(HOWL)
+	HOWL=$(HOWL) sh test/check-firecracker-protected
 build/x86_64/tools/howl-freebsd build/aarch64/tools/howl-freebsd: build/%/tools/howl-freebsd: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe -target $*-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
@@ -1186,7 +1206,7 @@ check-compose: slot
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
 
 # EROFS_OPTS must match the options lib/image.zig gives mkfs.erofs.
-EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments
+EROFS_OPTS = -b 4096 -zzstd,level=5 -C65536 -Efragments
 check-updater check-updater-staged check-updater-published: | _check-shared
 	@$(CHECK_MAKE) $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
 _check-updater: $(VERITY_BIN)

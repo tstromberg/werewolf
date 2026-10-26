@@ -1,7 +1,7 @@
 # Dependency-Track - Hardened VM
 
-A bill-of-materials server: [Dependency-Track](https://dependencytrack.org) 4.14, the
-bundled UI and API, behind Caddy, with PostgreSQL. The form's manifest is
+A bill-of-materials server: [Dependency-Track](https://dependencytrack.org) 5, the
+API server and its frontend, behind Caddy, with PostgreSQL. The form's manifest is
 [form.yaml](form.yaml).
 
 [Images, test status and download

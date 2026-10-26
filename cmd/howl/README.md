@@ -44,7 +44,9 @@ The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata l
 
 **Engines.** Protected defaults are Lima (macOS) and QEMU (Linux), which download a
 [protected image](../../docs/design/published-secure-boot.md). Clouds take protected
-`--build` images: werewolf publishes none yet. Other providers and `--dev` require
+`--build` images: werewolf publishes none yet. Firecracker builds an IPE image with
+host-pinned boot files, warning that UEFI Secure Boot and TPM rollback protection are
+unavailable. Other providers and `--dev` require
 [disabling
 protections](../../docs/security.md#protections-a-machine-can-be-made-without). Missing
 tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and
@@ -54,7 +56,7 @@ Lima-managed).
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
 | bhyve | FreeBSD x86_64 or arm64 (experimental, [limits](../../docs/testing-live.md#bhyve)), supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
-| firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
+| firecracker | IPE and dm-verity, with the initial kernel, stage0 and boot arguments pinned on the trusted host and checked on every boot; no UEFI Secure Boot or TPM, with a warning explaining the risks. Image changes require host rebuilds. Explicit `--disable=secureboot,tpm,ipe` retains the legacy A/B boot path. Per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT, undone by delete | /dev/kvm, firecracker, mtools, sudo/doas, image build tools |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket; C4, C4A and N4 boot from `hyperdisk-balanced` | gcloud |

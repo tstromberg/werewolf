@@ -150,10 +150,11 @@ pub fn main(init: std.process.Init) void {
             why.refuse("_bhyve-secure NAME DIR BHYVE...", .{})
         else
             bhyve.keepProtected(io, gpa, args[2], args[3], args[4..]),
-        ._firecracker => if (args.len != 3)
-            why.refuse("_firecracker DIR", .{})
+        ._firecracker => if (args.len != 3 and
+            !(args.len == 4 and std.mem.eql(u8, args[3], "--pinned")))
+            why.refuse("_firecracker DIR [--pinned]", .{})
         else
-            firecracker.keep(io, gpa, args[2]),
+            firecracker.keep(io, gpa, args[2], args.len == 4),
         // Internal: a protected machine's TPM supervisor, and what
         // tools/enroll-boot asks howl for.
         ._tpm => @import("swtpm.zig").command(io, gpa, args[2..], &why),
@@ -1661,11 +1662,9 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
         _, given = try flagValue(before_disable, &i, why);
     }
     const disabled: cmdline.Protections = if (given) |v| try disableValue(v, why) else .empty;
-    // One protected profile provides all three, so a machine has them all
-    // or, named, none.
-    if (!disabled.eql(.empty) and !disabled.eql(.full)) return why.refuse(
-        "--disable={s}: a machine is made with Secure Boot, the TPM and IPE, or, for now, " ++
-            "without all three: --disable=" ++ every_protection,
+    if (!disabled.eql(.empty) and !disabled.eql(.full) and
+        !disabled.eql(firecracker.unavailable)) return why.refuse(
+        "--disable={s}: use secureboot,tpm for Firecracker with IPE, or " ++ every_protection,
         .{given.?},
     );
     if (version != null and (from_tree or !disabled.eql(.empty))) return why.refuse(
@@ -1720,12 +1719,25 @@ fn securedHere(on: Platform) bool {
 }
 
 fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
-    if (!launch.protected()) return;
-    if (launch.dev) return why.refuse(
+    if (launch.dev and !launch.disabled.eql(.full)) return why.refuse(
         "developer access requires an unprotected local machine: " ++
             "{s} --disable=" ++ every_protection,
         .{if (launch.dev_shell) "--dev" else "--dev=ssh"},
     );
+    if (on == .firecracker) {
+        if (launch.version != null) return why.refuse(
+            "Firecracker cannot boot a protected UEFI download; omit --version to build " ++
+                "an IPE image with host-pinned boot files",
+            .{},
+        );
+        return;
+    }
+    if (!launch.disabled.eql(.empty) and !launch.disabled.eql(.full)) return why.refuse(
+        "--disable=secureboot,tpm is supported by Firecracker only; this provider requires " ++
+            "all protections or --disable=" ++ every_protection,
+        .{},
+    );
+    if (!launch.protected()) return;
     if (on == .lima or on == .qemu) return;
     // A cloud's firmware enrolls the image's own boot key; its first boot
     // takes the TPM (docs/design/independent-updates.md).
@@ -1758,7 +1770,8 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     try testing.expect(downloaded.protected() and !downloaded.local);
     try requireProtection(.lima, downloaded, &why);
     try requireProtection(.qemu, downloaded, &why);
-    for ([_]Platform{ .firecracker, .bhyve, .proxmox }) |on|
+    try requireProtection(.firecracker, launch, &why);
+    for ([_]Platform{ .bhyve, .proxmox }) |on|
         try testing.expectError(error.Refused, requireProtection(on, launch, &why));
     // Clouds take a protected image built here; werewolf publishes none for them.
     for ([_]Platform{ .aws, .gcp, .azure }) |on| {
@@ -1810,6 +1823,21 @@ test "versioned installs retain the download profile and reject conflicting mode
     }) |line| try testing.expectError(error.Refused, launchFlags(arena.allocator(), line, &why));
 }
 
+test "Firecracker retains IPE and refuses developer and download downgrades" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: Why = .{};
+    const gpa = arena.allocator();
+    const partial = try launchFlags(gpa, &.{"--disable=secureboot,tpm"}, &why);
+    try requireProtection(.firecracker, partial, &why);
+    try testing.expect(!partial.disabled.contains(.ipe));
+    try testing.expectError(error.Refused, requireProtection(.qemu, partial, &why));
+    const dev = try launchFlags(gpa, &.{ "--disable=secureboot,tpm", "--dev" }, &why);
+    try testing.expectError(error.Refused, requireProtection(.firecracker, dev, &why));
+    const download = try launchFlags(gpa, &.{ "--version", "20261014T232908Z" }, &why);
+    try testing.expectError(error.Refused, requireProtection(.firecracker, download, &why));
+}
+
 /// madeOn returns the platform create recorded for name, or null.
 pub fn madeOn(io: Io, gpa: Allocator, name: []const u8) ?Platform {
     const path = gpa.print("{s}/engine", .{machineDir(gpa, name) catch return null}) catch
@@ -1848,6 +1876,16 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     const on = eng.on;
     try bhyveNetworkOptions(o, on, why);
     if (!o.help) try requireProtection(on, launch, why);
+    if (on == .firecracker) {
+        if (o.disabled.eql(.empty)) o.disabled = firecracker.unavailable;
+        if (!o.help) {
+            say(io, "warning: {s}", .{firecracker.warning});
+            if (!firecracker.installed(io, gpa)) return why.refuse(
+                "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH (tools/install-deps)",
+                .{},
+            );
+        }
+    }
     o.on = on;
     milestones.enabled = !o.help and !verbose;
     milestones.enter(.{
@@ -2387,6 +2425,7 @@ test {
     _ = azure;
     _ = app;
     _ = @import("image.zig");
+    _ = @import("slot.zig");
     _ = @import("apk.zig");
     _ = @import("published.zig");
     _ = @import("keys.zig");

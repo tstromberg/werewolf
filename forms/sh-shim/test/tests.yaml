@@ -227,7 +227,8 @@ suites:
               exit: 127
               stderr: "sh-shim: no-such-program: not found\n"
       # Where no package or later form gives a shell, /bin/sh is the shim, and
-      # the allowance every leashed service runs it by is laid.
+      # the allowance every leashed service runs it by is laid. One that does
+      # give a shell wins over the shim: howl's own test (cmd/howl/slot.zig).
       - name: sh-shim-laid
         steps:
           - file: /usr/bin/sh

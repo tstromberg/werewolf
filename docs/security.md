@@ -128,8 +128,10 @@ guest, so the hypervisor must be trusted.
 Three protections reach across reboots: Secure Boot checks the boot files, a TPM records
 which releases may boot, and IPE runs only native code from the verified root. `howl
 --disable=secureboot,tpm,ipe` makes a machine without them, which every provider but
-Lima, QEMU and, for `--build` images, GCP, AWS and Azure needs for now
-([cli](design/cli.md)). Nothing disables them by default: a build refuses an image that
+Lima, QEMU, Firecracker and, for `--build` images, GCP, AWS and Azure needs for now
+([cli](design/cli.md)). Firecracker defaults to IPE with host-pinned boot files and
+warns that Secure Boot and TPM rollback protection are unavailable. Other providers
+disable nothing by default. A build refuses an image that
 would lack a protection `--disable` does not name, and says how to give it. Make builds
 also default to no disabled protections; legacy test images require an explicit
 command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment value is
@@ -144,7 +146,23 @@ them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-One profile provides all three, so for now they go together. Without them a running
+Firecracker cannot expose UEFI Secure Boot or the TPM used for the release floor.
+Its default mode retains IPE, dm-verity, the seal and fence. Before the first boot,
+howl records the freshly built kernel, stage0 (including its root hash and signed IPE
+policy) and boot entry in `firecracker-boot.json` outside the guest. Each boot checks
+them against that record and ignores other guest-written boot entries. Missing or
+malformed records and changed boot files fail closed. Existing unprotected disks are never
+enrolled automatically. Image changes require a host rebuild; `IPE_UPDATES` and
+protected UEFI downloads selected with `--version` are refused in this mode.
+
+This host check does not supply firmware Secure Boot or a TPM: the trusted host can
+replace the record, and restoring older host state can restore an older vulnerable
+release. Keep that state outside guest access. The warning and guest command line
+name both missing protections. `--disable=secureboot,tpm` explicitly selects the same
+mode. `--disable=secureboot,tpm,ipe` selects the legacy Firecracker path, including its
+guest-controlled A/B updates, and does not pin its boot files.
+
+Other providers currently provide all three protections together. Without them a running
 machine keeps its seal, fence and verified root: root still cannot run a program the
 image lacks, but can choose what boots next. `--dev` makes a local development image:
 mksh, BusyBox tools, root SSH through a Howl-managed Ed25519 key, optional seal learning

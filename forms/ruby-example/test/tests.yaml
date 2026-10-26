@@ -9,9 +9,9 @@ suites:
               url: 'http://127.0.0.1:8080/'
             expect:
               status: 200
-              body:
-                matches: "^werewolf: Ruby .* is answering\n$"
+              body: "Hello from Ruby on werewolf!\n"
             await: 60s
+  # The contract every runtime's hello-world answers (test/scenarios/app-*).
   - name: ruby
     cases:
       - name: ruby-greeting
@@ -20,8 +20,33 @@ suites:
               url: 'http://127.0.0.1:8080/'
             expect:
               status: 200
-              body:
-                matches: "^werewolf: Ruby .* is answering\n$"
+              body: "Hello from Ruby on werewolf!\n"
+      - name: ruby-health
+        steps:
+          - fetch:
+              url: 'http://127.0.0.1:8080/health?probe=integration'
+            expect:
+              status: 200
+              body: "ok\n"
+      - name: ruby-not-found
+        steps:
+          - fetch:
+              url: 'http://127.0.0.1:8080/werewolf-missing'
+            expect:
+              status: 404
+      # A body it never wanted is read, so closing does not reset the reply.
+      - name: ruby-method-refused
+        steps:
+          - fetch:
+              url: 'http://127.0.0.1:8080/'
+              method: POST
+              body: changed
+              headers:
+                Content-Type: application/x-www-form-urlencoded
+            expect:
+              status: 405
+              headers:
+                allow: GET
       - name: ruby-content-type
         steps:
           - fetch:
@@ -31,29 +56,23 @@ suites:
               headers:
                 content-type:
                   matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$
+      # Each connection is its own thread, closed after one reply.
       - name: ruby-reconnect
         steps:
           - fetch:
-              url: 'http://127.0.0.1:8080/arbitrary-path'
+              url: 'http://127.0.0.1:8080/health'
             expect:
-              status: 200
-              body:
-                matches: "^werewolf: Ruby .* is answering\n$"
+              body: "ok\n"
           - fetch:
-              url: 'http://127.0.0.1:8080/arbitrary-path'
+              url: 'http://127.0.0.1:8080/health'
             expect:
-              status: 200
-              body:
-                matches: "^werewolf: Ruby .* is answering\n$"
+              body: "ok\n"
           - fetch:
-              url: 'http://127.0.0.1:8080/arbitrary-path'
+              url: 'http://127.0.0.1:8080/health'
             expect:
-              status: 200
-              body:
-                matches: "^werewolf: Ruby .* is answering\n$"
-  # Raw HTTP/1.0, and a request split by a pause, get one framed reply and
-  # then the end of the stream. Content-Length is the body's: 29 bytes and
-  # RUBY_VERSION, 5 to 7 bytes, so the reply's three possible lengths.
+              body: "ok\n"
+  # It speaks HTTP itself: raw HTTP/1.0, and a request split by a pause, get
+  # one framed reply and then the end of the stream.
   - name: ruby-wire
     cases:
       - name: ruby-framing
@@ -63,7 +82,7 @@ suites:
               exchange:
                 - send: "GET / HTTP/1.0\r\n\r\n"
                 - expect:
-                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: (34\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{5}|35\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{6}|36\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{7}) is answering\n$"
+                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\nHello from Ruby on werewolf!\n$"
                 - close: eof
       - name: ruby-fragmented
         steps:
@@ -74,5 +93,5 @@ suites:
                 - pause: 1s
                 - send: "\r\n"
                 - expect:
-                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: (34\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{5}|35\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{6}|36\r\nConnection: close\r\n\r\nwerewolf: Ruby [^ ]{7}) is answering\n$"
+                    matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\nHello from Ruby on werewolf!\n$"
                 - close: eof

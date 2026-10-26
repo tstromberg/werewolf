@@ -60,20 +60,5 @@ fn uploads(io: Io, a: Allocator) !void {
     if (svg.object.get("status").?.integer != 200) return error.UploadedDataMissing;
     const csp = svg.object.get("headers").?.object.get("content-security-policy") orelse
         return error.UploadNotSandboxed;
-    if (csp != .string or !sandbox(csp.string)) return error.UploadNotSandboxed;
-}
-
-fn sandbox(value: []const u8) bool {
-    var directives = std.mem.splitScalar(u8, value, ';');
-    while (directives.next()) |directive| {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, directive, " \t"), "sandbox")) return true;
-    }
-    return false;
-}
-
-test "upload sandbox must be its own restrictive CSP directive" {
-    try std.testing.expect(sandbox("sandbox"));
-    try std.testing.expect(sandbox("default-src 'none'; sandbox; img-src 'self'"));
-    try std.testing.expect(!sandbox("default-src https://sandbox.example"));
-    try std.testing.expect(!sandbox("sandbox allow-scripts"));
+    if (csp != .string or !driver.sandboxed(csp.string)) return error.UploadNotSandboxed;
 }

@@ -708,47 +708,7 @@ test "generated forms do not also run their unconfigured base form" {
     }
 }
 
-test "nodata reuses the native prod disk without its key" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "check/prod-native");
-    try tmp.dir.createDirPath(io, "test");
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "check/prod-native/data.img",
-        .data = "LUKS-test-ciphertext",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "check/prod-native/data.key",
-        .data = "must-not-be-passed",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "test/boot",
-        .data = "#!/bin/sh\nprintf '%s\\n' \"$@\" > boot-args\n",
-        .flags = .{ .permissions = .fromMode(0o755) },
-    });
-    var env = try environ(gpa);
-    try env.put("CHECK", try tmp.dir.realPathFileAlloc(io, "check", gpa));
-    try env.put("OUT", "/image");
-    try env.put("KERNEL", "/kernel");
-    try env.put("CMDLINE", "console=ttyS0");
-    const script = try Dir.cwd().realPathFileAlloc(io, "test/check-nodata", gpa);
-    _ = try mustRun(gpa, &.{ "sh", script, "qemu" }, &env, .{ .dir = tmp.dir });
-    try testing.expectEqualStrings(
-        "LUKS-test-ciphertext",
-        try tmp.dir.readFileAlloc(io, "check/nodata.img", gpa, .limited(64)),
-    );
-    const args = try tmp.dir.readFileAlloc(io, "boot-args", gpa, .limited(64 << 10));
-    try expectHas(args, "nodata.img,format=raw,if=virtio", true);
-    try testing.expectEqual(1, mem.count(u8, args, "-drive"));
-    try expectHas(args, "data.key", false);
-    try expectHas(args, "prod-native", false);
-}
-
-test "selected release forms dispatch to their intended checks" {
+test "release forms dispatch to their native checks, and runtimes to a hello-world" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -757,10 +717,10 @@ test "selected release forms dispatch to their intended checks" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{
         .sub_path = "checks.mk",
-        .data = "_check-legacy-prod-ssh:\n\t@echo dispatched-legacy-prod-ssh\n" ++
-            "_check-legacy-playground:\n\t@echo dispatched-legacy-playground\n" ++
+        .data = "check-native-tests-prod-ssh:\n\t@echo dispatched-native-prod-ssh\n" ++
             "check-native-tests-minimal:\n\t@echo dispatched-native-minimal\n" ++
-            "_check-legacy-minimal:\n\t@echo unexpected-legacy-minimal; exit 99\n",
+            "check-scenario-app-python-app:\n\t@echo dispatched-app-python-app\n" ++
+            "_check-legacy-%:\n\t@echo unexpected-legacy-$*; exit 99\n",
     });
     // howl, which every check needs, must be neither built nor run.
     try tmp.dir.writeFile(io, .{
@@ -780,14 +740,14 @@ test "selected release forms dispatch to their intended checks" {
         overrides,
         "-o",
         howl,
-        "FORMS_FOR_ARCH=minimal prod-ssh playground",
+        "FORMS_FOR_ARCH=minimal prod-ssh python",
         try gpa.print("HOWL={s}", .{howl}),
         "check-prod-ssh",
-        "check-playground",
+        "check-python",
         "check-minimal",
     }, &env, .inherit);
     try testing.expectEqualStrings(
-        "dispatched-legacy-prod-ssh\ndispatched-legacy-playground\ndispatched-native-minimal\n",
+        "dispatched-native-prod-ssh\ndispatched-app-python-app\ndispatched-native-minimal\n",
         r.stdout,
     );
 }

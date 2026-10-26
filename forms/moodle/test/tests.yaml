@@ -152,6 +152,28 @@ suites:
               status: 308
               headers:
                 location: https://localhost/
+      # PHP is given PATH_INFO: pix.php sends a user without a picture to
+      # the theme's image.php, which finds the theme and icon by the path
+      # after the script alone; a revision not the current one is served
+      # uncached.
+      - name: moodle-path-info
+        steps:
+          - fetch:
+              url: https://localhost/user/pix.php/0/f1.jpg
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 303
+              headers:
+                location:
+                  matches: ^https://localhost/theme/image\.php/boost/core/[0-9]+/u/f1$
+          - fetch:
+              url: https://localhost/theme/image.php/boost/core/1/u/f1
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            expect:
+              status: 200
+              headers:
+                content-type:
+                  matches: ^image/
       - name: moodle-login
         steps:
           - fetch:

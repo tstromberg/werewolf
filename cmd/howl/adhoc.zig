@@ -1585,7 +1585,7 @@ test isPackage {
     for ([_][]const u8{
         "py3.13-flask",
         "nginx-mainline",
-        "openjdk-21-jre",
+        "openjdk-27-jre",
         "valkey=9.1.0-r0",
         "a+b",
     }) |ok|

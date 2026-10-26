@@ -1,0 +1,53 @@
+version: 1
+# prod booted again on the LUKS2 disk its first boot made, but with no
+# data.key in its config: init must refuse the disk, not format it again
+# (native-tests fails a boot that formats it). /data is then an empty,
+# read-only tmpfs, so nothing written there is lost at the next reboot,
+# and init says why, in /run/werewolf/nodata and on the console.
+form: prod
+boots:
+  verify:
+    data_key: false
+# A disk refused is neither usable nor kept: data-kept would pass, saying
+# nothing, on the tmpfs.
+skip: [data-usable, data-kept]
+console:
+  - seen: disk-is-luks
+    matches: 'werewolf: .*LUKS.*without data.key'
+    phases: [verify]
+suites:
+  - name: nodata
+    cases:
+      - name: nodata-marked
+        phases: [verify]
+        steps:
+          - file: /run/werewolf/nodata
+            expect:
+              body:
+                contains: without data.key
+      - name: data-empty-ro
+        phases: [verify]
+        steps:
+          - mount: /data
+            expect:
+              type: tmpfs
+              flags: [ro]
+          - file: /data
+            expect:
+              entries: []
+          - write: /data/werewolf-nodata
+            expect:
+              errno: EROFS
+      # The disk is not mounted, and cannot be read from here: /dev is
+      # closed under fence. init read it before fence, and said what it
+      # found (disk-is-luks).
+      - name: disk-untouched
+        phases: [verify]
+        steps:
+          - mount: /data
+            expect:
+              source:
+                not_equals: /dev/mapper/data
+          - file: /dev/vda
+            expect:
+              readable: false

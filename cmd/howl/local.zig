@@ -906,8 +906,14 @@ pub fn createFirecracker(
     tell: Tell,
     why: *Why,
 ) !void {
+    const pinned = !o.disabled.contains(.ipe);
+    if (pinned and howl.environ.get("IPE_UPDATES") != null) return why.refuse(
+        "Firecracker pins this image on the host; IPE_UPDATES requires a provider with " ++
+            "signed boot updates and rollback protection, such as QEMU",
+        .{},
+    );
     if (!firecracker.installed(io, gpa)) return why.refuse(
-        "--on firecracker: Linux with /dev/kvm, and firecracker on the PATH (tools/install-deps)",
+        "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH (tools/install-deps)",
         .{},
     );
     const root = firecracker.asRoot(io, gpa) catch
@@ -920,6 +926,17 @@ pub fn createFirecracker(
     const form_file = try gpa.print("{s}/form", .{dir});
     const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
     const kept = if (Dir.cwd().access(io, disk, .{})) |_| true else |_| false;
+    if (kept) {
+        const has_pin = if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }), .{})) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        };
+        if (has_pin != pinned) return why.refuse(
+            "{s}: an existing Firecracker disk cannot change its boot protections; " ++
+                "delete and recreate it explicitly",
+            .{name},
+        );
+    }
     if (kept) try reconfigurable(o, name, std.mem.trim(
         u8,
         Dir.cwd().readFileAlloc(io, form_file, gpa, .limited(256)) catch "",
@@ -948,8 +965,15 @@ pub fn createFirecracker(
             .app = ab.root,
             .disk_path = disk,
         };
+        if (pinned) {
+            const inputs = try @import("prerequisites.zig").resolveIpe(io, gpa, &steps, arch, why);
+            spec.ipe_kernel = inputs.kernel;
+            spec.ipe_key = inputs.key;
+            spec.ipe_cert = inputs.cert;
+        }
         spec.disk.args = try firecracker.bootArgs(gpa, n, dns);
         _ = try howl.buildHere(io, gpa, &steps, spec, .{ .disk = true });
+        if (pinned) try firecracker.pin(io, gpa, try gpa.print("{s}/{s}", .{ cwd, dir }), why);
         built = (try steps.finish()).seconds;
         try writePrivate(io, gpa, form_file, o.form, why);
     }
@@ -968,8 +992,12 @@ pub fn createFirecracker(
     // The supervisor writes the console to console.log and has nothing
     // else to say, so its own output is discarded.
     const launched = Io.Clock.awake.now(io);
+    const argv = try std.mem.concat(gpa, []const u8, &.{
+        &.{ "setsid", "-f", self, "_firecracker", try gpa.print("{s}/{s}", .{ cwd, dir }) },
+        if (pinned) &.{"--pinned"} else &.{},
+    });
     var starter = std.process.spawn(io, .{
-        .argv = &.{ "setsid", "-f", self, "_firecracker", try gpa.print("{s}/{s}", .{ cwd, dir }) },
+        .argv = argv,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,

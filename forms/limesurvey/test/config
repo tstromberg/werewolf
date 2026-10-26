@@ -2,7 +2,7 @@
 # forms/limesurvey/test/config DIR: the limesurvey form's config for make
 # check, in DIR, as an operator would make one (forms/limesurvey/README.md):
 # the site's address and name, its admin, and the admin's bcrypt password
-# hash, of "werewolf-check", which forms/limesurvey/test/checks signs in
+# hash, of "werewolf-check", which forms/limesurvey/test/tests.yaml signs in
 # with; no mail relay, so mail is off.
 set -eu
 d=$1/limesurvey

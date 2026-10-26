@@ -1,4 +1,4 @@
-# kafka: jre21, with Apache Kafka 4.3 as one KRaft node, broker and
+# kafka: jre, with Apache Kafka 4.4 as one KRaft node, broker and
 # controller in one JVM. Clients reach it on :9093 over TLS with
 # SASL/SCRAM-SHA-512 alone; the controller listens on loopback, for this
 # node's own broker. The certificate, the users and their passwords come
@@ -8,61 +8,17 @@
 # leash starts it (etc/sv/kafka/service) as the kafka user, by running
 # java directly: none of Kafka's scripts, and no shell. See
 # forms/kafka/README.md.
-base: jre21
+base: jre
 
 packages:
-  - kafka-4.3
+  # Ours (../packages/net/kafka): the jars and configuration, on hardened
+  # OpenJDK 27, without Kafka's scripts or the bash they name. Wolfi's
+  # kafka-4.3 also provides kafka, with bash and OpenJDK 21; the floor
+  # keeps it out.
+  - kafka>=4.4.0
 
-# Kafka's scripts, and the bash they name: leash runs java itself, and
-# kafka-setup the formatter.
-prune:
-  - usr/bin/bash
-  - usr/lib/kafka/bin/connect-distributed.sh
-  - usr/lib/kafka/bin/connect-mirror-maker.sh
-  - usr/lib/kafka/bin/connect-plugin-path.sh
-  - usr/lib/kafka/bin/connect-standalone.sh
-  - usr/lib/kafka/bin/kafka-acls.sh
-  - usr/lib/kafka/bin/kafka-broker-api-versions.sh
-  - usr/lib/kafka/bin/kafka-client-metrics.sh
-  - usr/lib/kafka/bin/kafka-cluster.sh
-  - usr/lib/kafka/bin/kafka-configs.sh
-  - usr/lib/kafka/bin/kafka-console-consumer.sh
-  - usr/lib/kafka/bin/kafka-console-producer.sh
-  - usr/lib/kafka/bin/kafka-console-share-consumer.sh
-  - usr/lib/kafka/bin/kafka-consumer-groups.sh
-  - usr/lib/kafka/bin/kafka-consumer-perf-test.sh
-  - usr/lib/kafka/bin/kafka-delegation-tokens.sh
-  - usr/lib/kafka/bin/kafka-delete-records.sh
-  - usr/lib/kafka/bin/kafka-dump-log.sh
-  - usr/lib/kafka/bin/kafka-e2e-latency.sh
-  - usr/lib/kafka/bin/kafka-features.sh
-  - usr/lib/kafka/bin/kafka-get-offsets.sh
-  - usr/lib/kafka/bin/kafka-groups.sh
-  - usr/lib/kafka/bin/kafka-jmx.sh
-  - usr/lib/kafka/bin/kafka-leader-election.sh
-  - usr/lib/kafka/bin/kafka-log-dirs.sh
-  - usr/lib/kafka/bin/kafka-metadata-quorum.sh
-  - usr/lib/kafka/bin/kafka-metadata-shell.sh
-  - usr/lib/kafka/bin/kafka-producer-perf-test.sh
-  - usr/lib/kafka/bin/kafka-reassign-partitions.sh
-  - usr/lib/kafka/bin/kafka-replica-verification.sh
-  - usr/lib/kafka/bin/kafka-run-class.sh
-  - usr/lib/kafka/bin/kafka-server-start.sh
-  - usr/lib/kafka/bin/kafka-server-stop.sh
-  - usr/lib/kafka/bin/kafka-share-consumer-perf-test.sh
-  - usr/lib/kafka/bin/kafka-share-groups.sh
-  - usr/lib/kafka/bin/kafka-storage.sh
-  - usr/lib/kafka/bin/kafka-streams-application-reset.sh
-  - usr/lib/kafka/bin/kafka-streams-groups.sh
-  - usr/lib/kafka/bin/kafka-topics.sh
-  - usr/lib/kafka/bin/kafka-transactions.sh
-  - usr/lib/kafka/bin/kafka-verifiable-consumer.sh
-  - usr/lib/kafka/bin/kafka-verifiable-producer.sh
-  - usr/lib/kafka/bin/kafka-verifiable-share-consumer.sh
-  - usr/lib/kafka/bin/trogdor.sh
-
-# make check's (forms/README.md): :9093 speaks TLS, not HTTP; test/checks
-# speaks Kafka's protocol, with its own client.
+# make check's (forms/README.md): :9093 speaks TLS, not HTTP; the plan's
+# clients speak Kafka's protocol (test/tests.yaml).
 check:
   memory: 1536
   skip: [http-answering]
@@ -71,7 +27,7 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: java runs Kafka, which is what this form is for
-  kernel-write-xor-execute: the JVM compiles Kafka to machine code as it runs (allow jit, from jre21)
+  kernel-write-xor-execute: the JVM compiles Kafka to machine code as it runs (allow jit, from jre)
 
 services:
   # Kafka, as its own user: it may bind :9093, and :9094 on loopback for
@@ -81,6 +37,8 @@ services:
   # the formatter (java) named by run. The heap is half its memory; the
   # rest is the JVM's own and the page cache.
   kafka:
+    # Kafka unmaps its memory-mapped index files through Unsafe.invokeCleaner.
+    allow: [java:native]
     exec: /usr/bin/java -Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent
       -XX:MaxInlineLevel=15 -XX:+ExitOnOutOfMemoryError -XX:-UsePerfData -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/kafka
       -Dlog4j2.configurationFile=/etc/kafka/log4j2.properties -cp /usr/lib/kafka/libs/* kafka.Kafka /run/svc/kafka/server.properties

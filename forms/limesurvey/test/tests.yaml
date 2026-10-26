@@ -1,0 +1,276 @@
+version: 1
+suites:
+  # LimeSurvey was installed from the settings before it served, into
+  # MariaDB, once MariaDB answered (forms/limesurvey/test/config).
+  - name: limesurvey-ready
+    readiness: true
+    cases:
+      - name: ls-installed
+        steps:
+          - fetch:
+              url: http://localhost/
+            await: 300s
+            expect:
+              status: 200
+              body:
+                contains: werewolf check surveys
+  # A plugin planted under upload/ is never scanned, run or installed; a .php
+  # planted among the uploads is a 404, an SVG is sandboxed, and the assets
+  # LimeSurvey published are served (driver.zig).
+  - name: limesurvey-planted
+    source: driver.zig
+    mode: planted
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet unix connect proc exec
+      run: [/usr/bin/mariadb]
+    cases:
+      seed: [ls-plugin-planted]
+      verify: [ls-plugin-planted]
+  - name: limesurvey-uploads
+    source: driver.zig
+    mode: uploads
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed: [ls-uploads-data]
+      verify: [ls-uploads-data]
+  - name: limesurvey
+    policy:
+      run: [/usr/bin/mariadb]
+    cases:
+      # Its tables are MariaDB's, and the role php, by its UNIX identity,
+      # holds its database alone.
+      - name: ls-in-mariadb
+        steps:
+          - exec:
+              argv:
+                - /usr/bin/mariadb
+                - -S
+                - /run/svc/mariadb/mariadb.sock
+                - -N
+                - -e
+                - select users_name from limesurvey.lime_users
+            expect:
+              exit: 0
+              stdout: "admin\n"
+          - exec:
+              argv:
+                - /usr/bin/mariadb
+                - -S
+                - /run/svc/mariadb/mariadb.sock
+                - -N
+                - -e
+                - show grants for 'php'@'localhost'
+            expect:
+              exit: 0
+              stdout:
+                contains_all: [unix_socket, 'ALL PRIVILEGES ON `limesurvey`']
+                not_matches: "(^|\n)GRANT ([^U]|U[^S])[^\n]* ON \\*\\.\\* "
+      # The admin is the config's: it signs in with the password whose hash
+      # the config carries, and reaches the plugin manager. A plugin is PHP:
+      # its upload is refused, nothing of the archive lands, and its code
+      # never runs. Signing in replaces the CSRF token; the plugin manager's
+      # page carries the new one once, in LS.data.
+      - name: ls-login
+        steps:
+          - name: form
+            fetch:
+              url: http://localhost/index.php/admin/authentication/sa/login
+              session: admin
+            expect:
+              status: 200
+          - fetch:
+              url: http://localhost/index.php/admin/authentication/sa/login
+              method: POST
+              session: admin
+              form:
+                YII_CSRF_TOKEN:
+                  step: form
+                  regex: 'value="([^"]+)" name="YII_CSRF_TOKEN"'
+                authMethod: Authdb
+                user: admin
+                password: werewolf-check
+                loginlang: default
+                action: login
+                width: '1280'
+                login_submit: login
+            expect:
+              status:
+                one_of: [200, 302]
+          - name: plugins
+            fetch:
+              url: http://localhost/index.php/admin/pluginmanager/sa/index
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: authentication/sa/logout
+          - fetch:
+              url: http://localhost/index.php/admin/pluginmanager/sa/upload
+              method: POST
+              session: admin
+              multipart:
+                YII_CSRF_TOKEN:
+                  step: plugins
+                  regex: '"csrfToken":"([A-Za-z0-9_=-]+)"'
+                the_file:
+                  file: /run/config/limesurvey/plugin-test.zip
+                  filename: Evil.zip
+                  type: application/zip
+            expect:
+              status: 302
+          - fetch:
+              url: http://localhost/index.php/admin/pluginmanager/sa/index
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: Plugin upload is disabled
+          - tree:
+              roots: [/data/svc/php-fpm]
+            expect:
+              name:
+                not_matches: ^Evil
+          - file: /run/svc/php-fpm/pwned
+            expect:
+              exists: false
+      # What LimeSurvey's .htaccess files refuse, nginx refuses: its code and
+      # configuration, libraries, the installer, translations, the cache, the
+      # release stamp, participants' uploaded files, and any .php but its own.
+      - name: ls-hidden
+        steps:
+          - fetch:
+              url: http://localhost/application/config/config.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/application/config/security.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/application/config/version.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/vendor/autoload.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/installer/create-database.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/setdebug.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/locale/limesurvey.pot
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/tmp/release
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/tmp/runtime/x
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/index.php/installer/welcome
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/upload/surveys/1/files/fu_x
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/upload/x.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/assets/packages/kcfinder/core/autoload.php
+            expect:
+              status: 404
+          - fetch:
+              url: http://localhost/plugins/Authdb/Authdb.php
+            expect:
+              status: 404
+      # A request naming another host is refused, so no link in mail can be
+      # aimed elsewhere.
+      - name: ls-host
+        steps:
+          - tcp:
+              connect: 127.0.0.1:80
+              exchange:
+                - send: "GET /index.php/admin/authentication/sa/forgotpassword HTTP/1.0\r\nHost: localhost\r\n\r\n"
+                - expect:
+                    prefix: "HTTP/1.1 200 "
+          - tcp:
+              connect: 127.0.0.1:80
+              exchange:
+                - send: "GET /index.php/admin/authentication/sa/forgotpassword HTTP/1.0\r\nHost: evil.example\r\n\r\n"
+                - expect:
+                    prefix: "HTTP/1.1 400 "
+      # php cannot change LimeSurvey's code, and what is secret is php's alone.
+      - name: ls-private
+        steps:
+          - write: /usr/share/limesurvey/plugins/werewolf-test-write
+            expect:
+              errno: EROFS
+          - file: /run/svc/php-fpm/admin-password-hash
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/security.json
+            expect:
+              uid: php
+              mode: '600'
+          - file: /data/svc/php-fpm/tmp/runtime
+            expect:
+              uid: php
+              mode: '700'
+          - file: /run/svc/php-fpm/smtp-password
+            expect:
+              exists: false
+      - name: limesurvey-no-ldap
+        steps:
+          - file: /usr/lib/php/modules/ldap.so
+            expect:
+              exists: false
+      # A wrong password signs no one in. Last, as LimeSurvey locks an
+      # address out after a few.
+      - name: ls-wrong-password
+        steps:
+          - name: form
+            fetch:
+              url: http://localhost/index.php/admin/authentication/sa/login
+              session: wrong
+            expect:
+              status: 200
+          - fetch:
+              url: http://localhost/index.php/admin/authentication/sa/login
+              method: POST
+              session: wrong
+              form:
+                YII_CSRF_TOKEN:
+                  step: form
+                  regex: 'value="([^"]+)" name="YII_CSRF_TOKEN"'
+                authMethod: Authdb
+                user: admin
+                password: werewolf-wrong
+                loginlang: default
+                action: login
+                width: '1280'
+                login_submit: login
+            expect:
+              status:
+                min: 200
+                max: 399
+          - fetch:
+              url: http://localhost/index.php/admin/pluginmanager/sa/index
+              session: wrong
+            expect:
+              body:
+                absent: authentication/sa/logout

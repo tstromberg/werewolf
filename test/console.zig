@@ -22,6 +22,11 @@
 //! CONSOLE_TIMEOUT the seen lines, 300 s each by default; HOST_STEPS_TIMEOUT
 //! bounds the host steps. The console goes to LOG. It exits 0 only if the
 //! machine booted, every judgement held and it powered off cleanly.
+//! CONSOLE_POWER_CUT cuts its power after the judgements instead, for the
+//! next boot to find what that leaves. CONSOLE_ENDS judges a machine that
+//! must end by itself, refusing to boot or resetting: QEMU must exit within
+//! CONSOLE_TIMEOUT, with no posture line asked for nor button pressed, and
+//! its console is judged.
 
 const std = @import("std");
 const host = @import("host");
@@ -79,13 +84,15 @@ const Boot = struct {
         b.started = true;
         defer b.m.stop(.fromSeconds(10));
         b.m.note(try gpa.print("werewolf-check: host {s}\n", .{b.host}));
+        if (b.c.env.get("CONSOLE_ENDS") != null)
+            return b.ends(lines, b.seconds("CONSOLE_TIMEOUT", 300));
         const boot_timeout = b.seconds("BOOT_TIMEOUT", 300);
         try b.handover(boot_timeout);
         try b.posture(boot_timeout);
         const console_timeout = b.seconds("CONSOLE_TIMEOUT", 300);
         try b.hostSteps(lines, console_timeout);
         try b.judge(lines, console_timeout);
-        try b.shutdown();
+        if (b.c.env.get("CONSOLE_POWER_CUT") != null) try b.powerCut() else try b.shutdown();
         if (b.failed == 0) b.say("pass", "all checks", "");
     }
 
@@ -243,6 +250,35 @@ const Boot = struct {
         };
     }
 
+    /// ends judges a machine that must end by itself, never booting or
+    /// resetting, as CONSOLE_ENDS asks: under -no-reboot QEMU exits. Once
+    /// it has, every seen line must be on its console and no unseen line.
+    fn ends(b: *Boot, lines: []const Line, timeout: i64) !void {
+        const gpa = b.c.gpa;
+        b.m.until(qemu.after(b.c.io, timeout), Never{}) catch |err| switch (err) {
+            error.MachineExited => {},
+            error.Timeout => return b.giveUp(
+                "end",
+                try gpa.print("still running after {d} s", .{timeout}),
+                true,
+            ),
+            else => return err,
+        };
+        const t = try Text.of(gpa, try b.m.console(gpa));
+        for (lines) |l| switch (l.kind) {
+            .seen => if (try t.found(gpa, l.arg))
+                b.say("ok", l.name, "")
+            else
+                b.fail(l.name, try gpa.print("not on the console: {s}", .{l.arg})),
+            .unseen => if (try t.offending(gpa, l.arg)) |line|
+                b.fail(l.name, try gpa.print("on the console: {s}", .{line}))
+            else
+                b.say("ok", l.name, ""),
+            .up => b.fail(l.name, "up needs a machine that stays up"),
+        };
+        if (b.failed == 0) b.say("pass", "all checks", "");
+    }
+
     /// settled waits up to timeout, reading the console, for every seen
     /// line, and is the console as it last read it, or null when QEMU
     /// exited first. Each look reads the whole console, so look is reset
@@ -290,6 +326,22 @@ const Boot = struct {
             const end = mem.findAnyPos(u8, text, at, "\r\n") orelse text.len;
             b.fail("shutdown", text[at..end]);
         } else if (b.failed == 0) b.say("ok", "shutdown", "");
+    }
+
+    /// powerCut cuts the machine's power, as a reset or a host's hard stop
+    /// does, for the next boot to find what is left: QEMU's monitor quits.
+    fn powerCut(b: *Boot) !void {
+        const io = b.c.io;
+        const start = (try b.m.console(b.c.gpa)).len;
+        try b.m.send("\x01c");
+        b.m.until(qemu.after(io, 10), After{ .start = start, .needle = "(qemu)" }) catch
+            return b.giveUp("power-cut", "no QEMU monitor", false);
+        try b.m.send("quit\r");
+        b.m.until(qemu.after(io, 30), Never{}) catch |err| switch (err) {
+            error.MachineExited => {},
+            else => return b.giveUp("power-cut", "QEMU did not quit", false),
+        };
+        if (b.failed == 0) b.say("ok", "power-cut", "");
     }
 
     /// diagnosis says what the machine was doing when it failed: werewolf's

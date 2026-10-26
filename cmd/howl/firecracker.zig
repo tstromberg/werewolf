@@ -1,8 +1,8 @@
 //! firecracker runs a machine as a Firecracker microVM on Linux with KVM
 //! (experimental). The machine is the boot disk QEMU boots, slots and all.
-//! Firecracker has no firmware, so its supervisor does systemd-boot's part
-//! before each start: it picks the disk's entry, spends a try, and boots
-//! that slot's kernel and stage0. Updates work as anywhere. See README.md.
+//! Firecracker has no firmware or TPM. The default pins the initial boot
+//! files on the trusted host and keeps IPE. Explicitly unprotected machines
+//! use the supervisor's systemd-boot-like A/B selection. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,6 +15,48 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
+pub const unavailable: @import("cmdline").Protections = .initMany(&.{ .secureboot, .tpm });
+pub const warning = "Firecracker does not support UEFI Secure Boot or a TPM. " ++
+    "Firmware cannot authenticate boot code, and there is no TPM release floor to prevent " ++
+    "rollback to an older vulnerable image. By default howl pins boot files and arguments " ++
+    "on the trusted host and retains IPE and dm-verity. Restoring older host state can still " ++
+    "roll the machine back. Image updates require rebuilding on the host; use QEMU for " ++
+    "firmware verification and TPM rollback protection.";
+pub const trust_file = "firecracker-boot.json";
+
+const BootTrust = struct {
+    version: u8 = 1,
+    entry: []const u8,
+    kernel: [64]u8,
+    initrd: [64]u8,
+
+    fn hash(bytes: []const u8) [64]u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        return std.fmt.bytesToHex(digest, .lower);
+    }
+
+    fn verify(trust: BootTrust, entry: []const u8, kernel: []const u8, initrd: []const u8) !void {
+        if (trust.version != 1 or !mem.eql(u8, trust.entry, entry) or
+            !mem.eql(u8, &trust.kernel, &hash(kernel)) or
+            !mem.eql(u8, &trust.initrd, &hash(initrd))) return error.BootFilesChanged;
+    }
+};
+
+/// Pin only a newly built image. Never enroll an existing guest-writable disk.
+pub fn pin(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) !void {
+    const esp = try openEsp(io, gpa, dir, why);
+    const text = try esp.run("mtype", &.{"::/loader/entries/werewolf-a.conf"});
+    const e = Entry.parse("werewolf-a.conf", text);
+    try e.direct();
+    const trust: BootTrust = .{
+        .entry = text,
+        .kernel = BootTrust.hash(try esp.run("mtype", &.{try gpa.print("::{s}", .{e.linux})})),
+        .initrd = BootTrust.hash(try esp.run("mtype", &.{try gpa.print("::{s}", .{e.initrd})})),
+    };
+    try howl.writePrivate(io, gpa, try gpa.print("{s}/{s}", .{ dir, trust_file }), try std.json.Stringify.valueAlloc(gpa, trust, .{ .whitespace = .indent_2 }), why);
+}
+
 /// installed reports whether this is Linux with /dev/kvm and firecracker
 /// on the PATH (tools/install-deps installs it).
 pub fn installed(io: Io, gpa: Allocator) bool {
@@ -22,7 +64,14 @@ pub fn installed(io: Io, gpa: Allocator) bool {
     Dir.cwd().access(io, "/dev/kvm", .{}) catch return false;
     const r = std.process.run(gpa, io, .{ .argv = &.{ "firecracker", "--version" } }) catch
         return false;
-    return r.term == .exited and r.term.exited == 0;
+    return r.term == .exited and r.term.exited == 0 and supportedVersion(r.stdout);
+}
+
+fn supportedVersion(output: []const u8) bool {
+    const text = mem.cutPrefix(u8, output, "Firecracker v") orelse return false;
+    const end = mem.findAny(u8, text, " \r\n") orelse text.len;
+    const v = std.SemanticVersion.parse(text[0..end]) catch return false;
+    return v.order(.{ .major = 1, .minor = 17, .patch = 0 }) != .lt;
 }
 
 /// rootReady reports whether the network can be set up without a password
@@ -457,28 +506,47 @@ const Esp = struct {
 /// boot does systemd-boot's part for the machine in dir: it picks the
 /// entry on disk.img's EFI partition, renames it to spend a try if it
 /// counts them, takes its kernel and stage0, and writes vm.json. It
-/// returns what it chose, for the console log. The kernel is made one
-/// Firecracker loads: on x86_64 the ELF inside the bzImage, on aarch64
-/// the Image inside an EFI zboot wrapper.
-fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
+/// returns what it chose, for the console log. x86_64 keeps the bzImage:
+/// its decompressor supplies KASLR, bypassed by extracting the ELF. This
+/// requires Firecracker 1.17+. aarch64 unwraps the EFI zboot Image.
+fn openEsp(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) !Esp {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);
     // mtools otherwise refuses a partition that is no whole number of tracks.
     try env.put("MTOOLS_SKIP_CHECK", "1");
     const disk = try gpa.print("{s}/disk.img", .{dir});
-    const esp: Esp = .{
+    return .{
         .io = io,
         .gpa = gpa,
         .image = try gpa.print("{s}@@{d}", .{ disk, gpt.margin * gpt.sector }),
         .env = env,
         .why = why,
     };
+}
+
+fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) ![]const u8 {
+    const esp = try openEsp(io, gpa, dir, why);
+    const disk = try gpa.print("{s}/disk.img", .{dir});
+    const trust: ?BootTrust = if (pinned) try std.json.parseFromSliceLeaky(
+        BootTrust,
+        gpa,
+        try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/{s}", .{ dir, trust_file }), gpa, .limited(64 << 10)),
+        .{},
+    ) else null;
     var chosen: ?Entry = null;
-    var listed = mem.tokenizeScalar(u8, try esp.run("mdir", &.{ "-b", "::/loader/entries" }), '\n');
-    while (listed.next()) |path| {
-        if (!mem.endsWith(u8, path, ".conf")) continue;
-        const e: Entry = .parse(path["::/loader/entries/".len..], try esp.run("mtype", &.{path}));
-        if (chosen == null or e.before(chosen.?)) chosen = e;
+    if (trust) |t| {
+        // The trusted host selects the initial image. Guest-written entries cannot
+        // select a different kernel, root hash, command line or trial slot.
+        const text = try esp.run("mtype", &.{"::/loader/entries/werewolf-a.conf"});
+        if (!mem.eql(u8, text, t.entry)) return why.refuse("pinned Firecracker boot entry changed", .{});
+        chosen = .parse("werewolf-a.conf", text);
+    } else {
+        var listed = mem.tokenizeScalar(u8, try esp.run("mdir", &.{ "-b", "::/loader/entries" }), '\n');
+        while (listed.next()) |path| {
+            if (!mem.endsWith(u8, path, ".conf")) continue;
+            const e: Entry = .parse(path["::/loader/entries/".len..], try esp.run("mtype", &.{path}));
+            if (chosen == null or e.before(chosen.?)) chosen = e;
+        }
     }
     const e = chosen orelse return why.refuse("{s}: no boot entries", .{disk});
     e.direct() catch |err| return switch (err) {
@@ -494,11 +562,13 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
         said = try gpa.print("{s}, a try spent: {s}", .{ said, name });
     }
     const shipped = try esp.run("mtype", &.{try gpa.print("::{s}", .{e.linux})});
-    const kernel = switch (builtin.cpu.arch) {
-        .x86_64 => image.vmlinux(gpa, shipped),
-        else => image.unwrapZboot(gpa, shipped),
-    } catch |err| return why.refuse("{s}: {t}", .{ e.linux, err });
     const stage0 = try esp.run("mtype", &.{try gpa.print("::{s}", .{e.initrd})});
+    if (trust) |t| {
+        t.verify(t.entry, shipped, stage0) catch
+            return why.refuse("pinned Firecracker kernel or initrd changed; refusing to boot", .{});
+        said = try gpa.print("{s}; host-pinned kernel, initrd and command line verified", .{said});
+    }
+    const kernel = if (builtin.cpu.arch == .x86_64) shipped else image.unwrapZboot(gpa, shipped) catch |err| return why.refuse("{s}: {t}", .{ e.linux, err });
     const kernel_path = try gpa.print("{s}/kernel", .{dir});
     const stage0_path = try gpa.print("{s}/stage0.zst", .{dir});
     try Dir.cwd().writeFile(io, .{ .sub_path = kernel_path, .data = kernel });
@@ -546,7 +616,13 @@ fn added(arg: []const u8) bool {
 /// written. Firecracker exits 0 on both reboot and halt, so keep reads the
 /// console to tell them apart, and restarts on reboot while config.tar
 /// exists; delete removes it. Any other exit ends the machine.
-pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
+pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
+    // Preserve admission when an operator invokes the internal supervisor directly.
+    // Once selected, losing the record during a guest reboot never downgrades it.
+    const require_pin = pinned or if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, trust_file }), .{})) |_| true else |err| switch (err) {
+        error.FileNotFound => false,
+        else => return err,
+    };
     const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
@@ -571,7 +647,7 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer arena.deinit();
         var why: howl.Why = .{};
-        const said = boot(io, arena.allocator(), dir, &why) catch |err| {
+        const said = boot(io, arena.allocator(), dir, &why, require_pin) catch |err| {
             out.writeStreamingAll(io, mem.print(
                 &buf,
                 booting.no_slot ++ "{s}\n",
@@ -620,6 +696,29 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
 }
 
 const testing = std.testing;
+
+test "bzImage boot requires Firecracker 1.17 or newer" {
+    try testing.expect(supportedVersion("Firecracker v1.17.0\n"));
+    try testing.expect(supportedVersion("Firecracker v1.18.0\n"));
+    try testing.expect(!supportedVersion("Firecracker v1.16.0\n"));
+    try testing.expect(!supportedVersion("Firecracker v1.17.0-rc.1\n"));
+    try testing.expect(!supportedVersion("unknown"));
+}
+
+test "host boot pins reject changed kernel, initrd, arguments and unknown versions" {
+    const trust: BootTrust = .{
+        .entry = "linux /kernel\ninitrd /initrd\noptions werewolf.disable=secureboot,tpm\n",
+        .kernel = BootTrust.hash("trusted kernel"),
+        .initrd = BootTrust.hash("trusted stage0 and IPE policy"),
+    };
+    try trust.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy");
+    try testing.expectError(error.BootFilesChanged, trust.verify(trust.entry, "other kernel", "trusted stage0 and IPE policy"));
+    try testing.expectError(error.BootFilesChanged, trust.verify(trust.entry, "trusted kernel", "other stage0 or IPE policy"));
+    try testing.expectError(error.BootFilesChanged, trust.verify("linux /kernel\ninitrd /initrd\noptions ipe.enforce=0\n", "trusted kernel", "trusted stage0 and IPE policy"));
+    var future = trust;
+    future.version = 2;
+    try testing.expectError(error.BootFilesChanged, future.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy"));
+}
 
 test net {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

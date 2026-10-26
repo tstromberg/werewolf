@@ -34,18 +34,18 @@ protections:
     - args: [create, protection-check, --with, prod-ssh, --on, bhyve, --yes, --build]
       status: 1
       stderr: [protected deployment is not ready]
-    - args: [run, --with, prod-ssh, --on, firecracker, --yes]
+    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --version, 20261014T232908Z]
       status: 1
-      stderr: [protected deployment is not ready]
-    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes]
+      stderr: [Firecracker cannot boot a protected UEFI download]
+    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --version, 20261014T232908Z]
       status: 1
-      stderr: [protected deployment is not ready]
-    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --build]
+      stderr: [Firecracker cannot boot a protected UEFI download]
+    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --build, --dev]
       status: 1
-      stderr: [protected deployment is not ready]
-    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --build]
+      stderr: [developer access requires an unprotected local machine]
+    - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --build, --dev=ssh]
       status: 1
-      stderr: [protected deployment is not ready]
+      stderr: [developer access requires an unprotected local machine]
     - args: [run, --with, prod-ssh, --on, proxmox, --yes]
       status: 1
       stderr: [protected deployment is not ready]

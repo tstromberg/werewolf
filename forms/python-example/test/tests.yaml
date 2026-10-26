@@ -34,7 +34,9 @@ suites:
               headers:
                 Content-Type: application/x-www-form-urlencoded
             expect:
-              status: 501
+              status: 405
+              headers:
+                allow: GET
       - name: app-query
         steps:
           - fetch:

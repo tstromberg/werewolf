@@ -166,7 +166,7 @@ Native setup can save generated IDs as JSON on `/data`, for `file` steps to capt
 Preserve every old assertion, including refusals and reboot behavior. Seed writes a
 run-specific value; verify reads it before setup can recreate it. Keep case names stable
 or record split/renamed replacements in `test/form-probe-baseline.yaml`.
-`build/host/form-coverage --probes` reports progress toward 80% of 722 baseline cases;
+`build/host/form-coverage --probes` reports progress toward 80% of 714 baseline cases;
 `--mapping`, their implementations. Native code does not count as YAML. SSH logins run
 from the host in [host suites](testing-host.md); Jellyfin keeps `legacy: true` for its
 in test/boot. Keep old coverage, supplied-code gates too, until both phases and the

@@ -88,13 +88,13 @@ never a form allowance; runtime APKs may contain no `/etc/runtime-hardening` fil
 - Python: `inline` gates argv/stdin; `writable-source` gates the main script.
   PHP checks all compiled files by descriptor, outside OPcache and during preloads;
   `writable-source` permits writable files, `inline` evaluated and generated code.
-  Metadata failures refuse. Java's jshell and `defineClass` seals remain deferred.
+  Metadata failures refuse. Java's `defineClass` seal remains deferred.
 
 **Phase 2.** `defineClass`, `marshal`, Python `eval`, Node `vm` and custom loaders
 still need provenance; PHP gates string compilation with `inline`.
 **Form coverage.** Native forms still request PHP 8.4; hardened PHP follows 8.5.
 Migrate writable configuration to data and precompile templates before switching;
-blanket grants restore webshell risk. `jre21`, older Node and OCI runtimes also need
+blanket grants restore webshell risk. Older Node and OCI runtimes also need
 migration. Declare allowances as weaknesses with excuses, like `jit`.
 
 ## Drawbacks

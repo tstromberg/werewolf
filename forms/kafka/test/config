@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/kafka/test/config DIR: the kafka form's config for make check, in
 # DIR: a certificate for localhost, the admin ops, and two users, app,
-# whom test/checks grants a topic, and stranger, whom no ACL names.
+# whom test/tests.yaml grants a topic, and stranger, whom no ACL names.
 set -eu
 d=$1/kafka
 mkdir -p "$d"
@@ -14,13 +14,16 @@ printf 'app werewolf-check-app\nstranger werewolf-check-stranger\n' >"$d/users"
 echo '{"domain":"localhost","admin":"ops"}' >"$d/settings.json"
 
 # Native Java clients use these directly; no guest shell or script is needed.
+# They run as nobody, as the hardened JVM refuses root, so each carries the
+# certificate it trusts rather than naming /run/config/kafka/tls.crt.
 mkdir -p "$1/tests"
+trust="ssl.truststore.type=PEM
+ssl.truststore.certificates=$(sed '$!s/$/\\n\\/' "$d/tls.crt")"
 for entry in ops:admin app:app stranger:stranger ops:wrong-password; do
 	user=${entry%%:*}
 	label=$user
 	[ "${entry#*:}" != wrong-password ] || label=wrong
-	printf 'security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-512\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="werewolf-check-%s";\nssl.truststore.type=PEM\nssl.truststore.location=/run/config/kafka/tls.crt\n' \
-		"$user" "${entry#*:}" >"$1/tests/kafka-$label"
+	printf 'security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-512\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="werewolf-check-%s";\n%s\n' \
+		"$user" "${entry#*:}" "$trust" >"$1/tests/kafka-$label"
 done
-printf 'security.protocol=SSL\nssl.truststore.type=PEM\nssl.truststore.location=/run/config/kafka/tls.crt\n' \
-	>"$1/tests/kafka-anon"
+printf 'security.protocol=SSL\n%s\n' "$trust" >"$1/tests/kafka-anon"

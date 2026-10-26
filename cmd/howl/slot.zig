@@ -11,6 +11,7 @@ const ipe = @import("ipe");
 const cmdline = @import("cmdline");
 const image = @import("image");
 const build = @import("build.zig");
+const package = @import("package");
 const packages = @import("packages.zig");
 const embedded = @import("files");
 const disk = @import("disk.zig");
@@ -222,8 +223,8 @@ fn withoutPins(gpa: Allocator, world: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = mem.splitScalar(u8, body, '\n');
     while (lines.next()) |l| {
-        if (mem.startsWith(u8, l, @import("package").baselayout.name ++ "="))
-            try out.print(gpa, "{s}\n", .{@import("package").baselayout.name})
+        if (mem.startsWith(u8, l, package.baselayout.name ++ "="))
+            try out.print(gpa, "{s}\n", .{package.baselayout.name})
         else if (mem.findScalar(u8, l, '=') == null)
             try out.print(gpa, "{s}\n", .{l});
     }
@@ -407,58 +408,54 @@ fn layerStep(
 /// root, modes 644 or 755, dated 1970 as apko dates its own files, and
 /// carrying nothing of the builder's (owners, extended attributes,
 /// .DS_Store). Images are made from tars alone, so no
-/// inode number or time of the build host reaches one.
+/// inode number or time of the build host reaches one. It reads each file
+/// where it lies: nothing is copied before the tar is written.
 fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
     const io = b.io;
-    const stage = try b.path("{s}.d", .{target});
-    try Dir.cwd().deleteTree(io, stage);
-    var into = try Dir.cwd().createDirPathOpen(
-        io,
-        stage,
-        .{ .open_options = .{ .iterate = true } },
-    );
-    defer into.close(io);
-    for (dirs) |dir| try lay(b, dir, into);
-
-    // Every name below stage, as find lists them, dated 1970 and sorted.
-    var names: std.ArrayList([]const u8) = .empty;
-    {
-        var w = try into.walk(b.gpa);
-        defer w.deinit();
-        while (try w.next(io)) |e| try names.append(b.gpa, try b.gpa.dupe(u8, e.path));
-    }
-    for (names.items) |n| try into.setTimestamps(io, n, .{
-        .follow_symlinks = false,
-        .access_timestamp = .{ .new = .zero },
-        .modify_timestamp = .{ .new = .zero },
-    });
-    mem.sortUnstable([]const u8, names.items, {}, build.lessThan);
-    var list: std.ArrayList(u8) = .empty;
-    for (names.items) |n| try list.print(b.gpa, "{s}\n", .{n});
-    const list_path = try b.path("{s}.list", .{target});
-    try Dir.cwd().writeFile(io, .{ .sub_path = list_path, .data = list.items });
+    var laid: std.array_hash_map.String(Laid) = .empty;
+    for (dirs) |dir| try lay(b, dir, &laid);
+    const names = try b.gpa.dupe([]const u8, laid.keys());
+    mem.sortUnstable([]const u8, names, {}, build.lessThan);
     const t = try b.tmp(target);
     {
-        const names_in = try Dir.cwd().openFile(io, list_path, .{});
-        defer names_in.close(io);
-        try b.run(&.{
-            "bsdtar",      "-cf",             try b.absolute(t), "--format",
-            "paxr",        "--uid",           "0",               "--gid",
-            "0",           "--numeric-owner", "--no-xattrs",     "--no-acls",
-            "--no-fflags", "-n",              "-T",              "-",
-        }, .{ .cwd = stage, .stdin = names_in });
+        const file = try Dir.cwd().createFile(io, t, .{});
+        defer file.close(io);
+        var w = file.writer(io, try b.gpa.alloc(u8, 1 << 20));
+        for (names) |name| switch (laid.get(name).?) {
+            .directory => try header(b.gpa, &w.interface, name, '5', 0o755, 0, ""),
+            .link => |link| try header(b.gpa, &w.interface, name, '2', 0o777, 0, link),
+            .file => |f| try layFile(b, &w.interface, name, f.source, f.exec),
+        };
+        // The end: two empty blocks.
+        try w.interface.splatByteAll(0, 2 * package.block);
+        try w.interface.flush();
     }
     try b.rename(t, target);
-    try Dir.cwd().deleteFile(io, list_path);
-    try Dir.cwd().deleteTree(io, stage);
 }
 
-/// lay copies dir's tree into into as cp -R does, then normalises it as
-/// chmod u=rwX,go=rX does: directories 755, files 755 if executable, else
-/// 644. A file laid over another keeps the first's mode, as cp leaves it;
-/// a link replaces a file or link. What cp would refuse, or do through a
-/// link, fails.
-fn lay(b: *B, dir: []const u8, into: Dir) !void {
+/// Laid is what layer lays at a path: a directory, a file, or a link.
+const Laid = union(enum) {
+    directory,
+    /// source is the file whose bytes it takes; exec, whether it is 755.
+    file: struct { source: []const u8, exec: bool },
+    /// link is the link's target.
+    link: []const u8,
+
+    fn kind(l: Laid) Io.File.Kind {
+        return switch (l) {
+            .directory => .directory,
+            .file => .file,
+            .link => .sym_link,
+        };
+    }
+};
+
+/// lay lays dir's tree over laid as cp -R would over a copy of it, then
+/// as chmod u=rwX,go=rX normalises it: directories 755, files 755 if
+/// executable, else 644. A file laid over another keeps the first's mode,
+/// as cp leaves it; a link replaces a file or link. What cp would refuse,
+/// or do through a link, fails.
+fn lay(b: *B, dir: []const u8, laid: *std.array_hash_map.String(Laid)) !void {
     const io = b.io;
     var from = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch |err|
         return b.fail("{s}: {t}", .{ dir, err });
@@ -468,8 +465,8 @@ fn lay(b: *B, dir: []const u8, into: Dir) !void {
     var buf: [Dir.max_path_bytes]u8 = undefined;
     while (try w.next(io)) |e| {
         if (mem.eql(u8, e.basename, ".DS_Store")) continue;
-        const there = into.statFile(io, e.path, .{ .follow_symlinks = false }) catch null;
-        const was: ?Io.File.Kind = if (there) |st| st.kind else null;
+        const there = laid.getPtr(e.path);
+        const was: ?Io.File.Kind = if (there) |l| l.kind() else null;
         const misfit = switch (e.kind) {
             .directory => was != null and was != .directory,
             .file => was != null and was != .file,
@@ -479,25 +476,125 @@ fn lay(b: *B, dir: []const u8, into: Dir) !void {
         if (misfit) return b.fail("{s}/{s}: cannot lay a {t} over {s}", .{
             dir, e.path, e.kind, if (was) |k| @tagName(k) else "nothing",
         });
-        switch (e.kind) {
-            .directory => {
-                try into.createDirPath(io, e.path);
-                try into.setFilePermissions(io, e.path, .fromMode(0o755), .{});
-            },
-            .file => {
-                const st = try (if (was != null) into else from).statFile(io, e.path, .{});
-                try from.copyFile(e.path, into, e.path, io, .{});
-                const exec = st.permissions.toMode() & 0o111 != 0;
-                try into.setFilePermissions(io, e.path, .fromMode(if (exec) 0o755 else 0o644), .{});
-            },
-            .sym_link => {
-                const link = buf[0..try from.readLink(io, e.path, &buf)];
-                if (was != null) try into.deleteFile(io, e.path);
-                try into.symLink(io, link, e.path, .{});
-            },
+        const now: Laid = switch (e.kind) {
+            .directory => .directory,
+            .file => .{ .file = .{
+                .source = try std.fs.path.join(b.gpa, &.{ dir, e.path }),
+                .exec = if (there) |l| l.file.exec else blk: {
+                    const st = try from.statFile(io, e.path, .{});
+                    break :blk st.permissions.toMode() & 0o111 != 0;
+                },
+            } },
+            .sym_link => .{ .link = try b.gpa.dupe(
+                u8,
+                buf[0..try from.readLink(io, e.path, &buf)],
+            ) },
             else => unreachable,
-        }
+        };
+        if (there) |l| l.* = now else try laid.put(b.gpa, try b.gpa.dupe(u8, e.path), now);
     }
+}
+
+/// layFile writes name's header and source's bytes, padded to a block.
+fn layFile(b: *B, w: *Io.Writer, name: []const u8, source: []const u8, exec: bool) !void {
+    const file = try Dir.cwd().openFile(b.io, source, .{});
+    defer file.close(b.io);
+    const size = try file.length(b.io);
+    try header(b.gpa, w, name, '0', if (exec) 0o755 else 0o644, size, "");
+    var rbuf: [64 << 10]u8 = undefined;
+    var r = file.reader(b.io, &rbuf);
+    if (try w.sendFileAll(&r, .limited(size)) != size)
+        return b.fail("{s}: changed as it was laid", .{source});
+    try w.splatByteAll(0, @intCast((package.block - size % package.block) % package.block));
+}
+
+/// header writes ustar's header for path, after a pax header for what
+/// ustar cannot hold: a long path or link, or a size of 8 GiB or more.
+fn header(
+    gpa: Allocator,
+    w: *Io.Writer,
+    path: []const u8,
+    kind: u8,
+    mode: u32,
+    size: u64,
+    link: []const u8,
+) !void {
+    const long_path = if (package.ustar(path, kind, mode, 0, "")) |_| false else |_| true;
+    const long_link = link.len > 100;
+    const big = size >= 1 << 33;
+    if (!long_path and !long_link and !big)
+        return w.writeAll(&try package.ustar(path, kind, mode, size, link));
+    var records: std.ArrayList(u8) = .empty;
+    if (long_path) try records.appendSlice(gpa, try package.pax(gpa, "path", path));
+    if (long_link) try records.appendSlice(gpa, try package.pax(gpa, "linkpath", link));
+    if (big) try records.appendSlice(
+        gpa,
+        try package.pax(gpa, "size", try gpa.print("{d}", .{size})),
+    );
+    try w.writeAll(&try package.ustar("PaxHeader", 'x', 0o644, records.items.len, ""));
+    try w.writeAll(records.items);
+    try w.splatByteAll(0, (package.block - records.items.len % package.block) % package.block);
+    // Readers take the pax record's: ustar's holds what fits.
+    try w.writeAll(&try package.ustar(
+        if (long_path) path[path.len - 100 ..] else path,
+        kind,
+        mode,
+        if (big) 0 else size,
+        if (long_link) "" else link,
+    ));
+}
+
+/// root_head is the root's first entry: the root directory itself. Without
+/// it, mkfs.erofs gives / the builder's uid and mode 0777, which sshd's
+/// StrictModes rightly refuses keys under.
+const root_head = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n";
+
+/// shim_sh follows it if the image takes the sh shim: /bin/sh as a link to
+/// it, which a package's sh, mksh's, or a form's replaces, as it comes
+/// later (cmd/sh-shim/sh-shim.1.md).
+const shim_sh =
+    \\./usr type=dir uid=0 gid=0 mode=0755 time=0.0
+    \\./usr/bin type=dir uid=0 gid=0 mode=0755 time=0.0
+    \\./usr/bin/sh type=link uid=0 gid=0 mode=0777 time=0.0 link=/usr/lib/werewolf/sh-shim
+    \\
+;
+
+/// rootTar is the two bsdtar commands that write root_tar: mtree's entries
+/// and then the packages, less what the forms and image.package_prune
+/// prune; then the overlay appended, less what the forms prune alone, so a
+/// form's replacement survives. Where a name comes twice, the later entry
+/// is the one an image gets.
+fn rootTar(
+    gpa: Allocator,
+    root_tar: []const u8,
+    mtree: []const u8,
+    rootfs: []const u8,
+    overlay: []const u8,
+    pruned: []const []const u8,
+) ![2][]const []const u8 {
+    // Appending, bsdtar writes in the format it finds in the archive: plain
+    // ustar if nothing before needed more, which has no room for a long path
+    // or link and skips it with a warning, exiting 0 (an OCI image's pnpm
+    // links, for one). Every write names paxr, so every name fits.
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(gpa, &.{
+        "bsdtar", "-cf",             root_tar, "--format",
+        "paxr",   "--uid",           "0",      "--gid",
+        "0",      "--numeric-owner",
+    });
+    // libarchive otherwise matches at any path component: pruning the host's
+    // usr/bin/bash must not remove an OCI service's own interpreter as well.
+    for (pruned) |p| try argv.appendSlice(gpa, &.{ "--exclude", try gpa.print("^{s}", .{p}) });
+    var appended = try argv.clone(gpa);
+    appended.items[1] = "-rf";
+    try appended.append(gpa, try gpa.print("@{s}", .{overlay}));
+    for (image.package_prune) |p|
+        try argv.appendSlice(gpa, &.{ "--exclude", try gpa.print("^{s}", .{p}) });
+    try argv.appendSlice(
+        gpa,
+        &.{ try gpa.print("@{s}", .{mtree}), try gpa.print("@{s}", .{rootfs}) },
+    );
+    return .{ argv.items, appended.items };
 }
 
 /// rootErofs makes target, the slot's root, from the packages and the
@@ -513,55 +610,19 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     );
     const began = try b.begin(target, inputs) orelse return;
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/slot", .{out}));
-    // The root directory itself, first: without an entry for it,
-    // mkfs.erofs gives / the builder's uid and mode 0777, which sshd's
-    // StrictModes rightly refuses keys under. Then, if the image takes the
-    // sh shim, /bin/sh as a link to it, which a package's sh, mksh's,
-    // or a form's replaces (cmd/sh-shim/sh-shim.1.md).
     const mtree = try b.path("{s}/root.mtree", .{out});
-    const head = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n";
-    const sh =
-        \\./usr type=dir uid=0 gid=0 mode=0755 time=0.0
-        \\./usr/bin type=dir uid=0 gid=0 mode=0755 time=0.0
-        \\./usr/bin/sh type=link uid=0 gid=0 mode=0777 time=0.0 link=/usr/lib/werewolf/sh-shim
-        \\
-    ;
     try Dir.cwd().writeFile(b.io, .{
         .sub_path = mtree,
-        .data = if (try takes(b, "sh-shim")) head ++ sh else head,
+        .data = if (try takes(b, "sh-shim")) root_head ++ shim_sh else root_head,
     });
     const root_tar = try b.path("{s}/root.tar", .{out});
-    // Appending, bsdtar writes in the format it finds in the archive: plain
-    // ustar if nothing before needed more, which has no room for a long path
-    // or link and skips it with a warning, exiting 0 (an OCI image's pnpm
-    // links, for one). Every write names paxr, so every name fits.
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(b.gpa, &.{
-        "bsdtar", "-cf",             root_tar, "--format",
-        "paxr",   "--uid",           "0",      "--gid",
-        "0",      "--numeric-owner",
-    });
     var f: forms.Failure = .{};
     const pruned = compose.prune(b.gpa, b.chain, &f) catch |err| switch (err) {
         error.Form => return b.steps.fail(f.text),
         else => |e| return e,
     };
-    // libarchive otherwise matches at any path component: pruning the host's
-    // usr/bin/bash must not remove an OCI service's own interpreter as well.
-    for (pruned) |p| try argv.appendSlice(b.gpa, &.{ "--exclude", try b.path("^{s}", .{p}) });
-    const overlay_flags = argv.items.len;
-    for (image.package_prune) |p|
-        try argv.appendSlice(b.gpa, &.{ "--exclude", try b.path("^{s}", .{p}) });
-    try argv.appendSlice(b.gpa, &.{
-        try b.path("@{s}", .{mtree}),
-        try b.path("@{s}", .{rootfs}),
-    });
-    try b.run(argv.items, .{});
-    // Package-only pruning must not discard a form's replacement.
-    argv.shrinkRetainingCapacity(overlay_flags);
-    argv.items[1] = "-rf";
-    try argv.append(b.gpa, try b.path("@{s}", .{overlay}));
-    try b.run(argv.items, .{});
+    for (try rootTar(b.gpa, root_tar, mtree, rootfs, overlay, pruned)) |argv|
+        try b.run(argv, .{});
     // An image service runs in its own tree, which lacks werewolf's
     // programs: a form's `before` helpers, and service-config for its
     // settings. Each tree gets the root's /usr/lib/werewolf, in the root's
@@ -646,7 +707,9 @@ fn checkPrograms(b: *B, root_tar: []const u8) !void {
     const file = try Dir.cwd().openFile(b.io, root_tar, .{});
     defer file.close(b.io);
     var rbuf: [64 << 10]u8 = undefined;
-    var r = file.readerStreaming(b.io, &rbuf);
+    // Positional, so the bytes of what it skips, an image service's, are
+    // never read.
+    var r = file.reader(b.io, &rbuf);
     var name_buf: [Dir.max_path_bytes]u8 = undefined;
     var link_buf: [Dir.max_path_bytes]u8 = undefined;
     // Hard links and device nodes hold no bytes of their own: a hard link's
@@ -920,4 +983,77 @@ test withoutPins {
         "werewolf-baselayout\nother@repo\n",
         try withoutPins(a, "werewolf-baselayout=0.123-r0\nother@repo\n"),
     );
+}
+
+/// testTar is a tar of entries: a directory where the link is empty, else a
+/// link to it.
+fn testTar(gpa: Allocator, entries: []const [2][]const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (entries) |e| try out.appendSlice(gpa, &(if (e[1].len == 0)
+        try package.ustar(e[0], '5', 0o755, 0, "")
+    else
+        try package.ustar(e[0], '2', 0o777, 0, e[1])));
+    try out.appendNTimes(gpa, 0, 2 * package.block);
+    return out.items;
+}
+
+test "a package's /usr/bin/sh, or a form's, replaces the shim's" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const at = struct {
+        fn f(gpa: Allocator, dir: []const u8, name: []const u8) ![]const u8 {
+            return std.fs.path.join(gpa, &.{ dir, name });
+        }
+    }.f;
+    try tmp.dir.writeFile(io, .{ .sub_path = "root.mtree", .data = root_head ++ shim_sh });
+    const dirs = [_][2][]const u8{ .{ "usr", "" }, .{ "usr/bin", "" } };
+    for ([_][3][]const u8{
+        .{ "", "", "/usr/lib/werewolf/sh-shim" },
+        .{ "mksh", "", "mksh" },
+        .{ "", "/usr/lib/form/sh", "/usr/lib/form/sh" },
+        .{ "mksh", "/usr/lib/form/sh", "/usr/lib/form/sh" },
+    }) |case| {
+        for ([_][2][]const u8{ .{ "rootfs.tar", case[0] }, .{ "overlay.tar", case[1] } }) |t| {
+            const sh = [_][2][]const u8{.{ "usr/bin/sh", t[1] }};
+            const entries = if (t[1].len > 0) &dirs ++ &sh else &dirs;
+            try tmp.dir.writeFile(io, .{ .sub_path = t[0], .data = try testTar(a, entries) });
+        }
+        tmp.dir.deleteFile(io, "root.tar") catch {};
+        for (try rootTar(
+            a,
+            try at(a, root, "root.tar"),
+            try at(a, root, "root.mtree"),
+            try at(a, root, "rootfs.tar"),
+            try at(a, root, "overlay.tar"),
+            &.{},
+        )) |argv| {
+            const r = std.process.run(a, io, .{ .argv = argv }) catch |err| switch (err) {
+                error.FileNotFound => return error.SkipZigTest,
+                else => return err,
+            };
+            try testing.expect(r.term == .exited and r.term.exited == 0);
+        }
+        // An image gets the last of a name's entries.
+        const file = try tmp.dir.openFile(io, "root.tar", .{});
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var r = file.reader(io, &buf);
+        var name_buf: [Dir.max_path_bytes]u8 = undefined;
+        var link_buf: [Dir.max_path_bytes]u8 = undefined;
+        var it: std.tar.Iterator = .init(&r.interface, .{
+            .file_name_buffer = &name_buf,
+            .link_name_buffer = &link_buf,
+        });
+        var last: []const u8 = "";
+        while (try it.next()) |e| {
+            const name = mem.cutPrefix(u8, e.name, "./") orelse e.name;
+            if (mem.eql(u8, name, "usr/bin/sh")) last = try a.dupe(u8, e.link_name);
+        }
+        try testing.expectEqualStrings(case[2], last);
+    }
 }

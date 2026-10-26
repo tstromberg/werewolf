@@ -45,7 +45,7 @@ fn run(io: Io, gpa: Allocator) !void {
     for (password) |c| if (c < 0x20 or c == 0x7f) return error.AdminPasswordRefused;
 
     try awaitApi(io, gpa);
-    // 4.14's login and forceChangePassword take form fields and return the
+    // Its login and forceChangePassword take form fields and return the
     // token as text. JSON is refused, and admin/admin does not yield a
     // token while the published password still has to be changed.
     const fresh = try formFields(gpa, "admin", password, null);

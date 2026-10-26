@@ -53,8 +53,7 @@ image, so the host's programs-no-shell check still passes.
 | `velociraptor` | built | keys generated on the machine; `admin` from the config at each start; GUI on loopback behind Caddy; clients on :8000 with mutual TLS; the server may run only its own binary; `admin`/`admin` and a stranger |
 | `suricata` | built | AF_PACKET on eth0; Emerging Threats Open cached on `/data` by rules-fetch; the engine has no inet and does not own the cache; no unix socket |
 | `zeek` | built | AF_PACKET on eth0, Zeek's `local` scripts, JSON logs on `/data`; the process not root |
-| `dependency-track` | built | bundled jar, PostgreSQL on loopback, Caddy; `admin`/`admin` replaced before Caddy opens |
-| `bloodhound` | built | CE behind Caddy; Neo4j Bolt on loopback, HTTP off; Cypher mutations off; the community-edition password refused |
+| `dependency-track` | built | API server and frontend, PostgreSQL on loopback, Caddy; `admin`/`admin` replaced before Caddy opens |
 | `wazuh` | not built | the manager's programs are mode 0750, root only; the tree is read-only, and the leash has dropped root |
 | `opencanary` | built | Python on twistd, not the image's shell; FTP, SSH, HTTP, Telnet, RDP and VNC only; SMB and the host's logs off; a banner on :21, nothing on :445 |
 | `misp` | built | PHP on loopback behind Caddy; misp-serve starts a fixed list, with no Python and no supervisor; published passwords are not set; modules are not started |
@@ -63,9 +62,7 @@ image, so the host's programs-no-shell check still passes.
 
 ## Drawbacks
 
-Two passwords for BloodHound, because
-two services cannot share one config key. Neo4j's password is set
-once; Dependency-Track's administrator is too. Greenbone's first
+Dependency-Track's administrator password is set once. Greenbone's first
 feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 
 ## Alternatives Considered
@@ -87,7 +84,7 @@ feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 Suricata and Zeek hold the packet capabilities; every other service on those machines
 drops them. A packet socket can inject, and Zeek's netlink socket can change routes.
 Velociraptor can run VQL that would exec; the leash allows only the server binary.
-BloodHound's metrics port is loopback. Neo4j sends no usage report. The bash these three
+The bash these three
 forms run is the image's, and it is not on the host. gvmd's socket is mode 0660 and its
 group is `_oci-gvmd`; gvm-link keeps that group. A command still needs the password. The
 scanner alone keeps the packet capabilities; gvmd reads the feed and cannot open
@@ -96,5 +93,5 @@ PostgreSQL.
 ## Reliability Considerations
 
 A sensor that exits is restarted by runit. Velociraptor's keys are kept on `/data`; a
-second boot does not regenerate them. BloodHound waits out Neo4j by exiting until Bolt
-answers, and runit starts it again. IRIS and gvmd do the same for PostgreSQL.
+second boot does not regenerate them. IRIS and gvmd wait out PostgreSQL by exiting until
+it answers, and runit starts them again.

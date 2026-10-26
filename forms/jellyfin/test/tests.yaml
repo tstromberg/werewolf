@@ -1,6 +1,4 @@
 version: 1
-# Keep inherited SSH host attacks until they have a native replacement.
-legacy: true
 suites:
   - name: jellyfin
     cases:
@@ -86,3 +84,61 @@ suites:
         - jf-library
       verify:
         - jf-library
+host:
+  # From the host, as an operator, with the run's keys (docs/testing-host.md):
+  # root logs in with its security key and runs commands; the session
+  # forwards nothing; a key file is refused, sshd taking security keys
+  # alone. That one failed login is last: sshd holds it against its source.
+  - name: jellyfin-ssh
+    cases:
+      - name: ssh-login
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: echo $USER_ID
+            await: 60s
+            expect:
+              status: 0
+              stdout:
+                matches: "(^|\n)0\n?$"
+      - name: ssh-command-output
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: echo werewolf-ssh-command
+            expect:
+              status: 0
+              stdout:
+                matches: "(^|\n)werewolf-ssh-command\n?$"
+      - name: ssh-command-status
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: exit 23
+            expect:
+              status: 23
+      - name: ssh-no-forwarding
+        steps:
+          - ssh:
+              user: root
+              key: security
+              remote_forward: true
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: forwarding failed
+      - name: ssh-security-keys-only
+        steps:
+          - ssh:
+              user: root
+              key: file
+              command: echo werewolf-ssh-file-key
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: Permission denied (publickey)

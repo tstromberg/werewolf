@@ -3,6 +3,7 @@
 //! a machine matches the build's. See lib/README.md.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -388,12 +389,26 @@ fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const
                     error.FileNotFound => {},
                     else => |x| return x,
                 };
-                try from.copyFile(e.path, into, e.path, io, .{});
+                try copy(io, gpa, from, e.path, into);
             },
             else => return error.UnexpectedFileKind,
         }
     }
 }
+
+/// copy copies path from from to into, as a clone where the file system
+/// can share its blocks: APFS here, as copy_file_range shares them on Btrfs
+/// and XFS. An image service's tree is laid twice, gigabytes at a time.
+fn copy(io: Io, gpa: Allocator, from: Dir, path: []const u8, into: Dir) !void {
+    if (builtin.os.tag.isDarwin()) {
+        const z = try gpa.dupeSentinel(u8, path, 0);
+        defer gpa.free(z);
+        if (clonefileat(from.handle, z, into.handle, z, 0) == 0) return;
+    }
+    try from.copyFile(path, into, path, io, .{});
+}
+
+extern "c" fn clonefileat(c_int, [*:0]const u8, c_int, [*:0]const u8, u32) c_int;
 
 /// defaultId returns an account's default uid and gid: an FNV-1a hash of
 /// its name, in [2^30, 2^31). Ids start above

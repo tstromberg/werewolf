@@ -1,7 +1,7 @@
 # Kafka - Hardened VM
 
 An event stream for applications inside a company: [Apache
-Kafka](https://kafka.apache.org) 4.3 as one KRaft node. Clients use TLS and
+Kafka](https://kafka.apache.org) 4.4 as one KRaft node. Clients use TLS and
 SCRAM-SHA-512. What no ACL allows is denied. The form's manifest is
 [form.yaml](form.yaml).
 

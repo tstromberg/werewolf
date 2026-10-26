@@ -60,7 +60,6 @@ same protections, signed with your own keys.
 | [authelia](../forms/authelia/README.md) | Shared sign-in for your websites, with passwords and TOTP or security keys. |
 | [bastion](../forms/bastion/README.md) | SSH forwarding to explicitly allowed destinations, using security keys; no interactive shell or file transfer. |
 | [blocky](../forms/blocky/README.md) | DNS filtering for ads and trackers, with upstream DNS over TLS and no web interface. |
-| [bloodhound](../forms/bloodhound/README.md) | BloodHound CE for exploring Active Directory relationships. |
 | [bugsink](../forms/bugsink/README.md) | Error tracking compatible with Sentry SDKs. |
 | [caddy](../forms/caddy/README.md) | A web server with automatic HTTPS. Supply your site and Caddyfile. |
 | [cloudflared](../forms/cloudflared/README.md) | Cloudflare Tunnel to publish services without opening inbound ports. |
@@ -83,7 +82,6 @@ same protections, signed with your own keys.
 | [jre](../forms/jre/form.yaml) | A Java 27 runtime for your own service; no application service included. |
 | [jre-app](../forms/jre-app/README.md) | Run your own `app.jar` on port 8080 using Java 27; supply it with `--app`. |
 | [jre-example](../forms/jre-example/form.yaml) | A sample Java web application using the JDK’s HTTP server. |
-| [jre21](../forms/jre21/form.yaml) | A Java 21 runtime for applications that require it; no application service included. |
 | [kafka](../forms/kafka/README.md) | An Apache Kafka event stream on one KRaft node, with TLS, SCRAM authentication and ACLs. |
 | [keycloak](../forms/keycloak/README.md) | Single sign-on through OpenID Connect and SAML. |
 | [langflow](../forms/langflow/README.md) | The full Langflow editor/API with authenticated access, hosted providers and offline ONNX embeddings on hardened Python. |
