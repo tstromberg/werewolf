@@ -295,3 +295,16 @@ suites:
                 /message/type: error
               body:
                 absent: redir
+  # Projects are apart: a document given the path of another project's
+  # compiled file reads nothing of it (driver.zig).
+  - name: overleaf-cross-project
+    source: driver.zig
+    mode: cross-project
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed:
+        - overleaf-cross-project
+      verify:
+        - overleaf-cross-project

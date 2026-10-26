@@ -211,7 +211,7 @@ CONSOLE_CHECK = build/host/console
 # Host-side programs that scripts, workflows and release tools run: test/NAME.zig is build/host/NAME.
 HOST_PROGRAMS = cloud-console cloud-posture azure-security ssh-su metadata ipe-boot \
 	check-legacy-image check-public-image check-protected-qemu check-published-lifecycle check-published-run \
-	check-independent-updates
+	check-independent-updates remote-qemu
 $(addprefix build/host/,$(HOST_PROGRAMS)): build/host/%: test/%.zig test/published.zig test/postdoc.zig $(wildcard test/host/*.zig test/host/*.yaml lib/*.zig)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -226,7 +226,7 @@ HOST_TESTS = test/metadata.zig test/check-dist.zig test/check-legacy-image.zig t
 	test/build-traced-stub.zig test/trace-stub.zig test/check-image-updater.zig \
 	test/check-independent-updates.zig test/check-people-persist.zig forms/vuln-demo/test/appliance.zig \
 	test/check-published-run.zig test/check-published-lifecycle.zig test/check-public-image.zig \
-	test/check-protected-qemu.zig
+	test/check-protected-qemu.zig test/remote-qemu.zig
 
 # Every guest binary is a static PIE, so ASLR moves its code and data, not only its
 # stack and heap; howl refuses a root with a fixed-address program (lib/image.zig).
@@ -406,6 +406,7 @@ _test/probes:
 	zig test -lc --dep test-driver -Mroot=forms/immich/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/moodle/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/langflow/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/overleaf/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=test/native/platform.zig -Mtest-driver=test/native/driver.zig
 	zig build-exe -lc -O ReleaseSafe test/native/probes.zig test/native/regex.c -femit-bin=build/test-probes/host
 	$(call host_test,test/probe-tests.zig) build/test-probes/host
@@ -607,8 +608,15 @@ _dist-form: $(HOWL)
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
 CONSOLE = $(if $(filter aarch64,$(ARCH)),ttyAMA0,ttyS0)
+# QEMU_HOST runs the machines on that Linux host, with KVM, through ssh
+# (test/remote-qemu.zig): make QEMU_HOST=gandalf ARCH=x86_64 check-overleaf.
+QEMU_HOST ?=
+REMOTE_QEMU = $(if $(QEMU_HOST),build/host/remote-qemu)
 # Without KVM, HVF or NVMM (some CI runners, FreeBSD), QEMU emulates.
-ifeq ($(ARCH),$(HOST_ARCH))
+ifneq ($(QEMU_HOST),)
+ACCEL = kvm
+CPU = host
+else ifeq ($(ARCH),$(HOST_ARCH))
 ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(or $(shell test -r /dev/kvm && test -w /dev/kvm && echo kvm),$(if $(wildcard /dev/nvmm),nvmm,tcg)))
 CPU = $(if $(filter tcg,$(ACCEL)),max,host)
 else
@@ -616,8 +624,8 @@ ACCEL = tcg
 CPU = max
 endif
 # Checks lend aarch64 guests EL2 where QEMU can, so posture proves kvm-arm.mode=none holds.
-EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on))
-QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
+EL2 = $(if $(QEMU_HOST),,$(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on)))
+QEMU = $(if $(QEMU_HOST),$(REMOTE_QEMU) $(QEMU_HOST) )qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
@@ -801,7 +809,7 @@ check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
 check-bastion: check-native-tests-bastion
 # A run's host suites log in through its own forwarded port (tools/native-ssh.zig).
 NATIVE_SSH_PORT ?= $(call check_port,24200,$(notdir $(NATIVE_FORM)))
-_check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(TEST_SK) build/host/ssh-su
+_check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(REMOTE_QEMU) $(TEST_SK) build/host/ssh-su
 	@$(CHECK_ENV) PRODUCTION_OUT=$(or $(NATIVE_PRODUCTION),$(BUILD)/$(notdir $(NATIVE_FORM)))$(if $(IPE),-ipe) \
 		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
@@ -865,7 +873,7 @@ check-people: $(HOWL) $(NATIVE_TESTS)
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-shellfree
-_check-shellfree: $(CONSOLE_CHECK)
+_check-shellfree: $(CONSOLE_CHECK) $(REMOTE_QEMU)
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
 # A Linux check runs as root in private namespaces (test/host/netns.zig), so
@@ -1178,7 +1186,7 @@ check-compose: slot
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
 
 # EROFS_OPTS must match the options lib/image.zig gives mkfs.erofs.
-EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
+EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments
 check-updater check-updater-staged check-updater-published: | _check-shared
 	@$(CHECK_MAKE) $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
 _check-updater: $(VERITY_BIN)

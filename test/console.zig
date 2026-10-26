@@ -82,8 +82,9 @@ const Boot = struct {
         const boot_timeout = b.seconds("BOOT_TIMEOUT", 300);
         try b.handover(boot_timeout);
         try b.posture(boot_timeout);
-        try b.hostSteps();
-        try b.judge(lines, b.seconds("CONSOLE_TIMEOUT", 300));
+        const console_timeout = b.seconds("CONSOLE_TIMEOUT", 300);
+        try b.hostSteps(lines, console_timeout);
+        try b.judge(lines, console_timeout);
         try b.shutdown();
         if (b.failed == 0) b.say("pass", "all checks", "");
     }
@@ -190,10 +191,16 @@ const Boot = struct {
     }
 
     /// hostSteps runs a native run's host suites, while the machine's
-    /// console keeps being read: QEMU stalls a machine nobody reads.
-    fn hostSteps(b: *Boot) !void {
+    /// console keeps being read: QEMU stalls a machine nobody reads. They
+    /// start once every seen line is in, after the guest's own cases, one of
+    /// which restarts the service they log in to (test-lifecycle's reaped).
+    fn hostSteps(b: *Boot, lines: []const Line, timeout: i64) !void {
         const command = b.c.env.get("HOST_STEPS") orelse return;
         if (command.len == 0) return;
+        var look: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer look.deinit();
+        _ = try b.settled(&look, lines, timeout) orelse
+            return b.giveUp("console", "QEMU exited", false);
         const gpa = b.c.gpa;
         const argv = braced(
             gpa,
@@ -214,23 +221,11 @@ const Boot = struct {
     /// line, then judges every line. No unseen line may appear.
     fn judge(b: *Boot, lines: []const Line, timeout: i64) !void {
         if (lines.len == 0) return;
-        const io = b.c.io;
         const gpa = b.c.gpa;
-        const deadline = qemu.after(io, timeout);
-        // Each look reads the whole console: free it before the next.
         var look: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer look.deinit();
-        var t: Text = undefined;
-        while (true) {
-            _ = look.reset(.retain_capacity);
-            t = try Text.of(look.allocator(), try b.m.console(look.allocator()));
-            const missing = for (lines) |l| {
-                if (l.kind == .seen and !try t.found(look.allocator(), l.arg)) break true;
-            } else false;
-            if (!missing or deadline.compare(.lte, .now(io, .awake))) break;
-            if (b.m.exited()) return b.giveUp("console", "QEMU exited", false);
-            try io.sleep(.fromSeconds(1), .awake);
-        }
+        const t = try b.settled(&look, lines, timeout) orelse
+            return b.giveUp("console", "QEMU exited", false);
         const a = look.allocator();
         for (lines) |l| switch (l.kind) {
             .seen => if (try t.found(a, l.arg)) b.say("ok", l.name, "") else b.fail(
@@ -246,6 +241,25 @@ const Boot = struct {
             else
                 b.say("ok", l.name, ""),
         };
+    }
+
+    /// settled waits up to timeout, reading the console, for every seen
+    /// line, and is the console as it last read it, or null when QEMU
+    /// exited first. Each look reads the whole console, so look is reset
+    /// before the next.
+    fn settled(b: *Boot, look: *std.heap.ArenaAllocator, lines: []const Line, timeout: i64) !?Text {
+        const io = b.c.io;
+        const deadline = qemu.after(io, timeout);
+        while (true) {
+            _ = look.reset(.retain_capacity);
+            const t = try Text.of(look.allocator(), try b.m.console(look.allocator()));
+            const missing = for (lines) |l| {
+                if (l.kind == .seen and !try t.found(look.allocator(), l.arg)) break true;
+            } else false;
+            if (!missing or deadline.compare(.lte, .now(io, .awake))) return t;
+            if (b.m.exited()) return null;
+            try io.sleep(.fromSeconds(1), .awake);
+        }
     }
 
     /// shutdown presses the power button from QEMU's monitor, ACPI on

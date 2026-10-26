@@ -86,10 +86,10 @@ test "a refused write reports why, and one that succeeds leaves nothing" {
         "EEXIST",
         try attempt(io, try a.print("{s}/code/link", .{root}), .create),
     );
-    var code = try tmp.dir.openDir(io, "code", .{});
-    defer code.close(io);
-    try code.setPermissions(io, .fromMode(0o500));
-    defer code.setPermissions(io, .fromMode(0o700)) catch {};
+    // By path: Linux opens a directory that is not iterated O_PATH, and
+    // fchmod refuses that descriptor (EBADF).
+    try tmp.dir.setFilePermissions(io, "code", .fromMode(0o500), .{});
+    defer tmp.dir.setFilePermissions(io, "code", .fromMode(0o700), .{}) catch {};
     if (attempt(io, fresh, .create)) |why|
         try testing.expectEqualStrings("EACCES", why)
     else |err| {

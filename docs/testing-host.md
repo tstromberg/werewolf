@@ -50,8 +50,9 @@ keys in `authorized_keys`, and `test/config DIR` finds the key file as DIR's sib
 `FORM-key.pub`. A generated form bakes in keys of its own: make passes their prefix as
 `NATIVE_SSH_KEYS` (test/bastion-form).
 
-Cases run in both phases unless `phases` picks one, after the machine's posture is in.
-`await` repeats a step until it holds: give it to the first login. A refusal proves
-nothing from a machine that never answered, so expect what the server said once it let
-the client in (`Authenticated to`). sshd holds failed logins against their source: fail
-one, last. Host suites run in clean runs only, not under `--iterate`.
+Cases run in both phases unless `phases` picks one, once the machine's posture is in and
+its guest cases are done, since one restarts sshd. `await` repeats a step until it
+holds: give it to the first login. A refusal proves nothing from a machine that never
+answered, so expect what the server said once it let the client in (`Authenticated to`).
+sshd holds failed logins against their source: fail one, last. Host suites run in clean
+runs only, not under `--iterate`.

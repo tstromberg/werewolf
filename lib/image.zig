@@ -77,16 +77,17 @@ pub fn vmlinux(gpa: Allocator, bzimage: []const u8) ![]const u8 {
 }
 
 /// erofs_options are mkfs.erofs's options for a root: zstd in 64 KiB
-/// clusters, small files packed together, duplicates kept once, which
-/// boots fastest (Makefile, root.erofs). 4 KiB blocks, since mkfs.erofs
-/// otherwise takes the builder's page size, 16 KiB on Apple silicon, which
-/// a 4 KiB-page kernel will not mount.
+/// clusters and small files packed together, which boots fastest
+/// (Makefile, root.erofs). Not dedupe, which keeps mkfs.erofs to one
+/// thread: Overleaf's root took 7 times as long, to save 0.5% of it.
+/// 4 KiB blocks, since mkfs.erofs otherwise takes the builder's page size,
+/// 16 KiB on Apple silicon, which a 4 KiB-page kernel will not mount.
 pub const erofs_options = [_][]const u8{
     "-b",
     "4096",
     "-zzstd,level=9",
     "-C65536",
-    "-Eall-fragments,dedupe",
+    "-Eall-fragments",
 };
 
 /// checkErofs refuses a mkfs.erofs that would make a bad root. Before 1.9

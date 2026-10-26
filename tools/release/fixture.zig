@@ -124,7 +124,8 @@ pub const Fixture = struct {
 pub const Keys = struct { key: []const u8, crt: []const u8 };
 
 /// keys are the named test identity, made once and kept under .zig-cache
-/// while they stay valid: RSA key generation is slow.
+/// while they stay valid for 2 days, longer than the day the release tools
+/// demand of a certificate (keys.zig): RSA key generation is slow.
 pub fn keys(f: *Fixture, name: []const u8) !Keys {
     const s = &f.s;
     const dir = try sys.resolve(s, ".zig-cache/tmp/release-test-keys");
@@ -136,7 +137,7 @@ pub fn keys(f: *Fixture, name: []const u8) !Keys {
     if (sys.exists(s, k.key) and sys.exists(s, k.crt)) {
         const r = try sys.exec(
             s,
-            &.{ "openssl", "x509", "-in", k.crt, "-checkend", "7200", "-noout" },
+            &.{ "openssl", "x509", "-in", k.crt, "-checkend", "172800", "-noout" },
             .{ .capture = .both },
         );
         if (r.ok()) return k;
@@ -148,7 +149,7 @@ pub fn keys(f: *Fixture, name: []const u8) !Keys {
     };
     const r = try sys.exec(s, &.{
         "openssl", "req", "-newkey", "rsa:2048", "-nodes",  "-x509",   "-sha256",
-        "-days",   "2",   "-subj",   subject,    "-keyout", fresh.key, "-out",
+        "-days",   "7",   "-subj",   subject,    "-keyout", fresh.key, "-out",
         fresh.crt,
     }, .{ .capture = .both });
     try testing.expect(r.ok());

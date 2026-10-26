@@ -454,14 +454,17 @@ if {[info exists env(SSH_MODE)] && $env(SSH_MODE) in {ssh-su prod-ssh playground
 	if {$status == 0} { say ok su-rejects-wrong-host $out } else { say FAIL su-rejects-wrong-host $out; incr failed }
 }
 
+# A check may wait in the machine: postdoc-server's, up to 900 s for its first
+# download. Give the longest that and a minute to answer.
+set check_seconds 960
 set f [open $checks]
 while {[gets $f line] >= 0} {
 	if {![regexp {^(ok|gap)\s+(\S+)\s+(.+)$} $line -> kind check cmd]} { continue }
 	send "( $cmd ) 2>&1; ww_check_rc=\$?; printf '\\n@@%s=%d\\n' $check \$ww_check_rc\r"
-	set deadline [expr {[clock seconds] + 180}]
+	set deadline [expr {[clock seconds] + $check_seconds}]
 	while {1} {
 		set remaining [expr {$deadline - [clock seconds]}]
-		if {$remaining <= 0} { set rc timeout; set out "no answer in 180 s"; break }
+		if {$remaining <= 0} { set rc timeout; set out "no answer in $check_seconds s"; break }
 		expect {
 			-timeout [expr {min(5, $remaining)}]
 			-re "@@$check=(\[0-9]+)" { set rc $expect_out(1,string); set out $expect_out(buffer); break }

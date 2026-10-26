@@ -4,4 +4,6 @@
 
 seen    app-waits         leash: \{"event":"down","service":"app","why":"requires /usr/lib/app/main\.py, which is not there"\}
 unseen  app-leashed       leash: \{"event":"start","service":"app"
-up  app-retried       app
+# Nor may it retry, but for syslogd: of leash's reasons only "waiting for syslogd"
+# starts with w, and POSIX expressions have no negative lookahead.
+unseen  app-retried       leash: \{"event":"retry","service":"app","why":"[^w]
