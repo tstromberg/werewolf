@@ -1,0 +1,38 @@
+version: 1
+# minimal, booted with no address on its kernel command line and a config
+# whose network file names one, as howl pack --ip --gw --dns writes it:
+# init takes the address from there before it brings the network up, and
+# asks for no DHCP lease (minimal has no client). The shared network check
+# proves the address and the default route.
+form: minimal
+kernel_address: false
+console:
+  - seen: from-config
+    matches: 'werewolf: [^ ]+ 10[.]0[.]2[.]15/24 via 10[.]0[.]2[.]2 dns 10[.]0[.]2[.]3, from the config tar'
+  - unseen: refused
+    matches: 'werewolf: network: .*refused'
+  - unseen: no-network
+    matches: 'werewolf: no network'
+suites:
+  - name: static
+    cases:
+      - name: local-resolver
+        steps:
+          - file: /etc/resolv.conf
+            expect:
+              link: /run/werewolf/network/resolv.conf
+          - file: /run/werewolf/network/resolv.conf
+            expect:
+              body:
+                matches: "^nameserver 127[.]0[.]0[.]53\n?$"
+      - name: upstream-resolver
+        steps:
+          - file: /run/werewolf/network/upstream
+            expect:
+              body:
+                matches: "^nameserver 10[.]0[.]2[.]3\n?$"
+      - name: no-dhcp
+        steps:
+          - file: /run/werewolf/network/lease.json
+            expect:
+              exists: false

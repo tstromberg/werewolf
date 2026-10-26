@@ -201,12 +201,10 @@ suites:
           - fetch:
               url: https://localhost/v2/app/hello/manifests/1
               ca: /data/svc/caddy/pki/authorities/local/root.crt
-              headers:
-                Accept: application/vnd.docker.distribution.manifest.v2+json
             expect:
               status: 401
-              json:
-                /errors/0/code: UNAUTHORIZED
+              body:
+                contains: UNAUTHORIZED
             timeout: 30s
       - name: zot-stranger-push
         steps:

@@ -15,8 +15,8 @@ with: [postgresql, caddy, cron, sh-shim]
 
 packages:
   - moodle
-  - php-8.5>=8.5.12-r16000
-  - php-8.5-fpm>=8.5.12-r16000
+  - php-8.5>=8.5.12-r17000
+  - php-8.5-fpm>=8.5.12-r17000
   - php-8.5-ctype
   - php-8.5-curl
   - php-8.5-dom

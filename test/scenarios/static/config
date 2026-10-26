@@ -1,0 +1,5 @@
+#!/bin/sh
+# test/scenarios/static/config DIR: the network file howl pack --ip --gw
+# --dns would write (lib/network.zig), so init has no other address.
+set -eu
+printf '%s\n' 'werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3' >"$1/network"

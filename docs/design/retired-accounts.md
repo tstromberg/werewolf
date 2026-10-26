@@ -110,7 +110,7 @@ changes, failed key removal, reboot, and crashes at each commit step.
 `lib/people.zig` owns the mapping, table validation, account derivation, and
 home checks. Init publishes after mounting `/data`; the metadata publisher
 uses a pinned table FD. It checks retained homes through `O_PATH` without
-reading a user's private directory. `test/checks-people` and the metadata
+reading a user's private directory. `test/generated/people/tests.yaml` and the metadata
 poll tests cover boot and revocation; `test/people-ledger.zig` probes Linux
 file and owner rules. `make check-people-persist` reboots one data volume through
 retirement, hash and NoCloud conflicts, and reactivation, checking private-file

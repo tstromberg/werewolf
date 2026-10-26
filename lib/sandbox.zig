@@ -182,7 +182,10 @@ pub fn keepOnly(keep: u32) !void {
 pub fn refuseExecGain() !void {
     const PR_SET_MDWE = 65;
     const PR_MDWE_REFUSE_EXEC_GAIN = 1;
-    _ = try sys(linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0), "memory-deny-write-execute");
+    _ = try sys(
+        linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0),
+        "memory-deny-write-execute",
+    );
 }
 
 /// bound drops every capability not in keep from the bounding set. EINVAL

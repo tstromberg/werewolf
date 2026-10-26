@@ -6,8 +6,9 @@ const seal = @import("seal");
 const settings = @import("settings");
 const Allocator = std.mem.Allocator;
 
-/// System identities are reserved for the machine's own programs.
-pub const system_id_max: u32 = 76;
+/// System identities are reserved for the machine's own programs. The
+/// highest is the updater's, _updater (77).
+pub const system_id_max: u32 = 77;
 
 pub const Service = struct {
     exec: []const []const u8 = &.{},

@@ -149,7 +149,7 @@ take a manifest, `-f FILE`, and flags that are its keys, and write a form from t
 ```sh
 build/host/howl run --with python-app --app ./api --packages py3.13-flask
 build/host/howl create shop --with caddy,valkey,postgresql --domain shop.example.com
-build/host/howl run --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp
+build/host/howl run --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp --services.web.pledge 'stdio rpath wpath inet unix connect listen proc sendfile'
 ```
 
 | Flag | Writes |
@@ -167,9 +167,10 @@ a line a flag; a map's value set twice is refused; `accounts`, `paths`,
 `bastion` and `weaknesses` hold structure a line cannot, so keep the form
 (`howl form ... -o DIR`) and edit it. `-n` prints the form and stops.
 
-An `image` is pinned to the digest `crane` resolves, baked in at `/oci/NAME`
-and run inside it as `_oci-NAME`, with its entrypoint (an ELF program, never
-a `#!` script), its own `/tmp`, `/run`, `/data` and `/proc`, and a pledge of
-`stdio rpath wpath inet unix connect listen proc` unless you say otherwise.
-Until you give a `listen` or `write` line, howl refuses and prints the lines
-to choose from. The unpack's rules are in [design/oci.md](design/oci.md).
+An `image` is pinned to the digest `crane` resolves, baked in at `/oci/NAME` and run
+inside it as `_oci-NAME`, with its entrypoint (an ELF program, never a `#!` script),
+its own `/tmp`, `/run`, `/data` and `/proc`, and a pledge of
+`stdio rpath wpath inet unix connect listen proc` unless you say otherwise; nginx,
+above, adds the `sendfile` it leaves out ([lib/seal.zig](../lib/seal.zig) says why).
+Until you give a `listen` or `write` line, howl refuses and prints the lines to choose
+from. The unpack's rules are in [design/oci.md](design/oci.md).

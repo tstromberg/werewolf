@@ -18,9 +18,6 @@ packages:
   - pgvector-18
   - postgresql-contrib~18
 
-# BusyBox wget truncates binary POST bodies at NUL; the upload check uses curl.
-dev: [curl]
-
 # Taken back of werewolf's defaults (lib/allow.zig): V8 compiles Immich to
 # machine code as it runs.
 allow: [jit]

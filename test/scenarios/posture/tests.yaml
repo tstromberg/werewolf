@@ -1,0 +1,53 @@
+version: 1
+# minimal, for posture's own regressions (docs/posture.md): it parks once it
+# has judged the machine, it proves the kernel randomized, and its attacks
+# hold when several scans race, when a probe is left over and when the
+# audit log is fresh. leash fails closed on a bad directory and refuses the
+# system's own identities, and power-button's halves restart each other.
+form: minimal
+suites:
+  - name: posture
+    policy:
+      run: [/usr/bin/sv]
+    cases:
+      - name: posture-service-parks
+        steps:
+          - exec:
+              argv: [/usr/bin/sv, status, /etc/sv/posture]
+              readonly: true
+            await: 10s
+            expect:
+              stdout:
+                matches: '^down:'
+          - file: /run/werewolf/posture.json
+            expect:
+              size:
+                min: 1
+      # A skip would pass the posture line: kernel randomization must show
+      # passed, and the command line hold nothing that turns it off.
+      - name: posture-kaslr
+        steps:
+          - file: /run/werewolf/posture.json
+            expect:
+              body:
+                matches: '"id": *"kernel-kaslr"[^}]*"result": *"pass"'
+          - file: /run/werewolf/posture.json
+            expect:
+              body:
+                matches: '"id": *"kernel-cmdline"[^}]*"result": *"pass"'
+  - name: posture-attacks
+    source: driver.zig
+    mode: attacks
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc exec
+    cases:
+      seed:
+        - posture-concurrent-attacks
+        - posture-stale-probe
+        - posture-fresh-audit
+        - leash-directory-error
+        - system-identities-reserved
+        - power-worker-restarts
+        - power-monitor-restarts
+      verify: []
