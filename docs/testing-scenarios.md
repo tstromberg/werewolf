@@ -33,6 +33,23 @@ and `config-again` beside the plan prepare each boot's config directory, as a fo
 `test/config` does. A scenario may have no suites of its own (`suites: []`). A form's
 own plan may use none of these keys, and `--iterate` does not run scenarios.
 
+`boots` changes how one of the two boots is made: `verify: {data_key: false}` packs its
+config without `data.key`, so init must refuse the disk the seed boot made, as
+[nodata](../test/scenarios/nodata/tests.yaml) checks; a boot that formats the disk
+fails. A console line or a case judged in one boot only names it in `phases`.
+
+`app: NAME` boots the form with the code `howl --app` would supply: the fixture
+[test/app-fixtures](../test/app-fixtures) names, staged by
+[test/app-fixture](../test/app-fixture). Both images are built with it (`-app`), and the
+form's own `check.skip`, for what its missing code rules out, no longer applies. Each
+application-carrier form has one, `app-FORM`, which `make check-app-FORM` runs. A
+runtime is for running an application, so `make check-RUNTIME` runs its carrier's, the
+runtime the fixture's last column names: `make check-python` boots `python-app` with
+a hello-world. Every runtime's hello-world answers one contract, the same cases in each
+`app-FORM` plan: a greeting naming the runtime, `/health`, 404 for an unknown path, and
+405 with `Allow: GET` for any other method, all `text/plain; charset=utf-8`. A new
+runtime brings a hello-world that answers it.
+
 Forms that a check generates, such as `test/bastion-form`'s and `test/people-form`'s,
 are not scenarios: their generators copy a plan from `test/generated/NAME/` or the
 form's own `test/` into the form they write, and make checks that form as any other.

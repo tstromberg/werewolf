@@ -1,0 +1,209 @@
+version: 1
+suites:
+  # The login page answers through Caddy, once MISP has made its database.
+  - name: misp-ready
+    readiness: true
+    cases:
+      - name: misp-login
+        steps:
+          - fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+            await: 300s
+            expect:
+              status: 200
+              body:
+                matches: '[Pp]assword'
+  - name: misp
+    cases:
+      # MISP runs as its image's user, unprivileged, and can gain nothing.
+      - name: misp-user
+        steps:
+          - service: misp
+            expect:
+              user: _oci-misp
+              uid:
+                min: 65536
+              capabilities: []
+              no_new_privileges: true
+      # PHP is on loopback; the supervisor port and the image's public
+      # FastCGI are not open.
+      - name: misp-bind
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 8080
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 8080
+          - listeners: tcp
+            expect:
+              absent:
+                - port: 9001
+                - port: 9002
+      # MariaDB and Valkey are on loopback alone.
+      - name: misp-db
+        steps:
+          - listeners:
+              protocol: tcp
+              port: 3306
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 3306
+          - listeners:
+              protocol: tcp
+              port: 6379
+            expect:
+              equals:
+                - protocol: tcp
+                  address: 127.0.0.1
+                  port: 6379
+      # misp-serve runs MISP's jobs, with no Python and no supervisor. It
+      # exits rather than start with a password in its environment.
+      - name: misp-serve
+        steps:
+          - service: misp
+            expect:
+              comm:
+                matches: "(^|\n)misp-serve(\n|$)"
+                not_matches: "(^|\n)(python[^\n]*|supervisord)(\n|$)"
+      # The image's published administrators and password sign no one in.
+      - name: misp-published
+        steps:
+          - name: form
+            fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: published
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: published
+              headers:
+                Referer: https://localhost/users/login
+              form:
+                'data[_Token][key]':
+                  step: form
+                  regex: 'name="data\[_Token\]\[key\]" value="([^"]+)"'
+                'data[_Token][fields]':
+                  step: form
+                  regex: 'name="data\[_Token\]\[fields\]" value="([^"]+)"'
+                'data[_Token][unlocked]': ''
+                'data[User][email]': admin@admin.test
+                'data[User][password]': admin
+            expect:
+              status: 200
+              body:
+                matches: '[Pp]assword'
+                absent: /events/index
+          - name: again
+            fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: published
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: published
+              headers:
+                Referer: https://localhost/users/login
+              form:
+                'data[_Token][key]':
+                  step: again
+                  regex: 'name="data\[_Token\]\[key\]" value="([^"]+)"'
+                'data[_Token][fields]':
+                  step: again
+                  regex: 'name="data\[_Token\]\[fields\]" value="([^"]+)"'
+                'data[_Token][unlocked]': ''
+                'data[User][email]': admin@localhost
+                'data[User][password]': admin
+            expect:
+              status: 200
+              body:
+                matches: '[Pp]assword'
+                absent: /events/index
+      # The administrator is the config's, with its password, which MISP
+      # makes them change at first sign-in: the change, through its CSRF
+      # tokens, opens their profile.
+      - name: misp-admin
+        steps:
+          - name: form
+            fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/users/login
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              headers:
+                Referer: https://localhost/users/login
+              form:
+                'data[_Token][key]':
+                  step: form
+                  regex: 'name="data\[_Token\]\[key\]" value="([^"]+)"'
+                'data[_Token][fields]':
+                  step: form
+                  regex: 'name="data\[_Token\]\[fields\]" value="([^"]+)"'
+                'data[_Token][unlocked]': ''
+                'data[User][email]': admin@localhost
+                'data[User][password]': werewolf-check-pass-1
+            expect:
+              status: 302
+              headers:
+                location: https://localhost/users/routeafterlogin
+          - fetch:
+              url: https://localhost/users/view/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 302
+              headers:
+                location: https://localhost/users/change_pw
+          - name: change
+            fetch:
+              url: https://localhost/users/change_pw
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+          - fetch:
+              url: https://localhost/users/change_pw
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              method: POST
+              session: admin
+              headers:
+                Referer: https://localhost/users/change_pw
+              form:
+                'data[_Token][key]':
+                  step: change
+                  regex: 'name="data\[_Token\]\[key\]" value="([^"]+)"'
+                'data[_Token][fields]':
+                  step: change
+                  regex: 'name="data\[_Token\]\[fields\]" value="([^"]+)"'
+                'data[_Token][unlocked]': ''
+                'data[User][password]': werewolf-check-pass-2
+                'data[User][confirm_password]': werewolf-check-pass-2
+            expect:
+              status: 302
+          - fetch:
+              url: https://localhost/users/view/me
+              ca: /data/svc/caddy/pki/authorities/local/root.crt
+              session: admin
+            expect:
+              status: 200
+              body:
+                contains: admin@localhost

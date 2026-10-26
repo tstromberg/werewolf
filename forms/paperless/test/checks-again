@@ -1,6 +1,0 @@
-# The second boot reuses the image and data disk. PostgreSQL's roles and
-# schema setup must be repeatable, and the processed document must remain.
-ok  pl-again-login i=0; until curl -sfk -H 'Content-Type: application/json' -d '{"username":"admin","password":"werewolf-check-password"}' https://localhost/api/token/ | grep -o '"token":"[^"]*"' | cut -d'"' -f4 >/tmp/pl-token && [ -s /tmp/pl-token ]; do i=$((i + 1)); [ "$i" -le 120 ] || exit 1; sleep 1; done
-ok  pl-document-kept curl -sfk -H "Authorization: Token $(cat /tmp/pl-token)" 'https://localhost/api/documents/?title__iexact=werewolf-postgres-check' | grep -q '"count":1'
-ok  pl-again-postgres chpst -u paperless psql -h /run/svc/postgres -d postgres -Atc 'SELECT count(*) FROM paperless.documents_document' | grep -qx 1
-ok  pl-again-no-sqlite [ ! -e /data/svc/paperless/db.sqlite3 ]

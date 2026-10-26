@@ -1,20 +1,20 @@
-# dependency-track: jre21, with Dependency-Track's bundled server behind
+# dependency-track: jre, with Dependency-Track 5's API server and frontend behind
 # Caddy, and PostgreSQL on loopback. The first start replaces the
 # published admin/admin password with the config's, before Caddy opens.
 # The API listens on loopback. Java runs it. See
 # forms/dependency-track/README.md.
-base: jre21
+base: jre
 
 with: [postgresql, caddy]
 
-packages:
-  - dependency-track-bundled
+# LOCAL-PACKAGE-REVERT: the unpublished package, built here.
+recipes: [../../build/rendered/dependency-track.yaml]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: java runs Dependency-Track, which is what this form is for
-  kernel-write-xor-execute: the JVM compiles Dependency-Track to machine code as it runs (allow jit, from jre21)
+  kernel-write-xor-execute: the JVM compiles Dependency-Track to machine code as it runs (allow jit, from jre)
 
 # make check's (forms/README.md): the JVM's heap beside PostgreSQL.
 check:
@@ -26,23 +26,27 @@ services:
   # admin/admin. A missing password parks Caddy, so this never faces the
   # network with the published password.
   dtrack:
-    # -host is the jar's own flag. A -Dalpine.http.host property does not
-    # bind it, and the default is every address.
-    exec: /usr/bin/java -Xms256m -Xmx768m -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack -jar
-      /usr/share/java/dependency-track/dependency-track-bundled.jar -host 127.0.0.1 -port 8080
+    # DataNucleus keeps some columns, such as a license's seeAlso list, as
+    # Java-serialized String arrays in PostgreSQL, and reads them back at the
+    # next start. The filter admits strings and nothing else.
+    allow: [java:deserialize]
+    # The API server, from the package's argument file. -host and -port are
+    # its own flags; the default address is every one. Its management
+    # server (health and metrics, :9000) is on loopback too.
+    exec: /usr/bin/java -Xms256m -Xmx768m -Djdk.serialFilter=java.lang.String;!* -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack
+      @/usr/share/java/dependency-track/java.args -host 127.0.0.1 -port 8080
     user: dtrack
     # netlink: the JVM lists the host's addresses.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
-    listen: tcp/8080 loopback
+    listen: [tcp/8080 loopback, tcp/9000 loopback]
     connect: [tcp/5432]
     memory: 1280
     nofile: 16384
     env:
-      - ALPINE_DATABASE_MODE=external
-      - ALPINE_DATABASE_URL=jdbc:postgresql://127.0.0.1:5432/postgres
-      - ALPINE_DATABASE_DRIVER=org.postgresql.Driver
-      - ALPINE_DATABASE_USERNAME=dtrack
-      - ALPINE_DATABASE_PASSWORD=dtrack
+      - DT_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:5432/postgres
+      - DT_DATASOURCE_USERNAME=dtrack
+      - DT_DATASOURCE_PASSWORD=dtrack
+      - DT_MANAGEMENT_HOST=127.0.0.1
 
   # PostgreSQL, as postgresql's form runs it, but also on loopback TCP:
   # pg_hba.conf lets the role dtrack alone in that way, to the postgres

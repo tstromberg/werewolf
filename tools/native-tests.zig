@@ -18,6 +18,7 @@ const mem = std.mem;
 
 const usage = "usage: native-tests describe|prepare|compare FORM ARCH\n" ++
     "       native-tests run FORM ARCH QEMU...\n" ++
+    "       native-tests boot FORM ARCH seed|verify NAME QEMU...\n" ++
     "       native-tests iterate HOWL FORM ARCH ensure|reset|stop|run PHASE [DRIVER]";
 
 pub const platform_plan = "test/native/platform.yaml";
@@ -57,6 +58,10 @@ fn dispatch(t: *Tool, args: []const []const u8) !void {
         try payload.compare(t, form, arch);
     } else if (mem.eql(u8, verb, "run") and args.len > 3) {
         try run(t, form, arch, args[3..]);
+    } else if (mem.eql(u8, verb, "boot") and args.len > 5) {
+        const phase = std.meta.stringToEnum(plans.Phase, args[3]) orelse
+            return t.fail("{s}", .{usage});
+        try once(t, form, try t.bootPlan(form), .{}, phase, args[4], args[5..]);
     } else return t.fail("{s}", .{usage});
 }
 
@@ -150,7 +155,11 @@ pub const Tool = struct {
                 error.Plan => t.fail("{s}", .{failure.text}),
                 error.OutOfMemory => error.OutOfMemory,
             };
-        const skip = try t.output(&.{ "build/host/form", "check", f.ref, "skip" });
+        // A form skips what its missing code rules out; supplied, it answers.
+        const skip = if (plan.app != null)
+            ""
+        else
+            try t.output(&.{ "build/host/form", "check", f.ref, "skip" });
         var words: std.ArrayList([]const u8) = .empty;
         var it = mem.tokenizeAny(u8, skip, " \t\n");
         while (it.next()) |word| try words.append(t.gpa, word);
@@ -623,7 +632,6 @@ fn runPlan(
     const out = t.variable("OUT") orelse return t.fail("OUT names the test image", .{});
     const kernel = t.variable("KERNEL") orelse return t.fail("KERNEL names the kernel", .{});
     const check = t.variable("CHECK") orelse return t.fail("CHECK names the check directory", .{});
-    const howl = t.variable("HOWL") orelse return t.fail("HOWL names howl", .{});
     // A scenario may leave the address off the kernel command line (BOOT has
     // none), for init to take it from the config or DHCP.
     const cmdline = if (plan.kernel_address)
@@ -651,33 +659,18 @@ fn runPlan(
         try inputs.append(gpa, .{ .name = name, .path = path });
     }
     for (inputs.items) |*input| input.digest = try hexDigest(io, input.path);
-    const work = try gpa.print("{s}/{s}-native", .{ check, f.name });
-    try Dir.cwd().deleteTree(io, work);
-    try Dir.cwd().createDirPath(io, check);
-    try Dir.cwd().createDir(io, work, .fromMode(0o700));
-    const disk = try gpa.print("{s}/data.img", .{work});
+    const w = try freshWork(t, check, f.name, f);
+    const disk = try gpa.print("{s}/data.img", .{w.dir});
     {
         const file = try Dir.cwd().createFile(io, disk, .{ .permissions = .fromMode(0o600) });
         defer file.close(io);
         try file.setLength(io, 4 << 30);
     }
-    // Named as check-form names it: a form's test/config finds the run's
-    // key file beside it, as FORM-key.pub.
-    const config = try gpa.print("{s}/{s}-config", .{ work, f.name });
-    try Dir.cwd().createDir(io, config, .fromMode(0o700));
-    const key_path = try gpa.print("{s}/data.key", .{config});
-    var key: [32]u8 = undefined;
-    try io.randomSecure(&key);
-    try Dir.cwd().writeFile(
-        io,
-        .{ .sub_path = key_path, .data = &key, .flags = .{ .permissions = .fromMode(0o600) } },
-    );
-    const data_key = try hexDigest(io, key_path);
     var run_bytes: [16]u8 = undefined;
     try io.randomSecure(&run_bytes);
     const run_id = std.fmt.bytesToHex(run_bytes, .lower);
     const ssh: ?hosts.Ssh = if (plan.host.len > 0)
-        try hosts.setup(t, plan, f, work, config, &run_id)
+        try hosts.setup(t, plan, f, w.dir, w.config, &run_id)
     else
         null;
     const machine = if (ssh) |s| try hosts.forwarded(t, qemu, s.port) else qemu;
@@ -686,114 +679,28 @@ fn runPlan(
         .path = hosts.runner,
         .digest = try hexDigest(io, hosts.runner),
     });
-    const Result = struct { phase: []const u8, cases: usize, log: []const u8, sha256: []const u8 };
+    const b: Booting = .{
+        .f = f,
+        .plan = plan,
+        .harness = harness,
+        .name = f.name,
+        .run_id = &run_id,
+        .work = w,
+        .ssh = ssh,
+        .inputs = inputs.items,
+    };
     var results: std.ArrayList(Result) = .empty;
     for ([_]plans.Phase{ .seed, .verify }, fixtures) |phase, fixture| {
-        if (Dir.cwd().access(io, fixture, .{})) |_|
-            try t.call(&.{ fixture, config }, .{})
-        else |_| {}
-        if (!mem.eql(u8, &try hexDigest(io, key_path), &data_key))
-            return t.fail("test configuration replaced the data key", .{});
-        const context: Run = .{
-            .run = &run_id,
-            .phase = @tagName(phase),
-            .timeout_seconds = plan.timeout_seconds,
-        };
-        try t.write(
-            try gpa.print("{s}/tests/context", .{config}),
-            try std.json.Stringify.valueAlloc(gpa, context, .{}),
-        );
-        const packed_path = try gpa.print("{s}/{s}.tar", .{ work, @tagName(phase) });
-        {
-            const log = try Dir.cwd().createFile(
-                io,
-                try gpa.print("{s}/{s}-pack.log", .{ work, @tagName(phase) }),
-                .{},
-            );
-            defer log.close(io);
-            try t.call(
-                &.{
-                    howl,
-                    "pack",
-                    "--build",
-                    "--with",
-                    f.ref,
-                    "--config",
-                    config,
-                    "-o",
-                    packed_path,
-                },
-                .{ .log = log },
-            );
-        }
-        const console = try gpa.print("{s}/console", .{work});
-        var lines: std.ArrayList(u8) = .empty;
-        try lines.appendSlice(gpa, "seen native-completed " ++ plans.completion ++ "\n" ++
-            "unseen native-failures werewolf-test: .*\"status\":\"fail\"\n");
-        for (plan.console) |l| try lines.appendSlice(gpa, try plans.consoleLine(gpa, l));
-        try t.write(console, lines.items);
-        const log = try gpa.print("{s}/{s}.log", .{ work, @tagName(phase) });
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(gpa, &.{
-            harness.boot,
-            try gpa.print(
-                "{s}-native-{s}",
-                .{ f.name, @tagName(phase) },
-            ),
-            console,
-            log,
-        });
-        try argv.appendSlice(gpa, machine);
-        try argv.appendSlice(gpa, &.{
-            "-kernel", kernel,
-            "-initrd", try gpa.print("{s}/initramfs.zst", .{out}),
-            "-append", try gpa.print("{s} werewolf.data=vda", .{cmdline}),
-            "-drive",  try gpa.print("file={s},format=raw,if=virtio", .{disk}),
-            "-drive",  try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{packed_path}),
-        });
-        var env = try t.env.clone(gpa);
-        try env.put(
-            "CONSOLE_TIMEOUT",
-            try gpa.print("{d}", .{@as(u32, plan.timeout_seconds) + 30}),
-        );
-        const host_results = try gpa.print("{s}/{s}-host.json", .{ work, @tagName(phase) });
-        if (ssh) |s| if (hosts.cases(plan, phase) > 0) {
-            try env.put("HOST_STEPS", try hosts.braced(t, &.{
-                hosts.runner, s.plan, @tagName(phase), host_results,
-            }));
-            try env.put("HOST_STEPS_TIMEOUT", try gpa.print("{d}", .{plan.timeout_seconds}));
-            try env.put("NATIVE_SSH_PORT", s.port);
-            try env.put("NATIVE_SSH_KEYS", s.keys);
-            try env.put("SSH_SK_PROVIDER", s.provider);
-        };
-        try t.call(argv.items, .{ .env = &env });
-        for (inputs.items) |input| if (!mem.eql(u8, &try hexDigest(io, input.path), &input.digest))
-            return t.fail("native test inputs changed during the run; rebuild and retry", .{});
-        const transcript = try Dir.cwd().readFileAlloc(io, log, gpa, .limited(256 << 20));
-        var count = validate(gpa, transcript, plan, context, null) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return t.fail("{s}: {s}", .{ log, transcriptError(err) }),
-        };
-        if (hosts.cases(
-            plan,
-            phase,
-        ) > 0) count += try hosts.results(t, host_results, plan, context);
-        if (phase == .verify and reformatted(transcript))
-            return t.fail("data was reformatted during verify boot", .{});
-        try results.append(gpa, .{
-            .phase = @tagName(phase),
-            .cases = count,
-            .log = log,
-            .sha256 = try gpa.dupe(u8, &std.fmt.bytesToHex(blk: {
-                var d: [Sha256.digest_length]u8 = undefined;
-                Sha256.hash(transcript, &d, .{});
-                break :blk d;
-            }, .lower)),
-        });
-        try t.say(
-            "native-tests: {s} {s}: {d} assertions passed",
-            .{ f.name, @tagName(phase), count },
-        );
+        const result = try boot(t, b, phase, fixture, try mem.concat(gpa, []const u8, &.{
+            machine,
+            &.{
+                "-kernel", kernel,
+                "-initrd", try gpa.print("{s}/initramfs.zst", .{out}),
+                "-append", try gpa.print("{s} werewolf.data=vda", .{cmdline}),
+                "-drive",  try gpa.print("file={s},format=raw,if=virtio", .{disk}),
+            },
+        }));
+        try results.append(gpa, result);
     }
     var report: Io.Writer.Allocating = .init(gpa);
     var json: std.json.Stringify = .{
@@ -818,7 +725,208 @@ fn runPlan(
     try json.write(results.items);
     try json.endObject();
     try report.writer.writeByte('\n');
-    try t.write(try gpa.print("{s}/results.json", .{work}), report.written());
+    try t.write(try gpa.print("{s}/results.json", .{w.dir}), report.written());
+}
+
+/// Work is a run's directory under CHECK, its config directory, and the
+/// data key that holds.
+const Work = struct { dir: []const u8, config: []const u8, key_path: []const u8, key: [64]u8 };
+
+/// freshWork makes a run's directory anew, as CHECK/NAME-native, with f's
+/// config directory and a new data key in it.
+fn freshWork(t: *Tool, check: []const u8, name: []const u8, f: Form) !Work {
+    const io = t.io;
+    const gpa = t.gpa;
+    const dir = try gpa.print("{s}/{s}-native", .{ check, name });
+    try Dir.cwd().deleteTree(io, dir);
+    try Dir.cwd().createDirPath(io, check);
+    try Dir.cwd().createDir(io, dir, .fromMode(0o700));
+    // Named as check-form names it: a form's test/config finds the run's
+    // key file beside it, as FORM-key.pub.
+    const config = try gpa.print("{s}/{s}-config", .{ dir, f.name });
+    try Dir.cwd().createDir(io, config, .fromMode(0o700));
+    const key_path = try gpa.print("{s}/data.key", .{config});
+    var key: [32]u8 = undefined;
+    try io.randomSecure(&key);
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = key_path, .data = &key, .flags = .{ .permissions = .fromMode(0o600) } },
+    );
+    return .{
+        .dir = dir,
+        .config = config,
+        .key_path = key_path,
+        .key = try hexDigest(io, key_path),
+    };
+}
+
+/// Result is one boot's: its phase, how many assertions held, and its
+/// transcript and that transcript's digest.
+const Result = struct { phase: []const u8, cases: usize, log: []const u8, sha256: []const u8 };
+
+/// Booting is what a run's boots share.
+const Booting = struct {
+    f: Form,
+    plan: plans.Plan,
+    harness: Harness,
+    /// name is the machine's in its logs: the form's, or a check's.
+    name: []const u8,
+    run_id: []const u8,
+    work: Work,
+    ssh: ?hosts.Ssh = null,
+    /// inputs must be as they were when the run began.
+    inputs: []const Input = &.{},
+};
+
+/// boot makes phase's config, with fixture if there is one, packs it, boots
+/// machine with it as a read-only disk, and accepts the phase's transcript.
+fn boot(
+    t: *Tool,
+    b: Booting,
+    phase: plans.Phase,
+    fixture: []const u8,
+    machine: []const []const u8,
+) !Result {
+    const io = t.io;
+    const gpa = t.gpa;
+    const plan = b.plan;
+    const w = b.work;
+    const howl = t.variable("HOWL") orelse return t.fail("HOWL names howl", .{});
+    if (Dir.cwd().access(io, fixture, .{})) |_|
+        try t.call(&.{ fixture, w.config }, .{})
+    else |_| {}
+    if (!mem.eql(u8, &try hexDigest(io, w.key_path), &w.key))
+        return t.fail("test configuration replaced the data key", .{});
+    const context: Run = .{
+        .run = b.run_id,
+        .phase = @tagName(phase),
+        .timeout_seconds = plan.timeout_seconds,
+    };
+    try t.write(
+        try gpa.print("{s}/tests/context", .{w.config}),
+        try std.json.Stringify.valueAlloc(gpa, context, .{}),
+    );
+    const packed_path = try gpa.print("{s}/{s}.tar", .{ w.dir, @tagName(phase) });
+    // A boot without data.key packs its config without it, held outside
+    // it, and puts it back for the next (scenario.zig, Boot).
+    const without_key = !switch (phase) {
+        .seed => plan.boots.seed,
+        .verify => plan.boots.verify,
+    }.data_key;
+    const held = try gpa.print("{s}/held.key", .{w.dir});
+    if (without_key) try Dir.rename(Dir.cwd(), w.key_path, Dir.cwd(), held, io);
+    {
+        const log = try Dir.cwd().createFile(
+            io,
+            try gpa.print("{s}/{s}-pack.log", .{ w.dir, @tagName(phase) }),
+            .{},
+        );
+        defer log.close(io);
+        try t.call(
+            &.{
+                howl,
+                "pack",
+                "--build",
+                "--with",
+                b.f.ref,
+                "--config",
+                w.config,
+                "-o",
+                packed_path,
+            },
+            .{ .log = log },
+        );
+    }
+    if (without_key) try Dir.rename(Dir.cwd(), held, Dir.cwd(), w.key_path, io);
+    const console = try gpa.print("{s}/console", .{w.dir});
+    var lines: std.ArrayList(u8) = .empty;
+    try lines.appendSlice(gpa, "seen native-completed " ++ plans.completion ++ "\n" ++
+        "unseen native-failures werewolf-test: .*\"status\":\"fail\"\n");
+    for (plan.console) |l| if (l.only == null or l.only.? == phase)
+        try lines.appendSlice(gpa, try plans.consoleLine(gpa, l));
+    try t.write(console, lines.items);
+    const log = try gpa.print("{s}/{s}.log", .{ w.dir, @tagName(phase) });
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(gpa, &.{
+        b.harness.boot,
+        try gpa.print("{s}-native-{s}", .{ b.name, @tagName(phase) }),
+        console,
+        log,
+    });
+    try argv.appendSlice(gpa, machine);
+    try argv.appendSlice(gpa, &.{
+        "-drive", try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{packed_path}),
+    });
+    var env = try t.env.clone(gpa);
+    try env.put(
+        "CONSOLE_TIMEOUT",
+        try gpa.print("{d}", .{@as(u32, plan.timeout_seconds) + 30}),
+    );
+    const host_results = try gpa.print("{s}/{s}-host.json", .{ w.dir, @tagName(phase) });
+    if (b.ssh) |s| if (hosts.cases(plan, phase) > 0) {
+        try env.put("HOST_STEPS", try hosts.braced(t, &.{
+            hosts.runner, s.plan, @tagName(phase), host_results,
+        }));
+        try env.put("HOST_STEPS_TIMEOUT", try gpa.print("{d}", .{plan.timeout_seconds}));
+        try env.put("NATIVE_SSH_PORT", s.port);
+        try env.put("NATIVE_SSH_KEYS", s.keys);
+        try env.put("SSH_SK_PROVIDER", s.provider);
+    };
+    try t.call(argv.items, .{ .env = &env });
+    for (b.inputs) |input| if (!mem.eql(u8, &try hexDigest(io, input.path), &input.digest))
+        return t.fail("native test inputs changed during the run; rebuild and retry", .{});
+    const transcript = try Dir.cwd().readFileAlloc(io, log, gpa, .limited(256 << 20));
+    var count = validate(gpa, transcript, plan, context, null) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return t.fail("{s}: {s}", .{ log, transcriptError(err) }),
+    };
+    if (hosts.cases(plan, phase) > 0) count += try hosts.results(t, host_results, plan, context);
+    if (phase == .verify and reformatted(transcript))
+        return t.fail("data was reformatted during verify boot", .{});
+    try t.say(
+        "native-tests: {s} {s}: {d} assertions passed",
+        .{ b.name, @tagName(phase), count },
+    );
+    var d: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(transcript, &d, .{});
+    return .{
+        .phase = @tagName(phase),
+        .cases = count,
+        .log = log,
+        .sha256 = try gpa.dupe(u8, &std.fmt.bytesToHex(d, .lower)),
+    };
+}
+
+/// once boots f's test image, judged by plan, as phase of a run of its own, on the machine
+/// qemu describes whole but for the config disk: a check's own kernel,
+/// disks and command line (test/check-slot). Host suites need a run's
+/// forwarded login, so a plan with them is refused.
+fn once(
+    t: *Tool,
+    f: Form,
+    plan: plans.Plan,
+    harness: Harness,
+    phase: plans.Phase,
+    name: []const u8,
+    qemu: []const []const u8,
+) !void {
+    if (hosts.cases(plan, phase) > 0)
+        return t.fail("{s}: host suites run in native-tests run alone", .{f.name});
+    const check = t.variable("CHECK") orelse return t.fail("CHECK names the check directory", .{});
+    var run_bytes: [16]u8 = undefined;
+    try t.io.randomSecure(&run_bytes);
+    const run_id = std.fmt.bytesToHex(run_bytes, .lower);
+    const fixture = try t.gpa.print("{s}/{s}", .{
+        f.tests, if (phase == .seed) "config" else "config-again",
+    });
+    _ = try boot(t, .{
+        .f = f,
+        .plan = plan,
+        .harness = harness,
+        .name = name,
+        .run_id = &run_id,
+        .work = try freshWork(t, check, name, f),
+    }, phase, fixture, qemu);
 }
 
 fn reformatted(transcript: []const u8) bool {
@@ -1489,7 +1597,8 @@ test "the generated form leaves out what test packages bring and no test runs" {
     for (plan.prune) |p| try testing.expect(mem.find(u8, listed, p) != null);
 }
 
-/// fake_howl packs only the run context, which fake_boot reads back.
+/// fake_howl packs only the run context, which fake_boot reads back,
+/// and says beside it whether the config held data.key.
 const fake_howl =
     \\#!/bin/sh
     \\while [ $# -gt 0 ]; do
@@ -1497,6 +1606,7 @@ const fake_howl =
     \\    shift
     \\done
     \\cp "$config/tests/context" "$out"
+    \\if [ -f "$config/data.key" ]; then echo key; else echo none; fi >"$out.key"
     \\
 ;
 
@@ -1507,6 +1617,7 @@ const fake_boot =
     \\#!/bin/sh
     \\set -eu
     \\log=$3
+    \\cp "$2" "$log.console"
     \\for arg; do
     \\    case $arg in
     \\    file=*readonly=on) packed=${arg#file=} packed=${packed%%,*} ;;
@@ -1554,10 +1665,15 @@ const Scratch = struct {
     root: []const u8,
     t: Tool,
     env: std.process.Environ.Map,
+    /// boots and console are a scenario's, for the plan run gives runPlan.
+    boots: plans.Boots = .{},
+    console: []const plans.Console = &.{},
 
     fn init(s: *Scratch, a: Allocator) !void {
         s.tmp = testing.tmpDir(.{});
         s.env = .init(a);
+        s.boots = .{};
+        s.console = &.{};
         s.t = .{ .io = testing.io, .gpa = a, .env = &s.env };
         s.root = try s.tmp.dir.realPathFileAlloc(s.t.io, ".", a);
         for ([_][2][]const u8{
@@ -1598,27 +1714,46 @@ const Scratch = struct {
     }
 
     fn run(s: *Scratch) !void {
-        const plan: plans.Plan = .{ .drivers = &.{
-            .{
-                .name = "test-a",
-                .source = "probes.zig",
-                .mode = "probes",
-                .seed = &.{ "one", "two" },
-                .verify = &.{"one"},
+        try runPlan(&s.t, try s.form(), s.plan(), "x86_64", &.{}, try s.harness());
+    }
+
+    fn plan(s: *Scratch) plans.Plan {
+        return .{
+            .drivers = &.{
+                .{
+                    .name = "test-a",
+                    .source = "probes.zig",
+                    .mode = "probes",
+                    .seed = &.{ "one", "two" },
+                    .verify = &.{"one"},
+                },
+                .{
+                    .name = "test-b",
+                    .source = "probes.zig",
+                    .mode = "probes",
+                    .seed = &.{"three"},
+                },
             },
-            .{ .name = "test-b", .source = "probes.zig", .mode = "probes", .seed = &.{"three"} },
-        } };
-        const f: Form = .{
+            .boots = s.boots,
+            .console = s.console,
+        };
+    }
+
+    fn form(s: *Scratch) !Form {
+        return .{
             .name = "postgresql",
             .ref = "postgresql",
             .dir = try s.path("forms/postgresql"),
             .tests = try s.path("forms/postgresql/test"),
         };
-        try runPlan(&s.t, f, plan, "x86_64", &.{}, .{
+    }
+
+    fn harness(s: *Scratch) !Harness {
+        return .{
             .boot = try s.path("boot"),
             .platform_plan = try s.path("platform.yaml"),
             .platform_driver = try s.path("platform.zig"),
-        });
+        };
     }
 
     fn results(s: *Scratch) !?std.json.Value {
@@ -1696,6 +1831,67 @@ test "config-again updates once before verify, on the same disk and key" {
     );
     try s.env.put("ROTATE", "1");
     try s.refused("data key");
+}
+
+test "a boot without data.key packs none, gets it back, and is judged by its own lines" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s: Scratch = undefined;
+    try s.init(a);
+    defer s.tmp.cleanup();
+    s.boots = .{ .verify = .{ .data_key = false } };
+    s.console = &.{
+        .{ .kind = .seen, .name = "both", .arg = "anywhere" },
+        .{ .kind = .seen, .name = "refused", .arg = "LUKS", .only = .verify },
+    };
+    try s.run();
+    const work = "check/postgresql-native";
+    for ([_][2][]const u8{ .{ "seed", "key\n" }, .{ "verify", "none\n" } }) |p| {
+        const io = s.t.io;
+        try testing.expectEqualStrings(p[1], try s.tmp.dir.readFileAlloc(
+            io,
+            try a.print("{s}/{s}.tar.key", .{ work, p[0] }),
+            a,
+            .limited(16),
+        ));
+        const lines = try s.tmp.dir.readFileAlloc(
+            io,
+            try a.print("{s}/{s}.log.console", .{ work, p[0] }),
+            a,
+            .limited(4096),
+        );
+        try testing.expect(mem.find(u8, lines, "seen both anywhere\n") != null);
+        try testing.expectEqual(
+            mem.eql(u8, p[0], "verify"),
+            mem.find(u8, lines, "seen refused LUKS\n") != null,
+        );
+    }
+    _ = try s.tmp.dir.statFile(s.t.io, work ++ "/postgresql-config/data.key", .{});
+}
+
+test "a check's own machine boots one phase, with only the config disk added" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s: Scratch = undefined;
+    try s.init(a);
+    defer s.tmp.cleanup();
+    try s.file("slot.img", "", 0o644);
+    try once(&s.t, try s.form(), s.plan(), try s.harness(), .seed, "slot", &.{
+        "-drive", try a.print("file={s},format=raw,if=virtio", .{try s.path("slot.img")}),
+    });
+    const io = s.t.io;
+    // The disk the boot wrote is the check's, not a data disk of the run's.
+    try testing.expectEqualStrings(
+        "kept data",
+        try s.tmp.dir.readFileAlloc(io, "slot.img", a, .limited(64)),
+    );
+    _ = try s.tmp.dir.statFile(io, "check/slot-native/seed.tar", .{});
+    try testing.expectError(
+        error.FileNotFound,
+        s.tmp.dir.statFile(io, "check/slot-native/data.img", .{}),
+    );
 }
 
 test "inputs changed during a run cannot write a passing report" {

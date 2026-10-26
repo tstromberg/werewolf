@@ -1,0 +1,87 @@
+#!/bin/sh
+# Run on a Linux/KVM host with Firecracker and the source-build dependencies.
+# A private guest proves IPE enforcement, reboot and host boot-file admission.
+set -eu
+howl=${HOWL:-build/host/howl}
+name=fc-protected-$$
+work=build/check/$name
+machine=build/machines/$name
+mkdir -p "$work"
+ssh-keygen -q -t ed25519 -N '' -f "$work/key"
+cleanup() { "$howl" stop "$name" --on firecracker >/dev/null 2>&1 || :; }
+trap cleanup EXIT
+create() {
+    "$howl" create "$name" --with playground --on firecracker --build --yes \
+        --root-keys "$work/key.pub" "$@"
+}
+guest() { "$howl" ssh "root@$name" --identity "$work/key" -- "$@"; }
+create >"$work/create.log" 2>&1 || { cat "$work/create.log"; exit 1; }
+grep -q 'warning: Firecracker does not support UEFI Secure Boot or a TPM' "$work/create.log"
+# shellcheck disable=SC2016 # Expanded by the guest shell.
+guest 'test "$(cat /sys/kernel/security/ipe/enforce)" = 1 &&
+    test "$(cat /sys/kernel/security/ipe/policies/werewolf/active)" = 1 &&
+    grep -q "werewolf.disable=secureboot,tpm " /proc/cmdline &&
+    ! grep -q "werewolf.disable=secureboot,tpm,ipe" /proc/cmdline &&
+    ! (echo 0 >/sys/kernel/security/ipe/enforce)' >"$work/ipe.log" 2>&1
+guest /usr/lib/werewolf/posture --line >"$work/posture.log" || test "$?" -eq 1
+grep -q '^posture: fail=' "$work/posture.log"
+grep -q '"unexpected":\[\]' "$work/posture.log"
+if grep -qE 'boot-ipe-enforced|kernel-kaslr' "$work/posture.log"; then cat "$work/posture.log"; exit 1; fi
+guest cat /proc/sys/kernel/random/boot_id >"$work/boot-id"
+guest /usr/bin/reboot >"$work/reboot.log" 2>&1 || :
+ready=0
+for _attempt in $(seq 60); do
+    if guest cat /proc/sys/kernel/random/boot_id >"$work/reboot-id" 2>/dev/null &&
+        ! cmp -s "$work/boot-id" "$work/reboot-id"; then ready=1; break; fi
+    sleep 1
+done
+test "$ready" = 1
+"$howl" stop "$name" --on firecracker
+create >"$work/resume.log" 2>&1
+guest cat /sys/kernel/security/ipe/enforce >"$work/resume-ipe.log"
+grep -qx 1 "$work/resume-ipe.log"
+"$howl" stop "$name" --on firecracker
+
+# These are disposable guest disks. Preserve the admitted original outside them.
+cp --sparse=always "$machine/disk.img" "$work/original.img"
+export MTOOLS_SKIP_CHECK=1
+printf 'version 99999999T999999Z\nlinux /untrusted\ninitrd /untrusted\noptions ipe.enforce=0\n' >"$work/other-entry"
+mcopy -o -i "$machine/disk.img@@1048576" "$work/other-entry" '::/loader/entries/werewolf-b.conf'
+create >"$work/other-entry.log" 2>&1
+guest cat /sys/kernel/security/ipe/enforce >"$work/other-entry-ipe.log"
+grep -qx 1 "$work/other-entry-ipe.log"
+"$howl" stop "$name" --on firecracker
+for target in kernel initrd entry; do
+    cp --sparse=always "$work/original.img" "$machine/disk.img"
+    case $target in
+        kernel) path=/werewolf/a/vmlinuz ;;
+        initrd) path=/werewolf/a/stage0.zst ;;
+        entry) path=/loader/entries/werewolf-a.conf ;;
+    esac
+    printf 'tampered boot content\n' >"$work/tampered"
+    mcopy -o -i "$machine/disk.img@@1048576" "$work/tampered" "::$path"
+    seen=$(wc -c <"$machine/console.log")
+    if create >"$work/$target.log" 2>&1; then echo "FAIL: booted changed $target"; exit 1; fi
+    tail -c +"$((seen + 1))" "$machine/console.log" >"$work/$target.console"
+    grep -q 'pinned Firecracker.*changed' "$work/$target.console"
+    if grep -q 'handing over to runit' "$work/$target.console"; then exit 1; fi
+done
+cp --sparse=always "$work/original.img" "$machine/disk.img"
+mv "$machine/firecracker-boot.json" "$work/trust.json"
+if create >"$work/missing-pin.log" 2>&1; then echo 'FAIL: enrolled an existing disk'; exit 1; fi
+grep -q 'cannot change its boot protections' "$work/missing-pin.log"
+seen=$(wc -c <"$machine/console.log")
+"$howl" _firecracker "$PWD/$machine" --pinned
+tail -c +"$((seen + 1))" "$machine/console.log" >"$work/missing-pin.console"
+grep -q 'FileNotFound' "$work/missing-pin.console"
+test ! -e "$machine/firecracker.pid"
+mv "$work/trust.json" "$machine/firecracker-boot.json"
+if create --disable=secureboot,tpm,ipe >"$work/downgrade.log" 2>&1; then echo 'FAIL: downgraded pinned machine'; exit 1; fi
+grep -q 'cannot change its boot protections' "$work/downgrade.log"
+create >"$work/recovered.log" 2>&1
+guest cat /sys/kernel/security/ipe/enforce >"$work/recovered-ipe.log"
+grep -qx 1 "$work/recovered-ipe.log"
+"$howl" delete "$name" --on firecracker
+trap - EXIT
+test ! -e "$machine"
+echo "pass: Firecracker IPE, reboot, resume, boot tampering, missing trust, downgrade refusal and delete; logs $work"

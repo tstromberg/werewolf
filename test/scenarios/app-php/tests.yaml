@@ -1,0 +1,125 @@
+version: 1
+# The PHP hello-world (test/app-fixtures) on php, laid as howl --app lays an
+# application: make check-php. Every runtime's hello-world answers this one
+# contract; only its greeting and port differ. Probes (test/php-security.php)
+# then run as the real php-fpm, on its leash.
+form: php
+app: php
+suites:
+  - name: php
+    cases:
+      - name: app-greeting
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/
+            expect:
+              status: 200
+              body:
+                matches: "^Hello from PHP on werewolf!\n$"
+            await: 120s
+      - name: app-health
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/health
+            expect:
+              status: 200
+              body: "ok\n"
+      - name: app-not-found
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/werewolf-missing
+            expect:
+              status: 404
+      # It changes nothing, so it takes nothing but GET.
+      - name: app-method-refused
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/
+              method: POST
+              body: changed
+              headers:
+                Content-Type: application/x-www-form-urlencoded
+            expect:
+              status: 405
+              headers:
+                allow: GET
+      - name: app-query
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/health?probe=integration
+            expect:
+              status: 200
+              body: "ok\n"
+      - name: app-content-type
+        steps:
+          - fetch:
+              url: http://127.0.0.1:80/
+            expect:
+              headers:
+                content-type:
+                  matches: ^[Tt][Ee][Xx][Tt]/[Pp][Ll][Aa][Ii][Nn]; [Cc][Hh][Aa][Rr][Ss][Ee][Tt]=[Uu][Tt][Ff]-8$
+  - name: php-security
+    cases:
+      - name: php-state
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=state
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-immutable
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=immutable
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-privileges
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=privileges
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-network
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=network
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-config
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=config
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-ini
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=ini
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      - name: php-exec
+        steps:
+          - fetch:
+              url: http://127.0.0.1/_werewolf-security.php?case=exec
+            expect:
+              status: 200
+              body:
+                matches: "^ok\n*$"
+      # A stager's name, its dot encoded, is not a script php-fpm runs.
+      - name: php-encoded-stager
+        steps:
+          - fetch:
+              url: http://127.0.0.1/app_84304470%2Ephp
+            expect:
+              status: 404

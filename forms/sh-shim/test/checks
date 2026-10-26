@@ -1,5 +1,0 @@
-# The shim's cases are native (tests.yaml) but this one: a DEV build's
-# mksh supplies /bin/sh, which wins over the shim's, as any
-# package's or later form's would. A shell-free image has no package shell
-# to show it; there, sh-shim-laid shows the shim is /bin/sh.
-ok  sh-shim-yields    [ "$(readlink /usr/bin/sh)" = mksh ] && [ -e /etc/werewolf/allow/sh ]

@@ -74,6 +74,12 @@ return array(
             'rules' => array(),
             'showScriptName' => true,
         ),
+        // Yii chmods what it publishes to 0777 and 0666, past the umask;
+        // nginx, in php's group, needs to read it, and no one to write it.
+        'assetManager' => array(
+            'newDirMode' => 0750,
+            'newFileMode' => 0640,
+        ),
         // With an https address, cookies go over HTTPS alone.
         'session' => array(
             'cookieParams' => array(

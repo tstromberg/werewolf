@@ -1,2 +1,0 @@
-ok  sshd-no-package-su   [ ! -e /usr/bin/su ] && [ ! -L /usr/bin/su ]
-ok  sshd-names-need-paths ! env sshd -V >/dev/null 2>&1 && env /usr/bin/sshd -V >/dev/null 2>&1

@@ -1,7 +1,0 @@
-# Test the public application contract, not merely an open socket.
-ok  app-greeting [ "$(wget -q -T 5 -O - http://127.0.0.1:8080/)" = 'Hello from Node.js on werewolf!' ]
-ok  app-health [ "$(wget -q -T 5 -O - http://127.0.0.1:8080/health)" = ok ]
-ok  app-not-found wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/werewolf-missing 2>&1 | grep -q 'HTTP/1.[01] 404'
-ok  app-method-refused wget -q -T 5 -S -O /dev/null --post-data 'changed' http://127.0.0.1:8080/ 2>&1 | grep -q 'HTTP/1.[01] 405'
-ok  app-query [ "$(wget -q -T 5 -O - 'http://127.0.0.1:8080/health?probe=integration')" = ok ]
-ok  app-content-type wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/ 2>&1 | grep -qi 'Content-Type: text/plain; charset=utf-8'

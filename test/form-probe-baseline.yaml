@@ -42,15 +42,6 @@ forms:
     - blocky-strangers
     - blocky-tls-only
     - blocky-user
-  bloodhound:
-    - bh-admin
-    - bh-anon
-    - bh-bind
-    - bh-health
-    - bh-user
-    - bh-wrong
-    - neo4j-bolt
-    - neo4j-user
   bugsink:
     - bs-anon
     - bs-data
@@ -830,6 +821,8 @@ replacements:
     sh-shim-redirs:
       - test-sh-shim/sh-shim-redirs
       - test-sh-shim-fds/sh-shim-closed-fds
+    sh-shim-yields:
+      - test-sh-shim/sh-shim-laid
   postgresql:
     postgres-shim:
       - test-postgres-policy/shim-policy
@@ -1062,3 +1055,13 @@ replacements:
       - test-langflow/inference-invalid-shape
     langflow-local-inference:
       - test-langflow/local-inference
+  limesurvey:
+    ls-http:
+      - test-limesurvey/ls-login
+    ls-plugin-upload:
+      - test-limesurvey/ls-login
+  misp:
+    misp-password:
+      - test-misp/misp-admin
+    misp-secrets:
+      - test-misp/misp-serve

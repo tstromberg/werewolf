@@ -1,9 +1,0 @@
-# What the bloodhound form, booted as it ships, without a config, must
-# say on its console (make check-shellfree-bloodhound; test/boot). Neo4j
-# and BloodHound park until their passwords exist, and Caddy until it has
-# a domain. make check-bloodhound boots it with its config.
-
-seen    neo4j-needs-password       leash: \{"event":"down","service":"neo4j","why":"config neo4j-password: FileNotFound"\}
-seen    bloodhound-needs-password  leash: \{"event":"down","service":"bloodhound","why":"config admin-password: FileNotFound"\}
-seen    caddy-needs-domain         service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
-seen    caddy-parked               leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

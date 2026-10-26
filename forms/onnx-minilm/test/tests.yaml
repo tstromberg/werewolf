@@ -1,0 +1,3 @@
+# Read-only model data: langflow's suites embed with it offline; the platform suite tests its boot.
+version: 1
+suites: []

@@ -104,6 +104,23 @@ test "within returns the call's result or times out" {
     try std.testing.expectError(error.Broken, within(io, 5, Calls.broken, .{}));
 }
 
+/// A Content-Security-Policy that sandboxes uploaded data: a bare sandbox
+/// directive of its own, allowing nothing back.
+pub fn sandboxed(csp: []const u8) bool {
+    var directives = std.mem.splitScalar(u8, csp, ';');
+    while (directives.next()) |directive| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, directive, " \t"), "sandbox")) return true;
+    }
+    return false;
+}
+
+test "upload sandbox must be its own restrictive CSP directive" {
+    try std.testing.expect(sandboxed("sandbox"));
+    try std.testing.expect(sandboxed("default-src 'none'; sandbox; img-src 'self'"));
+    try std.testing.expect(!sandboxed("default-src https://sandbox.example"));
+    try std.testing.expect(!sandboxed("sandbox allow-scripts"));
+}
+
 /// procfs reports size zero. Stream it rather than trusting stat's size.
 pub fn readKernel(io: Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     var file = try Io.Dir.cwd().openFile(io, path, .{});

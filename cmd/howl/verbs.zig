@@ -342,6 +342,22 @@ pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !vo
         }
     else
         try machineArgs(io, gpa, args, why);
+    if (on == .firecracker) {
+        if (madeOn(io, gpa, name) != .firecracker) return notMade(name, on, why);
+        const dir = try machineDir(gpa, name);
+        if (firecracker.running(io, gpa, dir)) |pid|
+            try firecracker.stop(io, gpa, dir, pid, why);
+        const pinned = if (Dir.cwd().access(io,
+            try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }), .{})) |_| true else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        };
+        if (!named and !pinned) {
+            try remove(io, gpa, name, on, why);
+            say(io, "{s}: stopped and removed", .{name});
+        } else say(io, "{s}: stopped; its disk and boot trust stay", .{name});
+        return;
+    }
     const secured = try @import("local-secure.zig").stop(io, gpa, name, on, why);
     if (named) {
         if (!secured) {

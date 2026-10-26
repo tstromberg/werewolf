@@ -26,6 +26,7 @@ suites:
                 min: 65536
               capabilities: []
               no_new_privileges: true
+      # The API and its management server (health, metrics) are on loopback.
       - name: dtrack-bind
         steps:
           - listeners: tcp
@@ -33,11 +34,17 @@ suites:
               contains:
                 - address: 127.0.0.1
                   port: 8080
+                - address: 127.0.0.1
+                  port: 9000
               absent:
                 - address: 0.0.0.0
                   port: 8080
                 - address: '::'
                   port: 8080
+                - address: 0.0.0.0
+                  port: 9000
+                - address: '::'
+                  port: 9000
       - name: dtrack-anon
         steps:
           - fetch:

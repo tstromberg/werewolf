@@ -61,15 +61,19 @@ pub const Plan = struct {
     drivers: []const Driver = &.{},
     /// host are the suites run from the build host (host.zig).
     host: []const hosts.Suite = &.{},
-    /// form, skip, console and kernel_address are a scenario's (scenario.zig).
+    /// form, skip, console, kernel_address, app and boots are a scenario's
+    /// (scenario.zig).
     form: ?[]const u8 = null,
     skip: []const []const u8 = &.{},
     console: []const scenarios.Console = &.{},
     kernel_address: bool = true,
+    app: ?[]const u8 = null,
+    boots: scenarios.Boots = .{},
 };
 
 pub const HostSuite = hosts.Suite;
 pub const Console = scenarios.Console;
+pub const Boots = scenarios.Boots;
 pub const consoleLine = scenarios.line;
 
 /// Failure says why a plan was refused, with its file and line.
@@ -148,9 +152,10 @@ pub fn form(
 ) Error!Plan {
     const path = try gpa.print("{s}/test/tests.yaml", .{dir});
     var plan = try load(io, gpa, root, path, failure);
-    if (plan.form != null or plan.skip.len > 0 or plan.console.len > 0 or !plan.kernel_address)
-        return refuse(gpa, failure, "{s}: form, skip, console and kernel_address are a " ++
-            "scenario's (test/scenarios); a form says check.skip and test/console", .{path});
+    if (plan.form != null or plan.skip.len > 0 or plan.console.len > 0 or !plan.kernel_address or
+        plan.app != null or !std.meta.eql(plan.boots, scenarios.Boots{}))
+        return refuse(gpa, failure, "{s}: form, skip, console, kernel_address, app and boots " ++
+            "are a scenario's (test/scenarios); a form says check.skip and test/console", .{path});
     for ([_][]const u8{ "checks", "checks-again" }) |name| {
         const stat = root.statFile(io, try gpa.print("{s}/test/{s}", .{ dir, name }), .{}) catch
             continue;
@@ -1076,11 +1081,11 @@ test "foundations alone may have no suites of their own" {
     const exceptions =
         \\# Form     Minimum  Why fewer form-specific cases are useful
         \\minimal    0        Boot foundation
-        \\jre21      2        Runtime only
+        \\jre        2        Runtime only
         \\
     ;
     try testing.expect(foundation(exceptions, "minimal"));
-    try testing.expect(!foundation(exceptions, "jre21"));
+    try testing.expect(!foundation(exceptions, "jre"));
     try testing.expect(!foundation(exceptions, "gatus"));
     try testing.expect(!foundation(exceptions, "#"));
 }

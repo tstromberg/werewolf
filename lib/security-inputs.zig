@@ -640,6 +640,37 @@ pub const Prepared = struct {
     stub: []const u8,
 };
 
+/// Direct boot needs an IPE kernel but no EFI stub or firmware toolchain.
+pub fn prepareKernel(
+    gpa: Allocator,
+    host: Host,
+    tree: []const u8,
+    cache: []const u8,
+    arch: []const u8,
+    signing: []const u8,
+) !Prepared {
+    _ = try Dir.cwd().createDirPathStatus(host.io, cache, .fromMode(0o700));
+    const guard = try Dir.cwd().createFile(host.io, try gpa.print("{s}/build.lock", .{cache}), .{
+        .truncate = false,
+        .permissions = .fromMode(0o600),
+    });
+    defer guard.close(host.io);
+    host.phase("security-lock", "Waiting for the security input build lock");
+    try guard.lock(host.io, .exclusive);
+    defer guard.unlock(host.io);
+    const signer = try identity(gpa, host, signing);
+    var inputs: [kernel_sources.len + 1]Input = undefined;
+    for (inputs[0..kernel_sources.len], kernel_sources) |*input, name|
+        input.* = .{ .name = name, .path = try gpa.print("{s}/{s}", .{ tree, name }) };
+    inputs[kernel_sources.len] = .{ .name = "certificate", .path = signer.cert };
+    const pin = try fingerprint(host.io, gpa, arch, &inputs);
+    var b: Build = .{ .host = host, .tree = tree, .cache = cache, .arch = arch, .cert = signer.cert };
+    const kernel = try cached(host.io, gpa, try gpa.print("{s}/{s}/test-kernel-{s}", .{
+        cache, arch, &pin,
+    }), &pin, "rootfs.tar", .{ .context = &b, .make = Build.kernel });
+    return .{ .kernel = kernel, .key = signer.key, .cert = signer.cert, .stub = "" };
+}
+
 /// prepare makes arch's stub under cache's lock, and given signing, the
 /// policy identity kept there and a test kernel that trusts it.
 pub fn prepare(

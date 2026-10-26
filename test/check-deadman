@@ -1,12 +1,11 @@
 #!/bin/sh
-# check-deadman QEMU... boots minimal's slot and never commits it (make
-# check-deadman). stage0's deadman, cut to 20 s by werewolf.deadman, which
-# only a DEV build takes, must say why and reset the machine. No loader is
-# named, so nothing commits. Not test/boot, which would check the machine
-# and power it off. make passes CHECK_ENV (Makefile).
+# check-deadman QEMU... boots minimal's native test image as slot a and
+# never commits it (make check-deadman). stage0's deadman, cut to 20 s by
+# werewolf.deadman, which it takes from a test image alone, must say why
+# and reset the machine, which then ends (test/console.zig, CONSOLE_ENDS).
+# No loader is named, so nothing commits. make passes CHECK_ENV (Makefile).
 set -eu
 d=$CHECK/deadman
-log=$CHECK/deadman.log
 rm -rf "$d" "$d.img" && mkdir -p "$d/slot/a"
 cp "$OUT/slot/root.erofs" "$d/slot/a/"
 mke2fs -q -F -t ext4 -U "$SLOTS" -d "$d" "$d.img" 128M && rm -r "$d"
@@ -17,15 +16,13 @@ for path in /slot /slot/a /slot/a/root.erofs; do
 	done
 done >"$CHECK/deadman-ownership.debugfs"
 "$DEBUGFS" -w -f "$CHECK/deadman-ownership.debugfs" "$d.img" >"$CHECK/deadman-ownership.log" 2>&1
-fail() { echo "FAIL   deadman            $1; see $log"; exit 1; }
-rc=0
-timeout 180 "$@" -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \
+cat >"$CHECK/deadman.checks" <<'EOF'
+seen    deadman-taken  stage0: the deadman waits 20s
+seen    deadman-says   stage0: slot a did not commit in 20s; rebooting into the last good slot
+unseen  powered-off    reboot: Power down
+unseen  committed      slot-keep: healthy
+EOF
+CONSOLE_ENDS=1 CONSOLE_TIMEOUT=180 build/host/console deadman "$CHECK/deadman.checks" \
+	"$CHECK/deadman.log" "$@" -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \
 	-append "$CMDLINE init=/init werewolf.slot=a werewolf.slots=$SLOTS werewolf.deadman=20" \
-	-drive "file=$d.img,format=raw,if=virtio" </dev/null >"$log" 2>&1 || rc=$?
-[ $rc -ne 124 ] || fail "no reset in 180 s"
-grep -a -q 'stage0: the deadman waits 20s' "$log" || fail "stage0 did not take werewolf.deadman"
-grep -a -q 'stage0: slot a did not commit in 20s; rebooting into the last good slot' "$log" ||
-	fail "the deadman did not say why"
-! grep -a -q 'reboot: Power down' "$log" || fail "the machine powered off rather than reset"
-! grep -a -q 'slot-keep: healthy' "$log" || fail "the slot committed"
-echo "pass   deadman            a slot that does not commit is rebooted, and says why"
+	-drive "file=$d.img,format=raw,if=virtio"

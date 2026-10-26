@@ -1,6 +1,9 @@
 #!/bin/sh
-# Boot minimal's slot from its ext4 filesystem and commit its native EFI entry.
-# make passes CHECK_ENV (Makefile).
+# check-slot QEMU... boots minimal's native test image from its slot, as a
+# machine howl installs boots: slot a's root.erofs on an ext4, beside a FAT EFI
+# partition with one counted entry, and the shared checks (native-tests boot).
+# Once healthy, the machine must commit that entry: no try count left. make
+# passes CHECK_ENV and ARCH (Makefile).
 set -eu
 v=$CHECK/slots
 img=$CHECK/slots.img
@@ -17,7 +20,7 @@ done >"$CHECK/slot-ownership.debugfs"
 "$DEBUGFS" -w -f "$CHECK/slot-ownership.debugfs" "$img" >"$CHECK/slot-ownership.log" 2>&1
 cmdline="$CMDLINE init=/init werewolf.slots=$SLOTS werewolf.esp=57E1-F000"
 sh test/slot-esp "$CHECK/slot-esp.img" a "$cmdline"
-test/boot slot test/checks "$CHECK/slot.log" "$@" \
+build/host/native-tests boot minimal "$ARCH" seed slot "$@" \
     -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \
     -append "$cmdline werewolf.slot=a" \
     -drive "file=$img,format=raw,if=virtio" \

@@ -200,15 +200,16 @@ pub fn main(init: std.process.Init) !void {
         fail("IPE: {s}; not handing over", .{@errorName(err)});
 
     if (boot.slot) |slot| {
-        // A shorter wait is for make check-deadman, so only a DEV build's
-        // root, now verified, may ask for one. A release always waits ten
-        // minutes.
+        // A shorter wait is for make check-deadman, so only a native test
+        // image's root, now verified, may ask for one; howl never exports
+        // one as a release. A release always waits ten minutes.
         var after: u32 = deadman_after;
         if (boot.deadman > 0) {
-            if (linux.errno(linux.access("/root/usr/share/werewolf/dev", linux.F_OK)) == .SUCCESS) {
+            const marker = "/root/usr/share/werewolf/test-image";
+            if (linux.errno(linux.access(marker, linux.F_OK)) == .SUCCESS) {
                 after = boot.deadman;
-                say("the deadman waits {d}s (werewolf.deadman, a DEV build)", .{after});
-            } else say("werewolf.deadman ignored: not a DEV build", .{});
+                say("the deadman waits {d}s (werewolf.deadman, a test image)", .{after});
+            } else say("werewolf.deadman ignored: not a test image", .{});
         }
         deadman(@tagName(slot), after);
     }

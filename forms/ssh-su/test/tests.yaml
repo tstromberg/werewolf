@@ -1,0 +1,165 @@
+version: 1
+suites:
+  # su is werewolf's own and takes root only through a forwarded security
+  # key (forms/ssh-su/README.md); sshd's policy is what that relies on.
+  - name: ssh-su
+    policy:
+      run: [/usr/bin/su, /usr/bin/sshd, /usr/bin/sh]
+    cases:
+      # su has no privilege of its own: no setuid or setgid bit. The ssh
+      # client it starts is there.
+      - name: su-unprivileged
+        steps:
+          - file: /usr/bin/su
+            expect:
+              link: /usr/lib/werewolf/su
+          - file: /usr/lib/werewolf/su
+            expect:
+              type: file
+              mode: '755'
+          - file: /usr/bin/ssh
+            expect:
+              type: file
+      - name: su-no-session
+        steps:
+          - exec:
+              argv: [/usr/bin/su]
+            expect:
+              exit:
+                not_equals: 0
+              stderr: "su: unauthenticated session\n"
+      - name: su-no-options
+        steps:
+          - exec:
+              argv: [/usr/bin/su, -oProxyCommand=evil]
+            expect:
+              exit:
+                not_equals: 0
+              stderr:
+                contains: 'usage:'
+      # su pins the machine's own host key, as root's alone to change.
+      - name: su-public-pin
+        steps:
+          - file: /run/werewolf/ssh_known_hosts
+            expect:
+              uid: 0
+              gid: 0
+              mode: '644'
+              body:
+                matches: '^werewolf-local ssh-ed25519 '
+          - exec:
+              argv:
+                - /usr/bin/sh
+                - -c
+                - read -r _ k v </run/werewolf/ssh_known_hosts && read -r t s _ </run/svc/sshd/host-key.pub && [ "$k $v" = "$t $s" ]
+            expect:
+              exit: 0
+      # A security key needs a touch, and a person's verified: sshd puts
+      # verify-required before each person's key, and none is without it.
+      - name: su-server-policy
+        steps:
+          - exec:
+              argv: [/usr/bin/sshd, -T]
+            expect:
+              exit: 0
+              stdout:
+                matches: "(^|\n)PubkeyAuthOptions [^\n]*touch-required"
+          - exec:
+              argv: [/usr/bin/sshd, -T]
+            expect:
+              stdout:
+                contains_all: ["\nAuthenticationMethods publickey\n", "\nAllowAgentForwarding yes\n"]
+          - file: /usr/share/werewolf/sshd-verify-required
+            expect:
+              body:
+                matches: "(^|\n)sk-ssh-ed25519@openssh.com(\n|$)"
+          - exec:
+              argv:
+                - /usr/bin/sh
+                - -c
+                - for f in /run/werewolf/keys/*; do while read -r l; do case $l in sk-ssh-ed25519*) exit 1 ;; esac; done <"$f"; done
+            expect:
+              exit: 0
+      # A failed login from loopback, su's own, costs no penalty; one from
+      # anywhere else does, and starts are rationed.
+      - name: su-local-penalties
+        steps:
+          - exec:
+              argv: [/usr/bin/sshd, -T]
+            expect:
+              exit: 0
+              stdout:
+                contains_all:
+                  - "\nPerSourcePenaltyExemptList 127.0.0.1/32\n"
+                  - "\nMaxStartups 10:30:30\n"
+          - exec:
+              argv: [/usr/bin/sshd, -T]
+            expect:
+              stdout:
+                matches: "(^|\n)PerSourcePenalties [^\n]*authfail:"
+host:
+  # From the host, as an operator, with the run's keys (docs/testing-host.md):
+  # root logs in with its security key and runs commands; the session
+  # forwards nothing; su takes root through a forwarded key, and refuses
+  # every other way (test/ssh-su.zig). A key file is refused last, the one
+  # failed login, which sshd holds against its source.
+  - name: ssh-su-host
+    cases:
+      - name: ssh-login
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: echo $USER_ID
+            await: 60s
+            expect:
+              status: 0
+              stdout:
+                matches: "(^|\n)0\n?$"
+      - name: ssh-command-output
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: echo werewolf-ssh-command
+            expect:
+              status: 0
+              stdout:
+                matches: "(^|\n)werewolf-ssh-command\n?$"
+      - name: ssh-command-status
+        steps:
+          - ssh:
+              user: root
+              key: security
+              command: exit 23
+            expect:
+              status: 23
+      - name: ssh-no-forwarding
+        steps:
+          - ssh:
+              user: root
+              key: security
+              remote_forward: true
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: forwarding failed
+      - name: ssh-su
+        steps:
+          - program:
+              name: ssh-su
+              args: [ssh-su]
+            expect:
+              status: 0
+      - name: ssh-security-keys-only
+        steps:
+          - ssh:
+              user: root
+              key: file
+              command: echo werewolf-ssh-file-key
+            expect:
+              status:
+                not_equals: 0
+              stderr:
+                contains: Permission denied (publickey)
