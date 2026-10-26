@@ -1881,7 +1881,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         if (!o.help) {
             say(io, "warning: {s}", .{firecracker.warning});
             if (!firecracker.installed(io, gpa)) return why.refuse(
-                "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH (tools/install-deps)",
+                "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH " ++
+                    "(tools/install-deps)",
                 .{},
             );
         }

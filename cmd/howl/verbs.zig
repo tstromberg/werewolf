@@ -347,8 +347,10 @@ pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !vo
         const dir = try machineDir(gpa, name);
         if (firecracker.running(io, gpa, dir)) |pid|
             try firecracker.stop(io, gpa, dir, pid, why);
-        const pinned = if (Dir.cwd().access(io,
-            try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }), .{})) |_| true else |err| switch (err) {
+        const pinned = if (Dir.cwd().access(io, try gpa.print(
+            "{s}/{s}",
+            .{ dir, firecracker.trust_file },
+        ), .{})) |_| true else |err| switch (err) {
             error.FileNotFound => false,
             else => return err,
         };

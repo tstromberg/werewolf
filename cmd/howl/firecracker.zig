@@ -54,7 +54,13 @@ pub fn pin(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) !void {
         .kernel = BootTrust.hash(try esp.run("mtype", &.{try gpa.print("::{s}", .{e.linux})})),
         .initrd = BootTrust.hash(try esp.run("mtype", &.{try gpa.print("::{s}", .{e.initrd})})),
     };
-    try howl.writePrivate(io, gpa, try gpa.print("{s}/{s}", .{ dir, trust_file }), try std.json.Stringify.valueAlloc(gpa, trust, .{ .whitespace = .indent_2 }), why);
+    try howl.writePrivate(
+        io,
+        gpa,
+        try gpa.print("{s}/{s}", .{ dir, trust_file }),
+        try std.json.Stringify.valueAlloc(gpa, trust, .{ .whitespace = .indent_2 }),
+        why,
+    );
 }
 
 /// installed reports whether this is Linux with /dev/kvm and firecracker
@@ -530,7 +536,12 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) !
     const trust: ?BootTrust = if (pinned) try std.json.parseFromSliceLeaky(
         BootTrust,
         gpa,
-        try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/{s}", .{ dir, trust_file }), gpa, .limited(64 << 10)),
+        try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/{s}", .{ dir, trust_file }),
+            gpa,
+            .limited(64 << 10),
+        ),
         .{},
     ) else null;
     var chosen: ?Entry = null;
@@ -538,13 +549,24 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) !
         // The trusted host selects the initial image. Guest-written entries cannot
         // select a different kernel, root hash, command line or trial slot.
         const text = try esp.run("mtype", &.{"::/loader/entries/werewolf-a.conf"});
-        if (!mem.eql(u8, text, t.entry)) return why.refuse("pinned Firecracker boot entry changed", .{});
+        if (!mem.eql(
+            u8,
+            text,
+            t.entry,
+        )) return why.refuse("pinned Firecracker boot entry changed", .{});
         chosen = .parse("werewolf-a.conf", text);
     } else {
-        var listed = mem.tokenizeScalar(u8, try esp.run("mdir", &.{ "-b", "::/loader/entries" }), '\n');
+        var listed = mem.tokenizeScalar(
+            u8,
+            try esp.run("mdir", &.{ "-b", "::/loader/entries" }),
+            '\n',
+        );
         while (listed.next()) |path| {
             if (!mem.endsWith(u8, path, ".conf")) continue;
-            const e: Entry = .parse(path["::/loader/entries/".len..], try esp.run("mtype", &.{path}));
+            const e: Entry = .parse(
+                path["::/loader/entries/".len..],
+                try esp.run("mtype", &.{path}),
+            );
             if (chosen == null or e.before(chosen.?)) chosen = e;
         }
     }
@@ -568,7 +590,13 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) !
             return why.refuse("pinned Firecracker kernel or initrd changed; refusing to boot", .{});
         said = try gpa.print("{s}; host-pinned kernel, initrd and command line verified", .{said});
     }
-    const kernel = if (builtin.cpu.arch == .x86_64) shipped else image.unwrapZboot(gpa, shipped) catch |err| return why.refuse("{s}: {t}", .{ e.linux, err });
+    const kernel = if (builtin.cpu.arch == .x86_64)
+        shipped
+    else
+        image.unwrapZboot(
+            gpa,
+            shipped,
+        ) catch |err| return why.refuse("{s}: {t}", .{ e.linux, err });
     const kernel_path = try gpa.print("{s}/kernel", .{dir});
     const stage0_path = try gpa.print("{s}/stage0.zst", .{dir});
     try Dir.cwd().writeFile(io, .{ .sub_path = kernel_path, .data = kernel });
@@ -619,10 +647,13 @@ fn added(arg: []const u8) bool {
 pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
     // Preserve admission when an operator invokes the internal supervisor directly.
     // Once selected, losing the record during a guest reboot never downgrades it.
-    const require_pin = pinned or if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, trust_file }), .{})) |_| true else |err| switch (err) {
-        error.FileNotFound => false,
-        else => return err,
-    };
+    const require_pin = pinned or
+        if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, trust_file }), .{})) |_|
+            true
+        else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        };
     const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
@@ -712,12 +743,28 @@ test "host boot pins reject changed kernel, initrd, arguments and unknown versio
         .initrd = BootTrust.hash("trusted stage0 and IPE policy"),
     };
     try trust.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy");
-    try testing.expectError(error.BootFilesChanged, trust.verify(trust.entry, "other kernel", "trusted stage0 and IPE policy"));
-    try testing.expectError(error.BootFilesChanged, trust.verify(trust.entry, "trusted kernel", "other stage0 or IPE policy"));
-    try testing.expectError(error.BootFilesChanged, trust.verify("linux /kernel\ninitrd /initrd\noptions ipe.enforce=0\n", "trusted kernel", "trusted stage0 and IPE policy"));
+    try testing.expectError(
+        error.BootFilesChanged,
+        trust.verify(trust.entry, "other kernel", "trusted stage0 and IPE policy"),
+    );
+    try testing.expectError(
+        error.BootFilesChanged,
+        trust.verify(trust.entry, "trusted kernel", "other stage0 or IPE policy"),
+    );
+    try testing.expectError(
+        error.BootFilesChanged,
+        trust.verify(
+            "linux /kernel\ninitrd /initrd\noptions ipe.enforce=0\n",
+            "trusted kernel",
+            "trusted stage0 and IPE policy",
+        ),
+    );
     var future = trust;
     future.version = 2;
-    try testing.expectError(error.BootFilesChanged, future.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy"));
+    try testing.expectError(
+        error.BootFilesChanged,
+        future.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy"),
+    );
 }
 
 test net {

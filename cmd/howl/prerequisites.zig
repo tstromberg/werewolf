@@ -83,7 +83,13 @@ pub fn resolve(
     return resolveFor(io, gpa, steps, arch, why, true);
 }
 
-pub fn resolveIpe(io: Io, gpa: Allocator, steps: *progress.Steps, arch: howl.Arch, why: *howl.Why) !Inputs {
+pub fn resolveIpe(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    arch: howl.Arch,
+    why: *howl.Why,
+) !Inputs {
     return resolveFor(io, gpa, steps, arch, why, false);
 }
 
@@ -144,7 +150,14 @@ fn resolveFor(
     const made = (if (need_stub)
         security.prepare(gpa, host, source, cache, @tagName(arch), identity)
     else
-        security.prepareKernel(gpa, host, source, cache, @tagName(arch), identity.?)) catch |err| return steps.fail(try gpa.print(
+        security.prepareKernel(
+            gpa,
+            host,
+            source,
+            cache,
+            @tagName(arch),
+            identity.?,
+        )) catch |err| return steps.fail(try gpa.print(
         "preparing security inputs failed: {s}; see the builder dependencies in docs/testing.md",
         .{@errorName(err)},
     ));

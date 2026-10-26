@@ -104,28 +104,17 @@ and image (`CLOUD_KEEP=1` keeps them, with their test private keys). Logs are in
 
 ## Firecracker
 
-On a Linux/KVM host, `make check-firecracker-protected` builds a private playground
-guest using Firecracker's default IPE mode. It checks the limitation warning, active
-and locked IPE, guest reboot, stop/start, refusal of changed kernels, initrds and boot
-arguments, missing host trust, explicit protection downgrades, and delete. It needs
-Firecracker 1.17+, mtools, erofs-utils, passwordless sudo/doas and the source-build tools,
-with TUN and NAT modules available for the running host kernel. x86_64 boots the
-original bzImage to retain kernel address randomization; extracting its ELF bypasses it.
-The first run builds the local IPE kernel. Logs stay under
-`build/check/fc-protected-PID`; failures stop the guest and retain its artifacts.
-Boot files are pinned on the host; this mode takes image changes through host rebuilds.
+[Protected Firecracker checks](testing-secure-boot.md#firecracker) exercise the
+host-pinned IPE mode on Linux/KVM.
 
-`make check-firecracker` boots the `sshd` form as a Firecracker microVM on
-`FIRECRACKER_HOST` (default `galadriel`), a Linux host with KVM, Firecracker, mtools,
-erofs-utils and passwordless `doas`. The tree, built for x86_64 here, is copied over
-with a howl, a form tool and a verity tool cross-compiled for the host, so it needs no
-toolchain; the host resolves a lock the copy does not match with `go install`'s apko, at
-the version tools/install-deps pins. The form is sshd relaxed to take a key file the
-host holds, and the ad-hoc generator declares the `network-ssh-security-keys` weakness
-that costs. The machine must hand over to runit with its root verified, posture must
-fail exactly what the form and test/posture-known allow, ssh must reach it through its
-tap with the host's key, and delete must remove the machine. `FIRECRACKER_KEEP=1` leaves
-it for a look.
+`make check-firecracker` boots `sshd` on `FIRECRACKER_HOST` (default `galadriel`).
+The host needs Linux/KVM, Firecracker, mtools, erofs-utils and passwordless `doas`.
+The x86_64 tree, howl, form and verity tools are copied there; no Zig toolchain is
+needed. A mismatched lock is resolved with `go install`'s apko, pinned in
+`tools/install-deps`. The form accepts the host's key file and declares the
+`network-ssh-security-keys` weakness. It must hand over to runit with a verified root,
+match the form's and `test/posture-known`'s expected posture, and accept SSH through
+the tap with that key. Delete must remove the VM; `FIRECRACKER_KEEP=1` retains it.
 
 ## bhyve
 

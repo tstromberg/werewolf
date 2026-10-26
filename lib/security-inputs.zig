@@ -664,7 +664,13 @@ pub fn prepareKernel(
         input.* = .{ .name = name, .path = try gpa.print("{s}/{s}", .{ tree, name }) };
     inputs[kernel_sources.len] = .{ .name = "certificate", .path = signer.cert };
     const pin = try fingerprint(host.io, gpa, arch, &inputs);
-    var b: Build = .{ .host = host, .tree = tree, .cache = cache, .arch = arch, .cert = signer.cert };
+    var b: Build = .{
+        .host = host,
+        .tree = tree,
+        .cache = cache,
+        .arch = arch,
+        .cert = signer.cert,
+    };
     const kernel = try cached(host.io, gpa, try gpa.print("{s}/{s}/test-kernel-{s}", .{
         cache, arch, &pin,
     }), &pin, "rootfs.tar", .{ .context = &b, .make = Build.kernel });
