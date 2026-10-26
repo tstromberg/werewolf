@@ -169,8 +169,8 @@ a line a flag; a map's value set twice is refused; `accounts`, `paths`,
 
 An `image` is pinned to the digest `crane` resolves, baked in at `/oci/NAME` and run
 inside it as `_oci-NAME`, with its entrypoint (an ELF program, never a `#!` script),
-its own `/tmp`, `/run`, `/data` and `/proc`, and a pledge of `stdio rpath wpath inet
-unix connect listen proc` unless you say otherwise. That leaves out `sendfile`
-([lib/seal.zig](../lib/seal.zig) says why): nginx, as above, needs it in its own, or
-sends headers alone. Until you give a `listen` or `write` line, howl refuses and prints
-the lines to choose from. The unpack's rules are in [design/oci.md](design/oci.md).
+its own `/tmp`, `/run`, `/data` and `/proc`, and a pledge of
+`stdio rpath wpath inet unix connect listen proc` unless you say otherwise; nginx,
+above, adds the `sendfile` it leaves out ([lib/seal.zig](../lib/seal.zig) says why).
+Until you give a `listen` or `write` line, howl refuses and prints the lines to choose
+from. The unpack's rules are in [design/oci.md](design/oci.md).
