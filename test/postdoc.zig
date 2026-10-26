@@ -8,6 +8,8 @@ pub const tunnel = "wget -q -T 10 -O - http://127.0.0.1:2000/metrics | grep -q c
 const sample = "module.exports = function add(a, b) { return a + b; };\n";
 
 /// The guest reads the token; no secret becomes a host argument or log entry.
+/// Flush the seed before howl stop's power cut: postdoc's best-effort cache
+/// uses atomic renames, which alone do not make new files durable on disk.
 pub fn command(gpa: std.mem.Allocator, resumed: bool) ![]const u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(sample, &digest, .{});
@@ -20,7 +22,7 @@ pub fn command(gpa: std.mem.Allocator, resumed: bool) ![]const u8 {
             "--header 'X-Filename: add.js' --post-file /data/postdoc-check.js " ++
             "'http://127.0.0.1:49999/v1/analyze?force=1'", .{try host.check.quote(gpa, sample)});
     return gpa.print(
-        "t=$(cat /run/config/postdoc/api-token); {s} | grep -q '\"decision\":\"allow\"'",
-        .{request},
+        "t=$(cat /run/config/postdoc/api-token); {s} | grep -q '\"decision\":\"allow\"'{s}",
+        .{ request, if (resumed) "" else " && sync" },
     );
 }

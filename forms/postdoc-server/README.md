@@ -79,6 +79,8 @@ The publication gate exercises this form through signed upgrades, operator rollb
 TPM retirement power cuts and failed-trial recovery on disposable signing keys. It
 checks the JIT-backed API and saved verdict after each committed boot; candidate boots
 also verify the exact production-signed image with disposable boot configuration.
+The test flushes the completed analysis before `howl stop`, which cuts VM power;
+the server's local verdict cache does not promise durable writes before a power loss.
 
 `--build` uses your own signing keys. It does not follow werewolf's public signed
 updates. To get automatic A/B updates for a local build, its builder must serve a
