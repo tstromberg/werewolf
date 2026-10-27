@@ -446,6 +446,7 @@ _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/preb
 _test/lib/boot-download.zig: ; zig test --dep prebuilt --dep update-policy --dep host -Mroot=lib/boot-download.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mhost=test/host/host.zig
+_test/cmd/howl/howl.zig _test/cmd/howl/import.zig _test/cmd/howl/test.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig
