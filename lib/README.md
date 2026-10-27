@@ -74,12 +74,13 @@ and `/boot`.
 The release floor ([independent-updates.md](../docs/design/independent-updates.md)):
 one NV counter per release channel at `0x0150XXXX`, XXXX the channel identity's first
 two bytes, with empty authorization, no policy and the attributes AUTHWRITE, COUNTER,
-AUTHREAD and NO_DA. `Device.boot`, for stage0, closes the platform hierarchy, enrolls a
-TPM nobody owns (defines the counter at the release's index, disables clear, sets
+AUTHREAD and NO_DA. `Device.boot`, for stage0, closes the platform hierarchy, enrolls
+a TPM nobody owns (defines the counter at the release's index, disables clear, sets
 random owner and lockout passwords it forgets) and returns the floor; `Device.raise`,
-for the mount broker, increments the counter to an index and never lowers it. `Marker`
-is what init records in `/run/werewolf/rollback-checked` for posture: `floor=M index=N
-handle=0x...`. A root holding `/usr/share/werewolf/tpm/protocol` (`3`) requires it.
+for the mount broker, increments the counter to an index and never lowers it.
+`Marker` is what init records in `/run/werewolf/rollback-checked` for posture:
+`floor=M index=N handle=0x...`. A root holding `/usr/share/werewolf/tpm/protocol`
+(`3`) requires it.
 
 ## dm
 
@@ -89,9 +90,9 @@ mount-broker removes /data's LUKS mapping at shutdown.
 
 ## verity
 
-Builds the dm-verity hash tree for a root image (format version 1, no superblock, 4 KiB
-blocks, SHA-256, levels top first after the data) and the table stage0 loads. Used by
-howl's build, slot-update and stage0, and by `tools/verity.zig` for `make
+Builds the dm-verity hash tree for a root image (format version 1, no superblock, 4
+KiB blocks, SHA-256, levels top first after the data) and the table stage0 loads.
+Used by howl's build, slot-update and stage0, and by `tools/verity.zig` for `make
 check-updater`. The salt is SHA-256 of the image rather than random, so the build and
 the updater make the same tree and builds stay reproducible. See
 [docs/design/verified-boot.md](../docs/design/verified-boot.md).
@@ -128,7 +129,7 @@ init, mount-broker, slot-update, leash, posture and others:
 | `channel=HEX`, `index=N` | the release's channel (64 hex digits) and index, held to the TPM floor; both or neither, on a secure boot only |
 | `disable=LIST` | the protections (`secureboot`, `tpm`, `ipe`) the machine lacks; `secureboot` needs `tpm` |
 | `deadman=SECONDS` | the deadman's wait, 1 to 600 |
-| `seal=learn\|enforce`, `debug=1` | DEV=1 builds only |
+| `debug=1` | developer uploads, on a `--dev=ssh` image alone |
 | `check=1` | posture's attacks, for tests |
 
 Each word may appear once and must be well formed, or the whole line is
@@ -161,14 +162,15 @@ escapes, `|` blocks and `[a, b]` over several lines.
 
 ## compose
 
-Derives everything an image holds beyond its packages from its chain: allowances, sshd
-and bastion files, the accounts init seeds, supervise links, and the records in
+Derives everything an image holds beyond its packages from its chain: allowances,
+sshd and bastion files, the accounts init seeds, supervise links, and the records in
 /usr/share/werewolf (network policy, promises, kernel arguments) that init, fence,
-posture and the updater read. The build (`build/host/form compose`) and slot-update call
-the same function, so a slot built on a machine matches the build's. It writes only into
-the two directories it is given: on a machine, a scratch directory the updater copies in
-with its own checks, never the new root, where a package's symlink could redirect a
-write. See [docs/design/custom-updates.md](../docs/design/custom-updates.md).
+posture and the updater read. The build (`build/host/form compose`) and slot-update
+call the same function, so a slot built on a machine matches the build's. It writes
+only into the two directories it is given: on a machine, a scratch directory the
+updater copies in with its own checks, never the new root, where a package's symlink
+could redirect a write. See
+[docs/design/custom-updates.md](../docs/design/custom-updates.md).
 
 Each image stages its chain (form.yaml, rootfs) and
 posture-known in /usr/share/werewolf. A form CI publishes, NAME-form, holds
@@ -268,8 +270,8 @@ Checks form.yaml's `sshd:` and `bastion:` at build time (via lib/form).
 
 ## service
 
-Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the service, and
-narrows a program it runs), howl pack (its config and setting flags), `seal` (its
+Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the service,
+and narrows a program it runs), howl pack (its config and setting flags), `seal` (its
 pledge) and compose (the machine's promises). Each reads the whole file the same way.
 cmd/leash/leash.8.md documents the lines, including caps and a shared data directory.
 

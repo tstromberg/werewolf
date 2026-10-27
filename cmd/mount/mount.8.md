@@ -21,21 +21,22 @@ The Werewolf **mount** utility mounts, binds and remounts the filesystems used d
 boot. It is normally called by init(8). It does not read fstab, probe filesystem
 types, resolve labels or configure loop devices.
 
-Supported types are proc, sysfs, securityfs, cgroup2, devtmpfs, devpts, tmpfs, ext4 and
-iso9660. Targets are restricted to the boot filesystem locations beneath `/proc`,
-`/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/data`, `/boot`, `/mnt` and `/oci`. Mounts
-over the root, /etc or /usr are refused. Paths must be absolute, without dot components,
-and are resolved without symlinks.
+Supported types are proc, sysfs, securityfs, cgroup2, devtmpfs, devpts, tmpfs, ext4
+and iso9660. Targets are restricted to the boot filesystem locations beneath `/proc`,
+`/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/data`, `/boot`, `/mnt` and `/oci`.
+Mounts over the root, /etc or /usr are refused. Paths must be absolute, without dot
+components, and are resolved without symlinks.
 
 New mounts are nosuid and noexec, with nodev except for device filesystems and
 nosymfollow except for proc, sysfs and devtmpfs. The symfollow option withholds
-nosymfollow from a new mount or bind. Binds retain the source's restrictions. Remounts
-only add restrictions; rw and symfollow are refused on remount. The suid, dev, exec
-and strictatime options are refused.
+nosymfollow from a new mount or bind. Binds retain the source's restrictions.
+Remounts only add restrictions; rw and symfollow are refused on remount. The suid,
+dev, exec and strictatime options are refused.
 
 Mounts are built and restricted while detached, then attached. The utility keeps
 CAP_SYS_ADMIN alone and installs a system call filter before performing mount
-operations. After fence(8), ordinary processes cannot mount even through this utility.
+operations. After fence(8), ordinary processes cannot mount even through this
+utility.
 
 ## EXIT STATUS
 

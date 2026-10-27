@@ -151,7 +151,7 @@ also had to be placed in `gitea`'s runtime `run:` list solely for `gitea-init`
 
 ---
 
-## 5. Interactive `sshd` (`caps: login`) Execute Surface & Privileged Tool Permissions
+## 5. `sshd` (`caps: login`) Execute Surface & Privileged Tool Permissions
 
 - **Files:**
   - `cmd/leash/leash.zig`

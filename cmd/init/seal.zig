@@ -14,11 +14,11 @@ const mkdir = init.mkdir;
 const say = init.say;
 const writeErrno = init.writeErrno;
 
-/// policyText returns the text of seal_lib.policy_path: the mode and the
-/// promises the seal allows.
-fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
+/// policyText returns the text of seal_lib.policy_path: the mode, enforce,
+/// and the promises the seal allows.
+fn policyText(gpa: Allocator, promises: seal_lib.Set) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.print(gpa, "mode {s}\npromises", .{if (learn) "learn" else "enforce"});
+    try out.appendSlice(gpa, "mode enforce\npromises");
     var it = promises.iterator();
     while (it.next()) |p| try out.print(gpa, " {s}", .{@tagName(p)});
     try out.append(gpa, '\n');
@@ -85,8 +85,7 @@ fn startWatch() ?i32 {
 /// the services' `pledge` lines (/usr/share/werewolf/pledge,
 /// docs/design/pledge.md); leash then narrows each service to its own.
 /// Other calls go to seal-watch, which refuses them with ENOSYS and logs
-/// each once, or allows and records them under werewolf.seal=learn on a
-/// DEV=1 build. A leashed service's own filter refuses first; the kernel
+/// each once. A leashed service's own filter refuses first; the kernel
 /// audits those refusals (SECCOMP_FILTER_FLAG_LOG).
 ///
 /// The order is the helpers' bounding set, PID 1's, then the filter. PID 1
@@ -94,13 +93,6 @@ fn startWatch() ?i32 {
 /// later program. Any failed step is an error, except a capability the
 /// kernel does not know (EINVAL), which it cannot grant anyway.
 pub fn seal(m: *Machine) !void {
-    // In learn mode seal-watch allows and records each unpromised call with
-    // the promise that would allow it, so an author learns what a pledge
-    // lacks. Only DEV=1 builds, which are never released, honor it.
-    const learn = m.cmd.seal == .learn and
-        std.mem.eql(u8, m.read("/usr/share/werewolf/dev"), "dev\n");
-    if (m.cmd.seal == .learn and !learn)
-        say("werewolf.seal=learn ignored: only a DEV=1 build learns", .{});
     var bad: []const u8 = "";
     const pledged = seal_lib.parse(m.read("/usr/share/werewolf/pledge"), &bad) catch |err| {
         say("/usr/share/werewolf/pledge: {s}: {s}", .{ bad, @errorName(err) });
@@ -156,23 +148,23 @@ pub fn seal(m: *Machine) !void {
     // Only seal-watch keeps the listener. If no one holds it, the kernel
     // refuses every unpromised call itself.
     if (watch) |sock| {
-        if (!seal_lib.sendListener(sock, listener, if (learn) "l" else "e"))
+        if (!seal_lib.sendListener(sock, listener, "e"))
             say("seal-watch did not take the listener: unlisted calls are refused unsaid", .{});
         _ = linux.close(sock);
     }
     _ = linux.close(listener);
-    m.write(seal_lib.policy_path, policyText(m.gpa, learn, promises) catch "", 0o644);
+    m.write(seal_lib.policy_path, policyText(m.gpa, promises) catch "", 0o644);
     say(
-        "sealed: {d} promises; every other call {s}; {d} capabilities dropped; " ++
+        "sealed: {d} promises; every other call refused; {d} capabilities dropped; " ++
             "other architectures' calls fatal",
-        .{ promises.count(), if (learn) "allowed and recorded" else "refused", caps },
+        .{ promises.count(), caps },
     );
 }
 
 test policyText {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const text = try policyText(arena.allocator(), false, .initMany(&.{ .stdio, .inet }));
+    const text = try policyText(arena.allocator(), .initMany(&.{ .stdio, .inet }));
     try testing.expectEqualStrings("mode enforce\npromises stdio inet\n", text);
 }
 

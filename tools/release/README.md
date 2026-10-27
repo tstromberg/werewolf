@@ -3,19 +3,21 @@
 ## Summary
 
 `build/host/release VERB ARG...` builds, tests, signs and publishes werewolf's images
-(`make build/host/release`). Each verb is one of the release scripts it replaced, with
-their arguments, refusals and output bytes.
+(`make build/host/release`). Each verb is one of the release scripts it replaced,
+with their arguments, refusals and output bytes.
 
 ## Background
 
-[form-images.yml](../../.github/workflows/form-images.yml) builds every published form
-twice per architecture and provider, in the secure-boot and legacy-boot profiles, gates
-the exact bundles and publishes the passing ones ([releases](../../docs/releases.md),
-[form images](../../docs/form-images.md)). Its jobs run these verbs.
+[form-images.yml](../../.github/workflows/form-images.yml) builds every published
+form twice per architecture and provider, in the secure-boot and legacy-boot
+profiles, gates the exact bundles and publishes the passing ones
+([releases](../../docs/releases.md), [form images](../../docs/form-images.md)). Its
+jobs run these verbs.
 
 ## Goals
 
-- One host program; the data a person edits, [images.yaml](../../release/images.yaml).
+- One host program; the data a person edits,
+  [images.yaml](../../release/images.yaml).
 - Records that are signed or published keep the bytes the scripts wrote them with.
 - Every refusal is tested beside its code, with no network, gh, aws or howl.
 
@@ -68,6 +70,6 @@ exact bundle, provider and architecture; immutable objects precede heads.
 
 Every failure names its program and target, and one target's failure never stops the
 others. A store interrupted mid-publication is recovered by its signed receipt and
-never loses its floor; a retry reuses the bytes an earlier attempt signed.
-`make _test/tools/release/release.zig` runs the tests, real openssl, zstd and qemu-img
+never loses its floor; a retry reuses the bytes an earlier attempt signed. `make
+_test/tools/release/release.zig` runs the tests, real openssl, zstd and qemu-img
 included.

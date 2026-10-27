@@ -39,7 +39,6 @@ limit what it can do.
 | autoupdate | `_updater` (77), no capabilities, Landlock and seccomp; only it retains the updater broker channel. A private root launcher stays inside state with immutable sources, no host descriptors and no mount or chroot capability. Disposable construction jobs and `_update` (69) fetchers/readers run behind that boundary ([coordinator](updater-coordinator.md), [installer](updater-installer.md)). |
 | posture | Keep privileged inspection once per boot. Dropping root must not silently skip protected process, account or attack checks. Bound mutable evidence reads; drop capabilities and stop through its own control pipe ([audit](posture-inspection.md)). |
 | sshd / sshd-dev | Keep upstream's privileged monitor and unprivileged connection handling. The forwarding-only bastion already runs without root. |
-| debug-shell | Keep the explicit development-only root console; production images cannot enable it. |
 
 ### Filesystem confinement
 
@@ -58,8 +57,7 @@ make protected inspection disappear. New built-ins need the same review.
 The mount broker keeps SYS_ADMIN and its existing three role channels. PID 1 and
 the shutdown stages retain lifecycle authority. Stage0's deadman stays independent
 of the running slot, with its existing reboot and commit-inspection authority.
-seal-watch already drops to `_seal` when enforcing; its development-only learning
-mode retains the access needed to identify callers. leash gives root up before
+seal-watch drops to `_seal` before it answers a call. leash gives root up before
 executing applications. Boot mount/interface helpers and leash-reap remain small,
 short-lived privileged operations.
 

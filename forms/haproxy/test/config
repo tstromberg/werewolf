@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/haproxy/test/config DIR: the haproxy form's config for make check,
-# in DIR: one backend, on loopback :443, where test/checks listens and
+# in DIR: one backend, on loopback :443, where test/tests.yaml listens and
 # records what reaches it. No certificate, so HAProxy serves HTTP on :80.
 set -eu
 mkdir -p "$1/haproxy"

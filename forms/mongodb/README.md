@@ -11,7 +11,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/mongodb/index.html).
 - MongoDB runs as its own user, with no capabilities.
 - Its image is pinned by digest and baked into the verified root.
 - Only declared local clients reach TCP 27017. It has no outbound network access.
-- Database files survive under `/data/svc/mongodb`; the application image is read-only.
+- Database files survive under `/data/svc/mongodb`; the application image is
+  read-only.
 - Server-side JavaScript and the container's shell entrypoint are disabled.
 
 ## Getting Started

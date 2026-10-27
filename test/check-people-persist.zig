@@ -2,10 +2,12 @@
 //! /data volume and never lets a retired identity be reused: enrollment,
 //! retirement, conflicting people and NoCloud requests, reactivation, and
 //! refusal of a corrupt or missing reservation table before services
-//! start. make check-people-persist supplies CHECK_ENV and the QEMU
-//! arguments. Successful boots go through test/boot; damaged-ledger boots
-//! must panic before handover. NoCloud seeds take hdiutil on macOS and
-//! xorriso elsewhere.
+//! start. make check-people-persist supplies CHECK_ENV, ARCH and the QEMU
+//! arguments, and OUT, people-persist's native test image. Successful boots
+//! are its native boots (native-tests boot), whose driver
+//! (test/scenarios/people-persist) knows each by the hostname its config
+//! gives; damaged-ledger boots must panic before handover. NoCloud seeds
+//! take hdiutil on macOS and xorriso elsewhere.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,17 +17,12 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const join = std.fs.path.join;
 
-// These distinct names collide under the current people mapping.
+// These distinct names collide under the current people mapping; the
+// scenario's driver checks for the same names and key.
 const person = "u2guv05clv";
 const collision = "udm5vojgxd";
-const person_uid = 982829894;
 const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGf9JfLCEyq5b4u2jFqCi6Q7BSQx5vLzPVRzCPkTaq2f";
-
-const Account = struct { name: []const u8, uid: u32, source: []const u8 };
-const accounts_kept = [_]Account{
-    .{ .name = person, .uid = person_uid, .source = "p" },
-    .{ .name = "lima", .uid = 1000, .source = "n" },
-};
+const scenario = "test/scenarios/people-persist";
 
 pub fn main(init: std.process.Init) void {
     var c = host.Check.init(init, "people-persist") catch |err| {
@@ -69,60 +66,46 @@ fn run(c: *host.Check) !void {
         defer disk.close(c.io);
         try disk.setLength(c.io, 256 << 20);
     }
-    const original = try config(c, "original", person);
-    const empty = try config(c, "empty", null);
-    const colliding = try config(c, "collision", collision);
     const original_seed = try seed(c, 1000);
     const changed_seed = try seed(c, 1001);
-
-    var enroll: std.ArrayList([]const u8) = .empty;
-    try enroll.appendSlice(gpa, try accounts(gpa, true));
-    for (accounts_kept) |a| {
-        const private = try gpa.print("/data/home/{s}/private", .{a.name});
-        try enroll.append(gpa, try gpa.print(
-            "ok {s}-create printf '%s\\n' {s}-secret >{s} && chmod 600 {s} && " ++
-                "chown {d}:{d} {s} && stat -c '%i:%u:%g:%a' {s} >/data/{s}.stat",
-            .{ a.name, a.name, private, private, a.uid, a.uid, private, private, a.name },
-        ));
-    }
-    try enroll.append(gpa, "ok save-ledger cp /data/.werewolf/identities /data/identities.saved");
-    try enroll.appendSlice(gpa, try files(gpa, true));
-    try boot(r, "enroll", enroll.items, original, original_seed);
-
-    const retired = try mem.concat(gpa, []const u8, &.{
-        try accounts(gpa, false), try files(gpa, false),
-    });
-    try boot(r, "retire", retired, empty, null);
-    const refusals = [_][]const u8{
-        "seen hash-refused '" ++ collision ++ "': name or UID is already reserved",
-        "seen nocloud-refused NoCloud name or UID is already reserved",
-        "ok collision-absent ! grep -q '^" ++ collision ++ ":' /etc/passwd && " ++
-            "[ ! -e /data/home/" ++ collision ++ " ] && " ++
-            "[ ! -e /run/werewolf/keys/" ++ collision ++ " ]",
-    };
-    const conflict = try mem.concat(gpa, []const u8, &.{ retired, &refusals });
-    try boot(r, "conflict", conflict, colliding, changed_seed);
-    const restored = try mem.concat(gpa, []const u8, &.{
-        try accounts(gpa, true), try files(gpa, true),
-    });
-    try boot(r, "restore", restored, original, original_seed);
-    try damaged(r, "corrupt", original, original_seed, debugfs.?, false);
-    try damaged(r, "missing", original, original_seed, debugfs.?, true);
+    try boot(r, "enroll", person, original_seed);
+    try boot(r, "retire", null, null);
+    try boot(r, "conflict", collision, changed_seed);
+    try boot(r, "restore", person, original_seed);
+    const damaged_config = try pack(c, try config(c, "damaged", person));
+    try damaged(r, "corrupt", damaged_config, original_seed, debugfs.?, false);
+    try damaged(r, "missing", damaged_config, original_seed, debugfs.?, true);
 }
 
-/// config writes name.tar, the config disk naming who, or no one, as the
-/// machine's one admin.
+/// config writes the config directory of the boot people-NAME, naming who,
+/// or no one, as the machine's one admin. It has no data.key: /data is
+/// plain ext4, which the damaged boots edit offline.
 fn config(c: *host.Check, name: []const u8, who: ?[]const u8) ![]const u8 {
-    var out: Io.Writer.Allocating = .init(c.gpa);
-    var tar: std.tar.Writer = .{ .underlying_writer = &out.writer };
-    try tar.writeFileBytes("hostname", "people-persist\n", .{ .mode = 0o600 });
+    const dir = try c.path(name);
+    try Io.Dir.cwd().deleteTree(c.io, dir);
+    try Io.Dir.cwd().createDirPath(c.io, dir);
+    try Io.Dir.cwd().writeFile(c.io, .{
+        .sub_path = try join(c.gpa, &.{ dir, "hostname" }),
+        .data = try c.gpa.print("people-{s}\n", .{name}),
+    });
     var users: []const u8 = "";
     if (who) |p| users = try c.gpa.print("{s} admin {s} people-persist\n", .{ p, key });
-    try tar.writeFileBytes("users", users, .{ .mode = 0o600 });
-    try tar.finishPedantically();
-    const path = try c.path(try c.gpa.print("{s}.tar", .{name}));
-    try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = path, .data = out.written() });
-    return path;
+    try Io.Dir.cwd().writeFile(c.io, .{
+        .sub_path = try join(c.gpa, &.{ dir, "users" }),
+        .data = users,
+    });
+    return dir;
+}
+
+/// pack is dir as a config disk, as howl packs one for prod.
+fn pack(c: *host.Check, dir: []const u8) ![]const u8 {
+    const tar = try c.gpa.print("{s}.tar", .{dir});
+    _ = try c.must(
+        &.{ try need(c, "HOWL"), "pack", "--build", "--with", "prod", "--config", dir, "-o", tar },
+        "pack",
+        .{},
+    );
+    return tar;
 }
 
 /// seed writes a NoCloud seed asking for lima at uid.
@@ -156,11 +139,11 @@ fn userData(gpa: Allocator, uid: u32) ![]const u8 {
         "    ssh_authorized_keys:\n      - {s} nocloud-persist\n", .{ uid, key });
 }
 
-/// machine is the QEMU command booting init on data with the config disk
-/// and, when given, the NoCloud seed.
+/// machine is the QEMU command booting init on data with, when given, the
+/// config disk and the NoCloud seed.
 fn machine(
     r: Run,
-    config_disk: []const u8,
+    config_disk: ?[]const u8,
     seed_disk: ?[]const u8,
     data: []const u8,
 ) ![]const []const u8 {
@@ -173,44 +156,49 @@ fn machine(
         "-initrd", r.initramfs,
         "-append", try gpa.print("{s} werewolf.data=vda", .{r.cmdline}),
         "-drive",  try gpa.print("file={s},format=raw,if=virtio", .{data}),
-        "-drive",  try gpa.print(read_only, .{config_disk}),
     });
-    if (seed_disk) |s| try argv.appendSlice(gpa, &.{ "-drive", try gpa.print(read_only, .{s}) });
+    for ([_]?[]const u8{ config_disk, seed_disk }) |disk| if (disk) |d|
+        try argv.appendSlice(gpa, &.{ "-drive", try gpa.print(read_only, .{d}) });
     return argv.items;
 }
 
-/// boot runs checks on a successful boot through test/boot, whose lines
-/// are the check's own. Only enrollment may format /data.
-fn boot(
-    r: Run,
-    name: []const u8,
-    checks: []const []const u8,
-    config_disk: []const u8,
-    seed_disk: ?[]const u8,
-) !void {
+/// boot is the native boot people-NAME, its admin who or no one: the
+/// scenario's driver judges it inside, and its console must say no more
+/// than that boot should. Only enrollment may format /data; the
+/// conflicting boot must refuse both its colliding requests.
+fn boot(r: Run, name: []const u8, who: ?[]const u8, seed_disk: ?[]const u8) !void {
     const c = r.c;
     const gpa = c.gpa;
-    const checks_file = try c.path(try gpa.print("{s}.checks", .{name}));
-    var text: std.ArrayList(u8) = .empty;
-    for (checks) |line| try text.print(gpa, "{s}\n", .{line});
-    try Io.Dir.cwd().writeFile(c.io, .{ .sub_path = checks_file, .data = text.items });
-    const log = try c.path(try gpa.print("{s}.log", .{name}));
+    var env = try c.env.clone(gpa);
+    try env.put("NATIVE_CONFIG", try config(c, name, who));
     const label = try gpa.print("people-{s}", .{name});
     const argv = try mem.concat(gpa, []const u8, &.{
-        &.{ "test/boot", label, checks_file, log },
-        try machine(r, config_disk, seed_disk, r.disk),
+        &.{ "build/host/native-tests", "boot", scenario, try need(c, "ARCH"), "seed", label },
+        try machine(r, null, seed_disk, r.disk),
     });
     var child = try std.process.spawn(c.io, .{
         .argv = argv,
-        .environ_map = &c.env,
+        .environ_map = &env,
         .stdin = .ignore,
     });
     const term = try child.wait(c.io);
-    if (!term.success()) return c.fail("{s}: test/boot {f}; see {s}", .{ name, term, log });
-    if (mem.eql(u8, name, "enroll")) return;
-    const console = try Io.Dir.cwd().readFileAlloc(c.io, log, gpa, .unlimited);
-    if (mem.find(u8, console, "werewolf: formatting ") != null)
+    const log = try join(
+        gpa,
+        &.{ try need(c, "CHECK"), try gpa.print("{s}-native", .{label}), "seed.log" },
+    );
+    if (!term.success()) return c.fail("{s}: native-tests {f}; see {s}", .{ name, term, log });
+    const console = try host.qemu.clean(
+        gpa,
+        try Io.Dir.cwd().readFileAlloc(c.io, log, gpa, .unlimited),
+    );
+    if (!mem.eql(u8, name, "enroll") and mem.find(u8, console, "werewolf: formatting ") != null)
         return c.fail("{s}: reformatted persistent data; see {s}", .{ name, log });
+    if (!mem.eql(u8, name, "conflict")) return;
+    for ([_][]const u8{
+        "'" ++ collision ++ "': name or UID is already reserved",
+        "NoCloud name or UID is already reserved",
+    }) |refusal| if (mem.find(u8, console, refusal) == null)
+        return c.fail("{s}: no refusal \"{s}\"; see {s}", .{ name, refusal, log });
 }
 
 /// damaged boots a copy of /data whose reservation table is corrupt or,
@@ -295,114 +283,6 @@ fn refused(clean: []const u8, raw: []const u8, remove_only: bool) bool {
         mem.find(u8, raw, "Kernel panic") != null and
         mem.find(u8, clean, "handing over to runit") == null and
         mem.find(u8, raw, "handing over to runit") == null;
-}
-
-/// accounts are the checks of both kept accounts, active or retired, and
-/// of the private reservation table they share.
-fn accounts(gpa: Allocator, active: bool) ![]const []const u8 {
-    const shell = if (active) "/bin/mksh" else "/sbin/nologin";
-    const shadow = if (active) "\\*" else "!";
-    var out: std.ArrayList([]const u8) = .empty;
-    for (accounts_kept) |a| {
-        const home = try gpa.print("/data/home/{s}", .{a.name});
-        try out.append(gpa, try gpa.print(
-            "ok {s}-account grep -qx '{s}:x:{d}:{d}::{s}:{s}' /etc/passwd && " ++
-                "grep -q '^{s}:{s}:' /etc/shadow && grep -qx '{s}:x:{d}:' /etc/group",
-            .{ a.name, a.name, a.uid, a.uid, home, shell, a.name, shadow, a.name, a.uid },
-        ));
-        try out.append(gpa, try gpa.print(
-            "ok {s}-reservation grep -qx '{s} {s} {d} {d}' /data/.werewolf/identities",
-            .{ a.name, a.source, a.name, a.uid, a.uid },
-        ));
-        try out.append(gpa, try gpa.print(
-            "ok {s}-home [ \"$(stat -c '%u:%g:%a' {s})\" = {d}:{d}:700 ]",
-            .{ a.name, home, a.uid, a.uid },
-        ));
-        if (active) {
-            try out.append(gpa, try gpa.print(
-                "ok {s}-key [ \"$(stat -c '%u:%g:%a' /run/werewolf/keys/{s})\" = 0:{d}:640 ] " ++
-                    "&& grep -q '{s}' /run/werewolf/keys/{s}",
-                .{ a.name, a.name, a.uid, key, a.name },
-            ));
-        } else try out.append(gpa, try gpa.print(
-            "ok {s}-revoked [ ! -e /run/werewolf/keys/{s} ]",
-            .{ a.name, a.name },
-        ));
-    }
-    try out.appendSlice(gpa, &.{
-        "ok ledger-private [ \"$(stat -c '%u:%g:%a' /data/.werewolf)\" = 0:0:700 ] && " ++
-            "[ \"$(stat -c '%u:%g:%a' /data/.werewolf/identities)\" = 0:0:600 ] && " ++
-            "[ \"$(wc -l </data/.werewolf/identities)\" -eq 3 ]",
-        if (active)
-            "ok admin-key grep -q people-persist /run/werewolf/keys/root"
-        else
-            "ok admin-key [ ! -s /run/werewolf/keys/root ]",
-        if (active)
-            "ok active-list grep -qx " ++ person ++ " /run/werewolf/people"
-        else
-            "ok active-list [ ! -s /run/werewolf/people ]",
-    });
-    return out.items;
-}
-
-/// files are the checks that each account's private file kept its inode,
-/// owner and mode, that no one else can read it, and, once restored, that
-/// its owner can.
-fn files(gpa: Allocator, restored: bool) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    try out.appendSlice(gpa, &.{
-        "ok same-ledger cmp /data/identities.saved /data/.werewolf/identities",
-        "ok outsider-uid [ \"$(chpst -u :1001:1001 id -u)\" = 1001 ]",
-    });
-    for (accounts_kept) |a| {
-        const private = try gpa.print("/data/home/{s}/private", .{a.name});
-        try out.append(gpa, try gpa.print(
-            "ok {s}-ownership [ \"$(stat -c '%i:%u:%g:%a' {s})\" = \"$(cat /data/{s}.stat)\" ] " ++
-                "&& grep -qx {s}-secret {s}",
-            .{ a.name, private, a.name, a.name, private },
-        ));
-        try out.append(gpa, try gpa.print(
-            "ok {s}-private ! chpst -u :1001:1001 cat {s} 2>/tmp/private-error && " ++
-                "grep -q 'Permission denied' /tmp/private-error",
-            .{ a.name, private },
-        ));
-        if (restored) try out.append(gpa, try gpa.print(
-            "ok {s}-access chpst -u :{d}:{d} cat {s} | grep -qx {s}-secret",
-            .{ a.name, a.uid, a.uid, private, a.name },
-        ));
-    }
-    return out.items;
-}
-
-test "the account checks name the exact identities, active or retired" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const active = try accounts(gpa, true);
-    try std.testing.expectEqual(11, active.len);
-    try std.testing.expectEqualStrings(
-        "ok u2guv05clv-account grep -qx 'u2guv05clv:x:982829894:982829894::" ++
-            "/data/home/u2guv05clv:/bin/mksh' /etc/passwd && grep -q '^u2guv05clv:\\*:' " ++
-            "/etc/shadow && grep -qx 'u2guv05clv:x:982829894:' /etc/group",
-        active[0],
-    );
-    try std.testing.expectEqualStrings(
-        "ok lima-reservation grep -qx 'n lima 1000 1000' /data/.werewolf/identities",
-        active[5],
-    );
-    const retired = try accounts(gpa, false);
-    try std.testing.expectEqual(11, retired.len);
-    const revoked = "ok lima-revoked [ ! -e /run/werewolf/keys/lima ]";
-    try std.testing.expectEqualStrings(revoked, retired[7]);
-    try std.testing.expectEqualStrings("ok active-list [ ! -s /run/werewolf/people ]", retired[10]);
-    try std.testing.expectEqual(6, (try files(gpa, false)).len);
-    const restored = try files(gpa, true);
-    try std.testing.expectEqual(8, restored.len);
-    try std.testing.expectEqualStrings(
-        "ok u2guv05clv-access chpst -u :982829894:982829894 cat " ++
-            "/data/home/u2guv05clv/private | grep -qx u2guv05clv-secret",
-        restored[4],
-    );
 }
 
 test "a damaged ledger must be refused for its reason, with a panic, before handover" {

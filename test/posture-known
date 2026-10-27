@@ -1,23 +1,19 @@
-# The posture checks known to fail on every form of a kind (make check;
-# test/boot, test/cage):
+# The posture checks known to fail on every form (make check;
+# test/console.zig, test/cage):
 #
-#   dev ID...    on any form built with DEV=1, as make check builds them
 #   * ID...      on any form built as it ships
 #   ARCH ID...   on that architecture (x86_64, aarch64)
 #
-# A form takes the dev or * line, the ARCH line, and the weaknesses its
-# own form.yaml names, each with its excuse (forms/README.md). ?ID may
-# fail or not, as the host decides. Each is a weakness still open
-# (docs/security.md, "Not yet"): test/boot fails a machine on any other
+# A form takes the * line, the ARCH line, and the weaknesses its own
+# form.yaml names, each with its excuse (forms/README.md). ?ID may fail or
+# not, as the host decides. Each is a weakness still open
+# (docs/security.md, "Not yet"): the console fails a machine on any other
 # failure, and on any of these that starts passing, so no list can claim
 # less, or more, than the machines hold.
 #
 # No form carries a shell but those that log people in (sshd, lima,
-# prod-ssh) and DEV=1 builds, which add busybox-full: its shell, awk,
-# wget, nc and telnetd. make check-dist boots prod-ssh's release disk as it
-# ships: busybox for the logins sshd serves, and sshd listening. A DEV=1
-# build booted with werewolf.debug=1 has a root shell on its console
-# (?processes-no-root-console: whether the boot asks is the host's).
+# prod-ssh). make check-dist boots prod-ssh's release disk as it ships:
+# busybox for the logins sshd serves, and sshd listening.
 #
 # The boot chain is not verified end to end yet (docs/design/
 # verified-boot.md): Secure Boot is off (?boot-secure-boot: it is on
@@ -25,5 +21,4 @@
 # release policy (boot-ipe-enforced), and no TPM counter guards the slot
 # serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login network-ssh-dev-security-keys programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-ipe-enforced
 * ?boot-secure-boot boot-rollback-protected boot-ipe-enforced

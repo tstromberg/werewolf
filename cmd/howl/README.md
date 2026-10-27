@@ -12,7 +12,7 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 | `forms [FORM\|SEARCH]` | lists forms or shows setup and run/test commands; uses the checkout when present, `--published` checks signed image availability, `--arch ARCH` filters and `--json` emits records |
 | `versions [--with FORM]` | lists published base image tags from GitHub; filters by `--on` and `--arch`, with `--json` for scripts |
 | `build --with FORM` | builds what `create` deploys: with every protection a bundle, `FORM-PROVIDER-ARCH` in `dist` (`--on lima\|qemu`), signed with your keys as CI signs werewolf's, following the channel `--ipe-updates URL` names at `--image-index N`; with `--disable=…` the disk and manifest `FORM-ARCH.json` byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)), `--format raw\|vhd\|vmdk` converting with qemu-img |
-| `test --with FORM [--arch ARCH]` | runs declared native clients (PostgreSQL uses psql without DEV), or legacy checks, plus production boot; logs in `build/ARCH/check/`; either suite failing returns failure |
+| `test --with FORM [--arch ARCH]` | runs declared native clients without DEV, or a runtime's hello-world application, plus production boot; logs in `build/ARCH/check/`; either suite failing returns failure; `--iterate` reuses a disposable SSH VM for development |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--version SERIAL\|TAG` selects the initial download; `--build` builds this checkout's bundle with your keys and enrolls it as a download; it follows a channel only if `IPE_UPDATES` names one (with `IMAGE_INDEX`; `IPE_UPDATES_CA` on Lima and QEMU), else changes take a reinstall ([design](../../docs/design/secure-local-deployment.md)) |
 | `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
@@ -26,8 +26,10 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 
 ## Goals
 
-- One command from form to running machine; pack and the machine make the same checks.
-- Records: `build/machines/NAME`; keys: `$XDG_DATA_HOME/howl` (`~/.local/share/howl`).
+- One command from form to running machine; pack and the machine make the same
+  checks.
+- Records: `build/machines/NAME`; keys: `$XDG_DATA_HOME/howl`
+  (`~/.local/share/howl`).
 
 ## Non-Goals
 
@@ -38,34 +40,35 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 **Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
 Path forms are never updated. Progress goes to stderr, the machine record to stdout.
 
-**Config tar.** Services declare flags with `config`, `setting` and `render`;
-`pack -h` lists all flags. FILE flags read paths or stdin; guests validate values.
-The tar is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
+**Config tar.** Services declare flags with `config`, `setting` and `render`; `pack
+-h` lists all flags. FILE flags read paths or stdin; guests validate values. The tar
+is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
-**Engines.** Protected defaults are Lima (macOS) and QEMU (Linux), which download a
-[protected image](../../docs/design/published-secure-boot.md). Clouds take protected
-`--build` images: werewolf publishes none yet. Firecracker builds an IPE image with
-host-pinned boot files, warning that UEFI Secure Boot and TPM rollback protection are
-unavailable. Other providers and `--dev` require
-[disabling
-protections](../../docs/security.md#protections-a-machine-can-be-made-without). Missing
-tools fail. Local VMs use the host architecture, 2 GiB and 2 CPUs (4 under QEMU and
-Lima-managed).
+**Engines.** Protected defaults are Lima (macOS), QEMU (Linux) and x86_64 bhyve
+(FreeBSD), which download a [protected
+image](../../docs/design/published-secure-boot.md). Clouds take protected `--build`
+images: werewolf publishes none yet. Firecracker builds an IPE image with host-pinned
+boot files, warning that UEFI Secure Boot and TPM rollback protection are
+unavailable. Other providers and `--dev=ssh` require [disabling
+protections](../../docs/security.md#protections-a-machine-can-be-made-without).
+Missing tools fail. Local VMs use the host architecture, 4 GiB and 2 CPUs (4 under
+QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
 | lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
-| bhyve | FreeBSD x86_64 or arm64 (experimental, [limits](../../docs/testing-live.md#bhyve)), supervised by howl; TAP by default; explicit `--network slirp` | doas/sudo, vmm; bhyve-firmware (x86_64) or u-boot-bhyve-arm64; libslirp for SLIRP |
-| firecracker | IPE and dm-verity, with the initial kernel, stage0 and boot arguments pinned on the trusted host and checked on every boot; no UEFI Secure Boot or TPM, with a warning explaining the risks. Image changes require host rebuilds. Explicit `--disable=secureboot,tpm,ipe` retains the legacy A/B boot path. Per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT, undone by delete | /dev/kvm, firecracker, mtools, sudo/doas, image build tools |
+| bhyve | FreeBSD x86_64: enrolled Secure Boot, IPE and persistent TPM, using the signed x86 QEMU image channel and its SLIRP network. TAP for images built for it; network selection persists across stop/start. ARM64 remains experimental and requires explicit protection disablement ([limits](../../docs/testing-live.md#bhyve)). | doas/sudo, vmm, bhyve-firmware, swtpm, virt-firmware, libslirp; TAP needs an existing bridge; ARM64 needs u-boot-bhyve-arm64 |
+| firecracker | IPE and dm-verity, with boot files pinned on the trusted host; no UEFI Secure Boot or TPM, with a warning explaining the risks. Automatic namespace confinement, tap filtering, bounded logs and I/O limits. Image changes require host rebuilds. Explicit `--disable=secureboot,tpm,ipe` retains legacy A/B boot selection. Per machine a tap, a /30 of 172.16.0.0/16 and NAT, undone by delete | /dev/kvm, Firecracker 1.17+, bubblewrap with user namespaces, prlimit, timeout, mtools, iptables/ip6tables, sudo/doas, image build tools |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket; C4, C4A and N4 boot from `hyperdisk-balanced` | gcloud |
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-Local engines and Proxmox attach the tar read-only; clouds take base64 user data and a
-`werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once and delete
-keeps. Cloud ports start closed; create's `--allow-from me|CIDR` opens the form's.
+Local engines and Proxmox attach the tar read-only; clouds take base64 user data and
+a `werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once and
+delete keeps. Cloud ports start closed; create's `--allow-from me|CIDR` opens the
+form's.
 
 **SSH.** See [Howl SSH connections](../../docs/design/howl-ssh.md) for account
 defaults, developer access, forwarded agents and cloud firewall behavior.
@@ -73,8 +76,9 @@ defaults, developer access, forwarded agents and cloud firewall behavior.
 **Second create.** The machine keeps its disk and takes the new config. On protected
 Lima and QEMU machines ([data import](../../docs/design/data-import.md)), a repeated
 `--import DIR` must match the init snapshot; `howl import NAME DIR` gives an empty
-destination new initial data, `howl sync NAME DIR` adds and replaces files, as the form
-allows. Both stage while the VM runs and apply only at its next howl stop and start.
+destination new initial data, `howl sync NAME DIR` adds and replaces files, as the
+form allows. Both stage while the VM runs and apply only at its next howl stop and
+start.
 
 ## Drawbacks
 

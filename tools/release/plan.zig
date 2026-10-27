@@ -465,19 +465,12 @@ fn resolveOne(
     const snapshot = try sys.join(s, &.{ output, name });
     try sys.mkdir(s, snapshot);
     const chain = try query(s, tree, &.{ "names", name });
-    for ([_][2][]const u8{ .{ "", "" }, .{ "-dev", "--dev" } }) |variant| {
-        const lock = try gpa.print("{s}/{s}{s}.lock.json", .{ tree.lock, name, variant[0] });
-        std.Io.Dir.cwd().deleteFile(s.io, lock) catch {};
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(
-            gpa,
-            &.{ try sys.resolve(s, tree.howl), "_build", "--with", name, "--arch", arch },
-        );
-        if (variant[1].len > 0) try argv.append(gpa, variant[1]);
-        try argv.append(gpa, "lock");
-        try sys.run(s, argv.items, .{});
-        try sys.copy(s, lock, try sys.join(s, &.{ snapshot, std.fs.path.basename(lock) }));
-    }
+    const lock = try gpa.print("{s}/{s}.lock.json", .{ tree.lock, name });
+    std.Io.Dir.cwd().deleteFile(s.io, lock) catch {};
+    try sys.run(s, &.{
+        try sys.resolve(s, tree.howl), "_build", "--with", name, "--arch", arch, "lock",
+    }, .{});
+    try sys.copy(s, lock, try sys.join(s, &.{ snapshot, std.fs.path.basename(lock) }));
     var mapping: json.Map = .empty;
     for (try query(s, tree, &.{ "recipes", name })) |recipe| {
         const recipe_digest = sys.sha256(recipe);
@@ -820,12 +813,8 @@ fn resolution(f: *fixture.Fixture, argv: []const []const u8) anyerror!?sys.Resul
             "100644 blob x\tMakefile\x00",
     };
     if (mem.eql(u8, argv[1], "_build")) {
-        // howl _build --with FORM --arch ARCH [--dev] lock
-        const dev = mem.eql(u8, argv[argv.len - 2], "--dev");
-        const lock = try f.gpa().print(
-            "{s}/{s}{s}.lock.json",
-            .{ f.text, argv[3], if (dev) "-dev" else "" },
-        );
+        // howl _build --with FORM --arch ARCH lock
+        const lock = try f.gpa().print("{s}/{s}.lock.json", .{ f.text, argv[3] });
         try sys.write(
             s,
             lock,
@@ -935,8 +924,8 @@ test "focused resolution locks only playground, at its channel's next index" {
         "targets",
     ).?);
     try testing.expectEqual(@as(i64, 5), try json.int(next[0], "index"));
-    // Release and integration locks, for each plan.
-    try testing.expectEqual(@as(usize, 4), f.called(&.{ "", "_build" }));
+    // One release lock for each plan.
+    try testing.expectEqual(@as(usize, 2), f.called(&.{ "", "_build" }));
     for ([_]struct { []const u8, i64, i64 }{ .{ "aarch64", 1, 1 }, .{ "x86_64", 1, 8 } }) |c| {
         try testing.expectError(
             error.Refused,

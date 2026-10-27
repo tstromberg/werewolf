@@ -18,12 +18,8 @@ packages:
   - openldap-2.6-passwd-argon2
   - libldap-2.6
 
-# The check speaks LDAP with OpenLDAP's own clients.
-dev:
-  - openldap-2.6-clients
-
 # make check's (forms/README.md): :636 speaks LDAPS, not HTTP; its own
-# test/checks speaks to it.
+# test/tests.yaml speaks to it.
 check:
   skip: [http-answering]
 

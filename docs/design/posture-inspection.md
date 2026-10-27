@@ -7,10 +7,11 @@ inputs it reads and stop its service without executing another program.
 
 ## Background
 
-Posture inspects protected account files, other users' processes, kernel audit records,
-IPE policy and stage0's TPM floor record. It also proves that forbidden opens, writes
-and executions fail. Dropping root changes those observations: DAC refusals could
-masquerade as kernel enforcement, and protected inspections could be skipped.
+Posture inspects protected account files, other users' processes, kernel audit
+records, IPE policy and stage0's TPM floor record. It also proves that forbidden
+opens, writes and executions fail. Dropping root changes those observations: DAC
+refusals could masquerade as kernel enforcement, and protected inspections could be
+skipped.
 
 ## Goals
 

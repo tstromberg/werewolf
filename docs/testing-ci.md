@@ -3,9 +3,10 @@
 ## Debugging a failure
 
 A FAIL reports the last progress line, the first kernel error (stall, blocked task,
-panic) and host details: kernel, QEMU, accelerator, CPUs and load. Check boots panic on
-a CPU stalled for 20 s or a task blocked for two minutes, reporting the kernel's reason.
-An unresponsive machine dumps every virtual CPU's state into its log before failing.
+panic) and host details: kernel, QEMU, accelerator, CPUs and load. Check boots panic
+on a CPU stalled for 20 s or a task blocked for two minutes, reporting the kernel's
+reason. An unresponsive machine dumps every virtual CPU's state into its log before
+failing.
 
 ```sh
 make check-one FORM=playground REPEAT=20             # how often does it fail?
@@ -16,16 +17,17 @@ BOOT_TIMEOUT=20 make check-minimal                   # see a hang sooner
 `check-one` keeps each failing boot's console as `FORM-one-N.log`. Every boot prints
 where its time went, `werewolf: up in 1.470s (the kernel 0.225s, userland 1.245s)`,
 phase by phase (kernel, disk, slot, root, init's steps, seal), and keeps it in
-`/run/werewolf/boot`. The console shows only warnings and worse (`loglevel=5`); `dmesg`
-keeps every line.
+`/run/werewolf/boot`. The console shows only warnings and worse (`loglevel=5`);
+`dmesg` keeps every line.
 
 ## Booting on another host
 
 On an arm64 Mac, x86_64 machines boot emulated. `QEMU_HOST=HOST` boots a check's
 machines on HOST, a Linux machine with KVM that `ssh HOST` reaches, and runs the rest
-here ([test/remote-qemu.zig](../test/remote-qemu.zig)): `make check-overleaf ARCH=x86_64
-QEMU_HOST=gandalf`. HOST needs QEMU, zstd and your user in its `kvm` group; it keeps a
-copy of each file a boot takes in `~/.cache/werewolf-qemu`, sent again when it changes.
+here ([test/remote-qemu.zig](../test/remote-qemu.zig)): `make check-overleaf
+ARCH=x86_64 QEMU_HOST=gandalf`. HOST needs QEMU, zstd and your user in its `kvm`
+group; it keeps a copy of each file a boot takes in `~/.cache/werewolf-qemu`, sent
+again when it changes.
 
 ## CI
 
@@ -40,5 +42,5 @@ Hosted arm64 lacks KVM: `vm-arm64` uses Ampere for all forms, then
 `make check-platform` (the rest of `make check`), on pushes/maintainers' PRs.
 `make check-native` attacks roots in `systemd-nspawn` ([test/cage](../test/cage)).
 
-`make ci` copies fresh source (no `config/` or `.git`) into a 16 GiB Lima VM with KVM.
-VM and caches persist; `limactl delete -f werewolf-ci-24.04` starts over.
+`make ci` copies fresh source (no `config/` or `.git`) into a 16 GiB Lima VM with
+KVM. VM and caches persist; `limactl delete -f werewolf-ci-24.04` starts over.

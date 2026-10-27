@@ -41,8 +41,8 @@ howl create wordpress --with wordpress --on gcp --allow-from me --config config 
 	--url https://blog.example.com --admin-email me@example.com
 ```
 
-`--allow-from me` admits your address to port 80. Point the name at the machine. The URL
-is stored at first install.
+`--allow-from me` admits your address to port 80. Point the name at the machine. The
+URL is stored at first install.
 
 ### Importing data
 

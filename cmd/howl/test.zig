@@ -112,7 +112,7 @@ fn decide(
     const o = try parse(args, why);
     const target = o.arch orelse try howl.localArch(why);
     for ([_][]const u8{
-        "Makefile", "test/check-form", "test/check-shellfree", "tools/native-tests.zig",
+        "Makefile", "test/check-shellfree", "tools/native-tests.zig",
     }) |path|
         root.access(io, path, .{}) catch
             return why.refuse(
@@ -127,10 +127,9 @@ fn decide(
         error.FileNotFound => false,
         else => return err,
     };
-    var legacy = false;
     if (native) {
         var failure: plans.Failure = .{};
-        const plan = plans.form(
+        _ = plans.form(
             io,
             gpa,
             root,
@@ -141,7 +140,6 @@ fn decide(
                 error.Plan => why.refuse("{s}", .{failure.text}),
                 error.OutOfMemory => error.OutOfMemory,
             };
-        legacy = plan.legacy;
     }
     const arch = try gpa.print("ARCH={t}", .{target});
     if (o.iterate) {
@@ -186,19 +184,15 @@ fn decide(
             arch,
             try gpa.print(
                 "check-{s}{s}",
-                .{ if (native and !legacy) "native-tests-" else "", o.form },
+                .{ if (native) "native-tests-" else "", o.form },
             ),
             try gpa.print("check-shellfree-{s}", .{o.form}),
         }),
         .note = try gpa.print("testing {s} on {t} ({s}); logs in build/{t}/check/", .{
             o.form,
             target,
-            if (native and legacy)
-                "native clients plus legacy DEV checks"
-            else if (native)
-                "native clients, no DEV"
-            else
-                "legacy DEV checks",
+            // A runtime has no plan of its own: its check boots a hello-world app.
+            if (native) "native clients, no DEV" else "a hello-world application",
             target,
         }),
     };
@@ -208,8 +202,8 @@ const testing = std.testing;
 
 fn checkout(io: Io, tmp: *testing.TmpDir) !void {
     for ([_][]const u8{
-        "Makefile",               "test/check-form",       "test/check-shellfree",
-        "tools/native-tests.zig", "forms/caddy/form.yaml",
+        "Makefile",              "test/check-shellfree", "tools/native-tests.zig",
+        "forms/caddy/form.yaml",
     }) |path| {
         if (std.fs.path.dirname(path)) |parent| try tmp.dir.createDirPath(io, parent);
         try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "" });
@@ -238,7 +232,7 @@ const plan_text =
     \\
 ;
 
-test "howl test runs the form's checks, native when it has a plan, legacy while retained" {
+test "howl test runs the form's native checks, or a runtime's hello-world application" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -258,7 +252,7 @@ test "howl test runs the form's checks, native when it has a plan, legacy while 
         "ARCH=x86_64", "check-caddy",          "check-shellfree-caddy",
     }, step);
     try testing.expect(mem.find(u8, step.note, "build/x86_64/check/") != null);
-    try testing.expect(mem.find(u8, step.note, "legacy DEV checks") != null);
+    try testing.expect(mem.find(u8, step.note, "a hello-world application") != null);
     step = try decide(io, a, tmp.dir, &.{ "--with=caddy", "--arch=arm64" }, "howl", &why);
     try testing.expectEqualStrings("ARCH=aarch64", step.argv[3]);
     try tmp.dir.createDirPath(io, "forms/caddy/test");
@@ -266,20 +260,17 @@ test "howl test runs the form's checks, native when it has a plan, legacy while 
     step = try decide(io, a, tmp.dir, &.{ "--with", "caddy" }, "howl", &why);
     try testing.expectEqualStrings("check-native-tests-caddy", step.argv[4]);
     try testing.expect(mem.find(u8, step.note, "native clients, no DEV") != null);
+    // Retired shell checks would no longer run, so they are refused.
     try tmp.dir.writeFile(
         io,
         .{ .sub_path = "forms/caddy/test/checks", .data = "ok retained true\n" },
     );
-    step = try decide(io, a, tmp.dir, &.{ "--with", "caddy" }, "howl", &why);
-    try testing.expectEqualStrings("check-caddy", step.argv[4]);
-    try testing.expect(mem.find(u8, step.note, "native clients plus legacy DEV checks") != null);
-    try tmp.dir.deleteFile(io, "forms/caddy/test/checks");
-    try tmp.dir.writeFile(
-        io,
-        .{ .sub_path = "forms/caddy/test/tests.yaml", .data = "legacy: true\n" ++ plan_text },
+    try testing.expectError(
+        error.Refused,
+        decide(io, a, tmp.dir, &.{ "--with", "caddy" }, "howl", &why),
     );
-    step = try decide(io, a, tmp.dir, &.{ "--with", "caddy" }, "howl", &why);
-    try testing.expectEqualStrings("check-caddy", step.argv[4]);
+    try testing.expect(mem.find(u8, why.text, "shell checks are retired") != null);
+    try tmp.dir.deleteFile(io, "forms/caddy/test/checks");
     try tmp.dir.writeFile(
         io,
         .{ .sub_path = "forms/caddy/test/tests.yaml", .data = "version: 2\nsuites: []\n" },

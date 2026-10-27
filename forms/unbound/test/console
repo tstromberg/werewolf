@@ -1,6 +1,6 @@
 # What the unbound form, booted as it ships, without a shell and without
 # a config, must say on its console (make check-shellfree-unbound;
-# test/boot; forms/demo/test/console has the format). It needs no
+# test/console.zig; forms/demo/test/console has the format). It needs no
 # settings: unbound-setup seeds the root's keys into /data and writes no
 # forward zones, and Unbound starts validating, with no control socket.
 

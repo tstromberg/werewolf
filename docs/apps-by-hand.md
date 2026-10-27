@@ -64,7 +64,7 @@ path the form keeps it, and build a boot disk with it laid over
 ```sh
 mkdir -p "$W/stage/usr/lib/app"
 cp -R "$W/myapp/." "$W/stage/usr/lib/app/"
-make FORM=python-example DEV= APP="$PWD/$W/stage" disk
+make FORM=python-example APP="$PWD/$W/stage" disk
 cp "build/$ARCH/python-example-app/disk.img" "$W/disk.img"
 ```
 

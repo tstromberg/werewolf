@@ -1,21 +1,21 @@
 # Open WebUI - Hardened VM
 
 A chat window for models that run on the same machine: [Open
-WebUI](https://github.com/open-webui/open-webui), with Ollama, PostgreSQL and Caddy. The
-form's manifest is [form.yaml](form.yaml).
+WebUI](https://github.com/open-webui/open-webui), with Ollama, PostgreSQL and Caddy.
+The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/open-webui/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- Python runs Open WebUI. Named in `form.yaml`. A function an administrator uploads runs
-  as that same user.
+- Python runs Open WebUI. Named in `form.yaml`. A function an administrator uploads
+  runs as that same user.
 
 ## Getting Started
 
@@ -29,9 +29,9 @@ howl create open-webui --with open-webui \
 ```
 
 Open `https://chat.home.arpa` and sign in as `you@example.com`. The password is in
-`admin-password`. Give the machine 8 GB for a small model. Under Admin Panel, Settings,
-Models pull `gemma3:4b` and `nomic-embed-text`. Models and documents are in [Open
-WebUI's documentation](https://docs.openwebui.com/).
+`admin-password`. Give the machine 8 GB for a small model. Under Admin Panel,
+Settings, Models pull `gemma3:4b` and `nomic-embed-text`. Models and documents are in
+[Open WebUI's documentation](https://docs.openwebui.com/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -47,10 +47,10 @@ password in Open WebUI afterwards.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
-in the `postgres` database, while the cluster is first made. See
-[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud
-cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied
+once, in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A
+cloud cannot attach the disk.
 
 ```sh
 howl create open-webui --with open-webui --import ./dump

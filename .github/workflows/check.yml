@@ -38,8 +38,8 @@ jobs:
       - name: Updater construction and coordinator isolation
         run: |
           # Installer/broker fixtures use direct boot; protected boots run in ipe.yml.
-          make FORM=minimal DEV=1 DISABLE=secureboot,tpm,ipe image
-          make FORM=minimal DEV=1 check-updater-installer check-mount-broker LINUX_TEST_RUNNER=sudo
+          make FORM=minimal DISABLE=secureboot,tpm,ipe image
+          make FORM=minimal check-updater-installer check-mount-broker LINUX_TEST_RUNNER=sudo
       - name: DNS permissions, DHCP renewal, HTTPS and LAN discovery
         run: make check-dns DNS_TEST_RUNNER=sudo
       - name: unwound behind fence, against a misbehaving resolver
@@ -148,7 +148,8 @@ jobs:
             ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} build/host/ci-forms ${{ matrix.group }}
           else
             jobs=$(test/ci-vm-jobs)
-            make -k -j"$jobs" DISABLE=secureboot,tpm,ipe PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+            make -k -j"$jobs" DISABLE=secureboot,tpm,ipe PERSIST_AFTER= \
+              ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
           fi
       # integrity saves the Zig cache, when this week's has no entry for
       # these sources yet: every check job compiles the same programs, and

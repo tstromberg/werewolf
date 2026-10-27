@@ -1,19 +1,19 @@
 # Valkey - Hardened VM
 
 A cache or queue for the other services on this machine: [Valkey](https://valkey.io)
-9.1, on a UNIX socket. The form's manifest is [form.yaml](form.yaml). The same server on
-a reachable port is [valkey-tcp](../valkey-tcp/README.md).
+9.1, on a UNIX socket. The form's manifest is [form.yaml](form.yaml). The same server
+on a reachable port is [valkey-tcp](../valkey-tcp/README.md).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/valkey/index.html).
 
 ## Security Posture
 
-The server runs as its own user. There is no shell. Landlock and seccomp hold it to its
-socket and to `/data/svc/valkey`. The root is read-only.
+The server runs as its own user. There is no shell. Landlock and seccomp hold it to
+its socket and to `/data/svc/valkey`. The root is read-only.
 
-- No TCP. The socket is mode 660 for the `valkey` group. A client's service joins that
-  group.
+- No TCP. The socket is mode 660 for the `valkey` group. A client's service joins
+  that group.
 - The default user may do everything except administer the server. `CONFIG`, `DEBUG`,
   `MODULE`, `REPLICAOF`, `SHUTDOWN`, `MONITOR` and ACL changes are refused.
 - Modules, debug, and protected config changes are off. Lua stays, for Sidekiq and
@@ -29,8 +29,8 @@ howl create valkey --with valkey
 ```
 
 Nothing answers on the network. A form takes this one `with` and puts its service in
-group `valkey`. The client is `valkey-cli -s /run/svc/valkey/valkey.sock`. Commands are
-in [Valkey's command reference](https://valkey.io/commands/).
+group `valkey`. The client is `valkey-cli -s /run/svc/valkey/valkey.sock`. Commands
+are in [Valkey's command reference](https://valkey.io/commands/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -38,14 +38,14 @@ in [Valkey's command reference](https://valkey.io/commands/).
 howl create valkey --with valkey --on gcp --allow-from me
 ```
 
-`--allow-from` opens no port: there is no listener. Keep the store on the same machine
-as the service that uses it.
+`--allow-from` opens no port: there is no listener. Keep the store on the same
+machine as the service that uses it.
 
 ### Importing data
 
-The host cannot reach this server. `--import` attaches a directory. `valkey-init` copies
-`dump.rdb` from it once, before the first start, and the server loads that file. Take
-the file from the old server with `valkey-cli --rdb dump.rdb`.
+The host cannot reach this server. `--import` attaches a directory. `valkey-init`
+copies `dump.rdb` from it once, before the first start, and the server loads that
+file. Take the file from the old server with `valkey-cli --rdb dump.rdb`.
 
 ```sh
 howl create valkey --with valkey --import ./dump

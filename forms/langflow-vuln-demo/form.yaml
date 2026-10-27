@@ -13,7 +13,6 @@ weaknesses:
 
 check:
   memory: 4096
-  web: 7860
 
 services:
   langflow:

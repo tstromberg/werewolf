@@ -112,4 +112,5 @@ It outranks a service's ENOSYS, and kills runtimes that probe (libuv).
 
 - **Fails closed:** without the seal init exits and the slot falls back;
   a service whose file or filter fails is parked, with the reason.
-- **Learnable:** a DEV=1 build allows and records calls (`make seal-learn`).
+- **Told:** every refused call is on the console once, with the promise that
+  would allow it, which is how a pledge is written.

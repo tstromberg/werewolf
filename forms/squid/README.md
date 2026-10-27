@@ -1,16 +1,16 @@
 # Squid - Hardened VM
 
-An egress proxy: [Squid](https://www.squid-cache.org) connects to port 443 of the names
-you list, from the networks you list, and to nothing else. No cache and no cache
-manager. The form's manifest is [form.yaml](form.yaml).
+An egress proxy: [Squid](https://www.squid-cache.org) connects to port 443 of the
+names you list, from the networks you list, and to nothing else. No cache and no
+cache manager. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/squid/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -41,13 +41,14 @@ whole top-level domain (`.com`) is refused.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`.
-There is no database to import.
+This machine starts empty. What it must remember is in the create command or
+`--config`. There is no database to import.
 
 ### Known Quirks
 
 - CONNECT is port 443 only. Port 25 and every other port are refused.
-- Squid does not look inside TLS. It only decides whether the name and port are allowed.
+- Squid does not look inside TLS. It only decides whether the name and port are
+  allowed.
 - There is no cache, so nothing is stored, and no cache-manager port.
 - The machine itself may connect. Other clients must be in `--networks`.
 

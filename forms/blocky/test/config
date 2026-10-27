@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/blocky/test/config DIR: the blocky form's config for make check, in
-# DIR: one upstream and one blocklist, which test/checks finds in the
+# DIR: one upstream and one blocklist, which test/tests.yaml finds in the
 # configuration Blocky runs.
 set -eu
 mkdir -p "$1/blocky"

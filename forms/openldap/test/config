@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/openldap/test/config DIR: the openldap form's config for make
 # check, in DIR: its domain, example.com, and admin, ops; the admin's
-# password, which test/checks binds with; and a certificate for
+# password, which test/tests.yaml binds with; and a certificate for
 # localhost, made here in the company's CA's place.
 set -eu
 d=$1/openldap

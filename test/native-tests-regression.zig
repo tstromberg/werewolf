@@ -1,8 +1,7 @@
 //! native-tests-regression drives, as black boxes, what the harness's unit
-//! tests cannot: the console transport of test/boot and of build/host/console
-//! (test/console.zig) with a fake QEMU, which is this program run again, test/check-one's kept
-//! evidence, and howl test's
-//! handing over to make. Run it from the checkout root with HOWL, as
+//! tests cannot: the console transport, build/host/console (test/console.zig),
+//! with a fake QEMU, which is this program run again; test/check-one's kept
+//! evidence; and howl test's handing over to make. Run it from the checkout root with HOWL, as
 //! `make _test/howl-smoke` does.
 
 const std = @import("std");
@@ -13,7 +12,7 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const posix = std.posix;
 
-const consoles = [_][]const u8{ "test/boot", "build/host/console" };
+const console = "build/host/console";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -32,13 +31,13 @@ pub fn main(init: std.process.Init) !void {
     const self = try std.process.executablePathAlloc(io, gpa);
     var failed = false;
     inline for (.{
-        .{ "a completion record keeps its own newline", fragments, true },
-        .{ "a serial console's split UTF-8 survives until power off", utf8, true },
-        .{ "console collection obeys the explicit budget", budget, true },
-        .{ "QEMU exiting without a kernel power off is refused", exited, true },
-        .{ "check-one keeps each failure's native logs", repeated, false },
-        .{ "howl test becomes make, without an outer make's flags", handover, false },
-    }) |t| for (if (t[2]) &consoles else consoles[0..1]) |console| {
+        .{ "a completion record keeps its own newline", fragments },
+        .{ "a serial console's split UTF-8 survives until power off", utf8 },
+        .{ "console collection obeys the explicit budget", budget },
+        .{ "QEMU exiting without a kernel power off is refused", exited },
+        .{ "check-one keeps each failure's native logs", repeated },
+        .{ "howl test becomes make, without an outer make's flags", handover },
+    }) |t| {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer arena.deinit();
         var c: Case = .{
@@ -47,19 +46,17 @@ pub fn main(init: std.process.Init) !void {
             .self = self,
             .howl = try Dir.cwd().realPathFileAlloc(io, args[1], arena.allocator()),
             .env = init.environ_map,
-            .console = console,
         };
-        const label = if (t[2]) console else "";
         if (t[1](&c)) {
-            std.debug.print("native-tests-regression: pass {s} {s}\n", .{ t[0], label });
+            std.debug.print("native-tests-regression: pass {s}\n", .{t[0]});
         } else |err| {
             failed = true;
             std.debug.print(
-                "native-tests-regression: FAIL {s} {s}: {s} {s}\n",
-                .{ t[0], label, @errorName(err), c.why },
+                "native-tests-regression: FAIL {s}: {s} {s}\n",
+                .{ t[0], @errorName(err), c.why },
             );
         }
-    };
+    }
     if (failed) std.process.exit(1);
 }
 
@@ -69,8 +66,6 @@ const Case = struct {
     self: []const u8,
     howl: []const u8,
     env: *const std.process.Environ.Map,
-    /// console is the transport under test: test/boot or build/host/console.
-    console: []const u8,
     why: []const u8 = "",
 
     fn expect(c: *Case, ok: bool, comptime fmt: []const u8, args: anytype) !void {
@@ -110,7 +105,7 @@ const Case = struct {
         try env.put("CONSOLE_TIMEOUT", timeout);
         const result = try std.process.run(c.gpa, c.io, .{
             .argv = &.{
-                c.console,
+                console,
                 "serial-utf8",
                 checks_path,
                 log,
@@ -135,11 +130,11 @@ const Case = struct {
 const Boot = struct { ok: bool, stdout: []const u8, log: []const u8 };
 
 /// fragments waits for a completion record whose newline arrives late, or
-/// at once, and finds it whole, with no newline test/boot made up.
+/// at once, and finds it whole, with no newline the console made up.
 fn fragments(c: *Case) !void {
     for ([_][]const u8{ "fragment", "immediate" }) |mode| {
         const b = try c.boot("poweroff", mode, "seen complete " ++ plans.completion ++ "\n", "300");
-        try c.expect(b.ok, "{s}: test/boot failed: {s}", .{ mode, b.stdout });
+        try c.expect(b.ok, "{s}: the console failed: {s}", .{ mode, b.stdout });
         var records: std.ArrayList([]const u8) = .empty;
         var lines = mem.splitScalar(u8, b.log, '\n');
         while (lines.next()) |line| {
@@ -163,11 +158,11 @@ const squares = blk: {
     break :blk bytes;
 };
 
-/// utf8 needs Expect to keep reading a character split across reads, which
-/// macOS's text decoder once took for the end of the console.
+/// utf8 needs the console to keep reading a character split across reads,
+/// which a text decoder can take for the end of the console.
 fn utf8(c: *Case) !void {
     const b = try c.boot("poweroff", "whole", "seen complete COMPLETE\n", "300");
-    try c.expect(b.ok, "test/boot failed: {s}", .{b.stdout});
+    try c.expect(b.ok, "the console failed: {s}", .{b.stdout});
     try c.expect(mem.find(u8, b.log, &squares) != null, "split characters lost", .{});
     try c.expect(mem.find(u8, b.log, "reboot: Power down") != null, "no power off logged", .{});
 }
@@ -278,8 +273,8 @@ fn handover(c: *Case) !void {
     var dir = try Dir.cwd().openDir(c.io, root, .{});
     defer dir.close(c.io);
     for ([_][]const u8{
-        "Makefile",               "test/check-form",       "test/check-shellfree",
-        "tools/native-tests.zig", "forms/caddy/form.yaml",
+        "Makefile",              "test/check-shellfree", "tools/native-tests.zig",
+        "forms/caddy/form.yaml",
     }) |path| {
         if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(c.io, parent);
         try dir.writeFile(c.io, .{ .sub_path = path, .data = "" });

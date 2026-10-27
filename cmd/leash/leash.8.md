@@ -39,8 +39,8 @@ at the beginning of a word starts a comment. Principal declarations are:
 
 - **listen**, **connect**
 
-  Granted ports and, for connect, named UNIX sockets. A low listening port retains the
-  capability required to bind it.
+  Granted ports and, for connect, named UNIX sockets. A low listening port retains
+  the capability required to bind it.
 
 - **requires**
 
@@ -104,6 +104,6 @@ fence(8), leash-reap(8), seal(8), service-config(8)
 
 ## CAVEATS
 
-An executable grant applies to a file, so granting one BusyBox applet allows the other
-applets in that binary. A readable dynamic executable may also be started through its
-permitted loader.
+An executable grant applies to a file, so granting one BusyBox applet allows the
+other applets in that binary. A readable dynamic executable may also be started
+through its permitted loader.

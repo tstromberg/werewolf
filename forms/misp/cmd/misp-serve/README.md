@@ -7,10 +7,10 @@ program. Nothing else can add to it.
 
 ## Background
 
-The image runs supervisord, which is Python, as root, so it can switch its children to
-`www-data`. It also opens a control socket. On this form the leash has already become
-`_oci-misp`, and the web process is that same user. A control socket would let a request
-start whatever the leash allows.
+The image runs supervisord, which is Python, as root, so it can switch its children
+to `www-data`. It also opens a control socket. On this form the leash has already
+become `_oci-misp`, and the web process is that same user. A control socket would let
+a request start whatever the leash allows.
 
 ## Goals
 
@@ -22,8 +22,8 @@ start whatever the leash allows.
 ## Non-Goals
 
 - A supervisor control socket, or a config file of programs.
-- Running the web process and the workers as different users. They share the image, and
-  werewolf has no writable volume between two images.
+- Running the web process and the workers as different users. They share the image,
+  and werewolf has no writable volume between two images.
 
 ## Detailed design
 
@@ -40,12 +40,12 @@ read another sandbox's private process environment.
 
 ## Drawbacks
 
-One worker exiting restarts PHP as well. That is the whole service coming back, rather
-than a process left running with no one watching it.
+One worker exiting restarts PHP as well. That is the whole service coming back,
+rather than a process left running with no one watching it.
 
 ## Alternatives Considered
 
-- supervisord without `user=root`. It would still be Python, and its socket would still
-  be a way to start programs.
+- supervisord without `user=root`. It would still be Python, and its socket would
+  still be a way to start programs.
 - Leaving the workers in the background of the shell. A worker that exited would stay
   down until the whole machine restarted.

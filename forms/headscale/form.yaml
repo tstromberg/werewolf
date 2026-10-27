@@ -11,10 +11,6 @@ base: prod
 
 with: [caddy]
 
-# The check tries to join with Tailscale's own client and a bad key.
-dev:
-  - tailscale
-
 services:
   # Headscale, as _oci-headscale, inside its image: it serves the clients'
   # protocol on loopback, behind Caddy; its CLI's socket is in its /run;

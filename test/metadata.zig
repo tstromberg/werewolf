@@ -1,4 +1,4 @@
-//! metadata PAYLOAD PORT_FILE LOG_FILE stands in for GCP's, AWS's,
+//! metadata PAYLOAD PORT_FILE LOG_FILE [HOSTNAME CONTEXT] stands in for GCP's, AWS's,
 //! Hetzner Cloud's and Azure's metadata servers in make check's cloud
 //! boots (test/cloud-boot). It serves user data only as each cloud does:
 //! GCP's with Metadata-Flavor: Google, AWS's only through an IMDSv2
@@ -11,7 +11,10 @@
 //! as a cloud holds it; or FIRST>THEN@N, which serves FIRST for the first N
 //! user-data requests and THEN after, as a config changed at the cloud. It
 //! listens on 127.0.0.1, writes its port to PORT_FILE, and logs each
-//! request's method, target and the headers that matter to LOG_FILE.
+//! request's method, target and the headers that matter to LOG_FILE. Each
+//! config names the machine cloud-check, or HOSTNAME; given CONTEXT, the
+//! file a native boot's run context is in (native-tests boot), it carries
+//! that as tests/context, read as each request is answered.
 
 const std = @import("std");
 const host = @import("host");
@@ -28,15 +31,13 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
-    if (args.len != 4) std.process.fatal("usage: metadata PAYLOAD PORT_FILE LOG_FILE", .{});
-    const plan = try Plan.parse(args[1]);
-    var server: Server = .{
-        .io = io,
-        .log = args[3],
-        .first = try configTar(gpa, plan.first),
-        .then = try configTar(gpa, plan.then),
-        .switch_at = plan.switch_at,
-    };
+    if (args.len != 4 and args.len != 6)
+        std.process.fatal("usage: metadata PAYLOAD PORT_FILE LOG_FILE [HOSTNAME CONTEXT]", .{});
+    var server: Server = .{ .io = io, .log = args[3], .plan = try Plan.parse(args[1]) };
+    if (args.len == 6) {
+        server.hostname = args[4];
+        server.context = args[5];
+    }
     var listener: http.Server = undefined;
     try listener.start(io, gpa, .{ .handler = .{ .context = &server, .serve = Server.serve } });
     try Io.Dir.cwd().writeFile(
@@ -70,11 +71,18 @@ const Plan = struct {
     }
 };
 
-/// configTar is payload's config tar, base64-encoded.
-fn configTar(gpa: Allocator, payload: []const u8) ![]const u8 {
+/// configTar is payload's config tar, naming the machine hostname, with
+/// context as tests/context if there is one, base64-encoded.
+fn configTar(
+    gpa: Allocator,
+    payload: []const u8,
+    hostname: []const u8,
+    context: ?[]const u8,
+) ![]const u8 {
     var out: Io.Writer.Allocating = .init(gpa);
     var tar: std.tar.Writer = .{ .underlying_writer = &out.writer };
-    try tar.writeFileBytes("hostname", "cloud-check\n", .{ .mode = 0o644 });
+    try tar.writeFileBytes("hostname", try gpa.print("{s}\n", .{hostname}), .{ .mode = 0o644 });
+    if (context) |c| try tar.writeFileBytes("tests/context", c, .{ .mode = 0o644 });
     if (mem.eql(u8, payload, "hostile")) {
         try tar.writeLink("authorized_keys", "/etc/shadow", .{ .mode = 0o644 });
         try tar.writeFileBytes("../escaped", "out\n", .{ .mode = 0o644 });
@@ -100,16 +108,26 @@ fn configTar(gpa: Allocator, payload: []const u8) ![]const u8 {
 const Server = struct {
     io: Io,
     log: []const u8,
-    first: []const u8,
-    then: []const u8,
-    switch_at: ?u32,
+    plan: Plan,
+    hostname: []const u8 = "cloud-check",
+    /// context is the file holding a native boot's run context, or null.
+    context: ?[]const u8 = null,
     served: std.atomic.Value(u32) = .init(0),
     mutex: Io.Mutex = .init,
 
-    fn body(s: *Server) []const u8 {
+    /// payload is the one the next user-data request gets.
+    fn payload(s: *Server) []const u8 {
         const n = s.served.fetchAdd(1, .monotonic) + 1;
-        const later = if (s.switch_at) |at| n > at else false;
-        return if (later) s.then else s.first;
+        const later = if (s.plan.switch_at) |at| n > at else false;
+        return if (later) s.plan.then else s.plan.first;
+    }
+
+    fn body(s: *Server, gpa: Allocator) ![]const u8 {
+        const context = if (s.context) |path|
+            try Io.Dir.cwd().readFileAlloc(s.io, path, gpa, .limited(4096))
+        else
+            null;
+        return configTar(gpa, s.payload(), s.hostname, context);
     }
 
     fn record(s: *Server, gpa: Allocator, r: *const http.Request) !void {
@@ -146,22 +164,26 @@ const Server = struct {
                 if (eql(
                     r.header("Metadata-Flavor"),
                     "Google",
-                )) return w.send(200, google, s.body());
+                )) return w.send(200, google, try s.body(gpa));
                 return w.send(403, google, "");
             }
             if (mem.eql(u8, target, "/latest/user-data"))
                 return if (eql(r.header("X-aws-ec2-metadata-token"), token))
-                    w.send(200, &.{}, s.body())
+                    w.send(200, &.{}, try s.body(gpa))
                 else
                     w.send(401, &.{}, "");
-            if (mem.eql(u8, target, "/hetzner/v1/userdata")) return w.send(200, &.{}, s.body());
+            if (mem.eql(
+                u8,
+                target,
+                "/hetzner/v1/userdata",
+            )) return w.send(200, &.{}, try s.body(gpa));
             if (mem.eql(
                 u8,
                 target,
                 "/metadata/instance/compute/userData?api-version=2021-01-01&format=text",
             ))
                 return if (eql(r.header("Metadata"), "true"))
-                    w.send(200, &.{}, s.body())
+                    w.send(200, &.{}, try s.body(gpa))
                 else
                     w.send(400, &.{}, "");
             return w.send(404, &.{}, "");
@@ -182,22 +204,24 @@ test "a changing payload switches after its count" {
     try std.testing.expectEqualStrings("good", plan.first);
     try std.testing.expectEqualStrings("people", plan.then);
     try std.testing.expectEqual(2, plan.switch_at.?);
-    var s: Server = .{ .io = std.testing.io, .log = "", .first = "A", .then = "B", .switch_at = 2 };
-    for ([_][]const u8{
-        "A",
-        "A",
-        "B",
-        "B",
-    }) |want| try std.testing.expectEqualStrings(want, s.body());
+    var s: Server = .{ .io = std.testing.io, .log = "", .plan = plan };
+    for ([_][]const u8{ "good", "good", "people", "people" }) |want|
+        try std.testing.expectEqualStrings(want, s.payload());
     try std.testing.expectError(error.BadPayload, Plan.parse("good>people"));
 }
 
-test "the hostile tar holds a link and an escape; the good one a key" {
+test "the hostile tar holds a link and an escape; the good one a key, and a context if given" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    for ([_][]const u8{ "good", "hostile", "people" }) |payload| {
-        const encoded = try configTar(gpa, payload);
+    for ([_][]const u8{ "good", "hostile", "people", "context" }) |payload| {
+        const context: ?[]const u8 = if (mem.eql(u8, payload, "context")) "{}" else null;
+        const encoded = try configTar(
+            gpa,
+            if (context) |_| "good" else payload,
+            "cloud-poll",
+            context,
+        );
         const raw = try gpa.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
         try std.base64.standard.Decoder.decode(raw, encoded);
         var reader: Io.Reader = .fixed(raw);
@@ -213,6 +237,8 @@ test "the hostile tar holds a link and an escape; the good one a key" {
             "hostname:file authorized_keys:sym_link ../escaped:file "
         else if (mem.eql(u8, payload, "people"))
             "hostname:file authorized_keys:file users:file "
+        else if (context != null)
+            "hostname:file tests/context:file authorized_keys:file "
         else
             "hostname:file authorized_keys:file ";
         try std.testing.expectEqualStrings(want, names.items);

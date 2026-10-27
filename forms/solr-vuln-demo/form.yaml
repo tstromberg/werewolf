@@ -10,7 +10,6 @@ weaknesses:
 
 check:
   memory: 2048
-  web: 8983
 
 services:
   solr:

@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/minecraft/test/config DIR: the minecraft form's config for make
-# check, in DIR. steve is on the whitelist. test/checks logs in as steve
+# check, in DIR. steve is on the whitelist. test/tests.yaml logs in as steve
 # and as a name that is not.
 set -eu
 mkdir -p "$1/minecraft"

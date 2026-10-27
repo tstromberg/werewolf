@@ -1,5 +1,5 @@
 # What the demo, booted as it ships, without a shell, must say on its
-# console (make check-shellfree-demo; test/boot). One line a check:
+# console (make check-shellfree-demo; test/console.zig). One line a check:
 #
 #   KIND NAME REGEX
 #

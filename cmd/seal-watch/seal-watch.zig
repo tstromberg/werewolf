@@ -13,13 +13,11 @@ const linux = std.os.linux;
 const seal_id = 66;
 
 pub fn main() void {
-    var mode_buf: [8]u8 = undefined;
-    const got = receiveListener(&mode_buf) orelse {
+    const listener = receiveListener() orelse {
         say("no listener from init; unlisted calls are refused unsaid", .{});
         linux.exit_group(1);
     };
     _ = linux.close(0);
-    const learn = got.mode.len > 0 and got.mode[0] == 'l';
     // runit's stage 3 sends TERM to every process, but refused calls keep
     // coming until the machine is down, so ignore it and wait for the KILL.
     const ignore: linux.Sigaction = .{
@@ -40,22 +38,21 @@ pub fn main() void {
             break :t -1;
         },
     };
-    if (!learn) confine() catch {
+    confine() catch {
         say("cannot confine itself: {s} {s}; unlisted calls are refused unsaid", .{
             sandbox.failed, sandbox.errnoName(sandbox.failed_errno),
         });
         linux.exit_group(1);
     };
-    say("{{\"event\":\"start\",\"mode\":\"{s}\"}}", .{if (learn) "learn" else "enforce"});
-    serve(got.fd, learn, table);
+    say("{{\"event\":\"start\",\"mode\":\"enforce\"}}", .{});
+    serve(listener, table);
 }
 
-const Received = struct { fd: i32, mode: []const u8 };
-
 /// receiveListener receives the listener fd that init sends over the socket
-/// on stdin (SCM_RIGHTS), with a mode byte: l to learn, else enforce.
-fn receiveListener(mode_buf: *[8]u8) ?Received {
-    var iov = [_]std.posix.iovec{.{ .base = mode_buf, .len = mode_buf.len }};
+/// on stdin (SCM_RIGHTS), with one byte of data, which it ignores.
+fn receiveListener() ?i32 {
+    var byte: [8]u8 = undefined;
+    var iov = [_]std.posix.iovec{.{ .base = &byte, .len = byte.len }};
     var control: [cmsg_space]u8 align(8) = @splat(0);
     var msg: linux.msghdr = .{
         .name = null,
@@ -72,7 +69,7 @@ fn receiveListener(mode_buf: *[8]u8) ?Received {
     if (msg.controllen < 20 or
         std.mem.readInt(i32, control[8..12], e) != linux.SOL.SOCKET or
         std.mem.readInt(i32, control[12..16], e) != scm_rights) return null;
-    return .{ .fd = std.mem.readInt(i32, control[16..20], e), .mode = mode_buf[0..n] };
+    return std.mem.readInt(i32, control[16..20], e);
 }
 
 const scm_rights = 1;
@@ -109,21 +106,17 @@ const Resp = extern struct { id: u64, val: i64, @"error": i32, flags: u32 };
 /// _IOWR('!', 0, struct seccomp_notif) and _IOWR('!', 1, struct seccomp_notif_resp).
 const notif_recv: u32 = 0xc0000000 | @as(u32, @sizeOf(Notif)) << 16 | 0x21 << 8 | 0;
 const notif_send: u32 = 0xc0000000 | @as(u32, @sizeOf(Resp)) << 16 | 0x21 << 8 | 1;
-const flag_continue: u32 = 1;
 
 const max_rows = 512;
-const max_learned = 4096;
 
 /// Row counts one call refused this boot. never is set if no promise allows it.
 const Row = struct { nr: u32, count: u64, pid: u32, first: i64, never: bool = false };
 
-fn serve(fd: i32, learn: bool, table: i32) noreturn {
+fn serve(fd: i32, table: i32) noreturn {
     var rows: [max_rows]Row = undefined;
     var n_rows: usize = 0;
     // other counts every call once the rows are full.
     var other: Row = .{ .nr = 0, .count = 0, .pid = 0, .first = 0 };
-    var learned: [max_learned]u64 = undefined;
-    var n_learned: usize = 0;
     var buf: [64 << 10]u8 = undefined;
     while (true) {
         var req: Notif = std.mem.zeroes(Notif);
@@ -139,34 +132,13 @@ fn serve(fd: i32, learn: bool, table: i32) noreturn {
         const nr: u32 = @bitCast(req.nr);
         const why = seal.refusal(nr, req.args);
         const never = isNever(nr) or why != null;
-        const allow = learn and !never;
-        var exe_buf: [256]u8 = undefined;
-        var cgroup_buf: [256]u8 = undefined;
-        const exe = if (allow) exeOf(req.pid, &exe_buf) else "";
-        const service = if (allow) serviceOf(req.pid, &cgroup_buf) else "";
         const resp: Resp = .{
             .id = req.id,
             .val = 0,
-            .@"error" = if (allow) 0 else -@as(i32, @backingInt(if (why) |w| w.errno else .NOSYS)),
-            .flags = if (allow) flag_continue else 0,
+            .@"error" = -@as(i32, @backingInt(if (why) |w| w.errno else .NOSYS)),
+            .flags = 0,
         };
         _ = linux.ioctl(fd, notif_send, @intFromPtr(&resp));
-        if (allow) {
-            const key = std.hash.Wyhash.hash(std.hash.Wyhash.hash(nr, exe), service);
-            if (std.mem.findScalar(u64, learned[0..n_learned], key) != null) continue;
-            if (n_learned == learned.len) continue;
-            learned[n_learned] = key;
-            n_learned += 1;
-            say(
-                "{{\"event\":\"learned\",\"call\":\"{s}\",\"promise\":\"{s}\"," ++
-                    "\"service\":\"{s}\",\"exe\":\"{s}\"}}",
-                .{ callName(nr), promiseName(nr), service, exe },
-            );
-            // Once full, later calls are allowed but not logged.
-            if (n_learned == learned.len)
-                say("{{\"event\":\"learning-full\",\"after\":{d}}}", .{max_learned});
-            continue;
-        }
         const row = for (rows[0..n_rows]) |*r| {
             if (r.nr == nr) break r;
         } else if (n_rows < max_rows) blk: {
@@ -247,57 +219,7 @@ fn callName(nr: u32) []const u8 {
     return std.mem.print(&S.buf, "{d}", .{nr}) catch "?";
 }
 
-/// exeOf returns the target of /proc/PID/exe, made plain, or "?" if pid is gone.
-fn exeOf(pid: u32, buf: *[256]u8) []const u8 {
-    var path: [32]u8 = undefined;
-    const p = std.mem.print(path[0 .. path.len - 1], "/proc/{d}/exe", .{pid}) catch return "?";
-    path[p.len] = 0;
-    const n = linux.readlink(@ptrCast(&path), buf, buf.len);
-    if (linux.errno(n) != .SUCCESS) return "?";
-    return plain(buf[0..n]);
-}
-
-/// serviceOf returns the service pid belongs to, from the cgroup leash put it
-/// in (/run/cgroup/svc/NAME), or - for werewolf's own programs or a gone pid.
-fn serviceOf(pid: u32, buf: *[256]u8) []const u8 {
-    var path: [32]u8 = undefined;
-    const p = std.mem.print(path[0 .. path.len - 1], "/proc/{d}/cgroup", .{pid}) catch return "-";
-    path[p.len] = 0;
-    const rc = linux.open(@ptrCast(&path), .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.errno(rc) != .SUCCESS) return "-";
-    const fd: i32 = @intCast(rc);
-    defer _ = linux.close(fd);
-    const n = linux.read(fd, buf, buf.len);
-    if (linux.errno(n) != .SUCCESS) return "-";
-    return cgroupService(buf[0..n]);
-}
-
-/// cgroupService returns NAME from the cgroup2 line 0::/svc/NAME, or -.
-fn cgroupService(text: []u8) []const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const prefix = "0::/svc/";
-        if (!std.mem.startsWith(u8, line, prefix)) continue;
-        const rest = line[prefix.len..];
-        const name = rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
-        if (name.len == 0) return "-";
-        const at = @intFromPtr(name.ptr) - @intFromPtr(text.ptr);
-        return plain(text[at..][0..name.len]);
-    }
-    return "-";
-}
-
-/// plain replaces, in place, each byte that is not printable ASCII or would
-/// end a JSON string with ?, so callers cannot forge log fields.
-fn plain(s: []u8) []const u8 {
-    for (s) |*c| if (c.* < 0x20 or c.* == '"' or c.* == '\\' or c.* > 0x7e) {
-        c.* = '?';
-    };
-    return s;
-}
-
-/// line_buf fits the longest line: a learned call with a 256-byte exe and a
-/// 256-byte service.
+/// line_buf fits the longest line, a refusal's.
 var line_buf: [1024]u8 = undefined;
 
 /// say writes one line to the console.
@@ -307,17 +229,6 @@ fn say(comptime fmt: []const u8, args: anytype) void {
 }
 
 const testing = std.testing;
-
-test cgroupService {
-    var a = "0::/svc/nginx\n".*;
-    try testing.expectEqualStrings("nginx", cgroupService(&a));
-    var b = "0::/svc/app/child\n".*;
-    try testing.expectEqualStrings("app", cgroupService(&b));
-    var c = "0::/\n".*;
-    try testing.expectEqualStrings("-", cgroupService(&c));
-    var d = "0::/svc/a\"b\n".*;
-    try testing.expectEqualStrings("a?b", cgroupService(&d));
-}
 
 test callName {
     try testing.expectEqualStrings("read", callName(@intCast(@backingInt(linux.SYS.read))));

@@ -51,7 +51,6 @@ pub const Driver = struct {
 pub const Phase = enum { seed, verify };
 
 pub const Plan = struct {
-    legacy: bool = false,
     timeout_seconds: u16 = 300,
     /// packages are the test image's extra packages, sorted.
     packages: []const []const u8 = &.{},
@@ -83,9 +82,9 @@ pub const Error = error{ Plan, OutOfMemory };
 
 pub const reserved = [_][]const u8{ "test-platform", "test-lifecycle" };
 
-/// completion is the Expect pattern test/boot waits for: the stage's whole
-/// completion record, newline and all, so the run's last record is never
-/// cut short by test/boot printing its own result.
+/// completion is the console line test/console.zig waits for: the stage's
+/// whole completion record, newline and all, so the run's last record is
+/// never cut short by the console printing its own result.
 pub const completion = "werewolf-test: [^\\r\\n]*\"event\":\"complete\"[^\\r\\n]*\\}\\r*\\n";
 const runtime_grants = [_][]const u8{ "python:native", "node:native", "java:native" };
 const test_pledges = [_][]const u8{
@@ -140,9 +139,8 @@ pub fn load(
 }
 
 /// form loads FORM's plan from dir, a form's directory, and holds it to what
-/// a form may declare: retained shell checks keep the legacy path, a form
-/// without suites must be a declared foundation, and the shared suites'
-/// names are not a form's.
+/// a form may declare: no retired shell checks, a form without suites must
+/// be a declared foundation, and the shared suites' names are not a form's.
 pub fn form(
     io: Io,
     gpa: Allocator,
@@ -151,16 +149,16 @@ pub fn form(
     failure: *Failure,
 ) Error!Plan {
     const path = try gpa.print("{s}/test/tests.yaml", .{dir});
-    var plan = try load(io, gpa, root, path, failure);
+    const plan = try load(io, gpa, root, path, failure);
     if (plan.form != null or plan.skip.len > 0 or plan.console.len > 0 or !plan.kernel_address or
         plan.app != null or !std.meta.eql(plan.boots, scenarios.Boots{}))
         return refuse(gpa, failure, "{s}: form, skip, console, kernel_address, app and boots " ++
             "are a scenario's (test/scenarios); a form says check.skip and test/console", .{path});
     for ([_][]const u8{ "checks", "checks-again" }) |name| {
-        const stat = root.statFile(io, try gpa.print("{s}/test/{s}", .{ dir, name }), .{}) catch
-            continue;
-        // Retaining a shell suite must not silently stop running its assertions.
-        if (stat.kind == .file) plan.legacy = true;
+        const shell = try gpa.print("{s}/test/{s}", .{ dir, name });
+        _ = root.statFile(io, shell, .{}) catch continue;
+        // Shell checks no longer run: kept, their assertions would silently stop.
+        return refuse(gpa, failure, "{s}: shell checks are retired; write native suites", .{shell});
     }
     for (plan.drivers) |d| for (reserved) |name| if (mem.eql(u8, d.name, name))
         return refuse(gpa, failure, "{s}: {s} is reserved for shared checks", .{ path, name });
@@ -372,7 +370,7 @@ pub const Check = struct {
     fn plan(c: *Check, node: yaml.Node, data: Json) Error!Plan {
         c.line = 1;
         try c.fields(data, &([_][]const u8{
-            "version", "packages", "prune", "suites", "host", "legacy", "timeout",
+            "version", "packages", "prune", "suites", "host", "timeout",
         } ++ scenarios.keys), &.{ "version", "suites" });
         const top = data.object;
         const version = top.get("version").?;
@@ -380,11 +378,6 @@ pub const Check = struct {
         if (version != .integer or version.integer != 1)
             return c.fail("unsupported test plan version", .{});
         var out: Plan = .{};
-        if (top.get("legacy")) |legacy| {
-            c.line = keyLine(node, "legacy");
-            if (legacy != .bool) return c.fail("legacy must be boolean", .{});
-            out.legacy = legacy.bool;
-        }
         if (top.get("timeout")) |timeout| {
             c.line = keyLine(node, "timeout");
             out.timeout_seconds = seconds(timeout, 1, 1800) orelse
@@ -889,7 +882,7 @@ test "YAML that could be read two ways, or not at all, is refused" {
         .{ "", "empty test plan" },
         .{ "version: [\n", "does not end with ]" },
         .{ "version: [[[1]]]\n", "YAML indicator" },
-        .{ "version: 1\nsuites: []\nlegacy: yes\n", "ambiguous" },
+        .{ "version: 1\nsuites: []\nx: yes\n", "ambiguous" },
         .{ "version: 1.0\nsuites: []\n", "unsupported test plan version" },
         .{ "version: 1\nsuites: []\ntimeout: 1e3\n", "ambiguous" },
         .{ "version: 1\nsuites: []\nx: 9007199254740992\n", "exact numeric range" },
@@ -1008,9 +1001,6 @@ test "native suites declare their client, identity, policy and cases" {
         try mem.replaceOwned(u8, a, try native(a, native_defaults), "nobody", "root"),
     );
     try expectRefused(a, try mem.concat(a, u8, &.{
-        try native(a, native_defaults), "legacy: 'false'\n",
-    }), "legacy must be boolean");
-    try expectRefused(a, try mem.concat(a, u8, &.{
         try native(a, native_defaults), "packages: [bash]\n",
     }), "invalid test package");
     const pruned = try expectPlan(a, try mem.concat(a, u8, &.{
@@ -1120,7 +1110,6 @@ test "every form's plan and the platform plan load" {
         };
         count += 1;
         if (mem.eql(u8, entry.name, "minimal")) try testing.expectEqual(0, plan.drivers.len);
-        if (mem.eql(u8, entry.name, "gatus")) try testing.expect(!plan.legacy);
         if (mem.eql(u8, entry.name, "greenbone")) {
             try testing.expectEqualDeep(
                 @as([]const []const u8, &.{ "libcurl-openssl4", "postgresql-client" }),
@@ -1133,7 +1122,7 @@ test "every form's plan and the platform plan load" {
     try testing.expect(count > 50);
 }
 
-test "a form's plan keeps retained shell checks and refuses shared names" {
+test "a form's plan refuses retired shell checks and shared names" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1153,11 +1142,12 @@ test "a form's plan keeps retained shell checks and refuses shared names" {
     );
     try tmp.dir.writeFile(io, .{ .sub_path = "forms/app/test/tests.yaml", .data = plan });
     var failure: Failure = .{};
-    try testing.expect(!(try form(io, a, tmp.dir, "forms/app", &failure)).legacy);
+    _ = try form(io, a, tmp.dir, "forms/app", &failure);
     for ([_][]const u8{ "checks", "checks-again" }) |name| {
         const path = try a.print("forms/app/test/{s}", .{name});
         try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "ok retained true\n" });
-        try testing.expect((try form(io, a, tmp.dir, "forms/app", &failure)).legacy);
+        try testing.expectError(error.Plan, form(io, a, tmp.dir, "forms/app", &failure));
+        try testing.expect(mem.find(u8, failure.text, "shell checks are retired") != null);
         try tmp.dir.deleteFile(io, path);
     }
     for (reserved) |name| {

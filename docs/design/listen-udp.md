@@ -61,18 +61,18 @@ and HTTP/3 for Caddy (udp/443).
 4. **A kernel socket.** WireGuard's datagrams carry no service's user;
    `wireguard-up` sets the device up as root before fence, so its form
    declares `listen root udp 51820` in `net:`, the one listen for root.
-5. **Checks.** test/checks' `listeners` takes the declared UDP ports;
+5. **Checks.** the shared `listeners` check takes the declared UDP ports;
    each UDP form's check binds a second socket on its port as another
    user, where the port is free, and finds its sends refused.
 
 ## Drawbacks
 
-- The bind is unguarded. While unbound is down, a broken-into service
-  that holds `CAP_NET_BIND_SERVICE` (any low-port server) can bind
-  udp/53 and read the queries that arrive; above 1024 any service can.
-  It cannot answer them: its datagrams from the port leave only to ports
-  its own user may reach anyway (DNS's 53), never to a client's. runit restarts unbound
-  within a second, but a squatter would keep the port until a reboot.
+- The bind is unguarded. While unbound is down, a broken-into service that holds
+  `CAP_NET_BIND_SERVICE` (any low-port server) can bind udp/53 and read the queries
+  that arrive; above 1024 any service can. It cannot answer them: its datagrams from
+  the port leave only to ports its own user may reach anyway (DNS's 53), never to a
+  client's. runit restarts unbound within a second, but a squatter would keep the
+  port until a reboot.
 - One more pair of rules for each UDP port, read once per route lookup.
 
 ## Alternatives Considered
@@ -99,7 +99,7 @@ and HTTP/3 for Caddy (udp/443).
 ## Reliability Considerations
 
 - A form whose service is down leaves its port unheld; nothing about
-  that changes. test/checks' `listeners` (`netstat -ltun`) already fails
+  that changes. The shared `listeners` check (`/proc/net`) already fails
   a UDP socket on an undeclared port.
 - Fails closed as fence does: a rule fence cannot add stops the boot,
   and the last slot that worked boots.

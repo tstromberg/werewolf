@@ -73,12 +73,12 @@ Delete only closed files whose closing time is at least 90 days old, whether
 plain or compressed. Backward clock changes postpone expiry. Retention depends
 on a trustworthy receive clock; message timestamps never drive deletion.
 
-Default storage budget: 1 GiB, including active files, archives and compression scratch
-space; reserve room for one compression before admitting new records. Bound closed
-segments to 8192, allowing recovery scratch. Never assume data compresses. If the
-budget, file limit or filesystem fills, preserve unexpired files and drop new file
-records, reporting counts through the console. A strict minimum age for stored records
-cannot also promise lossless ingestion at an unlimited rate.
+Default storage budget: 1 GiB, including active files, archives and compression
+scratch space; reserve room for one compression before admitting new records. Bound
+closed segments to 8192, allowing recovery scratch. Never assume data compresses. If
+the budget, file limit or filesystem fills, preserve unexpired files and drop new
+file records, reporting counts through the console. A strict minimum age for stored
+records cannot also promise lossless ingestion at an unlimited rate.
 
 Use console-only mode when persistent `/data` is unavailable. Do not quietly
 claim 90-day retention on a RAM filesystem. Console/file selection and the byte

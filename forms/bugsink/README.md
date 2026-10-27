@@ -10,8 +10,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/bugsink/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 - Leash assigns the service's UID and groups before Python starts. Gunicorn's
   workers inherit that identity; the service cannot change UIDs or groups.
 - Snappea watches its queue through compiled inotify bindings. No JIT or Python
@@ -55,13 +55,13 @@ howl create bugsink --with bugsink --on gcp --allow-from me \
 	--config config --domain errors.example.com
 ```
 
-Sign in at `https://errors.example.com`, make a team and a project, and give its DSN to
-your application's Sentry SDK. There is no sign-up page.
+Sign in at `https://errors.example.com`, make a team and a project, and give its DSN
+to your application's Sentry SDK. There is no sign-up page.
 
 ### Importing data
 
-The database is SQLite in `/data`, and the host cannot write that directory. Point the
-SDK at this machine. Events from here on are the data.
+The database is SQLite in `/data`, and the host cannot write that directory. Point
+the SDK at this machine. Events from here on are the data.
 
 ### Known Quirks
 

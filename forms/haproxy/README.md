@@ -10,8 +10,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/haproxy/index.html).
 
 - HAProxy runs as its own user. The root is read-only. There is no control socket.
 - A request is sent to the next backend that answers. `X-Forwarded-For` is added.
-- A certificate serves HTTPS on port 443, and port 80 redirects to it. Without one, only
-  port 80 answers.
+- A certificate serves HTTPS on port 443, and port 80 redirects to it. Without one,
+  only port 80 answers.
 
 ## Getting Started
 
@@ -36,8 +36,8 @@ howl create haproxy --with haproxy --on gcp --allow-from me --backends 10.0.0.5:
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command. There is no
-database to import.
+This machine starts empty. What it must remember is in the create command. There is
+no database to import.
 
 ### Known Quirks
 

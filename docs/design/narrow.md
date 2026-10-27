@@ -48,8 +48,8 @@ service promises `rpath exec landlock seccomp`, which narrowing uses, and
 has no `root`. leash checks again at start which directory is its own.
 
 **The link.** The build makes `/etc/sv/NAME/narrow/PROGRAM`, a link to
-`/usr/lib/werewolf/leash`, for each narrowed program (lib/compose.zig), and
-leash parks the service without it. The application is pointed at it by its own setting
+`/usr/lib/werewolf/leash`, for each narrowed program (lib/compose.zig), and leash
+parks the service without it. The application is pointed at it by its own setting
 (`FFMPEG_BINARY`). The service may run leash and read its service file.
 
 **The run.** leash, run by the link (AT_EXECFN) as the service, inside its

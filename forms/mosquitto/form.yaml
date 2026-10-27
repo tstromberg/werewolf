@@ -10,10 +10,6 @@ base: prod
 packages:
   - mosquitto
 
-# The check speaks MQTT with Mosquitto's own clients.
-dev:
-  - mosquitto-clients
-
 services:
   # Mosquitto, as its own user: it may bind :8883 and no other port, read
   # its configuration and the image, and write only its own directories.

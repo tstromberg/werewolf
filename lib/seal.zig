@@ -607,8 +607,8 @@ pub fn install(filter: []const Filter, listener: bool) !i32 {
     return if (listener) @intCast(rc) else -1;
 }
 
-/// sendListener sends fd over sock (SCM_RIGHTS) with bytes: from init, l to
-/// learn or e to enforce; from leash, the service's name. It reports success.
+/// sendListener sends fd over sock (SCM_RIGHTS) with bytes: from init, e; from
+/// leash, the service's name. It reports success.
 pub fn sendListener(sock: i32, fd: i32, bytes: []const u8) bool {
     var control: [24]u8 align(8) = @splat(0);
     const e = @import("builtin").cpu.arch.endian();
@@ -630,7 +630,7 @@ pub fn sendListener(sock: i32, fd: i32, bytes: []const u8) bool {
 }
 
 /// policy_path is where init records the seal it installed:
-/// `mode enforce|learn`, then `promises WORD...`, one line each.
+/// `mode enforce`, then `promises WORD...`, one line each.
 pub const policy_path = "/run/werewolf/seal/policy";
 /// refused_path is where seal-watch counts refusals, one line per call:
 /// `NAME COUNT LAST_PID FIRST_SECONDS PROMISE`. Calls past the table's last

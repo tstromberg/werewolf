@@ -805,7 +805,7 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         Brief{
             .label = "SSH access restricted",
             .expr = "sshd -T",
-            .want = "keys only; forwarding off; bounded limits",
+            .want = "keys only; port forwarding off; bounded limits",
         },
     },
     .{

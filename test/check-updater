@@ -13,7 +13,7 @@
 #
 # make passes CHECK, FORM, OUT, TAR, SLOTS, PRUNE (what the form leaves
 # out of its packages), EROFS_OPTS, VERITY (build/host/verity), CONSOLE,
-# SEAL_ARGS, STAGED and PUBLISHED, which test/update reads.
+# STAGED and PUBLISHED, which test/update reads.
 set -eu
 dir=$CHECK/update-$FORM
 rm -rf "$dir/claim" "$dir/slots" "$dir/slots.img" "$dir/b"
@@ -59,6 +59,6 @@ done >"$dir/ownership.debugfs"
 cp "$OUT/slot/vmlinuz" "$dir/"
 (cd "$dir/verity" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) |
 	zstd -q -c | cat "$OUT/slot/stage0.zst" - >"$dir/stage0.zst"
-cmdline="console=$CONSOLE panic=1 $(cat "$OUT/slot/cmdline") $SEAL_ARGS werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3"
+cmdline="console=$CONSOLE panic=1 $(cat "$OUT/slot/cmdline") werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3"
 sh test/slot-esp "$dir/esp.img" a "$cmdline init=/init werewolf.slots=$SLOTS werewolf.esp=57E1-F000"
 exec test/update "$dir" "$cmdline init=/init werewolf.slots=$SLOTS werewolf.esp=57E1-F000" "$@"

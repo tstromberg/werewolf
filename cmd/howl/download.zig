@@ -29,6 +29,23 @@ pub fn channel(gpa: Allocator, form: []const u8, provider: howl.Platform) ![]con
     return gpa.print("{s}/{s}/{t}", .{ (try trust(gpa)).source, form, provider });
 }
 
+/// x86 bhyve boots the same signed native UEFI disk and follows its existing
+/// channel. Do not rewrite signed metadata or manufacture a separate publisher.
+fn imageProvider(provider: howl.Platform, arch: howl.Arch) !howl.Platform {
+    return switch (provider) {
+        .qemu, .lima => provider,
+        .bhyve => if (arch == .x86_64) .qemu else error.UnsupportedProtection,
+        else => error.BadSecuredProvider,
+    };
+}
+
+test "bhyve downloads keep the published x86 UEFI channel and refuse unsupported targets" {
+    try std.testing.expectEqual(howl.Platform.qemu, try imageProvider(.bhyve, .x86_64));
+    try std.testing.expectEqual(howl.Platform.lima, try imageProvider(.lima, .aarch64));
+    try std.testing.expectError(error.UnsupportedProtection, imageProvider(.bhyve, .aarch64));
+    try std.testing.expectError(error.BadSecuredProvider, imageProvider(.firecracker, .x86_64));
+}
+
 pub fn latest(
     io: Io,
     gpa: Allocator,
@@ -104,7 +121,7 @@ pub fn selected(
         "protected downloads require a published form name; use --build for a custom image",
         .{},
     );
-    if (provider != .lima and provider != .qemu) return error.BadSecuredProvider;
+    const published = try imageProvider(provider, arch);
     const t = try trust(gpa);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const root = try gpa.print("{s}/build/boot-download", .{cwd});
@@ -113,7 +130,7 @@ pub fn selected(
     const image = try gpa.print("{s}/image.crt", .{root});
     try howl.writePrivate(io, gpa, code, files.protected_boot_certificate, why);
     try howl.writePrivate(io, gpa, image, files.protected_image_certificate, why);
-    const followed = try channel(gpa, form, provider);
+    const followed = try channel(gpa, form, published);
     var native: Native = .{
         .io = io,
         .boot_certificate = code,
@@ -137,7 +154,7 @@ pub fn selected(
         .image_certificate = image,
         .channel = followed,
         .form = form,
-        .provider = @tagName(provider),
+        .provider = @tagName(published),
         .arch = @tagName(arch),
         .version = version,
     }, native.admission(), h.transport(), validator, @intCast(@divTrunc(
@@ -162,7 +179,8 @@ pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why
         if (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help")) {
             return Io.File.stdout().writeStreamingAll(
                 io,
-                "usage: howl versions [--with FORM] [--on qemu|lima] [--arch ARCH] [--json]\n" ++
+                "usage: howl versions [--with FORM] [--on qemu|lima|bhyve] [--arch ARCH] " ++
+                    "[--json]\n" ++
                     "List base image releases; install with run/create --version SERIAL|TAG.\n",
             );
         }
@@ -171,7 +189,10 @@ pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why
             form = value;
         } else if (std.mem.eql(u8, flag, "--on")) {
             provider = std.meta.stringToEnum(howl.Platform, value) orelse
-                return why.refuse("--on {s}: versions supports qemu or lima", .{value});
+                return why.refuse(
+                    "--on {s}: versions supports qemu, lima or x86_64 bhyve",
+                    .{value},
+                );
         } else if (std.mem.eql(u8, flag, "--arch")) {
             arch = howl.archName(value) orelse return why.refuse(
                 "unknown architecture {s}",
@@ -184,7 +205,8 @@ pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why
         .{},
     );
     const on = howl.engine(io, gpa, provider).on;
-    if (on != .qemu and on != .lima) return why.refuse("versions supports qemu or lima", .{});
+    const published = imageProvider(on, arch orelse return error.UnsupportedHostArch) catch
+        return why.refuse("versions supports qemu, lima or x86_64 bhyve", .{});
     const target = @tagName(arch orelse return error.UnsupportedHostArch);
     const root = "build/boot-download";
     try Dir.cwd().createDirPath(io, root);
@@ -197,7 +219,7 @@ pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why
         h.transport(),
         root,
         form,
-        @tagName(on),
+        @tagName(published),
         target,
     ) catch |err|
         return refuse(why, "image version discovery failed", err, &h);

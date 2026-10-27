@@ -1,11 +1,11 @@
 # Available forms
 
-A form says what a werewolf machine is for: its packages, services and
-permissions. Pick one below and follow its guide; a name links to the guide
-where one exists, else to the form's manifest. For your own application,
-start with the [language tutorials](../examples/README.md): the `-app` forms
-take your code through `--app`, the `-example` forms carry a sample, and a
-runtime such as `python` leaves the service to you ([applications.md](applications.md)).
+A form says what a werewolf machine is for: its packages, services and permissions.
+Pick one below and follow its guide; a name links to the guide where one exists, else
+to the form's manifest. For your own application, start with the [language
+tutorials](../examples/README.md): the `-app` forms take your code through `--app`,
+the `-example` forms carry a sample, and a runtime such as `python` leaves the
+service to you ([applications.md](applications.md)).
 
 ## Get started
 

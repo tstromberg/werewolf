@@ -11,9 +11,9 @@ service's test, and it records a few measurements beside the pass.
 
 ## Background
 
-`make check-FORM` boots a `DEV=1` image under QEMU and runs
-[test/checks](../../test/checks) as root on the serial console, then
-`forms/FORM/test/checks`. That attacks a machine. The README starts one
+`make check-FORM` boots a test image under QEMU and runs its native tests,
+the [shared platform suites](../../test/native/platform.yaml) and
+`forms/FORM/test/tests.yaml`. That attacks a machine. The README starts one
 with `howl create`, files made in the prose above the fence, a shared
 machine name, and `--on lima` or `--on proxmox`. Nothing runs the fence,
 so a flag can rot while the command still looks right.
@@ -36,8 +36,7 @@ is those two, pointed at a fence.
 
 ## Non-Goals
 
-- Replacing the `DEV=1` console checks. They need a root shell the shipping
-  image lacks, and they stay `make check`.
+- Replacing `make check`'s native tests, which judge the machine from inside.
 - AWS, Azure, Proxmox, or a browser. Proxmox stays prose for a home form.
   The fence that runs is GCP.
 - A public DNS name, an SMTP relay, or a boot-time budget.
@@ -64,7 +63,7 @@ with `sh`, with `build/host/howl` first on `PATH`. howl prints
 `NAME ADDRESS FORM`. The runner then:
 
 - reads the posture line from the console log howl kept, and requires the
-  failures to be the form's `weaknesses`, as `test/boot` does
+  failures to be the form's `weaknesses`, as `test/console.zig` does
 - connects, from the host, to each `listen: tcp/PORT` under Network Exposure
 - runs `forms/NAME/test/probe` when that file exists, with the address and
   the scratch directory, so it can read the password the fence wrote
@@ -72,7 +71,7 @@ with `sh`, with `build/host/howl` first on `PATH`. howl prints
   and deletes a leftover of that name before it starts
 
 A probe is the protocol check (a login, a blocked name) run from the host.
-It takes over from `forms/NAME/test/checks` once it covers the same
+It takes over from `forms/NAME/test/tests.yaml` once it covers the same
 behavior. Until then `make check-FORM` stays, and the example run sits
 beside it. A form whose `archs` exclude the host is skipped on `local`;
 its production fence passes `--arch` and runs on GCP.

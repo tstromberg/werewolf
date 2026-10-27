@@ -8,12 +8,13 @@ instructions](https://dist.werewolf-linux.org/boot/v1/nextcloud/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- PHP runs Nextcloud, and PostgreSQL may compile a query. Both are named in `form.yaml`.
+- PHP runs Nextcloud, and PostgreSQL may compile a query. Both are named in
+  `form.yaml`.
 
 ## Getting Started
 
@@ -27,8 +28,8 @@ howl create nextcloud --with nextcloud \
 ```
 
 Open `https://cloud.home.arpa` and sign in as `alice`. The password is in
-`admin-password`. The first start installs Nextcloud before the site answers. Phone and
-desktop apps use the same URL. Clients are in [Nextcloud's
+`admin-password`. The first start installs Nextcloud before the site answers. Phone
+and desktop apps use the same URL. Clients are in [Nextcloud's
 documentation](https://docs.nextcloud.com/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
@@ -46,8 +47,8 @@ Change the password in Nextcloud; a later start does not reset it.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
-in the `postgres` database, while the cluster is first made. See
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied
+once, in the `postgres` database, while the cluster is first made. See
 [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The
 same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
 
@@ -62,8 +63,8 @@ service after it is up.
 
 - The web installer is not in the image, and the web updater is off. A new Nextcloud
   arrives with the machine's next image.
-- Apps from the app store install into `/data`. One that brings its own program does not
-  run, because `/data` cannot execute files.
+- Apps from the app store install into `/data`. One that brings its own program does
+  not run, because `/data` cannot execute files.
 - Background jobs run every five minutes. You do not start them.
 - Files live in `/data/svc/nextcloud`. The code does not.
 

@@ -8,8 +8,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/grafana/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -37,15 +37,15 @@ howl create grafana --with grafana --on gcp --allow-from me \
 ```
 
 Sign in at `https://grafana.example.com`. On one machine, `--with grafana,prometheus`
-puts Prometheus at `127.0.0.1:9090`. A key encrypts stored data-source credentials. The
-form makes one at `/data/svc/grafana/secret-key`. To keep it across a new disk, put the
-same bytes in `config/grafana/secret-key`.
+puts Prometheus at `127.0.0.1:9090`. A key encrypts stored data-source credentials.
+The form makes one at `/data/svc/grafana/secret-key`. To keep it across a new disk,
+put the same bytes in `config/grafana/secret-key`.
 
 ### Importing data
 
-The database is SQLite in `/data`, and the host cannot write that directory. After the
-site is up, import a dashboard's JSON in the UI. History before that stays on the old
-server.
+The database is SQLite in `/data`, and the host cannot write that directory. After
+the site is up, import a dashboard's JSON in the UI. History before that stays on the
+old server.
 
 ### Known Quirks
 

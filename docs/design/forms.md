@@ -47,8 +47,8 @@ wanting a disk: the kernel command line says whether there is one
 (`werewolf.data`), the config whether it is encrypted (`data.key`), and a
 disk slow to appear never quietly becomes RAM ([data.md](../data.md)).
 
-**Variants and bundles.** `DEV=1` adds busybox and the debug shell to any
-form, with its own lock and output directory. SSH needed no flag: `sshd`
+**Variants and bundles.** `--dev=ssh` adds developer SSH for test iteration to any
+form, with its own lock and output directory. SSH for people needed no flag: `sshd`
 is a form that `prod-ssh`, `playground` or a form of yours takes `with`.
 
 **Runtime forms** are `prod`, one Wolfi runtime, and a leashed service.
@@ -63,7 +63,7 @@ way (`make FORM=../myapp`), and `howl --app DIR` needs no form at all.
 a disk, in LUKS2 and in RAM, by static address and DHCP, and on each
 cloud's metadata ([testing.md](../testing.md)). A check that boots `prod`
 from slots (check-persist, check-dist) gives it no way out, so no slot b
-appears mid-check. Every form boots with `DEV=1` and as it ships;
+appears mid-check. Every form boots its native test image and as it ships;
 test/posture-known holds what every form of a kind fails.
 
 **Open:** which forms are published. Today `minimal`, `prod` and
@@ -78,7 +78,7 @@ test/posture-known holds what every form of a kind fails.
 ## Alternatives Considered
 
 **Capability forms in the chain**: every combination becomes a form.
-**`SSH=1` beside `DEV=1`**: bundles made `sshd` a form any form can take,
+**`SSH=1` as a build flag**: bundles made `sshd` a form any form can take,
 with no second build axis.
 
 ## Security Considerations

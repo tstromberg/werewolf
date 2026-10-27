@@ -1,6 +1,6 @@
 # What the syncthing form, booted as it ships, without a shell and without
 # a config, must say on its console (make check-shellfree-syncthing;
-# test/boot; forms/demo/test/console has the format). Caddy, given no
+# test/console.zig; forms/demo/test/console has the format). Caddy, given no
 # password for the GUI's user, parks before syncthing-auth writes
 # anything or Caddy binds a port, and says why; Syncthing runs, its GUI on
 # loopback, reachable by nothing. make check-syncthing boots it with its

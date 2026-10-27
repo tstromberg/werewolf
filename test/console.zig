@@ -1,8 +1,7 @@
 //! console NAME CHECKS LOG QEMU... boots a werewolf image under QEMU and
-//! judges it from outside, for a machine with no shell (test/boot keeps
-//! the legacy shell checks). QEMU must set -no-reboot, so a panic ends the
-//! run, and -nographic: its standard input and output are the console and,
-//! behind Ctrl-A c, the monitor.
+//! judges it from outside, running nothing on it. QEMU must set
+//! -no-reboot, so a panic ends the run, and -nographic: its standard input
+//! and output are the console and, behind Ctrl-A c, the monitor.
 //!
 //! It judges the posture line posture prints once the services settle: the
 //! failing checks must be exactly POSTURE_KNOWN's, a ?ID failing or not.
@@ -116,8 +115,8 @@ const Boot = struct {
         return std.fmt.parseInt(i64, text, 10) catch default;
     }
 
-    /// say prints a result as test/boot does: status, machine, what, and
-    /// any detail indented beneath.
+    /// say prints a result: status, machine, what, and any detail indented
+    /// beneath.
     fn say(b: *Boot, status: []const u8, what: []const u8, detail: []const u8) void {
         b.c.say("{s: <6} {s: <18} {s}", .{ status, b.name, what });
         var lines = mem.splitScalar(u8, mem.trim(u8, detail, " \r\n"), '\n');
@@ -557,7 +556,7 @@ const Never = struct {
     }
 };
 
-/// parse reads a CHECKS file. Shell checks are the legacy test/boot's.
+/// parse reads a CHECKS file. Shell checks, ok and gap, are retired.
 fn parse(gpa: Allocator, text: []const u8) ![]const Line {
     var out: std.ArrayList(Line) = .empty;
     var lines = mem.splitScalar(u8, text, '\n');
@@ -568,7 +567,7 @@ fn parse(gpa: Allocator, text: []const u8) ![]const Line {
         const kind_word = words.next().?;
         const kind = std.meta.stringToEnum(Kind, kind_word) orelse
             return if (mem.eql(u8, kind_word, "ok") or mem.eql(u8, kind_word, "gap"))
-                error.ShellChecksNeedTestBoot
+                error.ShellChecksRetired
             else
                 error.UnknownLine;
         const name = words.next() orelse return error.UnnamedLine;
@@ -824,7 +823,7 @@ fn describe(c: *host.Check, argv: []const []const u8) ![]const u8 {
 
 const testing = std.testing;
 
-test "console lines are seen, unseen or up; shell checks are test/boot's" {
+test "console lines are seen, unseen or up; shell checks are retired" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -839,7 +838,7 @@ test "console lines are seen, unseen or up; shell checks are test/boot's" {
     try testing.expectEqual(Kind.up, lines[3].kind);
     try testing.expectEqualStrings("postgres", lines[3].arg);
     try testing.expectEqualStrings("", lines[2].arg);
-    try testing.expectError(error.ShellChecksNeedTestBoot, parse(a, "ok  root  [ -e / ]\n"));
+    try testing.expectError(error.ShellChecksRetired, parse(a, "ok  root  [ -e / ]\n"));
     try testing.expectError(error.MissingExpression, parse(a, "seen nothing\n"));
     try testing.expectError(error.InvalidExpression, parse(a, "seen bad (unclosed\n"));
     try testing.expectError(error.UnknownLine, parse(a, "maybe x y\n"));

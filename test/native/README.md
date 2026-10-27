@@ -53,14 +53,14 @@ reformatting on the second boot. Existing form exclusions remain explicit; unkno
 exclusions fail. SSH iteration uses only the selected form suite.
 
 Limits are 256 KiB of YAML, 32 suites, 256 cases per suite and 64 steps per case.
-Responses allow 1 MiB of body and 64 KiB of headers; clients allow 1 MiB stdout
-and 64 KiB stderr. Regex patterns allow 512 bytes. A tree walks 100,000 entries, 64
-levels and 256 MiB of content at most; a conversation's reply holds 1 MiB, its literal
-text 4 KiB; service text 1 MiB. Probes default to a 10-second request deadline;
-`timeout: 45s` overrides one fetch, exec, tree or tcp call (1s..300s).
-`await` retries read-only operations within its declared budget;
-transport and parse failures do not silently satisfy a refusal assertion.
-The existing launcher and console also impose whole-suite/boot deadlines.
+Responses allow 1 MiB of body and 64 KiB of headers; clients allow 1 MiB stdout and
+64 KiB stderr. Regex patterns allow 512 bytes. A tree walks 100,000 entries, 64
+levels and 256 MiB of content at most; a conversation's reply holds 1 MiB, its
+literal text 4 KiB; service text 1 MiB. Probes default to a 10-second request
+deadline; `timeout: 45s` overrides one fetch, exec, tree or tcp call (1s..300s).
+`await` retries read-only operations within its declared budget; transport and parse
+failures do not silently satisfy a refusal assertion. The existing launcher and
+console also impose whole-suite/boot deadlines.
 
 Cases stop at their first failed step; independent cases continue. Captures and
 cookie sessions reset for every case and boot phase. Fixture values and captured
@@ -84,19 +84,19 @@ Use a native source when computation or protocol state cannot be expressed as
 ordered fixed probes. Do not add loops, branches or shell expansion.
 
 ## Security Considerations
-Auth and confinement tests select the tested user and leash policy. Root suites inspect
-the existing VM; they do not change production service grants or enforcement. Probes
-gain no privilege: the seal drops `CAP_SYS_PTRACE`, so no step reads another user's
-environment. Writes that succeed are undone; `squat`
-restores its service even when it fails. Clean test images add no shell, BusyBox or SSH.
-Iteration uses the existing developer SSH key and `sh-shim`; it is not release evidence.
-Shipping images omit test payloads.
+Auth and confinement tests select the tested user and leash policy. Root suites
+inspect the existing VM; they do not change production service grants or enforcement.
+Probes gain no privilege: the seal drops `CAP_SYS_PTRACE`, so no step reads another
+user's environment. Writes that succeed are undone; `squat` restores its service even
+when it fails. Clean test images add no shell, BusyBox or SSH. Iteration uses the
+existing developer SSH key and `sh-shim`; it is not release evidence. Shipping images
+omit test payloads.
 
 ## Reliability Considerations
-Reject malformed plans before boot. Reject absent, duplicate, stale or failed results.
-Mutations run once. Explicit read-only polling has a deadline; timeouts are failures.
-Client input and both output pipes drain concurrently. Kill the client process group
-and reap the direct child on completion or failure. `test/probe-tests.zig` covers
-real HTTP/TLS, capture types, cookies, polling, output limits and commands hanging
-after closing pipes.
-Compare test and shipping payloads before boot and hash the run's inputs and logs.
+Reject malformed plans before boot. Reject absent, duplicate, stale or failed
+results. Mutations run once. Explicit read-only polling has a deadline; timeouts are
+failures. Client input and both output pipes drain concurrently. Kill the client
+process group and reap the direct child on completion or failure.
+`test/probe-tests.zig` covers real HTTP/TLS, capture types, cookies, polling, output
+limits and commands hanging after closing pipes. Compare test and shipping payloads
+before boot and hash the run's inputs and logs.

@@ -73,6 +73,7 @@ suites:
               body: "ok\n"
   # It speaks HTTP itself: raw HTTP/1.0, and a request split by a pause, get
   # one framed reply and then the end of the stream.
+  # Escaped wire payloads must remain on one line in the plan parser.
   - name: ruby-wire
     cases:
       - name: ruby-framing
@@ -82,6 +83,7 @@ suites:
               exchange:
                 - send: "GET / HTTP/1.0\r\n\r\n"
                 - expect:
+                    # yamllint disable-line rule:line-length
                     matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\nHello from Ruby on werewolf!\n$"
                 - close: eof
       - name: ruby-fragmented
@@ -93,5 +95,6 @@ suites:
                 - pause: 1s
                 - send: "\r\n"
                 - expect:
+                    # yamllint disable-line rule:line-length
                     matches: "^HTTP/1\\.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\nHello from Ruby on werewolf!\n$"
                 - close: eof

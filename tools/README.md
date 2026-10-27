@@ -78,7 +78,7 @@ builds and installs the manuals; `make man-lint` checks them with mandoc.
 `doc-check FILE.md...` runs for `make lint`. It fails on a relative link or
 `#anchor` that leads nowhere (anchors as GitHub makes them from headings), a
 program README over 100 lines, a design doc over 120, a doc in docs/ over
-175, a line over 88 columns (outside code blocks and tables, and not a URL a
+175, a line over 85 columns (outside code blocks and tables, and not a URL a
 line ends in), or a line that starts with TODO: the limits in
 CONTRIBUTING.md's Style section. `doc-check --fix FILE.md...`, run by `make
 fix`, rewraps the paragraphs that overflow.

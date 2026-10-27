@@ -9,17 +9,17 @@ instructions](https://dist.werewolf-linux.org/boot/v1/postgresql/index.html).
 
 ## Security Posture
 
-The server runs as its own user, and nothing else does. There is no shell. Landlock and
-seccomp hold it to its socket and to `/data/svc/postgres`. The root is read-only.
+The server runs as its own user, and nothing else does. There is no shell. Landlock
+and seccomp hold it to its socket and to `/data/svc/postgres`. The root is read-only.
 
-- No TCP. `listen_addresses` is empty. A local role is the system user's name, and a TCP
-  login is refused.
+- No TCP. `listen_addresses` is empty. A local role is the system user's name, and a
+  TCP login is refused.
 - `initdb` uses the static sh-shim: one declared program and its arguments, with only
   `/dev/null` redirections. Setup needs no preload.
 - The cluster is mode 0700. If it was made and then lost, the next start refuses to
   create an empty one over it.
-- PostgreSQL compiles costly queries to machine code with LLVM. `jit` stays on, which is
-  its default.
+- PostgreSQL compiles costly queries to machine code with LLVM. `jit` stays on, which
+  is its default.
 
 ## Getting Started
 
@@ -60,19 +60,19 @@ available in that backend.
 howl create postgresql --with postgresql --import ./dump
 ```
 
-A form can still carry `rootfs/usr/share/werewolf-postgres/NAME.sql`. That SQL runs on
-every start.
+A form can still carry `rootfs/usr/share/werewolf-postgres/NAME.sql`. That SQL runs
+on every start.
 
 ### Known Quirks
 
 - Debian's PostgreSQL listens on port 5432. This one does not.
 - A dump's roles must be system users on this machine. Peer authentication has no
   passwords.
-- The image's SQL files run on every start. An `INSERT` needs a conflict target, or the
-  rows multiply. `--import` runs once.
-- This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger uses
-  `/bin/mksh`. A form replacing the PostgreSQL service must keep its explicit initdb,
-  sh-shim and locale run paths.
+- The image's SQL files run on every start. An `INSERT` needs a conflict target, or
+  the rows multiply. `--import` runs once.
+- This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger
+  uses `/bin/mksh`. A form replacing the PostgreSQL service must keep its explicit
+  initdb, sh-shim and locale run paths.
 
 ## Size
 

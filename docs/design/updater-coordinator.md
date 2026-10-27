@@ -26,11 +26,11 @@ fetchers and readers. Renaming that process would not remove its authority.
 ## Detailed design
 
 Before dropping privileges, the updater prepares its persistent state, opens its
-operator listener and console, and provisions the immutable runtime. It forks a private
-launcher, then changes real, effective and saved credentials to 77 and empties all
-capability sets. I/O stays single-threaded across the drop. `_update` (69) remains a
-separate worker identity. The coordinator alone retains the updater's mount-broker
-channel.
+operator listener and console, and provisions the immutable runtime. It forks a
+private launcher, then changes real, effective and saved credentials to 77 and
+empties all capability sets. I/O stays single-threaded across the drop. `_update`
+(69) remains a separate worker identity. The coordinator alone retains the updater's
+mount-broker channel.
 
 The launcher closes host descriptors and chroots into updater state. It loses
 SYS_CHROOT and SYS_ADMIN before receiving requests; it cannot escape by making
@@ -45,11 +45,11 @@ before decoding job arguments. Each job has an output bound and deadline; its
 children retain their existing Landlock and seccomp restrictions. No request
 accepts an executable path or returns a privileged descriptor.
 
-Construction reads the running image through `/host` and writes only updater work, cache
-and its audit log; temporary files stay in root-only `work/tmp`. Metadata capabilities
-stay confined to state. Candidate ownership is preserved until mkfs normalizes the
-immutable image. The coordinator owns reports and policy state. Scratch cleanup and old
-ownership migration run before unprivileged use.
+Construction reads the running image through `/host` and writes only updater work,
+cache and its audit log; temporary files stay in root-only `work/tmp`. Metadata
+capabilities stay confined to state. Candidate ownership is preserved until mkfs
+normalizes the immutable image. The coordinator owns reports and policy state.
+Scratch cleanup and old ownership migration run before unprivileged use.
 
 The mount broker accepts an argumentless updater-only request for clean reboot.
 It sets only the preopened runit flags and wakes PID 1. It also publishes the
@@ -59,9 +59,9 @@ descriptor; membership in `tty` permits ordinary session broadcasts.
 
 Boot artifacts stay root-owned, with group 77 read/traverse access and no group write
 permission. Staged images are also private to this group. The broker publishes this
-through its detached mount; `/boot` stays read-only. Only the operator policy receives
-group read access under `/run/config`; other files keep their existing permissions. IPE
-inspection uses preopened read-only descriptors.
+through its detached mount; `/boot` stays read-only. Only the operator policy
+receives group read access under `/run/config`; other files keep their existing
+permissions. IPE inspection uses preopened read-only descriptors.
 
 No service, the coordinator included, gets the TPM device. Before overwriting the
 inactive slot the coordinator asks the mount broker's `floor` operation, which takes
@@ -80,7 +80,8 @@ image; it sees none of that image's runtime mounts. It exits when its parent die
 - Keep capabilities in a renamed coordinator: preserves the authority being removed.
 - Give a helper arbitrary file operations: makes the interface harder to audit.
 - User namespaces and UID mappings: add machinery for the same construction job.
-- Remove worker chroots without replacing their filesystem boundary: weakens isolation.
+- Remove worker chroots without replacing their filesystem boundary: weakens
+  isolation.
 
 ## Security Considerations
 
@@ -94,8 +95,8 @@ accounts, recover UID 0 or change files outside its declared writable state.
 
 ## Reliability Considerations
 
-Setup fails closed before publishing updater-ready. The launcher watches parent death;
-children watch launcher death. Failed jobs leave scratch for the next pass. Guest tests
-check credentials as well as stage, reboot, commit and shutdown. Existing rollback
-checks remain in the keeper, stage0 and signed-image verifier. Linux fixtures exercise
-the actual installer and refusal paths.
+Setup fails closed before publishing updater-ready. The launcher watches parent
+death; children watch launcher death. Failed jobs leave scratch for the next pass.
+Guest tests check credentials as well as stage, reboot, commit and shutdown. Existing
+rollback checks remain in the keeper, stage0 and signed-image verifier. Linux
+fixtures exercise the actual installer and refusal paths.

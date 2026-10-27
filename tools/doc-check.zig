@@ -1,6 +1,6 @@
 //! doc-check fails when werewolf's markdown breaks its own rules: a relative
 //! link or #anchor that leads nowhere, a program README over 100 lines, a
-//! design doc over 120, a doc in docs/ over 175, a line over 88 columns, or
+//! design doc over 120, a doc in docs/ over 175, a line over 85 columns, or
 //! a line that starts with TODO. `doc-check --fix` rewraps the paragraphs
 //! that overflow. See README.md.
 
@@ -11,7 +11,7 @@ const mem = std.mem;
 
 /// width is the longest line a doc may have, in code points. Code blocks
 /// and table rows are exempt, as is a URL or path a line ends in.
-const width = 88;
+const width = 85;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -467,14 +467,14 @@ test limit {
 }
 
 test wide {
-    try testing.expect(!wide(comptime times("x", 88)));
-    try testing.expect(wide(comptime times("x", 89)));
+    try testing.expect(!wide(comptime times("x", 85)));
+    try testing.expect(wide(comptime times("x", 86)));
     try testing.expect(!wide(comptime "| " ++ times("x", 90)));
     try testing.expect(!wide(comptime "see https://example.com/" ++ times("a", 80)));
     try testing.expect(!wide(comptime "[a link](../../" ++ times("a", 80) ++ ".md)"));
     try testing.expect(wide(comptime times("a word ", 15) ++ "https://x/y"));
     try testing.expect(wide(comptime times("a word ", 12) ++ times("x", 20)));
-    try testing.expect(!wide(comptime times("é", 88)));
+    try testing.expect(!wide(comptime times("é", 85)));
 }
 
 test rewrapped {
@@ -492,9 +492,10 @@ test rewrapped {
     // four spaces after another list line is prose, and after a blank line
     // it is code.
     try testing.expectEqualStrings(
-        comptime "- item\n   ```\n   code\n   ```\n   after " ++ times("on and ", 11) ++ "on\n" ++
-            "   and\n  - nested\n    - deep " ++ times("on and ", 10) ++
-            "on and\n      on and\n\n" ++
+        comptime "- item\n   ```\n   code\n   ```\n   after " ++ times("on and ", 10) ++
+            "on and\n" ++
+            "   on and\n  - nested\n    - deep " ++ times("on and ", 10) ++
+            "on\n      and on and\n\n" ++
             "    code " ++ times("on and ", 12) ++ "\n",
         try rewrapped(
             a,
@@ -507,9 +508,9 @@ test rewrapped {
     // would start a line as a list marker (3.) stays on the line before; a
     // plain paragraph fills from column 0.
     try testing.expectEqualStrings(
-        comptime "- " ++ times("word ", 16) ++ "word\n  word word word\n" ++
-            "2. " ++ times("ab ", 27) ++ "ab 3.\n   ab ab\n\n" ++
-            "plain " ++ times("w ", 40) ++ "w\nw w w w\n",
+        comptime "- " ++ times("word ", 15) ++ "word\n  word word word word\n" ++
+            "2. " ++ times("ab ", 26) ++ "ab\n   ab 3. ab ab\n\n" ++
+            "plain " ++ times("w ", 39) ++ "w\nw w w w w\n",
         try rewrapped(
             a,
             comptime "- " ++ times("word ", 19) ++ "word\n" ++

@@ -1,7 +1,7 @@
 # Prometheus - Hardened VM
 
-[Prometheus](https://prometheus.io) scrapes targets you name and serves its own UI. The
-form's manifest is [form.yaml](form.yaml).
+[Prometheus](https://prometheus.io) scrapes targets you name and serves its own UI.
+The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/prometheus/index.html).

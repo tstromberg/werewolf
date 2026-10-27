@@ -1,5 +1,5 @@
 # What the cron form, booted as it ships, without a shell, must say on its
-# console (make check-shellfree-cron; test/boot; forms/demo/test/console
+# console (make check-shellfree-cron; test/console.zig; forms/demo/test/console
 # has the format). supercronic starts, leashed, reads the crontab, takes
 # sh-shim as its shell, and stays up without a complaint.
 

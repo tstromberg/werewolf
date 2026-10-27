@@ -1,5 +1,5 @@
 # What the zeek form, booted as it ships, must say on its console (make
-# check-shellfree-zeek; test/boot; forms/demo/test/console has the
+# check-shellfree-zeek; test/console.zig; forms/demo/test/console has the
 # format). Zeek starts. make check-zeek checks a log.
 
 seen    zeek-start   leash: \{"event":"start","service":"zeek"

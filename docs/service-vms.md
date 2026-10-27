@@ -74,16 +74,16 @@ The steps below do it by hand, for a VPC and subnet of your own. Complete
 the [GCP project setup](../examples/README.md#prepare-gcp-once), make a
 bucket for the upload (`gcloud storage buckets create gs://NAME
 --uniform-bucket-level-access`), and set `GCP_PROJECT`, `GCP_BUCKET`
-(without `gs://`) and `GCP_ZONE` (for `aarch64`, one with `t2a-standard-1`). With a new
-image and VM name for each deployment, build a pristine disk, without Lima's network
-arguments, and package it for [manual
+(without `gs://`) and `GCP_ZONE` (for `aarch64`, one with `t2a-standard-1`). With a
+new image and VM name for each deployment, build a pristine disk, without Lima's
+network arguments, and package it for [manual
 import](https://docs.cloud.google.com/compute/docs/import/import-existing-image):
 
 ```sh
 export GCP_NETWORK=your-vpc
 export GCP_SUBNET=your-subnet
 export GCP_IMAGE="$VM-$ARCH-v1"
-make FORM="$FORM" ARCH="$ARCH" DEV= "build/$ARCH/$FORM/disk.qcow2"
+make FORM="$FORM" ARCH="$ARCH" "build/$ARCH/$FORM/disk.qcow2"
 mkdir -p "$SERVICE_BUILD/gcp"
 qemu-img convert -f qcow2 -O raw "$SERVICE_BUILD/disk.qcow2" \
   "$SERVICE_BUILD/gcp/disk.raw"

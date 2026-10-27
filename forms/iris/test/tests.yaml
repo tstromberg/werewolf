@@ -63,7 +63,8 @@ suites:
                 - -v
                 - ON_ERROR_STOP=1
               stdin: |
-                SELECT count(*) FROM pg_roles r JOIN pg_database d ON d.datdba=r.oid WHERE r.rolname=current_user AND r.rolcreatedb AND NOT r.rolsuper AND NOT r.rolcreaterole AND d.datname IN ('postgres','iris_tasks');
+                SELECT count(*) FROM pg_roles r JOIN pg_database d ON d.datdba=r.oid WHERE r.rolname=current_user AND r.rolcreatedb AND NOT r.rolsuper
+                AND NOT r.rolcreaterole AND d.datname IN ('postgres','iris_tasks');
               readonly: true
               env:
                 LC_ALL: C

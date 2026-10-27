@@ -126,6 +126,8 @@ suites:
           - file: /etc/unbound/unbound.conf
             expect:
               body:
+                # Preserve the exact tabs and newlines; quoted plan scalars cannot wrap.
+                # yamllint disable-line rule:line-length
                 contains: "\taccess-control: 0.0.0.0/0 refuse\n\taccess-control: ::/0 refuse\n\taccess-control: 127.0.0.0/8 allow\n\taccess-control: ::1/128 allow\n\taccess-control: 10.0.0.0/8 allow\n\taccess-control: 172.16.0.0/12 allow\n\taccess-control: 192.168.0.0/16 allow\n\taccess-control: 100.64.0.0/10 allow\n\taccess-control: 169.254.0.0/16 allow\n\taccess-control: fc00::/7 allow\n\taccess-control: fe80::/10 allow\n"
                 occurrences:
                   'access-control:': 11

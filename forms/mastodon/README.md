@@ -1,6 +1,7 @@
 # Mastodon - Hardened VM
 
-[Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and Caddy.
+[Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and
+Caddy.
 
 The application package omits optional OpenTelemetry exporters. libvips retains
 Mastodon's JPEG, PNG, GIF and WebP formats, EXIF orientation and colour conversion;
@@ -54,9 +55,9 @@ machine before you create it.
 
 ### Importing data
 
-`--import` streams `*.sql` into the `postgres` database, and one `dump.rdb` into Valkey,
-once, while data is first made. Media and settings files are not on that disk. A cloud
-cannot attach it. Delete the machine before a second import.
+`--import` streams `*.sql` into the `postgres` database, and one `dump.rdb` into
+Valkey, once, while data is first made. Media and settings files are not on that
+disk. A cloud cannot attach it. Delete the machine before a second import.
 
 ```sh
 howl create mastodon --with mastodon --import ./dump \

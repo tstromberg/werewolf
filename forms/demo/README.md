@@ -1,8 +1,8 @@
 # The demo - Hardened VM
 
-A machine that serves one page about itself and keeps itself patched, with no shell in
-the image. The page shows uptime, the last patches, and what a vulnerability scan finds.
-The form's manifest is [form.yaml](form.yaml).
+A machine that serves one page about itself and keeps itself patched, with no shell
+in the image. The page shows uptime, the last patches, and what a vulnerability scan
+finds. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/demo/index.html).
@@ -25,7 +25,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/demo/index.html).
 howl create demo --with demo
 ```
 
-Open `http://ADDRESS`. The first scan follows a download of the vulnerability database.
+Open `http://ADDRESS`. The first scan follows a download of the vulnerability
+database.
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -33,8 +34,8 @@ Open `http://ADDRESS`. The first scan follows a download of the vulnerability da
 howl create demo --with demo --on gcp --allow-from me
 ```
 
-`--allow-from me` admits your address to port 80. Give the machine a data disk. A scan
-does not fit in RAM.
+`--allow-from me` admits your address to port 80. Give the machine a data disk. A
+scan does not fit in RAM.
 
 ### Importing data
 

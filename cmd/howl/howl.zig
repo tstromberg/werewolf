@@ -34,12 +34,12 @@ const json = std.json;
 
 pub const usage =
     \\usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--published] [--json]   browse forms; an exact name shows setup and commands
-    \\       howl versions [--with FORM] [--on qemu|lima] [--arch ARCH] [--json]   available base image releases
+    \\       howl versions [--with FORM] [--on qemu|lima|bhyve] [--arch ARCH] [--json]   available base image releases
     \\       howl build --with FORM,... [--build] [--disable=secureboot,tpm,ipe] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl test --with FORM [--arch ARCH] [--iterate [--driver NAME] [--phase seed|verify]]   run the release gate or reuse a local test VM
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--add-current-user auto|yes|no] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--add-current-user auto|yes|no] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev=ssh] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
     \\       howl ssh [[USER@]NAME] [--identity KEY | --no-agent] [-- COMMAND...]
     \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
@@ -48,7 +48,8 @@ pub const usage =
     \\       howl import NAME --retry SNAPSHOT-ID   reselect a retained snapshot for recovery
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] " ++
+    "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev=ssh] [--build] [--yes] [--arch " ++
+    "ARCH] " ++
     "[--size TYPE] " ++
     "[--allow-from me|CIDR] [--add-current-user auto|yes|no] " ++
     "[--network tap|slirp] [--bridge NAME] " ++
@@ -341,7 +342,7 @@ pub fn addDevSsh(
     var policy: forms.Failure = .{};
     const ports = try forms.listens(gpa, original, &policy);
     if (std.mem.findScalar(u16, ports, dev_ssh_port) != null)
-        return why.refuse("--dev reserves TCP port {d} for developer SSH", .{dev_ssh_port});
+        return why.refuse("--dev=ssh reserves TCP port {d} for developer SSH", .{dev_ssh_port});
     return @import("compose").withDevSsh(gpa, original, try devSshForm(io, gpa, why));
 }
 
@@ -584,7 +585,7 @@ pub const Options = struct {
     ip: ?[]const u8 = null,
     gw: ?[]const u8 = null,
     dns: ?[]const u8 = null,
-    /// bhyve defaults to TAP on an existing bridge; SLIRP is explicit.
+    /// bhyve defaults to TAP for built images; published images need SLIRP.
     network: ?bhyve.Mode = null,
     bridge: ?[]const u8 = null,
     data_key: ?[]const u8 = null,
@@ -617,7 +618,6 @@ pub const Options = struct {
     /// dev is the local --dev launch path; init uses its config marker only
     /// to admit key-only root SSH for this machine.
     dev: bool = false,
-    dev_shell: bool = true,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -826,7 +826,7 @@ pub fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) !
     if (o.dev and o.own_keys != null and o.root_keys == null) try add(gpa, &entries, .{
         .path = "dev",
         .data = "yes\n",
-        .from = "--dev",
+        .from = "--dev=ssh",
     }, why);
     if (o.update_policy) |f| try add(gpa, &entries, .{
         .path = "update-policy.json",
@@ -1242,7 +1242,7 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try row(w, "--ip CIDR", "network: an address, where no DHCP gives one");
     try row(w, "--gw ADDR", "network: the default route");
     try row(w, "--dns ADDR", "network: the resolver");
-    try row(w, "--network tap|slirp", "bhyve: TAP by default; SLIRP keeps localhost port forwards");
+    try row(w, "--network tap|slirp", "bhyve: TAP for built images; signed downloads use SLIRP");
     try row(
         w,
         "--bridge NAME",
@@ -1585,7 +1585,7 @@ pub fn isRoot() bool {
 
 pub const arch_refusal = "--arch {s}: aarch64 (arm64), or x86_64 (x86-64, amd64)";
 
-/// Secure deployments choose Lima on macOS and QEMU on Linux. Missing
+/// Secure deployments choose Lima on macOS, QEMU on Linux and bhyve on FreeBSD. Missing
 /// prerequisites never change the protection mode or select another backend.
 const Engine = struct { on: Platform, note: ?[]const u8 = null };
 
@@ -1620,7 +1620,6 @@ fn engineFor(io: Io, gpa: Allocator, given: ?Platform, secure: bool) Engine {
 const Launch = struct {
     disabled: cmdline.Protections,
     dev: bool,
-    dev_shell: bool = true,
     local: bool,
     yes: bool,
     version: ?[]const u8 = null,
@@ -1633,10 +1632,7 @@ const Launch = struct {
 
 pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
     _, const plain = try verboseFlag(gpa, line);
-    const ssh_only, const without_ssh = try takeFlag(gpa, plain, &.{"--dev=ssh"});
-    const shell, const rest = try takeFlag(gpa, without_ssh, &.{"--dev"});
-    if (ssh_only and shell) return why.refuse("choose --dev or --dev=ssh", .{});
-    const dev = shell or ssh_only;
+    const dev, const rest = try takeFlag(gpa, plain, &.{"--dev=ssh"});
     const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
     const yes, const before_disable = try takeFlag(gpa, more, &.{"--yes"});
     var args: std.ArrayList([]const u8) = .empty;
@@ -1674,7 +1670,6 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
     return .{
         .disabled = disabled,
         .dev = dev,
-        .dev_shell = !ssh_only,
         .local = from_tree,
         .yes = yes,
         .version = version,
@@ -1682,16 +1677,14 @@ pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch 
     };
 }
 
-test "SSH iteration selects developer access without the developer shell" {
+test "SSH iteration alone gives developer access" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var why: Why = .{};
-    const ssh = try launchFlags(arena.allocator(), &.{"--dev=ssh"}, &why);
-    try testing.expect(ssh.dev and !ssh.dev_shell);
-    try testing.expectError(
-        error.Refused,
-        launchFlags(arena.allocator(), &.{ "--dev", "--dev=ssh" }, &why),
-    );
+    try testing.expect((try launchFlags(arena.allocator(), &.{"--dev=ssh"}, &why)).dev);
+    // The developer shell is retired: --dev is no flag of launch's.
+    const bare = try launchFlags(arena.allocator(), &.{"--dev"}, &why);
+    try testing.expect(!bare.dev and bare.args.len == 1);
 }
 
 /// every_protection is the one --disable run and create take for now: one
@@ -1721,8 +1714,8 @@ fn securedHere(on: Platform) bool {
 fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
     if (launch.dev and !launch.disabled.eql(.full)) return why.refuse(
         "developer access requires an unprotected local machine: " ++
-            "{s} --disable=" ++ every_protection,
-        .{if (launch.dev_shell) "--dev" else "--dev=ssh"},
+            "--dev=ssh --disable=" ++ every_protection,
+        .{},
     );
     if (on == .firecracker) {
         if (launch.version != null) return why.refuse(
@@ -1738,7 +1731,7 @@ fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
         .{},
     );
     if (!launch.protected()) return;
-    if (on == .lima or on == .qemu) return;
+    if (securedHere(on)) return;
     // A cloud's firmware enrolls the image's own boot key; its first boot
     // takes the TPM (docs/design/independent-updates.md).
     if (on.is(.cloud)) {
@@ -1755,7 +1748,7 @@ fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
     );
 }
 
-test "deployment defaults protect Lima and Linux QEMU without backend fallback" {
+test "deployment defaults protect Lima, QEMU and bhyve without backend fallback" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var why: Why = .{};
@@ -1770,19 +1763,20 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     try testing.expect(downloaded.protected() and !downloaded.local);
     try requireProtection(.lima, downloaded, &why);
     try requireProtection(.qemu, downloaded, &why);
+    try requireProtection(.bhyve, downloaded, &why);
+    try requireProtection(.bhyve, launch, &why);
     try requireProtection(.firecracker, launch, &why);
-    for ([_]Platform{ .bhyve, .proxmox }) |on|
-        try testing.expectError(error.Refused, requireProtection(on, launch, &why));
+    try testing.expectError(error.Refused, requireProtection(.proxmox, launch, &why));
     // Clouds take a protected image built here; werewolf publishes none for them.
     for ([_]Platform{ .aws, .gcp, .azure }) |on| {
         try requireProtection(on, launch, &why);
         try testing.expectError(error.Refused, requireProtection(on, downloaded, &why));
     }
-    const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev" }, &why);
+    const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev=ssh" }, &why);
     try testing.expectError(error.Refused, requireProtection(.lima, dev, &why));
     const unprotected = try launchFlags(
         arena.allocator(),
-        &.{ "--disable=secureboot,tpm,ipe", "playground", "--dev" },
+        &.{ "--disable=secureboot,tpm,ipe", "playground", "--dev=ssh" },
         &why,
     );
     try testing.expect(unprotected.disabled.eql(.full) and unprotected.dev);
@@ -1832,7 +1826,7 @@ test "Firecracker retains IPE and refuses developer and download downgrades" {
     try requireProtection(.firecracker, partial, &why);
     try testing.expect(!partial.disabled.contains(.ipe));
     try testing.expectError(error.Refused, requireProtection(.qemu, partial, &why));
-    const dev = try launchFlags(gpa, &.{ "--disable=secureboot,tpm", "--dev" }, &why);
+    const dev = try launchFlags(gpa, &.{ "--disable=secureboot,tpm", "--dev=ssh" }, &why);
     try testing.expectError(error.Refused, requireProtection(.firecracker, dev, &why));
     const download = try launchFlags(gpa, &.{ "--version", "20261014T232908Z" }, &why);
     try testing.expectError(error.Refused, requireProtection(.firecracker, download, &why));
@@ -1868,14 +1862,19 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     var o = try options(gpa, args, why);
     o.local = launch.local;
     o.dev = dev;
-    o.dev_shell = launch.dev_shell;
     o.disabled = launch.disabled;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const eng = engineFor(io, gpa, o.on, o.protected());
     const on = eng.on;
     try bhyveNetworkOptions(o, on, why);
-    if (!o.help) try requireProtection(on, launch, why);
+    if (!o.help) {
+        try requireProtection(on, launch, why);
+        // Refuse an unavailable host before downloads or replacement of run's
+        // previous machine. Later checks still guard each actual launch.
+        if (o.protected() and securedHere(on) and on != .lima)
+            _ = try @import("local-secure.zig").admit(io, gpa, on, dev, why);
+    }
     if (on == .firecracker) {
         if (o.disabled.eql(.empty)) o.disabled = firecracker.unavailable;
         if (!o.help) {
@@ -1933,7 +1932,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
 
     if (on == .lima) {
         try @import("local-secure.zig").reconcileLima(io, gpa, name, why);
+        if (o.protected()) _ = try @import("local-secure.zig").admit(io, gpa, on, dev, why);
     }
+    if (on == .bhyve) try @import("local-secure.zig").restoreBhyveNetwork(io, gpa, &o, name);
     // `howl run` owns one disposable machine. Older howl releases made it
     // without the protected enrollment profile, so replace that legacy VM
     // before a source build instead of building for an instance we cannot
@@ -1966,6 +1967,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         name,
         why,
     );
+    if (on == .bhyve and o.boot_image != null) try bhyveDownloadNetwork(&o, why);
     const tell: Tell = .{
         .verbose = verbose,
         .command = try gpa.print("howl {s} {s}", .{
@@ -1990,7 +1992,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .{on},
     );
     if (dev and !on.here()) return why.refuse(
-        "--dev is for machines here: a shell on {t} is a release's choice to make",
+        "--dev=ssh is for machines here, not {t}: developer SSH is never released",
         .{on},
     );
     if (on.here() and ((o.arch != null and o.arch != hostArch()) or o.size != null))
@@ -2127,6 +2129,38 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .disk => unreachable,
     }
     try @import("apply.zig").enroll(io, gpa, name, o, on, why);
+}
+
+fn bhyveDownloadNetwork(o: *Options, why: *Why) !void {
+    // Published x86 QEMU UKIs sign their SLIRP network into the command line.
+    // A config disk cannot override it; never rewrite signed boot material.
+    if (o.network == .tap or o.bridge != null) return why.refuse(
+        "the published x86 image signs in its SLIRP network; TAP requires an image built " ++
+            "for TAP with --build. Omit --bridge/--network tap for the published image",
+        .{},
+    );
+    if (o.ip != null or o.gw != null or o.dns != null) return why.refuse(
+        "the published bhyve image fixes its SLIRP address, gateway and DNS; omit --ip, --gw " ++
+            "and --dns",
+        .{},
+    );
+    o.network = .slirp;
+}
+
+test "published bhyve selects compatible SLIRP and refuses ignored TAP or static flags" {
+    var why: Why = .{};
+    var o: Options = .{};
+    try bhyveDownloadNetwork(&o, &why);
+    try testing.expectEqual(bhyve.Mode.slirp, o.network.?);
+    for ([_]Options{
+        .{ .network = .tap },
+        .{ .bridge = "bridge0" },
+        .{ .ip = "10.1.2.3/24" },
+        .{ .dns = "1.1.1.1" },
+    }) |given| {
+        var bad = given;
+        try testing.expectError(error.Refused, bhyveDownloadNetwork(&bad, &why));
+    }
 }
 
 fn bhyveNetworkOptions(o: Options, on: Platform, why: *Why) !void {

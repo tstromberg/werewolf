@@ -124,7 +124,7 @@ pub fn inputs(io: Io, gpa: Allocator, s: native.Spec) ![64]u8 {
     var h = Sha256.init(.{});
     frame(&h, std.fmt.comptimePrint("werewolf-lock-1-format{d}", .{compose.format}));
     frame(&h, if (s.dev) "dev" else "prod");
-    if (s.dev) frame(&h, if (s.dev_shell) "shell" else "ssh");
+    if (s.dev) frame(&h, "ssh");
     frame(&h, if (s.published) "published" else "local");
     frame(&h, s.form);
     if (s.published) {

@@ -34,8 +34,8 @@ invoke it selects the stage; it does not accept a stage number as an argument.
   Stop applications, drain the logger and ask mount-broker(8) to unmount persistent
   storage and close encrypted data mappings. Shutdown waits are bounded.
 
-These entry points are for runit and require the boot environment and inherited broker
-channels. An unrecognized invocation name exits with status 2.
+These entry points are for runit and require the boot environment and inherited
+broker channels. An unrecognized invocation name exits with status 2.
 
 ## SEE ALSO
 

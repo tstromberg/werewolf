@@ -20,27 +20,29 @@ protections:
     DISABLE: secureboot,tpm,ipe
     DEV: '1'
     IPE: '0'
+    # Force host admission to refuse even on a FreeBSD test host with vmm loaded.
+    BHYVE_BINARY: relative/bhyve
   keep: [build/machines/werewolf-run/disk.img]
   cases:
     - args: [run, --with, prod-ssh, --on, bhyve, --yes]
       status: 1
-      stderr: [protected deployment is not ready]
+      stderr: [protected bhyve]
     - args: [create, protection-check, --with, prod-ssh, --on, bhyve, --yes]
       status: 1
-      stderr: [protected deployment is not ready]
+      stderr: [protected bhyve]
     - args: [run, --with, prod-ssh, --on, bhyve, --yes, --build]
       status: 1
-      stderr: [protected deployment is not ready]
+      stderr: [protected bhyve]
     - args: [create, protection-check, --with, prod-ssh, --on, bhyve, --yes, --build]
       status: 1
-      stderr: [protected deployment is not ready]
+      stderr: [protected bhyve]
     - args: [run, --with, prod-ssh, --on, firecracker, --yes, --version, 20261014T232908Z]
       status: 1
       stderr: [Firecracker cannot boot a protected UEFI download]
     - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --version, 20261014T232908Z]
       status: 1
       stderr: [Firecracker cannot boot a protected UEFI download]
-    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --build, --dev]
+    - args: [run, --with, prod-ssh, --on, firecracker, --yes, --build, --dev=ssh]
       status: 1
       stderr: [developer access requires an unprotected local machine]
     - args: [create, protection-check, --with, prod-ssh, --on, firecracker, --yes, --build, --dev=ssh]
@@ -78,10 +80,10 @@ protections:
       status: 1
       stderr: [werewolf publishes no azure image yet]
     # Developer access never quietly gives up a protection.
-    - args: [run, --with, prod-ssh, --on, lima, --build, --dev, --yes]
+    - args: [run, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
       status: 1
       stderr: [developer access requires an unprotected local machine]
-    - args: [create, protection-check, --with, prod-ssh, --on, lima, --build, --dev, --yes]
+    - args: [create, protection-check, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
       status: 1
       stderr: [developer access requires an unprotected local machine]
     - args: [run, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
@@ -90,10 +92,10 @@ protections:
     - args: [create, protection-check, --with, prod-ssh, --on, lima, --build, --dev=ssh, --yes]
       status: 1
       stderr: [developer access requires an unprotected local machine]
-    - args: [run, --with, prod-ssh, --on, qemu, --build, --dev, --yes]
+    - args: [run, --with, prod-ssh, --on, qemu, --build, --dev=ssh, --yes]
       status: 1
       stderr: [developer access requires an unprotected local machine]
-    - args: [create, protection-check, --with, prod-ssh, --on, qemu, --build, --dev, --yes]
+    - args: [create, protection-check, --with, prod-ssh, --on, qemu, --build, --dev=ssh, --yes]
       status: 1
       stderr: [developer access requires an unprotected local machine]
     - args: [run, --with, prod-ssh, --on, qemu, --build, --dev=ssh, --yes]
@@ -106,7 +108,7 @@ protections:
       status: 1
       stderr: [cannot bring Secure Boot]
     # Raw arguments cannot downgrade a build either.
-    - args: [_build, --with, prod-ssh, --dev, disk]
+    - args: [_build, --with, prod-ssh, --dev=ssh, disk]
       status: 1
       stderr: [which --disable does not name]
     - args: [_build, --with, prod-ssh, --disk-args, 'werewolf.disable=secureboot,tpm,ipe', disk]

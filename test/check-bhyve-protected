@@ -1,0 +1,68 @@
+#!/bin/sh
+# Run on x86_64 FreeBSD with bhyve, swtpm and enrolled-firmware tools.
+# Published images use their signed SLIRP network; no bridge is required.
+set -eu
+howl=${HOWL:-build/host/howl}
+isolation=${HYPERVISOR_ISOLATION:-build/host/check-hypervisor-isolation}
+name=bhyve-protected-$$
+work=build/check/$name
+machine=build/machines/$name
+mkdir -p "$work"
+ssh-keygen -q -t ed25519 -N '' -f "$work/key"
+cleanup() { "$howl" stop "$name" --on bhyve >/dev/null 2>&1 || :; }
+trap cleanup EXIT
+create() {
+    "$howl" create "$name" --with playground --on bhyve --yes \
+        --root-keys "$work/key.pub" "$@"
+}
+guest() { "$howl" ssh "root@$name" --identity "$work/key" -- "$@"; }
+create >"$work/create.log" 2>&1 || { cat "$work/create.log"; exit 1; }
+grep -q 'SLIRP helper runs as nobody outside Capsicum' "$work/create.log"
+if create --network tap >"$work/incompatible-network.log" 2>&1; then
+    echo 'FAIL: published image accepted incompatible TAP networking' >&2
+    exit 1
+fi
+grep -q 'published x86 image signs in its SLIRP network' "$work/incompatible-network.log"
+cp "$machine/console.log" "$work/first-boot.log"
+grep -q 'Secure Boot enforced outside setup mode' "$work/first-boot.log"
+grep -q "Secure Boot admits only this image's signer" "$work/first-boot.log"
+grep -q 'TPM floor .* admitted; reset authority sealed' "$work/first-boot.log"
+"$isolation" bhyve "$name" >"$work/host-isolation.log"
+guest 'test "$(cat /sys/kernel/security/ipe/enforce)" = 1 &&
+    test "$(cat /sys/kernel/security/ipe/policies/werewolf/active)" = 1 &&
+    ! (echo 0 >/sys/kernel/security/ipe/enforce)' >"$work/ipe.log" 2>&1
+guest /usr/lib/werewolf/posture --json >"$work/posture.json" || test "$?" -eq 1
+"$isolation" posture bhyve "$work/posture.json"
+# A read/write data file must survive reboots, without replacing enrollment.
+guest 'dd if=/dev/urandom of=/data/bhyve-persistence bs=1048576 count=64 && sha256sum /data/bhyve-persistence' \
+    >"$work/persistence.log" 2>&1
+guest sha256sum /data/bhyve-persistence >"$work/checksum"
+guest cat /proc/sys/kernel/random/boot_id >"$work/boot-id"
+for cycle in 1 2 3; do
+    guest /usr/bin/reboot >"$work/reboot-$cycle.log" 2>&1 || :
+    ready=0
+    for attempt in $(seq 60); do
+        if guest cat /proc/sys/kernel/random/boot_id >"$work/reboot-id" 2>/dev/null &&
+            ! cmp -s "$work/boot-id" "$work/reboot-id"; then ready=1; break; fi
+        sleep 2
+    done
+    test "$ready" = 1
+    cp "$work/reboot-id" "$work/boot-id"
+    guest sha256sum /data/bhyve-persistence >"$work/reboot-checksum"
+    cmp "$work/checksum" "$work/reboot-checksum"
+done
+"$howl" stop "$name" --on bhyve >"$work/stop.log" 2>&1
+test ! -e "$machine/bhyve-network.json"
+# No network flag on resume: the machine must retain its original network.
+create >"$work/resume.log" 2>&1 || { cat "$work/resume.log"; exit 1; }
+guest sha256sum /data/bhyve-persistence >"$work/resume-checksum"
+cmp "$work/checksum" "$work/resume-checksum"
+if create --build --disable=secureboot,tpm,ipe >"$work/downgrade.log" 2>&1; then
+    echo 'FAIL: protected machine accepted a protection downgrade' >&2
+    exit 1
+fi
+grep -q 'an enrolled machine keeps its protections' "$work/downgrade.log"
+"$howl" delete "$name" --on bhyve >"$work/delete.log" 2>&1
+test ! -e "$machine"
+trap - EXIT
+echo "PASS: protected bhyve enrollment, reboot, persistence, resume and downgrade refusal ($work)"

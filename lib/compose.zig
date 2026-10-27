@@ -25,10 +25,9 @@ pub const Arch = enum { aarch64, x86_64 };
 /// Build describes a build beyond its chain.
 pub const Build = struct {
     arch: Arch,
-    /// dev marks a DEV=1 build, with mksh, BusyBox tools and the debug shell.
+    /// dev marks a build for SSH test iteration (howl --dev=ssh): developer
+    /// access through sh-shim, with no BusyBox and no console shell.
     dev: bool = false,
-    /// SSH iteration has developer access without BusyBox or a console shell.
-    dev_shell: bool = true,
     /// ipe makes the image require IPE: stage0 activates its signed release policy.
     ipe: bool = false,
     /// tpm requires the measured release pair and rollback journal at boot.
@@ -241,7 +240,7 @@ pub fn compose(
     try put(io, ro, "usr/share/werewolf/age-enforce", "enforce\n");
     const normalized = try accounts(gpa, passwd, f);
     // A shell is a login form's policy, never the base filesystem's.
-    const login_shell = if (b.dev and !b.dev_shell)
+    const login_shell = if (b.dev)
         "root:x:0:0:root:/root:/usr/lib/werewolf/sh-shim\n"
     else
         "root:x:0:0:root:/root:/bin/mksh\n";
@@ -307,7 +306,7 @@ pub fn compose(
     try put(io, rec, "pledge", try pledge(io, gpa, root, forms, f));
     const images = try oci(io, gpa, root, forms, f);
     if (images.len > 0) try put(io, rec, "oci", images);
-    if (b.dev) try put(io, rec, "dev", if (b.dev_shell) "dev\n" else "ssh\n");
+    if (b.dev) try put(io, rec, "dev", "ssh\n");
     try put(io, rec, "cmdline", try gpa.print("{s}\n", .{try cmdline(gpa, allowed, b.arch)}));
     try put(io, rec, "net", try net(gpa, forms, passwd, f));
 }
@@ -608,10 +607,10 @@ pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format}
 /// image_programs are the programs from cmd/ that every image runs, stage0's
 /// init among them: a machine builds its next stage0 from its next root.
 pub const image_programs = [_][]const u8{
-    "init",         "stage0",      "iface-up",     "fence",       "mount",      "mount-broker",
-    "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",     "slot-keep",
-    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap", "syslogd",
-    "unwound",      "unwound-age",
+    "init",         "stage0",       "iface-up", "fence",       "mount",   "mount-broker",
+    "posture",      "seal-watch",   "seal",     "runit-stage", "reboot",  "slot-keep",
+    "power-button", "ssh-host-key", "leash",    "leash-reap",  "syslogd", "unwound",
+    "unwound-age",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -903,7 +902,7 @@ fn allows(allowed: []const []const u8, name: []const u8) bool {
 /// loglevel=5 limits the console to warnings and worse; dmesg keeps all.
 /// A cloud serial port takes about a millisecond a line: on GCP, notices
 /// and info doubled boot time (0.23 s against 0.11 s). Panics, stalls, BUG
-/// and the power-down line that test/boot reads are all errors or worse.
+/// and the power-down line that test/console.zig reads are all errors or worse.
 pub fn cmdline(gpa: Allocator, allowed: []const []const u8, arch: Arch) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(gpa, "proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1");
@@ -965,25 +964,20 @@ fn cleanPath(p: []const u8) bool {
 
 /// weaknesses lists the posture checks the machine is expected to fail,
 /// each with its excuse: the form's own, then those from test/posture-known
-/// (the `dev` line for a DEV=1 build, else `*`, plus the arch's line).
+/// (the `*` line, plus the arch's line).
 pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (top.weaknesses()) |e| try out.print(gpa, "{s} {s}\n", .{ e.key, e.value.scalar.text });
-    if (b.dev and
-        !b.dev_shell) try out.appendSlice(gpa, "network-no-login authenticated SSH for local " ++
+    if (b.dev) try out.appendSlice(gpa, "network-no-login authenticated SSH for local " ++
         "test iteration\n" ++
         "network-ssh-dev-security-keys the managed local developer key\n" ++
         "files-noexec-everywhere executable RAM for authenticated test uploads\n");
-    const kind = if (b.dev and b.dev_shell) "dev" else "*";
-    const excuse = if (b.dev and b.dev_shell)
-        "a DEV=1 build: busybox-full and the debug shell"
-    else
-        try gpa.print("every form on {t} (test/posture-known)", .{b.arch});
+    const excuse = try gpa.print("every form on {t} (test/posture-known)", .{b.arch});
     var known = mem.splitScalar(u8, b.posture_known, '\n');
     while (known.next()) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
         const first = it.next() orelse continue;
-        if (!mem.eql(u8, first, kind) and !mem.eql(u8, first, @tagName(b.arch))) continue;
+        if (!mem.eql(u8, first, "*") and !mem.eql(u8, first, @tagName(b.arch))) continue;
         while (it.next()) |id| {
             if (b.ipe and mem.eql(u8, id, "boot-ipe-enforced")) continue;
             if (b.tpm and mem.eql(u8, id, "boot-rollback-protected")) continue;
@@ -1929,12 +1923,12 @@ test "prune: relative and clean paths only" {
     }
 }
 
-test "weaknesses: the form's own, then its kind's and its arch's from posture-known" {
+test "weaknesses: the form's own, then every form's and its arch's from posture-known" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     const gpa = a.allocator();
     const top = try testForm(gpa, "sshd", "weaknesses:\n  programs-no-shell: a shell for logins\n");
-    const known = "# comment: dev and * lines\ndev programs-no-shell programs-no-interpreters\n" ++
+    const known = "# comment: * and arch lines\n" ++
         "* ?files-x ?boot-secure-boot boot-rollback-protected\n" ++
         "x86_64 kernel-y\naarch64 kernel-z\n";
     try testing.expectEqualStrings(
@@ -1947,12 +1941,15 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
             "kernel-z every form on aarch64 (test/posture-known)\n",
         try weaknesses(gpa, top, .{ .arch = .aarch64, .posture_known = known }),
     );
-    const dev = "a DEV=1 build: busybox-full and the debug shell";
-    try testing.expectEqualStrings(
-        "programs-no-shell a shell for logins\nprograms-no-shell " ++ dev ++ "\n" ++
-            "programs-no-interpreters " ++ dev ++ "\nkernel-y " ++ dev ++ "\n",
-        try weaknesses(gpa, top, .{ .arch = .x86_64, .dev = true, .posture_known = known }),
-    );
+    // Developer SSH adds its own, and takes the same lines as any build.
+    const dev = try weaknesses(gpa, top, .{ .arch = .x86_64, .dev = true, .posture_known = known });
+    try testing.expect(mem.startsWith(u8, dev, "programs-no-shell a shell for logins\n" ++
+        "network-no-login authenticated SSH for local test iteration\n"));
+    try testing.expect(mem.endsWith(
+        u8,
+        dev,
+        "kernel-y every form on x86_64 (test/posture-known)\n",
+    ));
 }
 
 test "staged developer SSH preserves chain order and never enters production" {
@@ -1992,7 +1989,7 @@ test "staged developer SSH preserves chain order and never enters production" {
     try testing.expectEqualStrings("app", linked[2].name);
 }
 
-test "SSH-only developer access preserves shell-free posture and uses sh-shim" {
+test "developer access is SSH alone: shell-free posture, and sh-shim" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -2014,8 +2011,7 @@ test "SSH-only developer access preserves shell-free posture and uses sh-shim" {
     }, ro, meta, .{
         .arch = .aarch64,
         .dev = true,
-        .dev_shell = false,
-        .posture_known = "dev programs-no-shell programs-no-interpreters\n* boot-ipe-enforced\n",
+        .posture_known = "* boot-ipe-enforced\n",
     }, &f);
     const passwd = try ro.readFileAlloc(io, "usr/share/werewolf/etc/passwd", gpa, .limited(4096));
     try testing.expect(mem.find(u8, passwd, "/root:/usr/lib/werewolf/sh-shim\n") != null);

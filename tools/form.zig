@@ -11,7 +11,7 @@ const compose = @import("compose");
 
 const usage = "usage: form names|dirs|recipes|listens|weaknesses|excuses FORM, " ++
     "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
-    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev|ssh], having KEY [VALUE], every KEY, " ++
+    "compose FORM ARCH KNOWN ACCOUNTS RO META [ssh], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
     "stage FORM DIR, depends FORM, archs FORM, for-arch ARCH";
 
@@ -130,7 +130,7 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         return;
     }
     if (args.len < 2) return error.Usage;
-    const development = args.len == 8 and (is(args[7], "dev") or is(args[7], "ssh"));
+    const development = args.len == 8 and is(args[7], "ssh");
     const forms = if (is(verb, "compose"))
         try compose.stagedChain(io, gpa, root, args[1], development, f)
     else
@@ -168,7 +168,6 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         const b: compose.Build = .{
             .arch = try arch(args[2]),
             .dev = development,
-            .dev_shell = args.len != 8 or !is(args[7], "ssh"),
             .posture_known = try root.readFileAlloc(io, args[3], gpa, .limited(64 << 10)),
         };
         var image: [3][]const u8 = undefined;

@@ -17,15 +17,16 @@ The **slot-keep** service commits the running slot only after it has proved heal
 It runs as _slotkeep without capabilities in a read-only Landlock domain. The
 inherited keeper channel permits a commit request to mount-broker(8).
 
-Every other supervised service must have run for at least a minute, or be down because
-it was requested to stay down. Finishing, crash loops and missing supervisor state do
-not count as healthy. Persistent data must be usable, the updater must be ready when
-present, and the boot posture report must contain no unexcused failure.
+Every other supervised service must have run for at least a minute, or be down
+because it was requested to stay down. Finishing, crash loops and missing supervisor
+state do not count as healthy. Persistent data must be usable, the updater must be
+ready when present, and the boot posture report must contain no unexcused failure.
 
 The broker keeps the EFI entry and only then publishes the root-owned commit marker.
-The service logs the result and takes itself down. Machines without a committable slot
-have nothing to do. Failure leaves the slot uncommitted, allowing the deadman and boot
-loader to return to the previous slot. Committing does not raise the TPM floor.
+The service logs the result and takes itself down. Machines without a committable
+slot have nothing to do. Failure leaves the slot uncommitted, allowing the deadman
+and boot loader to return to the previous slot. Committing does not raise the TPM
+floor.
 
 ## FILES
 

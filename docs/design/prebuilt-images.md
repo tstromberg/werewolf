@@ -48,13 +48,13 @@ Without a boot key, a leftover UKI is excluded from the bundle.
 
 The `werewolf-image/2` manifest explicitly requires `ipe: true`. It binds channel,
 architecture, serial, root hash, kernel, packages, advisories, declaration and every
-artifact's size/hash, and the release's place in its channel: `channel_id` (SHA-256 of
-the channel URL, as the signed UKI's `werewolf.channel` carries it) and `index` (1, 2,
-3, ...: howl's `--image-index`, or `IMAGE_INDEX` for `howl create --build`). RSA/SHA-256
-authentication precedes strict JSON parsing. Unknown fields, incomplete artifact
-records, unsafe URLs and malformed command lines fail closed. A machine with a TPM floor
-takes only its running channel's releases with a later index, and only if the staged
-UKI's command line names that same release
+artifact's size/hash, and the release's place in its channel: `channel_id` (SHA-256
+of the channel URL, as the signed UKI's `werewolf.channel` carries it) and `index`
+(1, 2, 3, ...: howl's `--image-index`, or `IMAGE_INDEX` for `howl create --build`).
+RSA/SHA-256 authentication precedes strict JSON parsing. Unknown fields, incomplete
+artifact records, unsafe URLs and malformed command lines fail closed. A machine with
+a TPM floor takes only its running channel's releases with a later index, and only if
+the staged UKI's command line names that same release
 ([independent-updates.md](independent-updates.md)).
 
 The updater bounds the manifest to 1 MiB and each artifact to its signed

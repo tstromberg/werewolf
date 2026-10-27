@@ -13,12 +13,12 @@ syslogd — collect local syslog and kernel messages as JSON
 
 ## DESCRIPTION
 
-The Werewolf **syslogd** daemon receives local syslog datagrams and kernel records. It
-writes escaped JSON to the console and, when persistent storage is available, to
+The Werewolf **syslogd** daemon receives local syslog datagrams and kernel records.
+It writes escaped JSON to the console and, when persistent storage is available, to
 /data/log. It accepts no remote input and does not capture service standard output.
 
-Configuration is read once at startup from the boot configuration, falling back to the
-image configuration. The keys and defaults are:
+Configuration is read once at startup from the boot configuration, falling back to
+the image configuration. The keys and defaults are:
 
 - **console yes|no**
 
@@ -34,8 +34,8 @@ image configuration. The keys and defaults are:
   Storage budget in MiB, from 16 through 1048576; default 1024.
 
 Repeated keys are refused. Restart the service to change configuration. The
-unprivileged _syslog receiver obtains sender credentials from the kernel; message text
-cannot supply them. A separate _logfile worker can write only its private log
+unprivileged _syslog receiver obtains sender credentials from the kernel; message
+text cannot supply them. A separate _logfile worker can write only its private log
 directory. Neither worker can execute programs or open network sockets.
 
 Datagrams are limited to 2048 bytes and 1000 per process per second. Kernel records

@@ -1,20 +1,21 @@
 # jre-app - Hardened VM
 
-A Java service for a jar you supply. It runs `java -jar app.jar` on port 8080, the port
-a Spring Boot or Quarkus jar uses by default. Nothing is shipped with it. The form's
-manifest is [form.yaml](form.yaml).
+A Java service for a jar you supply. It runs `java -jar app.jar` on port 8080, the
+port a Spring Boot or Quarkus jar uses by default. Nothing is shipped with it. The
+form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/jre-app/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- Java runs the jar, and the JVM compiles it as it runs. Both are named in `form.yaml`.
+- Java runs the jar, and the JVM compiles it as it runs. Both are named in
+  `form.yaml`.
 
 ## Getting Started
 
@@ -26,9 +27,10 @@ cp forms/jre-app/example/app.jar myapp/app.jar
 howl create jre-app --with jre-app --app ./myapp
 ```
 
-Open `http://ADDRESS:8080`, the address howl prints. The jar in `forms/jre-app/example`
-answers `ok`. Replace `myapp/app.jar` with your own. Howl refuses an empty directory.
-What your jar serves is the application's own documentation.
+Open `http://ADDRESS:8080`, the address howl prints. The jar in
+`forms/jre-app/example` answers `ok`. Replace `myapp/app.jar` with your own. Howl
+refuses an empty directory. What your jar serves is the application's own
+documentation.
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -38,9 +40,9 @@ cp forms/jre-app/example/app.jar myapp/app.jar
 howl create jre-app --with jre-app --on gcp --allow-from me --app ./myapp
 ```
 
-The jar speaks plain HTTP on port 8080. Put Caddy, or the load balancer you already run,
-in front of it. The heap is 640 MiB, inside a 1 GiB limit. When the heap runs out the
-process exits and leash starts it again.
+The jar speaks plain HTTP on port 8080. Put Caddy, or the load balancer you already
+run, in front of it. The heap is 640 MiB, inside a 1 GiB limit. When the heap runs
+out the process exits and leash starts it again.
 
 ### Importing data
 

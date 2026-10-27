@@ -837,7 +837,8 @@ fn ruleDetail(gpa: Allocator, r: RuleSummary) ![]const u8 {
 }
 
 /// ssh_settings is what sshd -T must report: keys only, no host-based
-/// trust, and no forwarding, tunnels or user environment.
+/// trust, and no port or socket forwarding, tunnels or user environment. An
+/// agent may be forwarded: ssh-su reauthenticates through it.
 const ssh_settings = [_][2][]const u8{
     .{ "passwordauthentication", "no" },
     .{ "kbdinteractiveauthentication", "no" },
@@ -849,7 +850,6 @@ const ssh_settings = [_][2][]const u8{
     .{ "x11forwarding", "no" },
     .{ "gssapiauthentication", "no" },
     .{ "loglevel", "VERBOSE" },
-    .{ "allowagentforwarding", "no" },
     .{ "allowtcpforwarding", "no" },
     .{ "allowstreamlocalforwarding", "no" },
     .{ "gatewayports", "no" },

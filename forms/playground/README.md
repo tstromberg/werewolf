@@ -29,12 +29,12 @@ Use `howl ssh` to connect, `howl stop` to stop it, and `howl run` to resume it.
 ## Image downloads and updates
 
 The x86_64 QEMU qcow2 is available on [GitHub
-Releases](https://github.com/werewolf-linux/werewolf/releases). Follow the [download and
-verification instructions](../../docs/form-images.md#downloading-images)
-before using a standalone disk. Other forms and hosts have different [image
+Releases](https://github.com/werewolf-linux/werewolf/releases). Follow the [download
+and verification instructions](../../docs/form-images.md#downloading-images) before
+using a standalone disk. Other forms and hosts have different [image
 availability](../../docs/forms-catalog.md#images-and-downloads).
 
 The machine fetches signed vendor updates from werewolf's public channel itself and
 stages A/B slots according to its [update policy](../../docs/updater.md); no host
-service takes part. Keep the machine's firmware variables and TPM state. Importing the
-qcow2 alone does not enroll them or provide the complete protected deployment.
+service takes part. Keep the machine's firmware variables and TPM state. Importing
+the qcow2 alone does not enroll them or provide the complete protected deployment.

@@ -1,15 +1,15 @@
 # Jellyfin - Hardened VM
 
-Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind Caddy.
-Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
+Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind
+Caddy. Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/jellyfin/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -39,8 +39,8 @@ howl create jellyfin --with jellyfin \
 ```
 
 A key file is refused until
-`--sshd.pubkey-accepted-algorithms=ssh-ed25519,sk-ssh-ed25519@openssh.com`, and that is
-a posture weakness. Libraries are in [Jellyfin's
+`--sshd.pubkey-accepted-algorithms=ssh-ed25519,sk-ssh-ed25519@openssh.com`, and that
+is a posture weakness. Libraries are in [Jellyfin's
 documentation](https://jellyfin.org/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
@@ -52,8 +52,8 @@ howl create jellyfin --with jellyfin --on gcp --allow-from me \
 	--jellyfin-password jellyfin-password
 ```
 
-Sign in at `https://media.example.com`. Add `--users.NAME.keys` with a security key, and
-`--users.NAME.admin`, before you copy files. An admin key is also root's:
+Sign in at `https://media.example.com`. Add `--users.NAME.keys` with a security key,
+and `--users.NAME.admin`, before you copy files. An admin key is also root's:
 
 ```text
 scp -i ~/.ssh/id_ed25519_sk -r Movies root@media.example.com:/data/svc/jellyfin/media/
@@ -64,8 +64,8 @@ from the dashboard.
 
 ### Importing data
 
-Media comes in over the ssh this form publishes, as the cloud section shows. There is no
-database dump, and `--import` does not carry media.
+Media comes in over the ssh this form publishes, as the cloud section shows. There is
+no database dump, and `--import` does not carry media.
 
 ### Known Quirks
 

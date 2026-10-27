@@ -26,8 +26,8 @@ openssl rand -hex 32 > config/n8n/task-token
 howl create n8n-vuln-demo --with n8n-vuln-demo --build --config config
 ```
 
-The editor uses port 5678 at `/`. Complete n8n's owner setup before using workflows. Use
-`vuln-demo` for request, application and containment event capture. The
+The editor uses port 5678 at `/`. Complete n8n's owner setup before using workflows.
+Use `vuln-demo` for request, application and containment event capture. The
 expression-injection target requires an authenticated account.
 
 Set `--editor-url https://automation.example/` and
@@ -52,8 +52,8 @@ See [n8n deployment documentation](https://docs.n8n.io/hosting/).
 - Python Code nodes need a separately declared Python runner.
 - Community package installation is disabled. Additional packages or shell commands
   need a new reviewed image.
-- This is a single-node SQLite deployment; clustering needs separate database and queue
-  forms.
+- This is a single-node SQLite deployment; clustering needs separate database and
+  queue forms.
 
 ### Network Exposure
 
@@ -63,12 +63,11 @@ See [n8n deployment documentation](https://docs.n8n.io/hosting/).
 The native test checks readiness, the editor, the public-only anonymous settings, the
 direct Node runtime and its database, owner setup, authenticated workflow creation,
 persistence after reboot, expression evaluation and JavaScript Code execution through
-the external runner.
-A
+the external runner. A
 [CVE-2025-68613](https://github.com/n8n-io/n8n/security/advisories/GHSA-v98v-ff95-f3cp)
 regression expression reads only `process.version`; this proves the sandbox escape
-remains present without starting a child process. The hardened Node child-process gate
-remains closed:
+remains present without starting a child process. The hardened Node child-process
+gate remains closed:
 
 ```sh
 howl test --with n8n-vuln-demo

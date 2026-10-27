@@ -13,9 +13,9 @@ su — authenticate a new root login through the forwarded SSH agent
 
 ## DESCRIPTION
 
-The Werewolf **su** utility opens a fresh root SSH login to 127.0.0.1:22. All accepted
-invocations open the same root login shell. It has no set-user-ID privilege; the
-existing SSH server authenticates the key and creates the session.
+The Werewolf **su** utility opens a fresh root SSH login to 127.0.0.1:22. All
+accepted invocations open the same root login shell. It has no set-user-ID privilege;
+the existing SSH server authenticates the key and creates the session.
 
 The caller must be in an interactive SSH session with terminal input and output and a
 forwarded agent. The wrapper uses only its system SSH configuration and host-key pin.

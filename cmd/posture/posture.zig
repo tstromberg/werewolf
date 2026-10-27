@@ -172,8 +172,8 @@ fn put(io: Io, path: []const u8, data: []const u8) void {
 }
 
 /// motd returns the message of the day: the form's greeting, then what a
-/// person logging in should know first, if anything: a DEV=1 build, a root
-/// shell without a password, protections the machine was made without.
+/// person logging in should know first, if anything: a developer image, a
+/// root shell without a password, protections the machine was made without.
 fn motd(gpa: Allocator, r: Report, greeting: []const u8) ![]const u8 {
     var out: Io.Writer.Allocating = .init(gpa);
     const w = &out.writer;
@@ -293,7 +293,7 @@ pub const Report = struct {
     /// disabled names the protections the machine was made without
     /// (werewolf.disable, from howl's --disable).
     disabled: []const []const u8 = &.{},
-    /// dev is a DEV=1 build: busybox-full, and a root console on request.
+    /// dev is a developer image: SSH for test iteration (howl --dev=ssh).
     dev: bool = false,
     /// allow lists, sorted, the werewolf defaults the form gave up at build
     /// time (/etc/werewolf/allow). The checks still measure them.
@@ -370,7 +370,7 @@ pub const Posture = struct {
     werewolf: bool = false,
     /// disabled is werewolf.disable: the protections the machine lacks.
     disabled: cmdline.Protections = .empty,
-    /// dev is a DEV=1 build (/usr/share/werewolf/dev).
+    /// dev is a developer image (/usr/share/werewolf/dev).
     dev: bool = false,
     /// extended adds the checks werewolf fails by choice (--extended).
     extended: bool = false,
@@ -1154,7 +1154,7 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     try w.writeAll(", on ");
     try writeClean(w, r.host);
     try w.print(" ({s})\n", .{if (r.root) "root" else "not root: some checks are limited"});
-    if (r.dev) try w.writeAll("Dev mode: a DEV=1 build\n");
+    if (r.dev) try w.writeAll("Dev mode: developer SSH for test iteration\n");
     if (r.disabled.len > 0) {
         try w.writeAll("Protections disabled: ");
         try writeList(w, r.disabled, ", ");
@@ -1789,7 +1789,7 @@ test compare {
         \\programs-no-interpreters php-fpm runs the application
         \\?kernel-no-hypervisor it runs virtual machines
         \\network-no-login sshd, by key
-        \\network-no-login a DEV=1 build
+        \\network-no-login developer SSH
         \\
     );
     try testing.expectEqualStrings("php-fpm runs the application", checks[0].excuse.?);
@@ -2477,7 +2477,8 @@ test printLine {
     try testing.expect(std.mem.indexOf(
         u8,
         out.written(),
-        "Dev mode: a DEV=1 build\nProtections disabled: secureboot, tpm, ipe (werewolf.disable)\n",
+        "Dev mode: developer SSH for test iteration\nProtections disabled: secureboot, tpm, ipe " ++
+            "(werewolf.disable)\n",
     ) != null);
     out.clearRetainingCapacity();
     try printSummary(arena.allocator(), &out.writer, unprotected, 80, false);

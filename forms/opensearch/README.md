@@ -1,15 +1,15 @@
 # OpenSearch - Hardened VM
 
-One node of log search: [OpenSearch](https://opensearch.org) 3.9, TLS on, the security
-plugin on, no demo users. The form's manifest is [form.yaml](form.yaml).
+One node of log search: [OpenSearch](https://opensearch.org) 3.9, TLS on, the
+security plugin on, no demo users. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/opensearch/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -34,9 +34,10 @@ howl create opensearch --with opensearch \
 	--tls-cert search.crt --tls-key search.key --tls-ca ca.crt
 ```
 
-The certificate is the server's and the client's: the node presents it to itself. Then
-`curl --cacert ca.crt -u admin:$(cat admin-password) https://ADDRESS:9200`. Give the
-machine 3 GB. Indexes are in [OpenSearch's documentation](https://docs.opensearch.org/).
+The certificate is the server's and the client's: the node presents it to itself.
+Then `curl --cacert ca.crt -u admin:$(cat admin-password) https://ADDRESS:9200`. Give
+the machine 3 GB. Indexes are in [OpenSearch's
+documentation](https://docs.opensearch.org/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 

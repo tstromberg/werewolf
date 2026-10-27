@@ -1,5 +1,5 @@
 # What the iris form, booted as it ships, without a config, must say on
-# its console (make check-shellfree-iris; test/boot). Given no
+# its console (make check-shellfree-iris; test/console.zig). Given no
 # administrator's password, IRIS parks before it serves. With no domain,
 # so does Caddy. make check-iris boots it with its config.
 

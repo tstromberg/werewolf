@@ -1,5 +1,5 @@
 # What the webshell-example form, booted as it ships without a shell, must
-# say on its console (make check-shellfree-webshell-example; test/boot).
+# say on its console (make check-shellfree-webshell-example; test/console.zig).
 # One line a check:
 #
 #   KIND NAME REGEX

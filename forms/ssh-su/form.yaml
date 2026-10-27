@@ -35,6 +35,4 @@ services:
 
 weaknesses:
   network-no-login: SSH provides operator shells and fresh authentication for su
-  network-ssh-config: operator sessions may forward an agent for local reauthentication
-  programs-no-downloaders: SSH and scp support operator access
   programs-no-shell: mksh provides operator shells and /bin/sh

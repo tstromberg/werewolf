@@ -1,6 +1,6 @@
 # What the dependency-track form, booted as it ships, without a config,
 # must say on its console (make check-shellfree-dependency-track;
-# test/boot). Given no administrator's password, Caddy parks before it
+# test/console.zig). Given no administrator's password, Caddy parks before it
 # opens, so the published admin/admin never faces the network. make
 # check-dependency-track boots it with its config.
 

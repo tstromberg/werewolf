@@ -1,8 +1,9 @@
 # Plex - Hardened VM
 
-[Plex Media Server](https://www.plex.tv/media-server-downloads/), behind Caddy, with a
-separate transcoder, callback proxy and media owner. The [manifest](form.yaml) defines
-the boundaries. [Image availability](../../docs/forms-catalog.md#images-and-downloads).
+[Plex Media Server](https://www.plex.tv/media-server-downloads/), behind Caddy, with
+a separate transcoder, callback proxy and media owner. The [manifest](form.yaml)
+defines the boundaries. [Image
+availability](../../docs/forms-catalog.md#images-and-downloads).
 
 This form is experimental. The broker and callback boundary are under review.
 Normal account registration and playback through the confined VM have not yet
@@ -25,8 +26,8 @@ not require a Plex account.
 
 ### Local test deployment (lima, qemu, firecracker)
 
-Save your existing Plex account's authentication token as `plex-token`, mode 0600. See
-[Plex's token
+Save your existing Plex account's authentication token as `plex-token`, mode 0600.
+See [Plex's token
 instructions](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 A short-lived `claim-` code is not an account token.
 
@@ -59,14 +60,14 @@ howl create plex --with plex --domain plex.example.com \
   --plex-token ./plex-token --import ./media
 ```
 
-Add `/data/svc/plex-media` as a library in Plex. The importer alone
-owns these files. Init requires an empty destination. A later `howl sync NAME ./media`
-adds and replaces changed files while preserving destination-only files. Staging
-works while the VM runs; the selected snapshot is applied after a full stop/start
-through Howl. A guest reboot alone does not switch the attached import disk.
-Completed snapshots are not reapplied across starts and updates. See the
-[data import design](../../docs/design/data-import.md) for recovery semantics.
-Do not import an old writable codec or plugin directory.
+Add `/data/svc/plex-media` as a library in Plex. The importer alone owns these files.
+Init requires an empty destination. A later `howl sync NAME ./media` adds and
+replaces changed files while preserving destination-only files. Staging works while
+the VM runs; the selected snapshot is applied after a full stop/start through Howl. A
+guest reboot alone does not switch the attached import disk. Completed snapshots are
+not reapplied across starts and updates. See the [data import
+design](../../docs/design/data-import.md) for recovery semantics. Do not import an
+old writable codec or plugin directory.
 
 ### Known Quirks
 
@@ -106,15 +107,15 @@ The adapter also binds application UDP sockets locally, including implicit binds
 send/connect. Discovery remains disabled by configuration and firewall policy; the
 adapter is a compatibility measure, not the security boundary.
 
-Run `make check-native-tests-plex` for VM startup, TLS, service identity, actual H.264
-decoding/encoding, output readability across UIDs, authentication checks and denied
-file/network/output checks. The suite checks that Plex accepts the configured fixture
-token for preference reads and rejects anonymous requests. This deliberately invalid
-account token cannot create a library, so the suite does **not** prove account
-registration, library management, metadata fetching or client playback. Those need a
-real account test, deferred for now. The exploratory namespace playback fixture is
-compatibility evidence only. `make check-plex-import` exercises the import lifecycle in
-a disposable protected Plex VM. Production IPE/verified-boot client playback remains
-unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can be exercised
-with `IPE=1` and the signed kernel inputs described in the testing guide. The
-protected import fixture checks all three protections.
+Run `make check-native-tests-plex` for VM startup, TLS, service identity, actual
+H.264 decoding/encoding, output readability across UIDs, authentication checks and
+denied file/network/output checks. The suite checks that Plex accepts the configured
+fixture token for preference reads and rejects anonymous requests. This deliberately
+invalid account token cannot create a library, so the suite does **not** prove
+account registration, library management, metadata fetching or client playback. Those
+need a real account test, deferred for now. The exploratory namespace playback
+fixture is compatibility evidence only. `make check-plex-import` exercises the import
+lifecycle in a disposable protected Plex VM. Production IPE/verified-boot client
+playback remains unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can
+be exercised with `IPE=1` and the signed kernel inputs described in the testing
+guide. The protected import fixture checks all three protections.

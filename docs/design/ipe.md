@@ -42,8 +42,8 @@ the commit `boot/kernel-build` pins, its IPE trusting `CERT`.
 
 Stage0 opens the verified root and, when the image requires IPE (its marker), loads
 `ipe.p7b` from initramfs. The kernel verifies its PKCS#7 signature. Stage0 checks the
-deployed policy against the mounted root hash, activates it, and forces enforcing mode.
-The final policy has no initramfs exception:
+deployed policy against the mounted root hash, activates it, and forces enforcing
+mode. The final policy has no initramfs exception:
 
 ```text
 policy_name=werewolf policy_version=1.0.0
@@ -77,12 +77,12 @@ On macOS, `make ipe-kernel` also needs `QEMU_KERNEL_IMAGE` and
 Howl also accepts `--ipe-kernel`, `--ipe-key`, `--ipe-cert` for `build` and
 `_build`; all three are required together.
 
-**Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and `IMAGE_SERIAL`,
-then export with `make prebuilt`. The updater verifies the complete slot before
-installing, arming or rebooting; retained signatures also protect operator `try`
-([prebuilt-images.md](prebuilt-images.md)). Unenrolled IPE machines return
-`IpeSignedImageRequired`. Published protected images follow werewolf's public channel
-([independent-updates.md](independent-updates.md)).
+**Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and
+`IMAGE_SERIAL`, then export with `make prebuilt`. The updater verifies the complete
+slot before installing, arming or rebooting; retained signatures also protect
+operator `try` ([prebuilt-images.md](prebuilt-images.md)). Unenrolled IPE machines
+return `IpeSignedImageRequired`. Published protected images follow werewolf's public
+channel ([independent-updates.md](independent-updates.md)).
 
 ## Drawbacks
 
@@ -108,12 +108,11 @@ counter. No claim of script or JIT integrity is made.
 
 ## Reliability Considerations
 
-`make IPE=1 check-ipe` boots the actual image, then runs an independent
-kernel probe without seccomp, Landlock or noexec mounts. It tests trusted
-exec, mmap and mprotect, an executable tmpfs, another verified volume, a trusted loader
-mapping untrusted ELF, and lost policy-administration capability. Missing,
-tampered, untrusted-signer and correctly signed wrong-root policies must stop stage0.
-Anonymous memory can become executable before MDWE is set, as a JIT form
-requires; after MDWE is set, executable writable mappings and transitions to
-executable memory are refused. CI runs the same suite on x86_64 and aarch64
-with disposable keys.
+`make IPE=1 check-ipe` boots the actual image, then runs an independent kernel probe
+without seccomp, Landlock or noexec mounts. It tests trusted exec, mmap and mprotect,
+an executable tmpfs, another verified volume, a trusted loader mapping untrusted ELF,
+and lost policy-administration capability. Missing, tampered, untrusted-signer and
+correctly signed wrong-root policies must stop stage0. Anonymous memory can become
+executable before MDWE is set, as a JIT form requires; after MDWE is set, executable
+writable mappings and transitions to executable memory are refused. CI runs the same
+suite on x86_64 and aarch64 with disposable keys.

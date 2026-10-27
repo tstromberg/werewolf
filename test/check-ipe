@@ -1,15 +1,13 @@
 #!/bin/sh
 # check-ipe QEMU...: release boot, independent kernel enforcement, bad policies.
+# The release boot runs nothing on the machine (test/console.zig): with
+# IPE=1 its posture must pass boot-ipe-enforced, the canonical single-root
+# policy active and enforcing with no way back to CAP_MAC_ADMIN to change
+# it, and boot-sig-enforced. make passes CHECK_ENV (Makefile).
 set -eu
 dir=$CHECK/ipe
 mkdir -p "$dir"
-cat >"$dir/checks" <<'EOF'
-ok  ipe-active       [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ] && [ "$(cat /sys/kernel/security/ipe/policies/werewolf/active)" = 1 ]
-ok  ipe-no-initramfs  ! grep -q boot_verified /sys/kernel/security/ipe/policies/werewolf/policy
-ok  ipe-locked       ! (echo 0 >/sys/kernel/security/ipe/enforce) && [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ]
-ok  ipe-modules      if [ -r /sys/module/module/parameters/sig_enforce ]; then [ "$(cat /sys/module/module/parameters/sig_enforce)" = Y ]; else zcat /proc/config.gz | grep -qx '# CONFIG_MODULES is not set'; fi
-EOF
-test/boot ipe "$dir/checks" "$dir/boot.log" "$@" -kernel "$KERNEL" \
+build/host/console ipe - "$dir/boot.log" "$@" -kernel "$KERNEL" \
 	-initrd "$OUT/initramfs.zst" -append "$CMDLINE"
 
 zstd -dq -c "$OUT/slot/stage0.zst" >"$dir/stage0.cpio"
@@ -61,13 +59,14 @@ for kind in missing tampered wrong-root wrong-signer; do
 	else cp "$dir/bad.cpio" "$dir/bad-all.cpio"; fi
 	zstd -1 -q -c "$dir/bad-all.cpio" >"$dir/bad-stage0.zst"
 	cat "$dir/bad-stage0.zst" "$dir/root.zst" >"$dir/bad.zst"
-	# Let the serial port drain the rejection before -no-reboot exits QEMU.
-	if test/boot "ipe-$kind" - "$dir/$kind.log" "$@" -kernel "$KERNEL" -initrd "$dir/bad.zst" -append "$CMDLINE panic=3" >"$dir/$kind.result"; then
-		echo "FAIL   ipe-$kind: invalid policy booted" >&2; exit 1
-	fi
-	grep -a -q "stage0: IPE: $reason; not handing over" "$dir/$kind.log"
-	! grep -a -q 'handing over to runit' "$dir/$kind.log"
-	echo "pass   ipe-$kind: boot refused before handover"
+	cat >"$dir/$kind.checks" <<EOF
+seen    refused    stage0: IPE: $reason; not handing over
+unseen  booted     handing over to runit
+EOF
+	# The machine must end there; panic=3 lets the serial port drain the
+	# refusal before -no-reboot exits QEMU.
+	CONSOLE_ENDS=1 CONSOLE_TIMEOUT=120 build/host/console "ipe-$kind" "$dir/$kind.checks" \
+		"$dir/$kind.log" "$@" -kernel "$KERNEL" -initrd "$dir/bad.zst" -append "$CMDLINE panic=3"
 done
 rm -f "$dir/stranger.key"
 echo "pass   ipe: trusted root allowed; executable tmpfs, other verified root and loader bypass refused; administration locked"

@@ -13,10 +13,6 @@ base: prod
 
 with: [caddy]
 
-# The check backs up to it with restic itself.
-dev:
-  - restic
-
 services:
   # rest-server, in its image, as _oci-restic-server: it serves on
   # loopback alone, behind Caddy, and reaches nothing. Its users come from

@@ -35,12 +35,13 @@ is one leashed process, or a few, on one machine.
 
 ## Detailed design
 
-Suricata and Zeek each capture `eth0` with `AF_PACKET`. The service keeps `CAP_NET_RAW`
-and `CAP_NET_ADMIN`; leash drops both from every other service. `packet` allows that
-socket family and no other. `listen` is the `bind()` the socket needs, and neither form
-declares a TCP port, so Landlock refuses a TCP bind. Suricata has no `inet` and no
-`netlink`. Zeek still has both, for the resolver. A packet socket can inject. `packet`
-and `netadmin` stay in the bounding set so those two services can open the socket.
+Suricata and Zeek each capture `eth0` with `AF_PACKET`. The service keeps
+`CAP_NET_RAW` and `CAP_NET_ADMIN`; leash drops both from every other service.
+`packet` allows that socket family and no other. `listen` is the `bind()` the socket
+needs, and neither form declares a TCP port, so Landlock refuses a TCP bind. Suricata
+has no `inet` and no `netlink`. Zeek still has both, for the resolver. A packet
+socket can inject. `packet` and `netadmin` stay in the bounding set so those two
+services can open the socket.
 
 Iris, MISP and Greenbone exec `/usr/bin/bash` or `/bin/bash` with one
 script as the argument. sh-shim is the host's mini-shell and runs one
@@ -69,8 +70,8 @@ feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 
 - Copying packets through a fifo so the analyzer never holds `CAP_NET_RAW`. The copy
   adds a trip through userspace, and a packet socket is what these sensors are for. A
-  service may name `net_raw` and `net_admin`; Suricata, Zeek and Greenbone's scanner do,
-  and only those processes keep them.
+  service may name `net_raw` and `net_admin`; Suricata, Zeek and Greenbone's scanner
+  do, and only those processes keep them.
 - Elastic as a form. It is a licensed cluster. OpenSearch is the
   search node.
 - Running Wazuh's `/init`, or its bash, as root. The programs are not
@@ -84,14 +85,13 @@ feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 Suricata and Zeek hold the packet capabilities; every other service on those machines
 drops them. A packet socket can inject, and Zeek's netlink socket can change routes.
 Velociraptor can run VQL that would exec; the leash allows only the server binary.
-The bash these three
-forms run is the image's, and it is not on the host. gvmd's socket is mode 0660 and its
-group is `_oci-gvmd`; gvm-link keeps that group. A command still needs the password. The
-scanner alone keeps the packet capabilities; gvmd reads the feed and cannot open
-PostgreSQL.
+The bash these three forms run is the image's, and it is not on the host. gvmd's
+socket is mode 0660 and its group is `_oci-gvmd`; gvm-link keeps that group. A
+command still needs the password. The scanner alone keeps the packet capabilities;
+gvmd reads the feed and cannot open PostgreSQL.
 
 ## Reliability Considerations
 
 A sensor that exits is restarted by runit. Velociraptor's keys are kept on `/data`; a
-second boot does not regenerate them. IRIS and gvmd wait out PostgreSQL by exiting until
-it answers, and runit starts them again.
+second boot does not regenerate them. IRIS and gvmd wait out PostgreSQL by exiting
+until it answers, and runit starts them again.

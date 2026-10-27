@@ -24,7 +24,8 @@ their signed manifests before the operator can authenticate a rollback.
 
 - Treating unsupported firmware as a passing Secure Boot test.
 - Publishing test images or private signers to a public update service.
-- The TPM floor, which `test/check-independent-updates.zig` tests.
+- Advancing and resetting the TPM floor, which `test/check-independent-updates.zig`
+  tests. The bhyve protected run checks rollback admission throughout recovery.
 
 ## Detailed design
 
@@ -50,6 +51,41 @@ SSH and raw consoles. Azure's known setup-mode conflict is a failing test,
 not a skip or an excuse to weaken stage0. Unsupported Secure Boot backends
 can test ordinary A/B separately; signed EFI refusal remains a negative test.
 Live cloud and remote-host tests are opt-in. Local firmware tests run in CI.
+
+### Firecracker and bhyve
+
+For x86_64 bhyve, use `AB_MODE=secure AB_TPM=1`. The fixture signs A, B and the
+unhealthy candidate at indexes 1, 2 and 3. The adapter uses howl's protected
+supervisor, persistent swtpm state and enrolled bhyve firmware. Each boot must
+report TPM rollback protection and an admissible floor, alongside Secure Boot,
+IPE and dm-verity. Cleanup waits for the supervisor to stop its TPM before
+removing the disposable machine directory.
+
+```sh
+make check-ab-bhyve ARCH=x86_64 BHYVE_HOST=bilbo \
+  AB_MODE=secure AB_TPM=1 SECUREBOOT_DIR=/path/to/bhyve-firmware
+make check-ab-firecracker ARCH=x86_64 FIRECRACKER_HOST=galadriel AB_MODE=plain
+make check-ab-firecracker ARCH=x86_64 FIRECRACKER_HOST=galadriel \
+  AB_MODE=plain AB_FIRECRACKER_PINNED=1
+```
+
+`SECUREBOOT_DIR` contains matching bhyve `code.fd` and `vars.fd` templates.
+Fixture creation needs the local test IPE kernel and signer; TPM fixtures also
+need a measured EFI stub. `AB_FIXTURE_ONLY=1` builds without launching a VM.
+`AB_FIXTURE=/path/to/fixture.json` reuses an image whose architecture, boot mode
+and TPM mode match the requested run. Only the disk, disposable SSH key and
+public enrollment material need to reach the controller or hypervisor; the
+signing keys stay on the build host.
+
+Firecracker runs as the owner of its private directory and TAP, with the
+production bubblewrap sandbox. Set `FIRECRACKER_REMOTE_PATH` when its binaries
+are outside the remote SSH session's PATH. The ordinary A/B test exercises the
+legacy guest-selected boot entries with signed updates, IPE and dm-verity;
+it does not establish authenticated boot or TPM protection. The separate
+`AB_FIRECRACKER_PINNED=1` check exercises the default host pins: signed B must
+stage, then a fresh reboot must retain A. This is a passing limitation check,
+not an A/B upgrade pass. Default Firecracker deployments still need host
+rebuilds to receive image updates.
 
 ## Drawbacks
 

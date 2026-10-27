@@ -43,6 +43,7 @@ fn cases(c: *host.Check) !void {
     var legacy = try Fixture.init(c, forms);
     defer legacy.remove(c);
     try legacy.write(c, "build/machines/werewolf-run/engine", "lima", 0o644);
+    try legacy.write(c, "build/machines/werewolf-run/disk.img", "previous data", 0o600);
     try legacy.write(c, "fake-lima/werewolf-run/lima.yaml", "# werewolf-form: playground\n", 0o644);
     try legacy.write(c, "bin/limactl",
         \\#!/bin/sh
@@ -69,14 +70,20 @@ fn cases(c: *host.Check) !void {
         "--on", "lima", "--config", "missing-config",
     }, "", .{ .environ_map = &env, .cwd = legacy.root, .timeout = .fromSeconds(30) });
     if (run.ok()) return c.fail("run succeeded with a missing config", .{});
-    if (!try legacy.exists(c, "deleted"))
-        return c.fail("run kept the legacy Lima VM: {s}", .{host.check.tail(run.stderr, 2000)});
-    if (try legacy.exists(c, "build/machines/werewolf-run"))
-        return c.fail("run kept the legacy machine record", .{});
-    try expectSaid(c, run, "missing-config");
+    if (try legacy.exists(c, "deleted"))
+        return c.fail("run deleted a legacy VM before host admission", .{});
+    const disk = try Dir.cwd().readFileAlloc(
+        c.io,
+        try legacy.path(c, "build/machines/werewolf-run/disk.img"),
+        c.gpa,
+        .limited(100),
+    );
+    if (!std.mem.eql(u8, disk, "previous data"))
+        return c.fail("run changed the legacy disk before host admission", .{});
+    try expectSaid(c, run, "protected deployment requires Lima on macOS");
     if (std.mem.find(u8, run.stderr, "Building the protected image") != null)
         return c.fail("run built before replacing the legacy VM", .{});
-    c.say("pass   lima-state: run replaces a legacy VM before it builds", .{});
+    c.say("pass   lima-state: an unavailable host preserves the legacy VM", .{});
 }
 
 /// Fixture is a scratch directory howl runs in, with the checkout's forms.

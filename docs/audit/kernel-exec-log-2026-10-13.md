@@ -64,7 +64,8 @@ are dropped.
 Kernel references: [rule
 evaluation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditsc.c), [rule
 installation](https://github.com/gregkh/linux/blob/v6.18.56/kernel/auditfilter.c),
-[audit UAPI](https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/audit.h).
+[audit
+UAPI](https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/audit.h).
 
 
 ## Follow-up: publishing gate, 2026-10-17

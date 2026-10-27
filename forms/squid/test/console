@@ -1,5 +1,5 @@
 # What the squid form, booted as it ships, without a shell and without a
-# config, must say on its console (make check-shellfree-squid; test/boot;
+# config, must say on its console (make check-shellfree-squid; test/console.zig;
 # forms/demo/test/console has the format). Given no client networks,
 # service-config refuses its settings and Squid parks, saying why, before
 # squid-setup writes a list or Squid binds :3128. make check-squid boots

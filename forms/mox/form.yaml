@@ -17,7 +17,7 @@ packages:
   - mox
 
 # make check's, for this form alone (forms/README.md): its mail ports speak
-# SMTP and IMAP, not HTTP, and its own test/checks speaks to them.
+# SMTP and IMAP, not HTTP, and its own test/tests.yaml speaks to them.
 check:
   skip: [http-answering]
 

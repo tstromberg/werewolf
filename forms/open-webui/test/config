@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/open-webui/test/config DIR: the open-webui form's config for make
 # check, in DIR: its base URL, https://localhost, for which Caddy's own CA
-# signs, and its administrator and password, which test/checks signs in
+# signs, and its administrator and password, which test/tests.yaml signs in
 # with.
 set -eu
 mkdir -p "$1/open-webui" "$1/caddy"

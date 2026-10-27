@@ -18,15 +18,11 @@ weaknesses:
   programs-no-interpreters: java runs OpenSearch with native access for JNA's startup checks
   kernel-write-xor-execute: the JVM compiles OpenSearch to machine code as it runs (allow jit, from jre)
 
-# The check speaks HTTPS with curl.
-dev:
-  - curl
-
 # make check's (forms/README.md): OpenSearch's heap and the JVM's own
 # beside the machine's.
 check:
   memory: 3072
-  # :9200 speaks HTTPS alone; test/checks speaks it.
+  # :9200 speaks HTTPS alone; test/tests.yaml speaks it.
   skip: [http-answering]
 
 services:

@@ -244,10 +244,10 @@ pub const Machine = struct {
     pub const oci = phase_oci.oci;
 
     /// developerUploads makes the one writable executable directory a local
-    /// --dev machine needs for SCP test iteration.  Both the checked debug
-    /// command line and Howl's --dev config marker are required, so
-    /// a production image, a plain DEV=1 check image, or a forged config disk
-    /// alone cannot gain it.  The mount is RAM-only and disappears at reboot.
+    /// --dev=ssh machine needs for SCP test iteration. Both the checked debug
+    /// command line and howl's --dev=ssh config marker are required, so a
+    /// production image or a forged config disk alone cannot gain it. The
+    /// mount is RAM-only and disappears at reboot.
     pub fn developerUploads(m: *Machine) void {
         if (!m.cmd.debug or !exists("/run/config/dev")) return;
         const path: [:0]const u8 = "/run/howl-dev";

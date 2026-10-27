@@ -10,8 +10,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/kafka/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -34,8 +34,8 @@ howl create kafka --with kafka --config config \
 ```
 
 Clients use `ADDRESS:9093`, `security.protocol=SASL_SSL`,
-`sasl.mechanism=SCRAM-SHA-512`. `ops` is the super user. Topics and ACLs are in [Kafka's
-documentation](https://kafka.apache.org/documentation/#security_sasl).
+`sasl.mechanism=SCRAM-SHA-512`. `ops` is the super user. Topics and ACLs are in
+[Kafka's documentation](https://kafka.apache.org/documentation/#security_sasl).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -62,12 +62,12 @@ import a log.
 
 ### Testing
 
-`howl test --with kafka` checks TLS, SCRAM, ACLs and message persistence after reboot.
-For local iteration, seed the retained VM with
-`howl test --with kafka --iterate --driver test-kafka`, then repeat refusals with
-`howl test --with kafka --iterate --driver test-kafka-security`.
-Use `howl test --with kafka --iterate --reset` before repeating the seed.
-The [test plan](test/tests.yaml) runs Kafka's Java clients directly, without a shell.
+`howl test --with kafka` checks TLS, SCRAM, ACLs and message persistence after
+reboot. For local iteration, seed the retained VM with `howl test --with kafka
+--iterate --driver test-kafka`, then repeat refusals with `howl test --with kafka
+--iterate --driver test-kafka-security`. Use `howl test --with kafka --iterate
+--reset` before repeating the seed. The [test plan](test/tests.yaml) runs Kafka's
+Java clients directly, without a shell.
 
 ### Known Quirks
 

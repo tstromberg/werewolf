@@ -10,15 +10,16 @@ instructions](https://dist.werewolf-linux.org/boot/v1/mariadb-tcp/index.html).
 ## Security Posture
 
 The server runs as its own user. There is no shell and no perl. Landlock and seccomp
-hold it to its socket, to port 3306, and to `/data/svc/mariadb`. The root is read-only.
+hold it to its socket, to port 3306, and to `/data/svc/mariadb`. The root is
+read-only.
 
 - The socket remains. A local account is still `unix_socket`.
 - Port 3306 is open. A client on the network cannot use `unix_socket`. It needs an
   account with a password, in the SQL a form carries.
 - A query cannot read or write a file on the machine. `local-infile` is off, and the
   file privilege points at an empty directory.
-- The data directory is mode 0700. If it was made and then lost, the next start refuses
-  to create an empty one over it.
+- The data directory is mode 0700. If it was made and then lost, the next start
+  refuses to create an empty one over it.
 
 ## Getting Started
 
@@ -41,8 +42,8 @@ howl create mariadb-tcp --with mariadb-tcp --on gcp --allow-from me
 
 ### Importing data
 
-`--import` applies a directory of SQL once, while the data directory is first made. The
-accounts in it need passwords. `unix_socket` does not cross the network.
+`--import` applies a directory of SQL once, while the data directory is first made.
+The accounts in it need passwords. `unix_socket` does not cross the network.
 
 ```sh
 howl create mariadb-tcp --with mariadb-tcp --import ./dump
@@ -54,16 +55,16 @@ Once an account exists, a client can load more.
 mysql --host ADDRESS --port 3306 -u app -p <dump.sql
 ```
 
-A form can still carry `rootfs/usr/share/werewolf-mariadb/NAME.sql`, applied before each
-start. [mariadb-local's shop.sql](../mariadb-local/example/shop.sql) is a socket
+A form can still carry `rootfs/usr/share/werewolf-mariadb/NAME.sql`, applied before
+each start. [mariadb-local's shop.sql](../mariadb-local/example/shop.sql) is a socket
 account, so it belongs on that form.
 
 ### Known Quirks
 
-- Debian's root has a password and listens on 3306. This one listens on 3306 and has no
-  such account until the SQL creates one.
-- The image's SQL files run on every start. An `INSERT` needs a key and `INSERT IGNORE`,
-  or the rows multiply. `--import` runs once.
+- Debian's root has a password and listens on 3306. This one listens on 3306 and has
+  no such account until the SQL creates one.
+- The image's SQL files run on every start. An `INSERT` needs a key and `INSERT
+  IGNORE`, or the rows multiply. `--import` runs once.
 - There is no replication. A new MariaDB series upgrades the data in place, with
   `mariadb-upgrade`, on its first start. An older release refuses data a newer one
   upgraded, so falling back past an upgrade needs a backup.

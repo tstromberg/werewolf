@@ -44,18 +44,18 @@ macOS and QEMU on Linux, from werewolf's published image
 ([design](published-secure-boot.md)) or, with `--build`, this checkout; clouds take
 `--build` images only. Firecracker builds an IPE image and pins its boot files on the
 host, warning that firmware Secure Boot and TPM rollback protection are unavailable.
-`--disable=LIST` gives up protections by name (`secureboot`, `tpm`, `ipe`): Firecracker
-also accepts `secureboot,tpm`, its default limitations; other providers take the whole
-list. A machine's command line names what it lacks (`werewolf.disable`) for
-posture and the login message
-([security](../security.md#protections-a-machine-can-be-made-without)). `create` makes a
-*machine*: source builds if stale, packs, uploads only an image the cloud lacks, starts
-the machine, waits for init's `up in`, and prints `NAME ADDRESS FORM`. `run` uses
-`werewolf-run`, reusing an unchanged protected VM and resuming its existing image when
-stopped. Changed image inputs replace it. Each platform is driven by its own tool
-(`limactl`, `qm`, `gcloud`, `aws`, `az`…) with argument lists. The provider supplies VM
-existence and runtime state; local files retain build inputs, firmware variables and TPM
-state.
+`--disable=LIST` gives up protections by name (`secureboot`, `tpm`, `ipe`):
+Firecracker also accepts `secureboot,tpm`, its default limitations; other providers
+take the whole list. A machine's command line names what it lacks
+(`werewolf.disable`) for posture and the login message
+([security](../security.md#protections-a-machine-can-be-made-without)). `create`
+makes a *machine*: source builds if stale, packs, uploads only an image the cloud
+lacks, starts the machine, waits for init's `up in`, and prints `NAME ADDRESS FORM`.
+`run` uses `werewolf-run`, reusing an unchanged protected VM and resuming its
+existing image when stopped. Changed image inputs replace it. Each platform is driven
+by its own tool (`limactl`, `qm`, `gcloud`, `aws`, `az`…) with argument lists. The
+provider supplies VM existence and runtime state; local files retain build inputs,
+firmware variables and TPM state.
 
 | Target | Choice, and why |
 | --- | --- |

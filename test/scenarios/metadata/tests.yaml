@@ -1,0 +1,21 @@
+version: 1
+# prod on a cloud, booted by check-metadata (test/cloud-boot), never by
+# check-scenarios: no address and no config disk, but a stand-in metadata
+# server (test/metadata.zig) whose config names the boot in its hostname and
+# carries the run's context. The machine's address is the cloud's link-local
+# one, and with no disk its /data is a tmpfs, so the shared network and data
+# checks do not apply. Polling waits for the server's later configs.
+form: prod
+kernel_address: false
+skip: [network, data-usable, data-encrypted]
+timeout: 900s
+suites:
+  - name: metadata
+    source: driver.zig
+    mode: cloud
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc
+    cases:
+      seed: [config-taken, people, poller]
+      verify: []

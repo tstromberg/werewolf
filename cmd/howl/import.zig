@@ -258,17 +258,60 @@ fn prepareWithReuse(
     try parent.deleteTree(io, "files");
     try data.syncDir(io, parent);
     try Dir.cwd().createDirPath(io, try a.print("{s}/imports", .{dir}));
-    try Dir.cwd().renamePreserve(work, .cwd(), home, io);
+    try publishSnapshot(io, a, work, home);
     var imports = try Dir.cwd().openDir(io, try a.print("{s}/imports", .{dir}), .{});
     defer imports.close(io);
     try data.syncDir(io, imports);
     return record;
 }
 
+fn publishSnapshot(io: Io, gpa: Allocator, work: []const u8, home: []const u8) !void {
+    if (@import("builtin").os.tag != .freebsd)
+        return Dir.cwd().renamePreserve(work, .cwd(), home, io);
+    // Zig's FreeBSD renamePreserve fallback hard-links the source, which
+    // cannot publish a directory. Serialize publishers in the private import
+    // directory, reject any existing entry, then atomically rename the snapshot.
+    const parent = std.fs.path.dirname(home) orelse return error.BadImportPath;
+    const lock = try Dir.cwd().createFile(io, try gpa.print("{s}/publish.lock", .{parent}), .{
+        .truncate = false,
+        .permissions = .fromMode(0o600),
+    });
+    defer lock.close(io);
+    try lock.lock(io, .exclusive);
+    defer lock.unlock(io);
+    if (Dir.cwd().statFile(io, home, .{ .follow_symlinks = false })) |_|
+        return error.PathAlreadyExists
+    else |err| if (err != error.FileNotFound) return err;
+    try Dir.cwd().rename(work, .cwd(), home, io);
+}
+
+test "publishing an import snapshot never replaces an existing snapshot" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    try tmp.dir.createDir(testing.io, "work", .default_dir);
+    try tmp.dir.createDir(testing.io, "kept", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kept/record", .data = "original" });
+    try testing.expectError(error.PathAlreadyExists, publishSnapshot(
+        testing.io,
+        gpa,
+        try gpa.print("{s}/work", .{root}),
+        try gpa.print("{s}/kept", .{root}),
+    ));
+    try testing.expectEqualStrings(
+        "original",
+        try tmp.dir.readFileAlloc(testing.io, "kept/record", gpa, .limited(32)),
+    );
+}
+
 fn findMke2fs(io: Io, gpa: Allocator) ?[]const u8 {
     const fixed = [_][]const u8{
         "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs",
         "/usr/local/opt/e2fsprogs/sbin/mke2fs",
+        "/usr/local/sbin/mke2fs",
         "/usr/sbin/mke2fs",
         "/sbin/mke2fs",
     };
@@ -304,6 +347,10 @@ test "snapshot staging is recursive, immutable, repeatable and private" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const previous = howl.environ;
+    howl.environ = &env;
+    defer howl.environ = previous;
     if (findMke2fs(io, a) == null) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -336,6 +383,10 @@ test "failed staging and corrupt artifacts cannot replace an active import" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    const previous = howl.environ;
+    howl.environ = &env;
+    defer howl.environ = previous;
     if (findMke2fs(io, a) == null) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

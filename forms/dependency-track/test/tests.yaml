@@ -76,6 +76,7 @@ suites:
                 password: werewolf-check-pass-1
             expect:
               status: 200
+              # A session: 32 random bytes, unpadded base64url.
               body:
                 matches: ^[A-Za-z0-9._~+/-]+={0,2}$
           - fetch:

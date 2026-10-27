@@ -27,7 +27,7 @@ prune:
   - oci/pi-hole/usr/lib/libpsl.so*
 
 check:
-  # :53 speaks DNS, not HTTP. Caddy's HTTPS is forms/pi-hole/test/checks.
+  # :53 speaks DNS, not HTTP. Caddy's HTTPS is forms/pi-hole/test/tests.yaml.
   skip: [http-answering]
 
 services:

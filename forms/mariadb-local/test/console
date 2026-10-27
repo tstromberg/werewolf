@@ -1,5 +1,5 @@
 # What the mariadb-local form, booted as it ships, without a shell, must
-# say on its console (make check-shellfree-mariadb-local; test/boot;
+# say on its console (make check-shellfree-mariadb-local; test/console.zig;
 # forms/demo/test/console has the format). It needs no config: on the
 # blank disk mariadb-init makes the data, and the server starts on its
 # socket alone. make check-mariadb-local checks what it refuses.

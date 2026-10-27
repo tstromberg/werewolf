@@ -7,13 +7,10 @@
 # SQL a form brings in /usr/share/werewolf-postgres. Local roles are
 # their system users (peer authentication). The package is pinned to major 18.
 base: prod
-
 packages:
   - postgresql~18
   - postgresql-contrib~18  # pg_trgm, pgcrypto, uuid-ossp and the standard extensions
   - posix-libc-utils-bin  # locale -a, without ldd or its bash dependency
-
-dev: [postgresql-client~18]  # peer-authenticated SQL checks
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).

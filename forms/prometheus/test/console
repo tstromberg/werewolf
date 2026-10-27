@@ -1,6 +1,6 @@
 # What the prometheus form, booted as it ships, without a shell and
 # without a config, must say on its console (make
-# check-shellfree-prometheus; test/boot; forms/demo/test/console has the
+# check-shellfree-prometheus; test/console.zig; forms/demo/test/console has the
 # format). Given no password, Prometheus parks before prometheus-setup
 # writes anything or Prometheus binds a port, and says why. make
 # check-prometheus boots it with its config, and checks it scrapes.

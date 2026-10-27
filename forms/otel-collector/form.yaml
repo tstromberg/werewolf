@@ -13,12 +13,8 @@ base: prod
 packages:
   - opentelemetry-collector-contrib
 
-# The check speaks OTLP over HTTP/1.1 and gRPC with curl.
-dev:
-  - curl
-
 # make check's (forms/README.md): :4317 speaks gRPC over TLS alone, which
-# answers no plain HTTP; test/checks speaks to both ports itself.
+# answers no plain HTTP; test/tests.yaml speaks to both ports itself.
 check:
   memory: 1024
   skip: [http-answering]

@@ -55,7 +55,7 @@ WordPress sending mail), stricter is a line in the form.
   RAM `/data` saying what a reboot loses. bastion stays down instead.
 - **No control interface on the network** (off, or a 0700 socket), and
   **no `exec` promise** but for a daemon's own helpers, named by `run`
-  (bastion's sshd); `make seal-learn` finds the rest of each pledge.
+  (bastion's sshd); the console's refusals say the rest of each pledge.
 - **Its own ceiling under `memory`**, so it refuses work rather than dying.
 - **Modern TLS** (1.2 at least), **security events on the console**, and
   **a check with an attack in it**.

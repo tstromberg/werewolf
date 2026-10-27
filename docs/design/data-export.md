@@ -1,119 +1,100 @@
-# Exporting a machine's data
+# Data export v1 (proposed)
 
-Proposed, 2026-10-15. Export is not implemented. It supports operator recovery,
-migration and inspection, including the [release-testing
-design](image-release-testing.md); it is not a guest test interface.
+## Summary
 
-## Scope and interface
+Export `/data`, or one service directory, for [import] on another VM.
 
-Add an explicit subcommand, with illustrative syntax:
+## Background
+
+Seed imports do not restore backups; [application tests] specify the replacement.
+
+## Goals
+
+- Round-trip all data and a selected service from running and stopped VMs.
+- Require no shell or consistency selection; validate each advertised provider.
+
+## Non-Goals
+
+- Live capture, upgrades, cross-architecture moves, incremental/resumable transfer,
+  built-in encryption, logical dumps and automatic traffic cutover.
+
+## Detailed design
 
 ```sh
-howl export NAME --via disk --data-key FILE --output backup.tar
-howl export NAME --via ssh --output backup.tar
+howl export source --output ./backup.tar.zst
+howl export source --service plex --output ./plex.tar.zst
 ```
 
-Export produces an archive of persistent application data plus a manifest: not vendor
-signing keys, machine enrollment/TPM state, the boot disk or a runnable image. Restore
-into another machine is a separate operation with its own compatibility checks. Begin
-with complete `/data` export; path selection and logical dumps can follow.
+`howl export NAME` creates `NAME-export-TIMESTAMP-RANDOM.tar.zst` by default. Walk
+all `/data`: databases, media, preferences, caches, secrets and homes. Signed policy
+names every writer and exact exclusions for SSH host keys, updater and
+boot/enrollment/TPM state. Record exclusions; unsupported files or uncontrolled
+writers fail.
 
-Require an explicit method. Refuse an unavailable one rather than enabling SSH,
-weakening authentication, stopping a machine unexpectedly or falling back to another
-transport. Identify the machine, data volume and consistency mode before reading.
-Publish output atomically to a new destination; never overwrite an existing backup.
+`--service NAME` selects exactly `/data/svc/NAME`, not dependencies. Require a known
+application service, never a path or system service. Print and record the scope. Plex
+state is `plex`; media is `plex-media`. Neither alone migrates the whole app.
 
-## Authorization and LUKS
+Provider state selects SSH or a stopped-disk copy; SSH timeout is not shutdown.
+Announce scope, method and downtime. Missing access/support fails, never enables
+listeners/firewalls. Export may interrupt services but never changes VM power.
 
-Disk export needs the caller's existing permission to read the machine volume and, when
-encrypted, a key its LUKS keyslots accept. SSH export uses the configured SSH identity,
-verified host identity and that account's file permissions. Neither creates a guest
-authentication service or grants access the caller did not already have.
+One SSH connection exports and exits. A guard owns fixed service controls; a separate
+reader has read/search access only to selected roots. Neither accepts commands, SQL,
+arbitrary paths or URLs. The reader cannot write, execute, connect externally or
+control services; the guard has no general admin or mount-broker access.
 
-The [data contract](../data.md) accepts an operator-provided `data.key`, opens LUKS2
-with it, then removes its guest config copy. A saved matching key also unlocks a stopped
-disk copy even when encryption is mandatory: intended owner recovery, not a bypass. A
-TPM boot credential is not a data-decryption key: a deployment that seals its only
-unlock secret to a TPM and keeps no recovery key gets no disk export until the owner
-supplies a supported recovery path. Never add a recovery keyslot implicitly, since it
-broadens who can decrypt offline; rotation must account for older backups' keyslots.
+Lock against updates, imports and lifecycle changes. Save prior states, suppress
+restarts, stop clients before databases, and verify clean exit of every selected-root
+writer, including other services with write grants. Keep essential services and SSH
+outside capture. Timeout aborts; killing is not clean shutdown. Hold writers stopped
+through transfer, then restore prior states.
 
-Initially accept an explicit key file, keeping bytes out of argv, logs, manifests and
-archives; later key retention uses an explicitly chosen owner secret store with volume
-identity and rotation metadata, never a plaintext key beside its disk or backup. A wrong
-or missing key fails without formatting, modifying keyslots or changing policy.
+Lock the stopped VM until an immutable copy includes all backing files. A Linux
+helper without network/host shares reads only that copy, on macOS too. Require clean
+filesystem/application shutdown; refuse damage. Pass the owner recovery key
+(`--data-key FILE`) privately to unlock LUKS. Detach and clean scratch; never mount
+or repair the source.
 
-## Disk method
+Use restricted tar: `manifest.json`, regular files/directories under `data/`, then
+`complete.json`. Record image, architecture, scope, inventory, exclusions and capture
+state. The final entry hashes all preceding uncompressed tar bytes with SHA-256.
+Require that digest, completion entry, complete compression frame and terminal
+capture-success result; EOF alone is insufficient.
 
-1. Lock the machine's lifecycle operations and verify it is stopped; refuse a running VM
-   at first. Copy the data storage, backing files resolved, to a private work area; a
-   data partition inside the boot disk is taken without boot or custody material.
-2. Use an isolated, pinned Linux helper to interpret partitions, LUKS and ext4, on macOS
-   too: only the copy attached, no network, the key passed over a private channel.
-3. Unlock copies with the supplied key, read-only, as cryptsetup supports
-   ([manual](https://kernel.googlesource.com/pub/scm/utils/cryptsetup/cryptsetup/+/refs/heads/main/man/cryptsetup-open.8.adoc));
-   encryption stays enforced on the original.
-4. A read-only mount is not a consistency guarantee. Prefer a clean shutdown; perform
-   any journal or database recovery only on a further disposable copy, and record it.
-   Never repair the source. Refuse ambiguous layouts or corruption beyond that.
-5. Archive without following links outside the root or reading devices and FIFOs as
-   files. Preserve ownership, modes and supported metadata; reject unsupported semantics
-   rather than silently changing a backup. Extraction into the host is not this command.
-6. Write a manifest: source identity, volume ID, capture method, clean or crash state,
-   recovery actions, tool versions and hashes. Close mappings, detach copies and remove
-   transient key material on success and failure. Secure erasure is not promised.
+Stream [Zstandard] level 1 at source, online or offline: one thread, no dictionary or
+SSH compression. Overlap compression, transfer and writing without archive staging.
 
-A stopped source avoids inventing a snapshot or guest-quiesce protocol. Provider
-snapshots and remote disk downloads need separate adapters; until one exists, fail with
-an actionable unsupported-provider message.
+## Drawbacks
 
-## SSH method
+Writers remain stopped for transfer, potentially hours for Plex. Require matching
+image/architecture. Compression may not help media; measure time, memory and CPU.
 
-Use only SSH the form already enables and the operator's established authentication:
-prod-ssh's security-key requirement, host-key verification and account restrictions
-stay, and export creates no users, relaxes no keys, adds no tools to the root image and
-assumes no account can read all of `/data`. A running guest has unlocked LUKS already,
-so no disk key is sent: authorization is the SSH user's authority over plaintext files,
-which neither lets that user decrypt an offline disk nor export files it cannot read.
+## Alternatives Considered
 
-SSH is a transport, not a consistency mechanism: a tar stream of a changing PostgreSQL
-directory is not a database backup. Require a supported quiesce or snapshot operation,
-or an application-native backup, before claiming consistency. Do not assume `pg_dump`:
-the standalone PostgreSQL form's client tools are DEV-only, and it enables no SSH. The
-first SSH implementation supports only pairs with an existing safe backup mechanism; a
-quiesced service is resumed on failure, with the interruption explicit. Unsupported
-services refuse rather than emit a success-shaped inconsistent archive. Logical dumps
-and filesystem archives need distinct manifest types and restore instructions.
+- Live dumps/snapshots need application-specific coordination; defer.
+- Generic SFTP/shell access exposes unnecessary operations; use one fixed verb.
+- Dependency expansion makes selection surprising; select an exact service root.
 
-## Output confidentiality and integrity
+## Security Considerations
 
-Decrypted archives hold plaintext even when the source uses LUKS: say so in help and
-output metadata, create files privately (0600, parent 0700), and never attach them to
-CI artifacts by default. A future encrypted-output mode should use an established format
-and a separately chosen recipient key; copying the still-encrypted volume is a different
-backup product. Manifests identify what was observed, not vendor attestations about user
-data. Validate archive names, bounds and destination handling, and keep partial output
-apart until completion. Tests publish assertions and bounded redacted evidence, never
-exported databases, passwords, TLS keys or Greenbone sessions.
+Opt-in SSH requires owner export grants, pinned host identity and security keys.
+Native login accepts only [forced command] `export-v1`. Disable shell, PTY, SFTP,
+forwarding, agents, password/root login and user rc/environment. Scope requests
+cannot exceed the authenticated grant. Reject links, special files, traversal,
+duplicate names and unsupported metadata. Never extract onto host paths. SSH encrypts
+transport; the mode-0600 archive is unencrypted and may hold credentials. Explain
+this. A cleanly stopped source is least dangerous.
 
-## Use in tests
+## Reliability Considerations
 
-PostgreSQL can be stopped after restart or update, exported, and checked with a matching
-database tool on a disposable copy: that establishes persisted rows, not live peer
-authentication or SQL behavior, which still need local-client integration tests.
-Greenbone verifies authentication and task persistence over HTTPS without export, which
-may retain a versioned feed cache or its public fixture CA; restoring that cache into
-another VM needs a supported restore path. Never clone a machine's TPM or enrollment.
+Invalidate capture before restarting writers on disconnect, timeout or reader
+failure. The independent guard recovers saved states; reboot invalidates capture.
+Bound time, memory, headers and expansion. Verify into private scratch; fsync,
+publish without replacement, then sync the parent. Preserve valid output if restart
+fails; return nonzero and name services. Require [application tests] before delivery.
 
-## Validation and delivery
-
-First implement local stopped-disk export, then SSH for explicitly supported service and
-method pairs; provider snapshots, generic online backup, secret-store integration and
-restore come later. Tests cover encrypted and plain volumes, correct, missing and wrong
-keys, source byte preservation, clean and crash recovery, malicious archive paths,
-destination collisions, interrupted cleanup and secret redaction; SSH tests add host-key
-mismatch, denied file access, retained authentication requirements and failure during
-quiescing; each database backup mode restores a disposable copy and verifies known
-records. Before implementation, settle the Linux helper boundary, archive metadata
-contract and supported layouts; the first milestone is export and verified restore of
-one encrypted local VM. Export must stay useful to operators apart from release testing.
+[import]: data-import.md
+[application tests]: data-import-application.md
+[Zstandard]: https://facebook.github.io/zstd/
+[forced command]: https://man.openbsd.org/sshd_config#ForceCommand

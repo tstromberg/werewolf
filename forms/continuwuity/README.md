@@ -26,8 +26,8 @@ howl create continuwuity --with continuwuity \
 	--domain matrix.home.arpa --admin alice --admin-password admin-password
 ```
 
-Point a Matrix client at `https://matrix.home.arpa` and sign in as `alice`. Clients are
-in [Matrix's documentation](https://matrix.org/ecosystem/clients/).
+Point a Matrix client at `https://matrix.home.arpa` and sign in as `alice`. Clients
+are in [Matrix's documentation](https://matrix.org/ecosystem/clients/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -37,8 +37,8 @@ howl create continuwuity --with continuwuity --on gcp --allow-from me \
 	--domain matrix.example.com --admin alice --admin-password admin-password
 ```
 
-`--allow-from me` admits your address to ports 80 and 443. Point the name at the machine
-before you create it. The name is the server name in every user id.
+`--allow-from me` admits your address to ports 80 and 443. Point the name at the
+machine before you create it. The name is the server name in every user id.
 
 ### Importing data
 

@@ -2,7 +2,7 @@
 # forms/jellyfin/test/config DIR: the jellyfin form's config for make
 # check, in DIR: its domain, localhost, for which Caddy's own CA signs, and
 # the administrator and password the wizard is completed with, which
-# test/checks signs in as.
+# test/tests.yaml signs in as.
 set -eu
 mkdir -p "$1/caddy"
 umask 077

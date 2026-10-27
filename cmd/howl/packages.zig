@@ -20,27 +20,17 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const B = build.B;
 
-/// apkoConfig writes the chain's apko config, its forms' packages, accounts and paths merged,
-/// and under dev the dev packages after the rest. It is replaced only when
-/// it says something new, so a change to howl that changes nothing apko
-/// is asked for rebuilds no root.
+/// apkoConfig writes the chain's apko config, its forms' packages, accounts and paths
+/// merged. It is replaced only when it says something new, so a change to howl that
+/// changes nothing apko is asked for rebuilds no root.
 pub fn apkoConfig(b: *B, target: []const u8) !void {
-    var extra: std.ArrayList([]const u8) = .empty;
-    if (b.spec.dev and b.spec.dev_shell) {
-        try extra.append(b.gpa, "busybox-full");
-        try extra.append(b.gpa, "mksh");
-        for (b.chain) |c| for (try c.items(b.gpa, "dev")) |item| {
-            var it = mem.tokenizeAny(u8, item, " \t");
-            while (it.next()) |pkg| try extra.append(b.gpa, pkg);
-        };
-    }
     var f: forms.Failure = .{};
     var node = compose.apko(
         b.io,
         b.gpa,
         Dir.cwd(),
         b.chain,
-        extra.items,
+        &.{},
         &f,
     ) catch |err| switch (err) {
         error.Form => return b.steps.fail(f.text),
@@ -53,7 +43,7 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
     // Published, werewolf's repository, and as packages the forms from it,
     // which bring theirs, and the rest's (compose.published).
     if (b.spec.published)
-        node = try compose.published(b.gpa, node, b.chain, b.from_repo, extra.items);
+        node = try compose.published(b.gpa, node, b.chain, b.from_repo, &.{});
     b.deployment = try deployment.prepare(b, node);
     if (b.deployment) |p| node = try deployment.configure(b.gpa, node, p);
     // Resolve the same form serials that were checked and composed, even

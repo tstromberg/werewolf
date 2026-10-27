@@ -148,6 +148,23 @@ const Run = struct {
                 .secure = r.secure,
                 .committed = committed,
             }, &why) catch return r.c.fail("{s}", .{why.text});
+            if (r.fixture.tpm) {
+                const expected: i64 = if (mem.eql(u8, release, "A"))
+                    1
+                else if (mem.eql(u8, release, "B"))
+                    2
+                else
+                    3;
+                const index = field(now, "index") orelse return error.MissingTpmEvidence;
+                const floor = field(now, "floor") orelse return error.MissingTpmEvidence;
+                if (!isTrue(field(now, "rollback_protected")) or index != .integer or
+                    index.integer != expected or floor != .integer or floor.integer < 1 or
+                    floor.integer > expected)
+                    return r.c.fail(
+                        "invalid TPM evidence for {s}: {f}",
+                        .{ release, json.fmt(now, .{}) },
+                    );
+            }
             return now;
         }
         const shown = last orelse json.Value{ .null = {} };
@@ -196,6 +213,11 @@ fn run(c: *host.Check) !void {
     const kind = std.meta.stringToEnum(Kind, name) orelse
         return c.fail("unknown provider: {s}", .{name});
     const mode = c.env.get("AB_MODE") orelse defaultMode(kind);
+    const tpm = mem.eql(u8, c.env.get("AB_TPM") orelse "0", "1");
+    if (c.env.get("AB_FIRECRACKER_PINNED") != null and kind != .firecracker)
+        return c.fail("AB_FIRECRACKER_PINNED is for Firecracker only", .{});
+    if (tpm and (kind != .bhyve or !mem.eql(u8, mode, "secure")))
+        return c.fail("AB_TPM=1 currently requires x86_64 bhyve in secure mode", .{});
     const proxmox = c.env.get("PROXMOX_HOST") != null;
     if (refusal(kind, arch, mode, proxmox)) |why| return c.fail("{s}", .{why});
     const check_dir = c.env.get("CHECK") orelse try gpa.print("build/{s}/check", .{arch});
@@ -221,13 +243,18 @@ fn run(c: *host.Check) !void {
             .cert = try c.absolute(try required(c, "IPE_CERT")),
             .root = try c.path(root),
             .mode = mode,
+            .tpm = tpm,
         });
+    }
+    if (mem.eql(u8, c.env.get("AB_FIXTURE_ONLY") orelse "0", "1")) {
+        c.say("fixture: {s}", .{fixture_path});
+        return;
     }
     const text = try cwd.readFileAlloc(io, fixture_path, gpa, .limited(16 << 20));
     const Fixture = host.provider.Fixture;
     const options: json.ParseOptions = .{ .ignore_unknown_fields = true };
     const fixture = try json.parseFromSliceLeaky(Fixture, gpa, text, options);
-    if (!mem.eql(u8, fixture.arch, arch) or !mem.eql(u8, fixture.mode, mode))
+    if (!mem.eql(u8, fixture.arch, arch) or !mem.eql(u8, fixture.mode, mode) or fixture.tpm != tpm)
         return c.fail("fixture architecture or boot mode differs from the requested " ++
             "provider test", .{});
 
@@ -264,8 +291,15 @@ fn run(c: *host.Check) !void {
         return c.fail("{t}; see {s}", .{ err, logs });
     };
     cleaned catch return c.fail("{s}; see {s}", .{ machine.why, logs });
-    c.say("pass   {s}: signed A/B upgrade, post-commit rollback, persistent rollback and " ++
-        "automatic unhealthy recovery; resources removed", .{name});
+    if (mem.eql(u8, c.env.get("AB_FIRECRACKER_PINNED") orelse "0", "1"))
+        c.say(
+            "pass   Firecracker default-mode limitation: signed B stages but host pins retain " ++
+                "A; automatic upgrades unsupported; resources removed",
+            .{},
+        )
+    else
+        c.say("pass   {s}: signed A/B upgrade, post-commit rollback, persistent rollback and " ++
+            "automatic unhealthy recovery; resources removed", .{name});
 }
 
 fn failureText(c: *host.Check, err: anyerror) ![]const u8 {
@@ -289,7 +323,24 @@ fn lifecycle(r: *Run) !void {
             "fix timekeeping before testing HTTPS signed updates", .{});
     try r.select("B");
     _ = try r.ssh("/usr/lib/werewolf/slot-update check", 600);
+    const pinned = mem.eql(u8, c.env.get("AB_FIRECRACKER_PINNED") orelse "0", "1");
+    if (pinned) {
+        const staged = (try r.ssh("/bin/cat /data/svc/autoupdate/log", 120)).stdout;
+        try write(c, try c.path("pinned-staging.log"), staged);
+        const build = r.fixture.releases.object.get("B").?.object.get("build").?.string;
+        if (mem.find(u8, staged, build) == null or
+            mem.find(u8, staged, "\"event\":\"stage\"") == null)
+            return c.fail("pinned-mode negative test did not stage signed B", .{});
+    }
     try r.reboot("/usr/bin/reboot");
+    if (pinned) {
+        const retained = try r.waitBoot("A", "a", bootId(initial), true, 400);
+        try r.report(
+            "host pins retain A after signed B stages; automatic upgrade unsupported",
+            retained,
+        );
+        return;
+    }
     const upgraded = try r.waitBoot("B", "b", bootId(initial), true, 400);
     try r.report("authenticated upgrade B verified and committed", upgraded);
     try r.reboot("/usr/lib/werewolf/slot-update try");

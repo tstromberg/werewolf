@@ -10,10 +10,6 @@ base: prod
 packages:
   - nats-server
 
-# The check speaks NATS with its own client.
-dev:
-  - nats
-
 services:
   # nats-server, as its own user: it may bind :4222, and :8222 on loopback
   # for monitoring (which fence lets no one outside reach), read its

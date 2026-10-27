@@ -7,7 +7,8 @@ console and exec-only SSH. See [form.yaml](form.yaml).
 
 - No shell, Bash, BusyBox, npm installer, or bundled upstream interpreter.
 - Each application, n8n runner, dashboard and SSH daemon has its own user.
-- The dashboard permits only its packaged script/style and never caches captured logs.
+- The dashboard permits only its packaged script/style and never caches captured
+  logs.
 - Writable files, TCP ports, child executables and memory are confined per service.
 - Applications have no outbound network. Only the console reaches their backends.
 - Versions are deliberately pinned and automatic updates are disabled.

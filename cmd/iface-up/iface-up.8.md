@@ -18,8 +18,8 @@ address and prefix and installs the default gateway. A gateway outside the subne
 receives a host route first. Arguments are validated before any network change.
 
 This boot helper is called by init(8) for loopback and static addressing. It keeps
-only CAP_NET_ADMIN and restricts its system calls before configuring the interface. It
-cannot restore network privileges removed by fence(8).
+only CAP_NET_ADMIN and restricts its system calls before configuring the interface.
+It cannot restore network privileges removed by fence(8).
 
 ## EXIT STATUS
 

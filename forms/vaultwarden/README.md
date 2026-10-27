@@ -9,8 +9,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/vaultwarden/index.html).
 ## Security Posture
 
 - Vaultwarden runs as its own user. The root is read-only. The vault is on `/data`.
-- The admin token is a file you pass in. It is an Argon2id PHC string, not the password
-  itself.
+- The admin token is a file you pass in. It is an Argon2id PHC string, not the
+  password itself.
 - Signups follow the server's config. The domain is the one clients will use.
 
 ## Getting Started
@@ -39,8 +39,8 @@ howl create vaultwarden --with vaultwarden --on gcp --allow-from me --config con
 
 ### Importing data
 
-Export the old vault as JSON and import it in the web vault after this one is up. There
-is no database import.
+Export the old vault as JSON and import it in the web vault after this one is up.
+There is no database import.
 
 ### Known Quirks
 

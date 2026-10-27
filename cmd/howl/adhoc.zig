@@ -223,11 +223,8 @@ pub fn take(
         .app = app_root,
         .published = @import("published.zig").arch != null,
         .dev = for (p.rest) |arg| {
-            if (std.mem.eql(u8, arg, "--dev") or std.mem.eql(u8, arg, "--dev=ssh")) break true;
+            if (std.mem.eql(u8, arg, "--dev=ssh")) break true;
         } else false,
-        .dev_shell = for (p.rest) |arg| {
-            if (std.mem.eql(u8, arg, "--dev=ssh")) break false;
-        } else true,
     }) catch null else null;
     const locked_images: []const locks.Image = if (previous) |record| blk: {
         const requested = record.requested orelse break :blk &.{};
@@ -362,7 +359,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         const dot = std.mem.findScalar(u8, key, '.');
         const head = key[0 .. dot orelse key.len];
         const sub: ?[]const u8 = if (dot) |d| key[d + 1 ..] else null;
-        // --app DIR and --dev are the verbs' flags, whatever form.yaml's keys say.
+        // --app DIR and --dev=ssh are the verbs' flags, whatever form.yaml's keys say.
         const kind: ?forms.Shape = if (std.mem.eql(u8, head, "app") or std.mem.eql(u8, head, "dev"))
             null
         else
@@ -1041,7 +1038,7 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
 /// the next word.
 fn takesNothing(flag: []const u8) bool {
     for ([_][]const u8{
-        "--dev",
+        "--dev=ssh",
         "--build",
         "--yes",
         "--verbose",
@@ -1120,9 +1117,15 @@ test "a line with none of our flags is left alone" {
     const p = try planned(gpa, .create, &.{ "edge", "--domain", "a.example", "-n" }, "", &why);
     try testing.expect(!p.ours);
     try testing.expectEqual(1, p.positionals);
-    const bare = try planned(gpa, .run, &.{ "--on", "lima", "--dev", "--app", "./x" }, "", &why);
+    const bare = try planned(
+        gpa,
+        .run,
+        &.{ "--on", "lima", "--dev=ssh", "--app", "./x" },
+        "",
+        &why,
+    );
     try testing.expect(!bare.ours);
-    try expectWords(&.{ "--on", "lima", "--dev", "--app", "./x" }, bare.rest);
+    try expectWords(&.{ "--on", "lima", "--dev=ssh", "--app", "./x" }, bare.rest);
     const with = try planned(gpa, .run, &.{ "--with", "valkey" }, "", &why);
     try testing.expect(with.ours);
     try testing.expectEqualStrings("playground", with.base);
@@ -1152,7 +1155,7 @@ test "positionals: create names the machine; run and build name a base" {
     try testing.expectEqualStrings("caddy", one_more.base);
     try testing.expectEqual(0, one_more.with.len);
     try testing.expectEqualStrings("base: caddy\npackages:\n  - curl\n", try body(gpa, one_more));
-    var none = try planned(gpa, .run, &.{"--dev"}, "", &why);
+    var none = try planned(gpa, .run, &.{"--dev=ssh"}, "", &why);
     const fallback = try references(gpa, &none, "playground", &why);
     try testing.expectEqualStrings("playground", fallback.?);
     var kept = try planned(gpa, .run, &.{ "--with", "forms/shop/" }, "", &why);
@@ -1171,13 +1174,13 @@ test "positionals: create names the machine; run and build name a base" {
     const c2 = try planned(
         gpa,
         .create,
-        &.{ "--dev", "shop", "--with=caddy", "--with=valkey", "--domain", "x", "--on", "gcp" },
+        &.{ "--dev=ssh", "shop", "--with=caddy", "--with=valkey", "--domain", "x", "--on", "gcp" },
         "",
         &why,
     );
     try testing.expectEqualStrings("shop", c2.name.?);
     try expectWords(&.{ "caddy", "valkey" }, c2.with);
-    try expectWords(&.{ "--dev", "--domain", "x", "--on", "gcp" }, c2.rest);
+    try expectWords(&.{ "--dev=ssh", "--domain", "x", "--on", "gcp" }, c2.rest);
     const r = try planned(
         gpa,
         .run,

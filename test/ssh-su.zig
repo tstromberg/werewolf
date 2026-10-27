@@ -1,6 +1,6 @@
 //! ssh-su PORT PREFIX PROVIDER MODE attacks the su form in a booted,
-//! disposable test machine (test/boot runs it for ssh-su, prod-ssh and
-//! playground): root through a forwarded security-key agent, and every way
+//! disposable test machine (a host suite's program step runs it for
+//! ssh-su, prod-ssh and playground): root through a forwarded security-key agent, and every way
 //! that must be refused. PREFIX names the check's keys, PROVIDER the
 //! software security key; MODE playground allows its local software keys.
 
