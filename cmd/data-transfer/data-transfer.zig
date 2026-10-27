@@ -198,7 +198,7 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
     var stage = try tmp.dir.openDir(io, "stage", .{ .iterate = true });
     defer stage.close(io);
     try (File{ .handle = stage.handle, .flags = .{ .nonblocking = false } }).setOwner(io, reader_id, reader_id);
-    for (0..3) |mode| {
+    for (0..4) |mode| {
         const pid = try sandbox.sys(linux.fork(), "fork boundary test");
         if (pid == 0) {
             boundaryProbe(io, tmp.dir, stage, mode) catch linux.exit_group(1);
@@ -211,10 +211,12 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
 }
 
 fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
+    if (mode == 3) try sandbox.inheritedCapabilities((1 << linux.CAP.DAC_READ_SEARCH) |
+        (1 << linux.CAP.SETUID) | (1 << linux.CAP.SETGID));
     const view = if (mode == 0) blk: {
         try confineDecoder(stage);
         break :blk stage;
-    } else try @import("data-read").confine(io, root, if (mode == 1) "plex" else null, .{});
+    } else try @import("data-read").confine(io, root, if (mode == 1) "plex" else null, .{ .session = mode == 3 });
     var header: extern struct { version: u32 = 0x20080522, pid: i32 = 0 } = .{};
     var caps: [2]extern struct { effective: u32, permitted: u32, inheritable: u32 } = undefined;
     _ = try sandbox.sys(linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps)), "capget boundary test");
