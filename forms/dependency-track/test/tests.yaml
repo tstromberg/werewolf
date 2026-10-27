@@ -77,7 +77,7 @@ suites:
             expect:
               status: 200
               body:
-                matches: ^eyJ
+                matches: ^[A-Za-z0-9._~+/-]+={0,2}$
           - fetch:
               url: https://localhost/api/v1/project
               ca: /data/svc/caddy/pki/authorities/local/root.crt

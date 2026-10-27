@@ -45,11 +45,11 @@ fn run(io: Io, gpa: Allocator) !void {
     for (password) |c| if (c < 0x20 or c == 0x7f) return error.AdminPasswordRefused;
 
     try awaitApi(io, gpa);
-    // Its login and forceChangePassword take form fields and return the
-    // token as text. JSON is refused, and admin/admin does not yield a
-    // token while the published password still has to be changed.
+    // Login and forceChangePassword take form fields. Version 5 returns an
+    // opaque bearer token as text, rather than the older JWT representation.
     const fresh = try formFields(gpa, "admin", password, null);
     if ((try login(io, gpa, fresh)).len != 0) {
+        try refuseDefault(io, gpa);
         try mark(io);
         say(io, "{{\"event\":\"admin already set\"}}", .{});
         return;
@@ -66,6 +66,7 @@ fn run(io: Io, gpa: Allocator) !void {
     );
     if (changed.status != 200) return error.PasswordNotChanged;
     if ((try login(io, gpa, fresh)).len == 0) return error.NewPasswordRefused;
+    try refuseDefault(io, gpa);
     try mark(io);
     say(io, "{{\"event\":\"admin set\"}}", .{});
 }
@@ -104,19 +105,32 @@ fn encode(gpa: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
 }
 
 /// login returns the bearer token, or an empty slice when the password is
-/// refused. The token is the body itself. Any other answer is an error.
+/// refused. Confirm it authorizes the private API before accepting it.
 fn login(io: Io, gpa: Allocator, body: []const u8) ![]const u8 {
     const got = try request(io, gpa, "POST", "/api/v1/user/login", null, form_type, body);
     if (got.status == 401 or got.status == 403) return "";
     if (got.status != 200) return error.LoginRefused;
     const token = std.mem.trim(u8, got.body, " \t\r\n");
-    var parts = std.mem.splitScalar(u8, token, '.');
-    const a = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    const b = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    const c = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    if (parts.next() != null or a.len == 0 or b.len == 0 or
-        c.len == 0) return error.LoginAnswerNotUnderstood;
+    if (!bearerToken(token)) return error.LoginAnswerNotUnderstood;
+    const authorized = try request(io, gpa, "GET", "/api/v1/project", token, null, null);
+    if (authorized.status != 200) return error.LoginNotAuthorized;
     return token;
+}
+
+fn refuseDefault(io: Io, gpa: Allocator) !void {
+    const body = try formFields(gpa, "admin", "admin", null);
+    if ((try login(io, gpa, body)).len != 0) return error.DefaultPasswordStillAccepted;
+}
+
+/// RFC 6750 bearer credentials may be opaque. Exclude whitespace and header
+/// injection without making a claim about their internal representation.
+fn bearerToken(token: []const u8) bool {
+    if (token.len == 0 or token.len > 4096) return false;
+    const body = std.mem.trimEnd(u8, token, "=");
+    if (body.len == 0) return false;
+    for (body) |c| if (!std.ascii.isAlphanumeric(c) and
+        std.mem.findScalar(u8, "-._~+/", c) == null) return false;
+    return true;
 }
 
 fn awaitApi(io: Io, gpa: Allocator) !void {
@@ -227,4 +241,13 @@ test "parse reads the status and joins chunks" {
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n",
     );
     try testing.expectEqualStrings("{\"a\":1}", chunked.body);
+}
+
+test "opaque bearer credentials are accepted without allowing header injection" {
+    for ([_][]const u8{ "dtst_opaque-token", "a.b.c", "opaque+/~==" }) |token|
+        try testing.expect(bearerToken(token));
+    for ([_][]const u8{ "", "=", "a=b", "bad token", "token\r\nX: injected", "\"token\"" }) |token|
+        try testing.expect(!bearerToken(token));
+    const oversized: [4097]u8 = @splat('a');
+    try testing.expect(!bearerToken(&oversized));
 }

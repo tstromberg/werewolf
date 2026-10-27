@@ -13,6 +13,7 @@ instructions](https://dist.werewolf-linux.org/boot/v1/dependency-track/index.htm
 - The published `admin` / `admin` password is replaced from the config before Caddy
   opens.
 - PostgreSQL takes one role, over loopback, and only this service may connect.
+- The API alone may load its packaged zstd JNI library from the read-only image.
 
 ### Weaknesses
 
