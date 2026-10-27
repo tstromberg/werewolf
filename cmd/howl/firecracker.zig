@@ -938,7 +938,6 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
             error.FileNotFound => false,
             else => return err,
         };
-    const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
     const pidfile = try gpa.print("{s}/firecracker.pid", .{dir});

@@ -13,5 +13,5 @@ This host check does not supply firmware Secure Boot or a TPM: the trusted host 
 replace the record, and restoring older host state can restore an older vulnerable
 release. Keep that state outside guest access. The warning and guest command line
 name both missing protections. `--disable=secureboot,tpm` explicitly selects the same
-mode. `--disable=secureboot,tpm,ipe` selects the legacy Firecracker path, including its
-guest-controlled A/B updates, and does not pin its boot files.
+mode. `--disable=secureboot,tpm,ipe` selects the legacy Firecracker path, including
+its guest-controlled A/B updates, and does not pin its boot files.
