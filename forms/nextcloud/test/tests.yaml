@@ -1,5 +1,5 @@
 version: 1
-timeout: 1200s
+timeout: 1500s
 packages:
   - postgresql-client
 suites:
@@ -269,6 +269,9 @@ suites:
                 credentials: YWRtaW46d2VyZXdvbGYtd3Jvbmc=
             expect:
               status: 401
+  # Cron starts on a five-minute boundary. Nextcloud records lastcron only
+  # after its background-job queue finishes, allowing up to fourteen minutes
+  # of work. Cover both intervals while still requiring successful completion.
   - name: nextcloud-cron
     user: postgres
     policy:
@@ -313,7 +316,7 @@ suites:
             expect:
               exit: 0
               stdout: "t\n"
-            await: 340s
+            await: 1200s
   # A real code write as Nextcloud's account, without a setuid helper: its
   # code is on the read-only root.
   - name: nextcloud-code-denied

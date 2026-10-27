@@ -82,3 +82,20 @@ unchanged. Four simultaneous full posture scans in a protected guest all
 matched their own refused-exec records. The concurrent posture regression
 now requires that result for every scan, alongside its existing attacks.
 This addresses the observed boot burst; missing evidence still fails.
+
+## Follow-up: Grafana catalog boot, 2026-10-27
+
+The x86_64 Grafana [catalog check][grafana-check] failed on kernel
+7.3.0-werewolf with `records=0` after 100 ms. Its captured console contains
+the exact child (151), native execve syscall (59), EACCES and failed SYSCALL
+record. Grafana was concurrently running its initial database migrations.
+This is delayed evidence, unlike the original investigation's absent record.
+
+The probe now allows five seconds for asynchronous audit delivery. It still
+returns immediately when the record arrives, follows the same log cursor,
+matches the same child and kernel-origin fields, and fails on missing evidence.
+Its 4096-read bound, spoof rejection, refused-exec rule, audit backlog and locked
+configuration remain unchanged. This replaces the earlier 100 ms waiting budget;
+it does not retry the exec or substitute another event.
+
+[grafana-check]: https://github.com/werewolf-linux/werewolf/actions/runs/40505931736/job/122195117718

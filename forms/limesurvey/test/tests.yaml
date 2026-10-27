@@ -14,6 +14,20 @@ suites:
               status: 200
               body:
                 contains: werewolf check surveys
+  # The lifecycle check restarts MariaDB after initial readiness. Its
+  # supervisor can be up before the database accepts queries again.
+  # Require the application to recover before testing plugins and uploads.
+  - name: limesurvey-restarted
+    cases:
+      - name: ls-database-recovered
+        steps:
+          - fetch:
+              url: http://localhost/
+            await: 60s
+            expect:
+              status: 200
+              body:
+                contains: werewolf check surveys
   # A plugin planted under upload/ is never scanned, run or installed; a .php
   # planted among the uploads is a 404, an SVG is sandboxed, and the assets
   # LimeSurvey published are served (driver.zig).

@@ -117,9 +117,10 @@ The host needs Linux/KVM, Firecracker, mtools, erofs-utils and passwordless `doa
 The x86_64 tree, howl, form and verity tools are copied there; no Zig toolchain is
 needed. A mismatched lock is resolved with `go install`'s apko, pinned in
 `tools/install-deps`. The form accepts the host's key file and declares the
-`network-ssh-security-keys` weakness. It must hand over to runit with a verified root,
-match the form's and `test/posture-known`'s expected posture, and accept SSH through
-the tap with that key. Delete must remove the VM; `FIRECRACKER_KEEP=1` retains it.
+`network-ssh-security-keys` weakness. It must hand over to runit with a verified
+root, match the form's and `test/posture-known`'s expected posture, and accept SSH
+through the tap with that key. Delete must remove the VM; `FIRECRACKER_KEEP=1`
+retains it.
 
 ## bhyve
 
