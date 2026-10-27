@@ -8,7 +8,8 @@ set -eu
 d=$1/otel-collector
 mkdir -p "$d"
 umask 077
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+	-pkeyopt ec_param_enc:named_curve -nodes -days 30 \
 	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
 	-keyout "$d/tls-key" -out "$d/tls-cert" 2>/dev/null
 echo werewolf-check-token >"$d/token"

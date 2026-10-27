@@ -297,6 +297,11 @@ pub const elf_exceptions = [_]ElfException{
         .why = wolfi_go ++ "; this client is a test dependency",
     },
     .{ .path = "usr/bin/nats-server", .why = wolfi_go },
+    .{
+        .path = "usr/bin/nats",
+        .form = "native-test-nats",
+        .why = wolfi_go ++ "; this client is a test dependency",
+    },
     .{ .path = "usr/bin/oauth2-proxy", .why = wolfi_go },
     .{ .path = "usr/bin/ollama", .why = wolfi_go },
     .{ .path = "usr/bin/bao", .why = wolfi_go },
@@ -554,6 +559,8 @@ test elfExcused {
     try testing.expectEqual(null, elfExcused("usr/lib/app/server", "go-example", .AARCH64));
     try testing.expect(elfExcused("usr/bin/mc", "native-test-minio", .X86_64) != null);
     try testing.expectEqual(null, elfExcused("usr/bin/mc", "minio", .X86_64));
+    try testing.expect(elfExcused("usr/bin/nats", "native-test-nats", .X86_64) != null);
+    try testing.expectEqual(null, elfExcused("usr/bin/nats", "nats", .X86_64));
 }
 
 test "OCI trees include staged copies, not native form files" {

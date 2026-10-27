@@ -23,7 +23,8 @@ pub fn main(init: std.process.Init) !void {
         try Io.File.stdout().writeStreamingAll(io, "fake QEMU for console transport regression\n");
         return;
     };
-    if (args.len == 4 and mem.eql(u8, args[1], "fake-qemu")) return qemu(io, args[2], args[3]);
+    if (args.len >= 4 and mem.eql(u8, args[1], "fake-qemu"))
+        return qemu(io, args[2], args[3], args[4..]);
     if (args.len != 2) {
         std.debug.print("usage: native-tests-regression HOWL\n", .{});
         std.process.exit(2);
@@ -354,7 +355,16 @@ fn handover(c: *Case) !void {
 /// qemu is the fake QEMU: on a raw console it prints a boot, its completion
 /// record split or whole, answers the monitor's power down, then prints
 /// UTF-8 a byte at a time, and powers off or simply exits.
-fn qemu(io: Io, power: []const u8, mode: []const u8) !void {
+fn qemu(io: Io, power: []const u8, mode: []const u8, options: []const []const u8) !void {
+    var monitors: Io.Group = .init;
+    defer monitors.cancel(io);
+    for (options, 0..) |option, i| if (mem.eql(u8, option, "-qmp")) {
+        if (i + 1 == options.len) return error.MissingMonitor;
+        const value = options[i + 1];
+        if (!mem.startsWith(u8, value, "unix:")) return error.InvalidMonitor;
+        const end = mem.findScalar(u8, value, ',') orelse value.len;
+        try monitors.concurrent(io, fakeMonitor, .{ io, value[5..end] });
+    };
     // test/boot gives QEMU a terminal, build/host/console a pipe: make a
     // terminal raw, as QEMU's -nographic does.
     if (posix.tcgetattr(0)) |raw| {
@@ -416,6 +426,26 @@ fn qemu(io: Io, power: []const u8, mode: []const u8) !void {
     };
     if (mem.eql(u8, power, "poweroff")) try out.writeStreamingAll(io, "\nreboot: Power down\n");
     try io.sleep(.fromMilliseconds(10), .awake);
+}
+
+/// Negotiate QMP but emit no poweroff event: these transport cases still
+/// require the serial poweroff marker, including their negative exit case.
+fn fakeMonitor(io: Io, path: []const u8) void {
+    const address = Io.net.UnixAddress.init(path) catch return;
+    var server = address.listen(io, .{}) catch return;
+    defer server.deinit(io);
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+    var input: [4096]u8 = undefined;
+    var output: [256]u8 = undefined;
+    var reader = stream.reader(io, &input);
+    var writer = stream.writer(io, &output);
+    writer.interface.writeAll("{\"QMP\":{}}\n") catch return;
+    writer.interface.flush() catch return;
+    _ = reader.interface.takeDelimiterInclusive('\n') catch return;
+    writer.interface.writeAll("{\"return\":{},\"id\":1}\n") catch return;
+    writer.interface.flush() catch return;
+    while (true) _ = reader.interface.takeByte() catch return;
 }
 
 /// until reads the console a byte at a time through ending.
