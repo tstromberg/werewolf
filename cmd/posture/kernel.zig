@@ -1373,7 +1373,10 @@ fn askToStop() ?[]const u8 {
 /// of a directory, which every kernel refuses, must leave an audit record
 /// in the kernel log (lib/audit.zig).
 pub fn logged(p: *Posture) !void {
-    p.work("kernel-exec-log: waiting for probe audit record (100 ms timeout)", "");
+    p.work(try p.gpa.print(
+        "kernel-exec-log: waiting for probe audit record ({d} ms timeout)",
+        .{exec_log_wait_ms},
+    ), "");
     var probe_detail: []const u8 = "";
     const on_record = try refusedExecLogged(p, &probe_detail);
     // Ask audit to stop only if it reads locked, or is unreadable for lack
@@ -1469,7 +1472,10 @@ pub fn logged(p: *Posture) !void {
 
 /// Follow new kernel records rather than repeatedly copying the entire
 /// boot log and sleeping 50 ms. kauditd wakes poll when its record arrives.
-/// Missing (including rate-limited) evidence still fails after 100 ms.
+/// Audit delivery can lag a refused exec during a busy application's startup.
+/// Missing (including rate-limited) evidence still fails after five seconds.
+const exec_log_wait_ms = 5000;
+
 fn refusedExecLogged(p: *Posture, detail: *[]const u8) !?bool {
     const rc = linux.open(
         "/dev/kmsg",
@@ -1516,7 +1522,8 @@ fn refusedExecLogged(p: *Posture, detail: *[]const u8) !?bool {
     var source: ExecLogSource = .{
         .io = p.io,
         .fd = fd,
-        .deadline = Io.Timestamp.now(p.io, .awake).nanoseconds + 100 * std.time.ns_per_ms,
+        .deadline = Io.Timestamp.now(p.io, .awake).nanoseconds +
+            exec_log_wait_ms * std.time.ns_per_ms,
     };
     var records: usize = 0;
     return switch (followExecLog(&source, &needles, &records)) {
@@ -1734,8 +1741,8 @@ test "exec audit evidence must be a kernel notice for this refusal" {
 
 fn execLogTimeout(p: *Posture, detail: *[]const u8, child: usize, records: usize) !?bool {
     detail.* = try p.gpa.print(
-        "child={d}: execve(/)=EACCES(13); records={d}; no matching audit record within 100 ms",
-        .{ child, records },
+        "child={d}: execve(/)=EACCES(13); records={d}; no matching audit record within {d} ms",
+        .{ child, records, exec_log_wait_ms },
     );
     return false;
 }
