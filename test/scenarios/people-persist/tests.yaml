@@ -1,0 +1,18 @@
+version: 1
+# prod, booted again and again on one /data by check-people-persist
+# (test/check-people-persist.zig), never by check-scenarios: each boot's
+# config and NoCloud seed are its own, and its hostname names the boot. Its
+# config holds no data.key, so /data is plain ext4, which the check damages
+# offline.
+form: prod
+skip: [data-encrypted]
+suites:
+  - name: people-persist
+    source: driver.zig
+    mode: people
+    user: root
+    policy:
+      pledge: stdio rpath wpath proc exec
+    cases:
+      seed: [accounts, collision-absent, ledger-private, admin-access, files-private]
+      verify: []

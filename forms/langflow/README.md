@@ -30,11 +30,11 @@ The editor is `/` on port 7860; APIs retain `/api/v1/` paths.
 Log in with the configured owner and password. Use an authenticated TLS proxy to
 reach the private listener remotely. A missing owner or password parks the service.
 
-Flows, SQLite state and models live beneath `/data/svc/langflow`. Keep that data
-with its generated secret key. Model files can be provisioned there; local ONNX
-inference does not require a hosted provider. The default MiniLM embedding model
-and tokenizer are packaged in read-only storage; the demo needs no model download. See
-[Langflow documentation](https://docs.langflow.org/).
+Flows, SQLite state and models live beneath `/data/svc/langflow`. Keep that data with
+its generated secret key. Model files can be provisioned there; local ONNX inference
+does not require a hosted provider. The default MiniLM embedding model and tokenizer
+are packaged in read-only storage; the demo needs no model download. See [Langflow
+documentation](https://docs.langflow.org/).
 
 ### Known Quirks
 

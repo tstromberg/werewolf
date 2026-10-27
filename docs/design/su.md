@@ -25,12 +25,12 @@ target accounts, and proving that a user understood a hardware-key touch.
 ## Detailed design
 
 `with: [ssh-su]` brings sshd and openssh-client, a native wrapper linked at
-/usr/bin/su, and fixed client configuration. Both prod-ssh and playground include
-it; playground explicitly admits software keys and omits required verification.
-Builds and updates prune package su entries before installing the form overlays.
-Only ssh-su then restores /usr/bin/su; BusyBox's compiled-in applet stays unprivileged.
-The su form explicitly selects FIDO algorithms. AuthenticationMethods is a
-publickey fallback in sshd's default file; a form's stronger requirement wins.
+/usr/bin/su, and fixed client configuration. Both prod-ssh and playground include it;
+playground explicitly admits software keys and omits required verification. Builds
+and updates prune package su entries before installing the form overlays. Only ssh-su
+then restores /usr/bin/su; BusyBox's compiled-in applet stays unprivileged. The su
+form explicitly selects FIDO algorithms. AuthenticationMethods is a publickey
+fallback in sshd's default file; a form's stronger requirement wins.
 
 The wrapper accepts only a root login, requires a terminal and an agent socket,
 and execs the client with a small environment. It ignores user client settings,

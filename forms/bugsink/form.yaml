@@ -23,10 +23,6 @@ packages:
 weaknesses:
   programs-no-interpreters: Bugsink runs on hardened Python, with the application and its dependencies on the verified root
 
-# The checks sign in and make a project with curl, which keeps cookies.
-dev:
-  - curl
-
 # make check's (forms/README.md): gunicorn's workers and snappea's beside
 # Caddy want more than the default.
 check:

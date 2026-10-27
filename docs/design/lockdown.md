@@ -87,7 +87,8 @@ compat calls, the LDT, kexec, BPF, io_uring and exploited code no form uses.
 
 ## Alternatives Considered
 
-- **A command-line switch for eBPF**: an unsigned boot configuration can weaken policy.
+- **A command-line switch for eBPF**: an unsigned boot configuration can weaken
+  policy.
 - **`integrity` everywhere**, as before, lets a kprobe rootkit read the kernel.
 - **The BPF LSM** uses eBPF.
 - **A list of calls**: allowed, it breaks on glibc updates; refused, it ages.

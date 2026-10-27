@@ -21,10 +21,10 @@ Setup creates a private mount namespace and writable database view. Init covers 
 database and socket directories with read-only binds in the main namespace before
 permitting services to start. The authority then drops to _unwoundage.
 
-A supervisor holds no database, restarts the writer and bounds fetch times. The writer
-owns the database and resolver channel but opens no TCP connection and parses no
-provider response. Separate confined fetch children retrieve evidence. At most four
-fetches run concurrently, one per service, each with a ten-second deadline. When
+A supervisor holds no database, restarts the writer and bounds fetch times. The
+writer owns the database and resolver channel but opens no TCP connection and parses
+no provider response. Separate confined fetch children retrieve evidence. At most
+four fetches run concurrently, one per service, each with a ten-second deadline. When
 durable data is unavailable, the authority uses temporary storage.
 
 ## SEE ALSO

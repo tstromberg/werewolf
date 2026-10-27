@@ -45,8 +45,8 @@ howl create wordpress-mariadb --with wordpress-mariadb --on gcp --allow-from me 
 
 ### Importing data
 
-`--import` streams `*.sql` into MariaDB once, while data is first made. Uploads and the
-WordPress tree are not on that disk. A cloud cannot attach it.
+`--import` streams `*.sql` into MariaDB once, while data is first made. Uploads and
+the WordPress tree are not on that disk. A cloud cannot attach it.
 
 ```sh
 umask 077

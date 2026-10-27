@@ -33,17 +33,18 @@ busybox `sh` in every image. Removing it matters because:
 
 ## Non-Goals
 
-- **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry mksh through the
-  `shell` form; runtime forms (`python`, `node`, `php`, `jre`) carry their interpreter.
-  Each names the failure in `weaknesses:` (forms/README.md).
-- An interpreter inside a program (nginx's njs); other binaries, such as init's `blkid`.
+- **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry mksh through
+  the `shell` form; runtime forms (`python`, `node`, `php`, `jre`) carry their
+  interpreter. Each names the failure in `weaknesses:` (forms/README.md).
+- An interpreter inside a program (nginx's njs); other binaries, such as init's
+  `blkid`.
 
 ## Detailed design
 
-**Programs for scripts.** Each script became a small Zig program in cmd/: runit's three
-stages (`runit-stage`, under three names), `reboot`, `slot-keep`, `power-button`,
-`debug-shell`, `ssh-host-key`, and `mount`, since busybox's cannot set `noexec`. init
-ends in `exec fence runit`, so runit stays PID 1.
+**Programs for scripts.** Each script became a small Zig program in cmd/: runit's
+three stages (`runit-stage`, under three names), `reboot`, `slot-keep`,
+`power-button`, `ssh-host-key`, and `mount`, since busybox's cannot set `noexec`.
+init ends in `exec fence runit`, so runit stays PID 1.
 
 **`sh -c` without a shell.** A program that insists on one (supercronic, a
 library's `system`) gets sh-shim from the `sh-shim` form: it runs one
@@ -64,8 +65,8 @@ by templating at boot. `forms/nginx` is the worked example.
 **Checks.** posture looks for shells and interpreters by name in the
 program directories and checks each `/etc/sv/*/run` is ELF
 ([docs/posture.md](../posture.md)). A `system(3)` call fails on the check
-boot; PostgreSQL setup uses sh-shim with explicit executable declarations. `DEV=1` adds
-mksh and BusyBox tools for debugging and test/checks, and `make dist` refuses it.
+boot; PostgreSQL setup uses sh-shim with explicit executable declarations. No build
+adds a shell; `make dist` refuses a `--dev=ssh` image.
 
 **Open.** init could stay PID 1 for life and read the power button; runit
 as PID 1 with Zig stages was the first step. postdoc asked leash for a
@@ -74,8 +75,9 @@ delegated cgroup, `nice` and an OOM score; leash has `memory` (MiB) and
 
 ## Drawbacks
 
-- Debugging uses another image (`DEV=1`), so a fix is confirmed on the
-  shipped image after. Each daemon that shells out needs a fix or a shim.
+- Debugging goes through the native tests and `--dev=ssh` iteration, not a
+  shell, so a fix is confirmed on the shipped image after. Each daemon that
+  shells out needs a fix or a shim.
 - posture checks names, not contents: a renamed interpreter, or one
   outside the program directories, is not found.
 
@@ -94,8 +96,8 @@ delegated cgroup, `nice` and an OOM score; leash has `memory` (MiB) and
 
 - An exploited service has only its process and what its file grants;
   root and PID 1 have no shell either.
-- The one root shell, on the console of a `DEV=1` build booted with
-  `werewolf.debug=1`, needs a marker only that build's root carries.
+- No image gives a console shell; `werewolf.debug=1` only admits a
+  `--dev=ssh` image's upload directory.
 
 ## Reliability Considerations
 

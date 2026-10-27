@@ -67,9 +67,9 @@ new name:
 build/host/howl create rust-v2 --with rust-example --on gcp --allow-from me
 ```
 
-Check the new VM before moving traffic. New VMs start with empty data; migrate any saved
-data first. See the [update guide](../README.md#change-update-and-remove) for package
-refreshes and rollback details.
+Check the new VM before moving traffic. New VMs start with empty data; migrate any
+saved data first. See the [update guide](../README.md#change-update-and-remove) for
+package refreshes and rollback details.
 
 ## Clean up
 

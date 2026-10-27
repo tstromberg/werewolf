@@ -9,8 +9,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/otel-collector/index.html)
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -46,21 +46,22 @@ howl create otel-collector --with otel-collector --on gcp --allow-from me \
 ```
 
 `--export` is an OTLP gRPC address on port 4317 or 443. The address above is a local
-port where nothing answers, so a span waits in the queue; point it at your backend when
-you have one. `--token` is one token a line. In the SDKs: `OTEL_EXPORTER_OTLP_ENDPOINT`
-and `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20TOKEN`.
+port where nothing answers, so a span waits in the queue; point it at your backend
+when you have one. `--token` is one token a line. In the SDKs:
+`OTEL_EXPORTER_OTLP_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20TOKEN`.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`.
-There is no database to import.
+This machine starts empty. What it must remember is in the create command or
+`--config`. There is no database to import.
 
 ### Known Quirks
 
 - A span without a token is refused.
 - There is no debug, zpages or pprof extension.
-- The check shows that a span is accepted. It does not show that your backend received
-  it.
+- The check shows that a span is accepted. It does not show that your backend
+  received it.
 - Certificates are yours. The form generates none.
 
 ### Network Exposure

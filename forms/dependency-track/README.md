@@ -30,8 +30,8 @@ howl create dependency-track --with dependency-track \
 ```
 
 Open `https://bom.home.arpa` and sign in as `admin`. The password is in
-`admin-password`. Give the machine 3 GB. Projects and uploads are in [Dependency-Track's
-documentation](https://docs.dependencytrack.org/).
+`admin-password`. Give the machine 3 GB. Projects and uploads are in
+[Dependency-Track's documentation](https://docs.dependencytrack.org/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 

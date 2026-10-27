@@ -157,14 +157,13 @@ done
 slots_dump /slot/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
-# Development access is part of the staged image, not just its leaf form.
-# Inspect the sealed slot without extracting another root tree.
-for path in etc/sv/sshd-dev/service etc/ssh/howl-dev.conf; do
-	dump.erofs --cat --path="/$path" "$dir/b.erofs" >"$dir/b-${path##*/}" 2>/dev/null
-	check "slot b preserves $path" cmp "$OUT/ro/$path" "$dir/b-${path##*/}"
+# An update composes no developer access onto a machine that had none.
+# Inspect the sealed slot without extracting another root tree: dump.erofs
+# exits 0 either way, so a path is absent only when it says so.
+absent() { dump.erofs --path="/$1" "$dir/b.erofs" 2>&1 | grep -q 'read inode failed'; }
+for path in etc/sv/sshd-dev/service etc/ssh/howl-dev.conf usr/share/werewolf/dev; do
+	check "slot b has no $path" absent "$path"
 done
-dump.erofs --cat --path=/usr/share/werewolf/dev "$dir/b.erofs" >"$dir/b-dev" 2>/dev/null
-check "slot b preserves developer mode" cmp "$OUT/meta/usr/share/werewolf/dev" "$dir/b-dev"
 dump.erofs --cat --path=/usr/share/werewolf/etc/passwd "$dir/b.erofs" >"$dir/b-passwd" 2>/dev/null
 built_root=$(grep '^root:' "$OUT/ro/usr/share/werewolf/etc/passwd")
 updated_root=$(grep '^root:' "$dir/b-passwd")

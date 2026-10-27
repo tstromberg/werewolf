@@ -22,11 +22,11 @@ build/host/howl build --with python-app --app ./myapp          # the release fil
 
 DIR is what the application's own toolchain made: regular files and directories, no
 links, no setuid files, programs position independent (`go build -buildmode=pie`,
-`-fPIE -pie`). werewolf prints DIR's sha256 over every path, mode and byte, so the same
-DIR makes the same image; a new application means a new machine, `howl delete` then
-`create`. [apps-by-hand.md](apps-by-hand.md) does the same with `make disk` and `tar`.
-What the application needs from each machine, such as a database's address, is a setting
-its form declares ([forms.md](forms.md#settings)): `python-example` takes
+`-fPIE -pie`). werewolf prints DIR's sha256 over every path, mode and byte, so the
+same DIR makes the same image; a new application means a new machine, `howl delete`
+then `create`. [apps-by-hand.md](apps-by-hand.md) does the same with `make disk` and
+`tar`. What the application needs from each machine, such as a database's address, is
+a setting its form declares ([forms.md](forms.md#settings)): `python-example` takes
 `--greeting TEXT` and hands it over as `GREETING`.
 
 ## A Python web server
@@ -107,16 +107,15 @@ and nothing else. The kernel enforces each limit:
 | to exhaust the machine's memory | capped where the service sets a cap | `memory MiB`: its cgroup's `memory.max`, resident memory, so it suits an interpreter, the JVM and V8 alike |
 | to leave a process running after it is stopped | killed with the service | nothing: each service is a cgroup, and its `finish` writes `cgroup.kill` on stop, restart and shutdown, a detached backdoor included |
 
-Every service file states a `pledge`; a service with none is parked at
-boot. `stdio rpath wpath proc inet listen` covers a server; `memfd`, `shm`,
-`sem`, `msg` and `watch` are off unless asked for, so an application that does not name
-them cannot make an anonymous executable file, squat another service's IPC
-key, or watch the machine's files; `memfd` also needs the form to allow
-`jit`, since a memory file written and then mapped runs as code wherever IPE
-is off. No promise brings `ptrace`, eBPF, perf,
-modules, io_uring or another process's memory. [lib/seal.zig](../lib/seal.zig)
-maps each promise to its calls. A service's `listen` and `connect` are its
-network policy for leash and fence alike.
+Every service file states a `pledge`; a service with none is parked at boot. `stdio
+rpath wpath proc inet listen` covers a server; `memfd`, `shm`, `sem`, `msg` and
+`watch` are off unless asked for, so an application that does not name them cannot
+make an anonymous executable file, squat another service's IPC key, or watch the
+machine's files; `memfd` also needs the form to allow `jit`, since a memory file
+written and then mapped runs as code wherever IPE is off. No promise brings `ptrace`,
+eBPF, perf, modules, io_uring or another process's memory.
+[lib/seal.zig](../lib/seal.zig) maps each promise to its calls. A service's `listen`
+and `connect` are its network policy for leash and fence alike.
 
 ## Ship it
 
@@ -142,9 +141,9 @@ its own: `jre-app`'s runs `java -jar /usr/lib/app/app.jar` with
 
 ## Forms from the command line
 
-To try something, you need not write a form. howl's `build`, `run`, `create` and `pack`
-take a manifest, `-f FILE`, and flags that are its keys, and write a form from them
-([design/adhoc.md](design/adhoc.md), [design/manifest.md](design/manifest.md)):
+To try something, you need not write a form. howl's `build`, `run`, `create` and
+`pack` take a manifest, `-f FILE`, and flags that are its keys, and write a form from
+them ([design/adhoc.md](design/adhoc.md), [design/manifest.md](design/manifest.md)):
 
 ```sh
 build/host/howl run --with python-app --app ./api --packages py3.13-flask
@@ -169,7 +168,7 @@ a line a flag; a map's value set twice is refused; `accounts`, `paths`,
 
 An `image` is pinned to the digest `crane` resolves, baked in at `/oci/NAME` and run
 inside it as `_oci-NAME`, with its entrypoint (an ELF program, never a `#!` script),
-its own `/tmp`, `/run`, `/data` and `/proc`, and, unless you say otherwise, a pledge of
-`stdio rpath wpath inet unix connect listen proc`; nginx, above, adds `sendfile`
+its own `/tmp`, `/run`, `/data` and `/proc`, and, unless you say otherwise, a pledge
+of `stdio rpath wpath inet unix connect listen proc`; nginx, above, adds `sendfile`
 ([why](../lib/seal.zig)). Without a `listen` or `write` line, howl refuses and prints
 the lines to choose from. The unpack's rules are in [design/oci.md](design/oci.md).

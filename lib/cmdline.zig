@@ -16,8 +16,6 @@ pub const Slot = enum {
     }
 };
 
-pub const Seal = enum { enforce, learn };
-
 /// Protection is one of werewolf's protections a machine can be made
 /// without: howl's --disable gives them up, and werewolf.disable names those
 /// a machine lacks.
@@ -75,7 +73,6 @@ pub const Cmdline = struct {
     root: []const u8 = "",
     /// deadman is in seconds; 0 means none was given.
     deadman: u32 = 0,
-    seal: Seal = .enforce,
     debug: bool = false,
     check: bool = false,
     /// native selects the slot from the signed UKI's canonical firmware path.
@@ -163,8 +160,6 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .slot => c.slot = std.meta.stringToEnum(Slot, v) orelse return refuse(f, "not a or b"),
             .esp => c.esp = serial(v) orelse return refuse(f, "not a FAT serial, XXXX-XXXX"),
             .deadman => c.deadman = seconds(v) orelse return refuse(f, "not 1 to 600 seconds"),
-            .seal => c.seal = std.meta.stringToEnum(Seal, v) orelse
-                return refuse(f, "not learn or enforce"),
             .debug => c.debug = if (isOne(v)) true else return refuse(f, "not 1"),
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
             .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
@@ -369,14 +364,13 @@ test parse {
     const slot = parse(
         "console=hvc0 werewolf.slots=" ++ id ++ " werewolf.slot=b " ++
             "werewolf.esp=57E1-F000 " ++
-            "werewolf.mac=52:55:55:0a:Bc:01 werewolf.seal=learn werewolf.debug=1\n",
+            "werewolf.mac=52:55:55:0a:Bc:01 werewolf.debug=1\n",
         &f,
     ).?;
     try testing.expectEqualStrings(id, slot.slots.?);
     try testing.expectEqual(Slot.b, slot.slot.?);
     try testing.expectEqual(Slot.a, slot.slot.?.other());
     try testing.expectEqual(0x57E1F000, slot.esp.?);
-    try testing.expectEqual(Seal.learn, slot.seal);
     try testing.expect(slot.debug and !slot.check);
 
     const direct = parse(
@@ -390,14 +384,13 @@ test parse {
     try testing.expectEqual(20, direct.deadman);
     try testing.expectEqual(null, direct.slot);
     try testing.expect(direct.check);
-    try testing.expectEqual(Seal.enforce, parse("", &f).?.seal);
     // Words that are not werewolf's are skipped.
     _ = parse("ip=dhcp root=/dev/vda werewolfx=1 init=/init", &f).?;
 
     try testing.expectEqualStrings("given twice", (try refused("werewolf.ip=10.0.0.5/24 " ++
         "werewolf.ip=10.0.0.6/24")).why);
-    try testing.expectEqualStrings("werewolf.seal=enforce", (try refused(
-        "werewolf.seal=learn werewolf.seal=enforce",
+    try testing.expectEqualStrings("werewolf.debug=1", (try refused(
+        "werewolf.debug=1 werewolf.debug=1",
     )).word);
     for ([_][]const u8{
         "werewolf.data=/dev/vda",

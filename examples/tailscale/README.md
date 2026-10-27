@@ -26,11 +26,10 @@ userspace network stack as `tailscale` (uid/gid 206).
   Persist the node identity in `/data/svc/tailscale`; never clone it into
   another router.
 
-The inherited `prod` image has a verified, read-only root. Build without
-`DEV=1`. Tailscale's own updater is disabled; Werewolf updates the package
-with the image. Userspace forwarding makes destinations see the router's
-address. This form supports the declared application ports, rather than
-general-purpose UDP or ICMP routing.
+The inherited `prod` image has a verified, read-only root. Tailscale's own
+updater is disabled; Werewolf updates the package with the image. Userspace
+forwarding makes destinations see the router's address. This form supports the
+declared application ports, rather than general-purpose UDP or ICMP routing.
 
 ## Basic usage
 
@@ -38,8 +37,8 @@ Start with [local test
 deployment](../../forms/tailscale/README.md#local-test-deployment-lima-qemu-firecracker)
 or [cloud production
 deployment](../../forms/tailscale/README.md#cloud-production-deployment-aws-gcp-azure-proxmox).
-Both use `tailscale/settings.json` and a private `auth-key` file. Lima carries them as
-NoCloud data files; GCP carries them in a base64 config tar.
+Both use `tailscale/settings.json` and a private `auth-key` file. Lima carries them
+as NoCloud data files; GCP carries them in a base64 config tar.
 
 The tutorial includes a narrow tailnet grant, route approval, client tests,
 updates and cleanup. Use a new single-use enrollment key for each VM.

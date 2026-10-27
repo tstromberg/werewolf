@@ -33,7 +33,60 @@ const Profile = struct {
     /// with the user's own keys, which later --build runs compare with;
     /// null for werewolf's downloads.
     local: ?native.Spec = null,
+    // Older protected bhyve profiles used SLIRP exclusively. Preserve that
+    // choice on resume; new profiles explicitly select the normal TAP default.
+    bhyve_network: bhyve.Mode = .slirp,
+    bhyve_bridge: ?[]const u8 = null,
 };
+
+fn inheritBhyveNetwork(o: *howl.Options, profile: Profile) void {
+    if (profile.provider != .bhyve) return;
+    if (o.network == null) o.network = if (o.bridge != null) .tap else profile.bhyve_network;
+    if (o.network == .tap and o.bridge == null) o.bridge = profile.bhyve_bridge;
+}
+
+test "protected bhyve preserves its bridge and legacy SLIRP unless explicitly changed" {
+    const t = std.testing;
+    var profile: Profile = .{
+        .spec = .{ .form = "playground", .arch = .x86_64 },
+        .managed = false,
+        .provider = .bhyve,
+    };
+    var legacy: howl.Options = .{};
+    inheritBhyveNetwork(&legacy, profile);
+    try t.expectEqual(bhyve.Mode.slirp, legacy.network.?);
+    profile.bhyve_network = .tap;
+    profile.bhyve_bridge = "bridge7";
+    var resumed: howl.Options = .{};
+    inheritBhyveNetwork(&resumed, profile);
+    try t.expectEqual(bhyve.Mode.tap, resumed.network.?);
+    try t.expectEqualStrings("bridge7", resumed.bridge.?);
+    var explicit: howl.Options = .{ .network = .slirp };
+    inheritBhyveNetwork(&explicit, profile);
+    try t.expectEqual(bhyve.Mode.slirp, explicit.network.?);
+    try t.expect(explicit.bridge == null);
+    profile.bhyve_network = .slirp;
+    var bridge: howl.Options = .{ .bridge = "bridge9" };
+    inheritBhyveNetwork(&bridge, profile);
+    try t.expectEqual(bhyve.Mode.tap, bridge.network.?);
+    try t.expectEqualStrings("bridge9", bridge.bridge.?);
+}
+
+/// Restore networking before the config tar is made, including SLIRP's
+/// static defaults for forms without DHCP. Explicit flags still take precedence.
+pub fn restoreBhyveNetwork(io: Io, gpa: Allocator, o: *howl.Options, name: []const u8) !void {
+    const file = try gpa.print("{s}/authority/profile.json", .{try howl.machineDir(gpa, name)});
+    const text = Dir.cwd().readFileAlloc(
+        io,
+        file,
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    inheritBhyveNetwork(o, try parseProfile(gpa, text));
+}
 
 /// parseProfile reads a machine's profile.json. A profile is howl's own
 /// record, and an older howl wrote fields since dropped (spec.insecure,
@@ -272,6 +325,7 @@ pub fn resumeDownload(
         else => return err,
     };
     const profile = try parseProfile(gpa, saved);
+    inheritBhyveNetwork(o, profile);
     if (profile.local != null or profile.imported == null) return why.refuse(
         "{s} was created with local signing keys; this command requests production-signed " ++
             "images.\n" ++
@@ -406,10 +460,9 @@ fn localSpec(
 
 /// admit refuses a protected machine its provider cannot run here, before
 /// anything is built for it, and returns the arch it runs.
-fn admit(
+pub fn admit(
     io: Io,
     gpa: Allocator,
-    o: howl.Options,
     provider: howl.Platform,
     dev: bool,
     why: *howl.Why,
@@ -420,8 +473,9 @@ fn admit(
             "protected bhyve requires FreeBSD x86_64 with vmm loaded",
             .{},
         );
-        if (o.network != .slirp) return why.refuse(
-            "protected bhyve requires explicit SLIRP, which reaches the update channel",
+        _ = bhyve.Runtime.fromEnvironment(howl.environ) catch return why.refuse(
+            "protected bhyve: BHYVE_BINARY must be an absolute path without commas " ++
+                "or control characters",
             .{},
         );
     } else if (provider != .lima and @import("builtin").os.tag != .linux)
@@ -431,8 +485,6 @@ fn admit(
     const arch = try howl.localArch(why);
     if (provider == .lima and arch != .aarch64)
         return why.refuse("the secured Lima profile currently requires arm64", .{});
-    if (o.import_dir != null and provider == .bhyve)
-        return why.refuse("protected bhyve import attachment is not supported", .{});
     return arch;
 }
 
@@ -464,7 +516,7 @@ pub fn resumeLocal(
     why: *howl.Why,
 ) !void {
     const provider = o.on.?;
-    const arch = try admit(io, gpa, o.*, provider, tell.dev, why);
+    const arch = try admit(io, gpa, provider, tell.dev, why);
     const dir = try howl.machineDir(gpa, name);
     const authority = try gpa.print("{s}/authority", .{dir});
     const saved = Dir.cwd().readFileAlloc(
@@ -478,6 +530,7 @@ pub fn resumeLocal(
     };
     if (saved) |text| {
         const p = try parseProfile(gpa, text);
+        inheritBhyveNetwork(o, p);
         const built = p.local orelse return why.refuse(
             "{s} was not built here with your keys: it runs werewolf's downloads, or an " ++
                 "older howl made it. Name another machine, or howl delete {s} first",
@@ -579,6 +632,8 @@ fn importImage(
     const code = try gpa.print("{s}/boot.crt", .{at});
     return .{
         .provider = o.on.?,
+        .bhyve_network = o.network orelse .tap,
+        .bhyve_bridge = o.bridge,
         .managed = if (m.configuration) |definition| definition.lima_managed else false,
         .imported = m.image.build,
         .bundle = .{
@@ -736,6 +791,8 @@ pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []c
         connection.close(io);
         return .running;
     } else if (profile.provider == .bhyve) {
+        if (profile.bhyve_network != (o.network orelse .tap) or
+            !std.mem.eql(u8, profile.bhyve_bridge orelse "", o.bridge orelse "")) return .configure;
         return if (try bhyve.supervised(io, gpa, dir) and try bhyve.exists(io, gpa, name))
             .running
         else
@@ -951,7 +1008,7 @@ pub fn create(
 ) !void {
     const provider = howl.engine(io, gpa, o.on).on;
     const on_lima = provider == .lima;
-    _ = try admit(io, gpa, o, provider, tell.dev, why);
+    _ = try admit(io, gpa, provider, tell.dev, why);
     const dir = try howl.machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
@@ -1030,7 +1087,10 @@ pub fn create(
             gpa,
             .limited(64 << 20),
         );
-        if (!std.mem.eql(u8, current, tar)) {
+        const network_changed = provider == .bhyve and
+            (profile.bhyve_network != (o.network orelse .tap) or
+                !std.mem.eql(u8, profile.bhyve_bridge orelse "", o.bridge orelse ""));
+        if (!std.mem.eql(u8, current, tar) or network_changed) {
             if (on_lima) {
                 _ = try @import("local.zig").reconfigure(io, gpa, name, o.form, dir, tar, why);
             } else {
@@ -1041,6 +1101,17 @@ pub fn create(
                     try swtpm.stop(io, gpa, try tpm(io, gpa, at));
                 }
                 try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), tar, why);
+            }
+            if (network_changed) {
+                profile.bhyve_network = o.network orelse .tap;
+                profile.bhyve_bridge = o.bridge;
+                try howl.writePrivate(
+                    io,
+                    gpa,
+                    profile_file,
+                    try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+                    why,
+                );
             }
         }
     } else if (o.built) |b| {
@@ -1056,6 +1127,8 @@ pub fn create(
             .managed = definition.lima_managed,
             .configuration = definition,
             .local = b.spec,
+            .bhyve_network = o.network orelse .tap,
+            .bhyve_bridge = o.bridge,
         };
         try enroll(io, gpa, &steps, name, at, authority, b.spec.boot_cert.?, profile, b, tar, why);
     } else if (o.boot_image) |request| {
@@ -1328,10 +1401,21 @@ fn startBhyve(
     )) return why.refuse("{s}: bhyve exists without its protected supervisor", .{name});
     try bhyve.prepareSupervisor(io, gpa, at);
     const definition = profile.configuration orelse return error.MissingBootConfiguration;
+    const config = try gpa.print("{s}/config.tar", .{at});
+    const configured = try Dir.cwd().readFileAlloc(io, config, gpa, .limited(64 << 20));
+    const static_address = try bhyve.staticAddress(gpa, configured);
+    const mode = profile.bhyve_network;
+    if (mode == .tap and !definition.dhcp and static_address == null) return why.refuse(
+        "{s} has no DHCP client; TAP needs --ip CIDR --gw ADDR --dns ADDR (or --config " ++
+            "DIR/network)",
+        .{profile.spec.form},
+    );
+    const network = try bhyve.prepareNetwork(io, gpa, at, mode, profile.bhyve_bridge, why);
+    errdefer bhyve.stopProtected(io, gpa, name, at) catch {};
     const fwds = try bhyve.forwards(gpa, name, definition.ports);
     var ssh: u16 = 0;
     for (fwds) |f| if (f.guest == 22) {
-        ssh = f.host;
+        ssh = if (mode == .slirp) f.host else 22;
     };
     try howl.writePrivate(
         io,
@@ -1347,14 +1431,14 @@ fn startBhyve(
         io,
         try gpa.print("{s}/bhyve.stop", .{at}),
     ) catch |err| if (err != error.FileNotFound) return err;
-    const args = try bhyve.command(gpa, name, try gpa.print(
+    const args = try bhyve.commandWith(gpa, name, try gpa.print(
         "{s}/disk.img",
         .{at},
-    ), try gpa.print("{s}/config.tar", .{at}), .{ .slirp = fwds }, null, .{
+    ), config, network.backend(fwds), try import_disk.existing(io, gpa, at), .{
         .code = try gpa.print("{s}/code.fd", .{at}),
         .vars = try gpa.print("{s}/vars.fd", .{at}),
         .tpm_socket = try gpa.print("{s}/data.sock", .{(try tpm(io, gpa, at)).sockets}),
-    });
+    }, try bhyve.Runtime.fromEnvironment(howl.environ));
     const launch = try std.mem.concat(
         gpa,
         []const u8,
@@ -1377,7 +1461,6 @@ fn startBhyve(
         &.{.{ .argv = launch }},
         .{},
     )).ok) return steps.fail("protected bhyve did not start");
-    errdefer bhyve.stopProtected(io, gpa, name, at) catch {};
     var spin: progress.Spinner = .init(io);
     defer spin.clear();
     const boot = try booting.watch(io, gpa, log, 0, null, 0, &spin);
@@ -1385,7 +1468,16 @@ fn startBhyve(
         "{s}: protected bhyve boot did not finish; see {s}",
         .{ name, log },
     );
-    if (ssh != 0 and !booting.awaitSsh(io, "127.0.0.1", ssh, &spin))
+    const address = if (mode == .slirp) "127.0.0.1" else static_address orelse
+        (try bhyve.awaitAddress(io, gpa, log, 0)) orelse return why.refuse(
+        "{s}: protected TAP guest reported no DHCP address; see {s}",
+        .{ name, log },
+    );
+    try howl.writePrivate(io, gpa, try gpa.print("{s}/machine", .{at}), try gpa.print(
+        "form {s}\nhost {s}\nssh {d}\nnetwork {t}\n",
+        .{ profile.spec.form, address, ssh, mode },
+    ), why);
+    if (ssh != 0 and !booting.awaitSsh(io, address, ssh, &spin))
         return why.refuse("{s}: protected bhyve SSH did not become ready", .{name});
 }
 

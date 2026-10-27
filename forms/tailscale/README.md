@@ -1,7 +1,7 @@
 # Tailscale - Hardened VM
 
-A [Tailscale](https://tailscale.com) subnet router. The image supplies the service. Boot
-configuration supplies the routes and the auth key. The form's manifest is
+A [Tailscale](https://tailscale.com) subnet router. The image supplies the service.
+Boot configuration supplies the routes and the auth key. The form's manifest is
 [form.yaml](form.yaml).
 
 [Images, test status and download

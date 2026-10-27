@@ -3,6 +3,7 @@
 # A private guest proves IPE enforcement, reboot and host boot-file admission.
 set -eu
 howl=${HOWL:-build/host/howl}
+isolation=${HYPERVISOR_ISOLATION:-build/host/check-hypervisor-isolation}
 name=fc-protected-$$
 work=build/check/$name
 machine=build/machines/$name
@@ -15,6 +16,10 @@ create() {
         --root-keys "$work/key.pub" "$@"
 }
 guest() { "$howl" ssh "root@$name" --identity "$work/key" -- "$@"; }
+posture() {
+    guest /usr/lib/werewolf/posture --json >"$1" || test "$?" -eq 1
+    "$isolation" posture firecracker "$1"
+}
 create >"$work/create.log" 2>&1 || { cat "$work/create.log"; exit 1; }
 grep -q 'warning: Firecracker does not support UEFI Secure Boot or a TPM' "$work/create.log"
 # shellcheck disable=SC2016 # Expanded by the guest shell.
@@ -23,10 +28,8 @@ guest 'test "$(cat /sys/kernel/security/ipe/enforce)" = 1 &&
     grep -q "werewolf.disable=secureboot,tpm " /proc/cmdline &&
     ! grep -q "werewolf.disable=secureboot,tpm,ipe" /proc/cmdline &&
     ! (echo 0 >/sys/kernel/security/ipe/enforce)' >"$work/ipe.log" 2>&1
-guest /usr/lib/werewolf/posture --line >"$work/posture.log" || test "$?" -eq 1
-grep -q '^posture: fail=' "$work/posture.log"
-grep -q '"unexpected":\[\]' "$work/posture.log"
-if grep -qE 'boot-ipe-enforced|kernel-kaslr' "$work/posture.log"; then cat "$work/posture.log"; exit 1; fi
+posture "$work/posture.json"
+"$isolation" firecracker "$howl" "$name" "$work/key" >"$work/isolation.log" 2>&1
 guest cat /proc/sys/kernel/random/boot_id >"$work/boot-id"
 guest /usr/bin/reboot >"$work/reboot.log" 2>&1 || :
 ready=0
@@ -36,7 +39,9 @@ for _attempt in $(seq 60); do
     sleep 1
 done
 test "$ready" = 1
+posture "$work/reboot-posture.json"
 "$howl" stop "$name" --on firecracker
+"$isolation" tap-probe "$machine" >>"$work/isolation.log" 2>&1
 create >"$work/resume.log" 2>&1
 guest cat /sys/kernel/security/ipe/enforce >"$work/resume-ipe.log"
 grep -qx 1 "$work/resume-ipe.log"

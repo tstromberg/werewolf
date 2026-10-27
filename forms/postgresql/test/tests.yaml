@@ -66,7 +66,9 @@ suites:
           - exec:
               argv: [/usr/bin/psql, -X, -w, -A, -t, -q, -v, ON_ERROR_STOP=1, -P, pager=off,
                      -h, /run/svc/postgres, -U, postgres, -d, postgres]
-              stdin: "CREATE TABLE native_test(value text PRIMARY KEY); INSERT INTO native_test VALUES (current_setting('application_name')), ('h' || chr(233) || 'llo');\n"
+              stdin: |
+                CREATE TABLE native_test(value text PRIMARY KEY); INSERT INTO native_test VALUES (current_setting('application_name')), ('h' ||
+                chr(233) || 'llo');
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'

@@ -68,7 +68,7 @@ ssh "$host" "cd $work && sh -c 'for i in \$(seq 36); do
 done; exit 1'" || fail "no posture line on the console"
 scp -q "$host:$work/build/machines/$name/console.log" "$log"
 # A kernel record can land inside the console's posture line; strip whole
-# records, as test/boot does, so the line's halves join.
+# records, as test/console.zig does, so the line's halves join.
 clean=$CHECK/firecracker-console.clean
 build/host/cloud-console <"$log" >"$clean"
 
@@ -76,7 +76,7 @@ grep -a -q 'handing over to runit' "$clean" || fail "the machine never reached r
 grep -a -E -q 'stage0: slot [ab]:.*verified' "$clean" || fail "the root was not verified through dm-verity"
 
 # Posture must fail exactly what the form and test/posture-known allow, as
-# test/boot judges a QEMU boot: nothing unexpected, nothing closed.
+# test/console.zig judges a QEMU boot: nothing unexpected, nothing closed.
 line=$(grep -a -m1 'posture: fail=' "$clean")
 got=$(printf '%s\n' "$line" | sed -E 's/.*fail=([^ ]*).*/\1/' | tr ',' ' ')
 passed=$(printf '%s\n' "$line" | sed -E 's/.*pass=([0-9]+).*/\1/')

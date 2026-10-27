@@ -3,7 +3,7 @@
 # check, in DIR: the domain werewolf.internal, for which Caddy's own CA
 # signs; its two secrets; and two users, alice and bob, whose password is
 # werewolf-check-pass-1, as Argon2id PHC strings (authelia crypto hash
-# generate argon2 makes the same), which test/checks signs in with.
+# generate argon2 makes the same), which test/tests.yaml signs in with.
 set -eu
 d=$1/authelia
 mkdir -p "$d" "$1/caddy"

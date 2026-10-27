@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/grafana/test/config DIR: the grafana form's config for make check,
-# in DIR: the administrator's password, which test/checks signs in with,
+# in DIR: the administrator's password, which test/tests.yaml signs in with,
 # and the base URL, https://localhost, for which Caddy's own CA signs. No
 # secret key: grafana-setup makes one.
 set -eu

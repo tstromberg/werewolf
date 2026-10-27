@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/home-assistant/test/config DIR: the home-assistant form's config
 # for make check, in DIR: its domain, localhost, for which Caddy's own CA
-# signs; the owner and password test/checks logs in with; and a location.
+# signs; the owner and password test/tests.yaml logs in with; and a location.
 set -eu
 mkdir -p "$1/home-assistant" "$1/caddy"
 umask 077

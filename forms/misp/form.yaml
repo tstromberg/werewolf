@@ -9,9 +9,6 @@ base: prod
 
 with: [mariadb-tcp, valkey, caddy]
 
-# Exercise login with the real session cookie and CSRF form fields.
-dev: [curl]
-
 # make check's (forms/README.md): PHP's workers beside MariaDB.
 check:
   memory: 6144

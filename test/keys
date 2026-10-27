@@ -2,7 +2,7 @@
 # keys PREFIX PROVIDER makes root's two keys for a check: PREFIX-key, a key
 # file, and PREFIX-sk-key, a security key held by PROVIDER, the software
 # security key (tools/test-sk.zig). sshd that takes security keys alone must
-# let the second in and refuse the first (test/boot).
+# let the second in and refuse the first (the native runs' host suites).
 set -eu
 rm -f "$1-key" "$1-key.pub" "$1-sk-key" "$1-sk-key.pub"
 ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f "$1-key"

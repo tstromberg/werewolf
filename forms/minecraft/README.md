@@ -1,7 +1,8 @@
 # Minecraft - Hardened VM
 
-A [Minecraft](https://www.minecraft.net/en-us/download/server) Java server: 26.3, with
-the people you name on the whitelist. The form's manifest is [form.yaml](form.yaml).
+A [Minecraft](https://www.minecraft.net/en-us/download/server) Java server: 26.3,
+with the people you name on the whitelist. The form's manifest is
+[form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/minecraft/index.html).
@@ -28,8 +29,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/minecraft/index.html).
 howl create minecraft --with minecraft --players steve
 ```
 
-Add a server at the machine's address, port 25565. `steve` is on the whitelist. Anyone
-else is refused at login. Worlds, operators and the rest are in [the server
+Add a server at the machine's address, port 25565. `steve` is on the whitelist.
+Anyone else is refused at login. Worlds, operators and the rest are in [the server
 documentation](https://minecraft.wiki/w/Server).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
@@ -43,16 +44,16 @@ Open TCP 25565 to the people who play. The whitelist is those names.
 
 ### Importing data
 
-The world is the directory the server keeps under `/data/svc/minecraft`. A new machine
-starts a new one.
+The world is the directory the server keeps under `/data/svc/minecraft`. A new
+machine starts a new one.
 
 ### Known Quirks
 
 - The server is Minecraft 26.3, pinned in the image. Nothing here notices when Mojang
   publishes a newer one.
 - It runs on the `jre` form's Java 27.
-- Starting it agrees to [Mojang's EULA](https://www.minecraft.net/en-us/eula). The form
-  sets `eula=true` so it will start.
+- Starting it agrees to [Mojang's EULA](https://www.minecraft.net/en-us/eula). The
+  form sets `eula=true` so it will start.
 - Each name is resolved with Mojang at start, and the whitelist is rewritten from the
   config.
 - View distance is 5. There is no RCON and no query port.

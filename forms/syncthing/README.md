@@ -9,8 +9,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/syncthing/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -23,9 +23,10 @@ howl create syncthing --with syncthing \
 	--gui-user alice --gui-password gui-password
 ```
 
-Open `https://sync.home.arpa` and sign in as `alice`. The password is in `gui-password`.
-Devices and folders are in [Syncthing's documentation](https://docs.syncthing.net/). On
-a LAN that should stay plain HTTP, leave `--base-url` out and open `http://ADDRESS/`:
+Open `https://sync.home.arpa` and sign in as `alice`. The password is in
+`gui-password`. Devices and folders are in [Syncthing's
+documentation](https://docs.syncthing.net/). On a LAN that should stay plain HTTP,
+leave `--base-url` out and open `http://ADDRESS/`:
 
 ```text
 howl create syncthing --with syncthing \
@@ -41,20 +42,21 @@ howl create syncthing --with syncthing --on gcp --allow-from me \
 	--gui-user alice --gui-password gui-password
 ```
 
-Sign in at `https://sync.example.com` as `alice`. Add your other devices by their IDs,
-and share folders. New folders go under `/var/syncthing`, which is on `/data`.
+Sign in at `https://sync.example.com` as `alice`. Add your other devices by their
+IDs, and share folders. New folders go under `/var/syncthing`, which is on `/data`.
 
 ### Importing data
 
-The other devices already hold the files. Add this machine to the folder after it is up.
-There is no dump to copy in.
+The other devices already hold the files. Add this machine to the folder after it is
+up. There is no dump to copy in.
 
 ### Known Quirks
 
 - The interface can share any folder with anyone. Caddy lets in only the one user you
   named, and Syncthing itself listens on loopback.
-- Local discovery and UPnP are off. Devices find each other through Syncthing's global
-  discovery and relays, unless you set `--global-discovery false` or `--relays false`.
+- Local discovery and UPnP are off. Devices find each other through Syncthing's
+  global discovery and relays, unless you set `--global-discovery false` or `--relays
+  false`.
 - Usage reports are off.
 - QUIC uses UDP port 22000 beside TCP 22000. Open both.
 

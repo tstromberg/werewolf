@@ -2,7 +2,7 @@
 # check-compose composes FORM again as a machine's updater composes it
 # (cmd/slot-update), from the chain its slot stages in OUT/meta, over
 # Werewolf's base accounts. The ro tree and records must be the build's,
-# file for file. make passes OUT, FORM, ARCH, DEV, FORM_TOOL and TAR.
+# file for file. make passes OUT, FORM, ARCH, FORM_TOOL and TAR.
 set -eu
 dir=$OUT/check-compose
 rm -rf "$dir" && mkdir -p "$dir/image/etc"

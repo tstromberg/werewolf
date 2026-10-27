@@ -23,9 +23,9 @@ custom service, compose this runtime and install its Python program in verified 
 howl create onnx --with onnx --build
 ```
 
-The runtime alone starts no application. `/usr/bin/python3.15` can import `onnxruntime`;
-sessions should select `CPUExecutionProvider`. Store mutable models in the application's
-own data directory. See the [Python API
+The runtime alone starts no application. `/usr/bin/python3.15` can import
+`onnxruntime`; sessions should select `CPUExecutionProvider`. Store mutable models in
+the application's own data directory. See the [Python API
 documentation](https://onnxruntime.ai/docs/api/python/api_summary.html).
 
 ### Known Quirks

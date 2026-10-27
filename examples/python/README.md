@@ -9,11 +9,12 @@ from the repository root.
 
 The [form](../../forms/python-example/form.yaml) builds on
 [python-app](../../forms/python-app/form.yaml), which supplies Python, a service that
-starts `/usr/lib/app/main.py`, and its network settings, and ships no application. The
-example brings [main.py](../../forms/python-example/rootfs/usr/lib/app/main.py), and its
-own [service](../../forms/python-example/form.yaml), which adds a setting. The service's
-`app` user gets its account from the build. Your own application is `--with python-app
---app ./myapp`, with `./myapp/main.py`. For a production application, see the [Flask and
+starts `/usr/lib/app/main.py`, and its network settings, and ships no application.
+The example brings [main.py](../../forms/python-example/rootfs/usr/lib/app/main.py),
+and its own [service](../../forms/python-example/form.yaml), which adds a setting.
+The service's `app` user gets its account from the build. Your own application is
+`--with python-app
+--app ./myapp`, with `./myapp/main.py`. For a production app, see the [Flask and
 gunicorn example](../../docs/applications.md#a-python-web-server).
 
 A form declares the machine's packages, users, services and network permissions.
@@ -73,9 +74,9 @@ new name:
 build/host/howl create python-v2 --with python-example --on gcp --allow-from me
 ```
 
-Check the new VM before moving traffic. New VMs start with empty data; migrate any saved
-data first. See the [update guide](../README.md#change-update-and-remove) for package
-refreshes and rollback details.
+Check the new VM before moving traffic. New VMs start with empty data; migrate any
+saved data first. See the [update guide](../README.md#change-update-and-remove) for
+package refreshes and rollback details.
 
 ## Clean up
 

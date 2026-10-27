@@ -1,16 +1,16 @@
 # Pi-hole - Hardened VM
 
 DNS for a home network that answers ad and tracker names with `0.0.0.0`:
-[Pi-hole](https://pi-hole.net), from its own image, the web interface behind Caddy. The
-form's manifest is [form.yaml](form.yaml).
+[Pi-hole](https://pi-hole.net), from its own image, the web interface behind Caddy.
+The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/pi-hole/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 - Refreshing the lists runs bash and coreutils from the image, as the Pi-hole
   user, with a private HTTP(S)-only curl. That curl retains TLS verification,
@@ -54,15 +54,16 @@ howl create pi-hole --with pi-hole --on proxmox \
 	--domain dns.home.arpa
 ```
 
-Upstreams and lists are changed in the web interface and kept on `/data`. The password
-comes from the config. Fence admits DNS clients only from connected subnets;
-dnsmasq binds the machine's network interface and leaves unwound's loopback
-address free.
+Upstreams and lists are changed in the web interface and kept on `/data`. The
+password comes from the config. Fence admits DNS clients only from connected subnets;
+dnsmasq binds the machine's network interface and leaves unwound's loopback address
+free.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`.
-Gravity's lists are fetched after it is up. There is no database to copy in.
+This machine starts empty. What it must remember is in the create command or
+`--config`. Gravity's lists are fetched after it is up. There is no database to copy
+in.
 
 ### Known Quirks
 

@@ -831,18 +831,18 @@ fn composeInto(u: *Update, r: Root) !void {
         u.detail = f.text;
     };
     const leaf = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-    const dev: ?[]const u8 = u.read(meta_dir ++ "/dev") catch |err| switch (err) {
-        error.FileNotFound => null,
+    const dev = if (u.read(meta_dir ++ "/dev")) |_| true else |err| switch (err) {
+        error.FileNotFound => false,
         else => return err,
     };
-    const forms = try compose.stagedChain(io, u.gpa, staged, leaf, dev != null, &f);
+    const forms = try compose.stagedChain(io, u.gpa, staged, leaf, dev, &f);
     const b: compose.Build = .{
         .arch = switch (@import("builtin").cpu.arch) {
             .aarch64 => .aarch64,
             .x86_64 => .x86_64,
             else => @compileError("werewolf runs on aarch64 and x86_64"),
         },
-        .dev = dev != null,
+        .dev = dev,
         .ipe = if (u.read(meta_dir ++ "/ipe")) |_| true else |err| switch (err) {
             error.FileNotFound => false,
             else => return err,
@@ -851,10 +851,6 @@ fn composeInto(u: *Update, r: Root) !void {
             error.FileNotFound => false,
             else => return err,
         },
-        .dev_shell = if (dev) |mode|
-            !std.mem.eql(u8, std.mem.trim(u8, mode, "\n"), "ssh")
-        else
-            true,
         .posture_known = try u.read(meta_dir ++ "/posture-known"),
     };
     const accounts: compose.Accounts = .{

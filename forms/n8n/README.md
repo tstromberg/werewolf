@@ -29,9 +29,9 @@ openssl rand -hex 32 > config/n8n/task-token
 howl create n8n --with n8n --build --config config
 ```
 
-The editor uses port 5678 at `/`. Complete n8n's owner setup before using workflows. Put
-an authenticated TLS proxy in front of the private listener to reach it remotely. Proxy
-only the editor/API port.
+The editor uses port 5678 at `/`. Complete n8n's owner setup before using workflows.
+Put an authenticated TLS proxy in front of the private listener to reach it remotely.
+Proxy only the editor/API port.
 
 Set `--editor-url https://automation.example/` and
 `--webhook-url https://automation.example/` with `--proxy-hops 1` behind one public
@@ -51,8 +51,8 @@ See [n8n deployment documentation](https://docs.n8n.io/hosting/).
 - Python Code nodes need a separately declared Python runner.
 - Community package installation is disabled. Additional packages or shell commands
   need a new reviewed image.
-- This is a single-node SQLite deployment; clustering needs separate database and queue
-  forms.
+- This is a single-node SQLite deployment; clustering needs separate database and
+  queue forms.
 
 ### Network Exposure
 

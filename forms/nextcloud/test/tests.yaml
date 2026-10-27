@@ -300,7 +300,9 @@ suites:
                 - postgres
                 - -d
                 - nextcloud
-              stdin: "SELECT (SELECT configvalue::bigint > 0 FROM oc_appconfig WHERE appid='core' AND configkey='lastcron') AND (SELECT configvalue = 'cron' FROM oc_appconfig WHERE appid='core' AND configkey='backgroundjobs_mode');\n"
+              stdin: |
+                SELECT (SELECT configvalue::bigint > 0 FROM oc_appconfig WHERE appid='core' AND configkey='lastcron') AND (SELECT configvalue = 'cron'
+                FROM oc_appconfig WHERE appid='core' AND configkey='backgroundjobs_mode');
               env:
                 LC_ALL: C
                 PGCONNECT_TIMEOUT: '3'

@@ -45,7 +45,7 @@ The **sample** utility does one job.
 Use conventional sections as needed: ENVIRONMENT, FILES, EXIT STATUS, EXAMPLES,
 SEE ALSO, HISTORY, AUTHORS, CAVEATS and BUGS. Section headings use uppercase words.
 Use `### Heading` for a subsection. Keep the prose direct; explain invocation,
-defaults, restrictions and failure behavior. Wrap source lines at 88 columns,
+defaults, restrictions and failure behavior. Wrap source lines at 85 columns,
 preferably breaking between sentences. Blank lines separate paragraphs and
 alternative invocations in SYNOPSIS.
 

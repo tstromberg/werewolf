@@ -162,7 +162,6 @@ pub const keys = [_]Key{
     .{ .name = "programs", .shape = .list },
     .{ .name = "net", .shape = .list },
     .{ .name = "prune", .shape = .list },
-    .{ .name = "dev", .shape = .list },
     .{ .name = "weaknesses", .shape = .map },
     .{ .name = "check", .shape = .map },
     .{ .name = "sshd", .shape = .map },
@@ -175,9 +174,9 @@ pub fn keyShape(key: []const u8) ?Shape {
     return null;
 }
 
-/// check_keys are check's keys: memory (MiB) and web (a port) are numbers,
-/// offline and native are true or false, and skip is a list of checks.
-const check_keys = [_][]const u8{ "memory", "offline", "native", "web", "skip" };
+/// check_keys are check's keys: memory is a number of MiB, offline and
+/// native are true or false, and skip is a list of checks.
+const check_keys = [_][]const u8{ "memory", "offline", "native", "skip" };
 
 /// checkMisfit says what check's key should hold, or returns null if value fits.
 fn checkMisfit(key: []const u8, value: Node) ?[]const u8 {
@@ -191,8 +190,6 @@ fn checkMisfit(key: []const u8, value: Node) ?[]const u8 {
         else
             "true or false";
     const n = std.fmt.parseInt(u32, text, 10) catch 0;
-    if (mem.eql(u8, key, "web"))
-        return if (n >= 1 and n <= 65535 and isDigits(text)) null else "a port, 1 to 65535";
     return if (n >= 1 and isDigits(text)) null else "a number of MiB";
 }
 
@@ -2201,14 +2198,12 @@ test checkMisfit {
         }
     }.of;
     try testing.expectEqual(null, checkMisfit("memory", s("2048")));
-    try testing.expectEqual(null, checkMisfit("web", s("3000")));
     try testing.expectEqual(null, checkMisfit("offline", s("true")));
     try testing.expectEqual(null, checkMisfit("native", s("false")));
     try testing.expectEqual(null, checkMisfit("skip", .{ .list = &.{s("listeners")} }));
     for ([_]struct { []const u8, Node }{
         .{ "memory", s("2G") },
         .{ "memory", s("0") },
-        .{ "web", s("70000") },
         .{ "offline", s("yes") },
         .{ "native", s("no") },
         .{ "skip", s("listeners") },

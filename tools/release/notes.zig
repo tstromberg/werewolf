@@ -16,7 +16,6 @@ const scopes = [_][2][]const u8{
     .{ "runtime", "Image packages" },
     .{ "local", "Packages built from form recipes" },
     .{ "kernel", "Kernel configuration inputs" },
-    .{ "test", "Additional integration test packages" },
     .{ "build:kernel", "Kernel build environment" },
     .{ "build:stub", "EFI build environment" },
     .{ "boot", "Boot package inputs" },
@@ -26,8 +25,7 @@ const scopes = [_][2][]const u8{
 pub const Local = struct { name: []const u8, version: []const u8, checksum: []const u8 };
 
 /// inventory normalizes a snapshot's resolved inputs for one target:
-/// other architectures, mirror URLs and resolver order drop out, and a
-/// test package identical to the runtime one is listed once.
+/// other architectures, mirror URLs and resolver order drop out.
 pub fn inventory(
     s: *Sys,
     snapshot: []const u8,
@@ -52,13 +50,10 @@ pub fn inventory(
     };
     mem.sort([]const u8, locks.items, {}, sys.pathLess);
     var packages: std.ArrayList(Json) = .empty;
-    var runtime: std.ArrayList(Json) = .empty;
     for (locks.items) |path| {
         const file = std.fs.path.basename(path);
         const scope = if (mem.eql(u8, file, try gpa.print("{s}.lock.json", .{name})))
             "runtime"
-        else if (mem.eql(u8, file, try gpa.print("{s}-dev.lock.json", .{name})))
-            "test"
         else if (mem.eql(u8, file, "kernel.lock.json") or mem.eql(u8, file, "boot.lock.json"))
             file[0 .. file.len - ".lock.json".len]
         else if (mem.eql(u8, file, "stub-builder.lock.json"))
@@ -93,22 +88,15 @@ pub fn inventory(
                 ),
             });
             try packages.append(gpa, item);
-            if (mem.eql(u8, scope, "runtime")) try runtime.append(gpa, item);
         }
     }
-    var kept: std.ArrayList(Json) = .empty;
-    for (packages.items) |p| {
-        if (mem.eql(u8, try json.text(p, "scope"), "test") and
-            duplicate(runtime.items, p)) continue;
-        try kept.append(gpa, p);
-    }
-    for (local) |l| try kept.append(gpa, try json.from(gpa, .{
+    for (local) |l| try packages.append(gpa, try json.from(gpa, .{
         .scope = "local",
         .name = l.name,
         .version = l.version,
         .checksum = l.checksum,
     }));
-    mem.sort(Json, kept.items, PairOrder{ .a = "scope", .b = "name" }, PairOrder.less);
+    mem.sort(Json, packages.items, PairOrder{ .a = "scope", .b = "name" }, PairOrder.less);
     const lock = try sys.readJson(
         s,
         try sys.join(s, &.{ snapshot, try gpa.print("{s}.lock.json", .{name}) }),
@@ -129,24 +117,10 @@ pub fn inventory(
         .format = format,
         .form = name,
         .arch = arch,
-        .packages = kept.items,
+        .packages = packages.items,
         .images = oci.items,
     });
     return validate(s, result, name, arch);
-}
-
-/// duplicate says whether runtime has p's name, version and checksum: the
-/// test variant's copy of an image package.
-fn duplicate(runtime: []const Json, p: Json) bool {
-    const name = json.text(p, "name") catch return false;
-    // The last runtime entry of a name wins, as a dict keeps it.
-    var last: ?Json = null;
-    for (runtime) |r| {
-        if (mem.eql(u8, json.text(r, "name") catch "", name)) last = r;
-    }
-    const r = last orelse return false;
-    return mem.eql(u8, json.text(r, "version") catch "", json.text(p, "version") catch "") and
-        mem.eql(u8, json.text(r, "checksum") catch "", json.text(p, "checksum") catch "");
 }
 
 /// PairOrder sorts records by two string members, as Python sorts tuples.
@@ -635,18 +609,6 @@ test "an inventory holds only the target's packages, identified by content" {
     );
     try sys.writeJson(
         s,
-        f.path("snapshot/caddy/caddy-dev.lock.json"),
-        try json.from(
-            gpa,
-            .{ .contents = .{ .packages = &[_]Json{
-                caddy,
-                other,
-                try Pkg.make(gpa, "busybox", "x86_64"),
-            } } },
-        ),
-    );
-    try sys.writeJson(
-        s,
         f.path("snapshot/kernel.lock.json"),
         try json.from(
             gpa,
@@ -687,7 +649,7 @@ test "an inventory holds only the target's packages, identified by content" {
     const want = [_][2][]const u8{
         .{ "build:forms/caddy/melange/local.yaml", "cargo" }, .{ "build:stub", "gcc" },
         .{ "kernel", "linux-werewolf" },                      .{ "local", "local" },
-        .{ "runtime", "caddy" },                              .{ "test", "busybox" },
+        .{ "runtime", "caddy" },
     };
     const got = try json.items(json.get(first, "packages").?);
     try testing.expectEqual(want.len, got.len);

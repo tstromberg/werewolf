@@ -59,8 +59,7 @@ pub fn check(p: *Posture) !void {
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
         const console = try consoleShell(p) orelse
-            if (askedShell(p.read("/proc/cmdline"), p.dev and
-                std.mem.eql(u8, p.read("/usr/share/werewolf/dev"), "dev\n"))) |w|
+            if (askedShell(p.read("/proc/cmdline"))) |w|
                 try p.gpa.print("{s} asks for one", .{w})
             else
                 null;
@@ -364,15 +363,13 @@ pub fn programs(p: *Posture) !void {
             "rsync",
         },
     );
+    // awk is a text filter, not a general interpreter, and does not count.
     try p.absent(
         "programs-no-interpreters",
         "programs",
         "No script interpreters",
         "There is nothing to run a script with.",
         &.{
-            "awk",
-            "gawk",
-            "mawk",
             "perl",
             "python",
             "python3",
@@ -538,8 +535,7 @@ fn passwordLogin(cmdline: []const u8) bool {
 
 /// askedShell returns the word of the kernel command line that gives root a
 /// console shell without a password, or null.
-/// werewolf.debug=1 does so only on a DEV=1 build (cmd/debug-shell).
-fn askedShell(cmdline: []const u8, dev: bool) ?[]const u8 {
+fn askedShell(cmdline: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, cmdline, " \t\n");
     while (words.next()) |w| {
         const name = w[0 .. std.mem.findScalar(u8, w, '=') orelse w.len];
@@ -549,8 +545,7 @@ fn askedShell(cmdline: []const u8, dev: bool) ?[]const u8 {
         const asks = ((std.mem.eql(u8, name, "systemd.debug_shell") or
             std.mem.eql(u8, name, "rd.shell")) and !off) or
             std.mem.eql(u8, name, "rd.break") or
-            (std.mem.eql(u8, name, "init") and isShell(std.fs.path.basename(value))) or
-            (dev and std.mem.eql(u8, w, "werewolf.debug=1"));
+            (std.mem.eql(u8, name, "init") and isShell(std.fs.path.basename(value)));
         if (asks) return w;
     }
     return null;
@@ -575,21 +570,18 @@ test passwordLogin {
 }
 
 test askedShell {
-    try testing.expectEqualStrings(
-        "werewolf.debug=1",
-        askedShell("console=ttyAMA0 werewolf.debug=1 quiet", true).?,
-    );
-    try testing.expectEqual(null, askedShell("werewolf.debug=1", false));
+    // werewolf.debug=1 asks for none: no image has a console shell to give.
+    try testing.expectEqual(null, askedShell("console=ttyAMA0 werewolf.debug=1 quiet"));
     try testing.expectEqualStrings(
         "systemd.debug_shell",
-        askedShell("systemd.debug_shell", false).?,
+        askedShell("systemd.debug_shell").?,
     );
-    try testing.expectEqualStrings("init=/bin/sh", askedShell("ro init=/bin/sh", false).?);
+    try testing.expectEqualStrings("init=/bin/sh", askedShell("ro init=/bin/sh").?);
     for ([_][]const u8{
         "systemd.debug_shell=0 rd.shell=no",
         "init=/sbin/init single",
         "quiet splash",
-    }) |line| try testing.expectEqual(null, askedShell(line, false));
+    }) |line| try testing.expectEqual(null, askedShell(line));
 }
 
 /// whyNotLeashed says why a /proc/PID/status does not look leashed, or null.

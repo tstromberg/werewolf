@@ -20,15 +20,14 @@ not auditd, and it is not a regular expression.
 is an argument. seccomp is handed a pointer, not the string. `python
 -c`, `ruby -e`, `node -e` and `php -r` have no path.
 
-A service that does not pledge `exec` cannot `execve` a path. It can
-still `execveat` a descriptor (`AT_EMPTY_PATH`). That is how leash
-becomes the service, the filter is inherited, and Landlock grants
-execute on that binary so the first exec works
-([lib/seal.zig](../../lib/seal.zig), [cmd/leash/leash.zig](../../cmd/leash/leash.zig)).
-Opening `/proc/self/exe` and `execveat` of it runs the same binary with
-a new argv. php-fpm, the `*-app` forms, Home Assistant, Open WebUI,
-Mastodon's streaming server and the JVMs can all do this. A shebang on
-`/data`, `/run`, `/tmp` or `/dev/shm` already fails: those mounts are
+A service that does not pledge `exec` cannot `execve` a path. It can still `execveat`
+a descriptor (`AT_EMPTY_PATH`). That is how leash becomes the service, the filter is
+inherited, and Landlock grants execute on that binary so the first exec works
+([lib/seal.zig](../../lib/seal.zig),
+[cmd/leash/leash.zig](../../cmd/leash/leash.zig)). Opening `/proc/self/exe` and
+`execveat` of it runs the same binary with a new argv. php-fpm, the `*-app` forms,
+Home Assistant, Open WebUI, Mastodon's streaming server and the JVMs can all do this.
+A shebang on `/data`, `/run`, `/tmp` or `/dev/shm` already fails: those mounts are
 `noexec`.
 
 These pledge `exec` and can execute the interpreter, so a compromised

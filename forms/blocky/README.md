@@ -9,8 +9,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/blocky/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -20,8 +20,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/blocky/index.html).
 howl create blocky --with blocky
 ```
 
-Point one device at the address howl prints. A blocked name answers 0.0.0.0. Other names
-resolve. Lists and upstreams are in [Blocky's
+Point one device at the address howl prints. A blocked name answers 0.0.0.0. Other
+names resolve. Lists and upstreams are in [Blocky's
 configuration](https://0xerr0r.github.io/blocky/latest/configuration/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
@@ -45,13 +45,13 @@ entry. An upstream must be `tcp-tls:` or `https:`.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`.
-There is no database to import.
+This machine starts empty. What it must remember is in the create command or
+`--config`. There is no database to import.
 
 ### Known Quirks
 
-- The default upstreams are Quad9 and Cloudflare, over TLS. The default list is Steven
-  Black's hosts file.
+- The default upstreams are Quad9 and Cloudflare, over TLS. The default list is
+  Steven Black's hosts file.
 - Lists are fetched again at every boot. Until they arrive, nothing is blocked.
 - There is no query log. Client addresses are not written.
 - A client outside the private ranges (10/8, 172.16/12, 192.168/16, and the local

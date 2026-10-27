@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/prometheus/test/config DIR: the prometheus form's config for make
-# check, in DIR: its user, ops, and password, which test/checks signs in
+# check, in DIR: its user, ops, and password, which test/tests.yaml signs in
 # with, and one target nothing answers, which it scrapes to no avail.
 set -eu
 mkdir -p "$1/prometheus"

@@ -8,8 +8,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/moodle/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -46,10 +46,10 @@ Moodle. Change the password in Moodle afterwards; a later start does not reset i
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
-in the `postgres` database, while the cluster is first made. See
-[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud
-cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied
+once, in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A
+cloud cannot attach the disk.
 
 ```sh
 howl create moodle --with moodle --import ./dump
@@ -64,8 +64,8 @@ service after it is up.
   caches before the web and background tasks run.
 - Nobody can sign up, and there is no guest. The web installer is refused.
 - Plugins and themes come with the image. The web cannot install one.
-- No path to a program can be set from the web, so no LaTeX filter and no antivirus scan
-  until a form of your own adds one.
+- No path to a program can be set from the web, so no LaTeX filter and no antivirus
+  scan until a form of your own adds one.
 - There is no LDAP or SAML package in the image. Use Keycloak in front, or add
   `php-8.5-ldap` in a form of your own.
 - SOAP is omitted; the usual web UI and REST services remain available.

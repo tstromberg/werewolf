@@ -144,7 +144,8 @@ suites:
       - name: plex-real-h264-decode
         steps:
           - exec:
-              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, rawvideo, -f, framemd5, '-']
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1',
+                     -c:v, rawvideo, -f, framemd5, '-']
             expect:
               exit: 0
               stdout:
@@ -161,7 +162,8 @@ suites:
       - name: plex-h264-output-readable-by-server
         steps:
           - exec:
-              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -y, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, libx264, -preset, ultrafast, -f, h264, /run/svc/plex-transcode/jobs/werewolf-test.h264]
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -y, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v,
+                     '1', -c:v, libx264, -preset, ultrafast, -f, h264, /run/svc/plex-transcode/jobs/werewolf-test.h264]
             expect:
               exit: 0
           - file: /run/svc/plex-transcode/jobs/werewolf-test.h264
@@ -180,7 +182,8 @@ suites:
       - name: plex-transcoder-media-readonly
         steps:
           - exec:
-              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /data/svc/plex-media/evil.ts]
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f,
+                     mpegts, /data/svc/plex-media/evil.ts]
             expect:
               exit:
                 not_equals: 0
@@ -189,14 +192,16 @@ suites:
       - name: plex-transcoder-codecs-readonly
         steps:
           - exec:
-              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f, mpegts, /usr/lib/plexmediaserver/Codecs/evil.so]
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -c, copy, -f,
+                     mpegts, /usr/lib/plexmediaserver/Codecs/evil.so]
             expect:
               exit:
                 not_equals: 0
       - name: plex-transcoder-survives-refusals
         steps:
           - exec:
-              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1', -c:v, rawvideo, -f, framemd5, '-']
+              argv: [/usr/lib/werewolf/plex-transcode, client, -v, error, -i, /usr/lib/plexmediaserver/Resources/black-h264.ts, -frames:v, '1',
+                     -c:v, rawvideo, -f, framemd5, '-']
             expect:
               exit: 0
               stdout:

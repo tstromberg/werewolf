@@ -1,15 +1,16 @@
 # Keycloak - Hardened VM
 
-Single sign-on for a campus: [Keycloak](https://www.keycloak.org) 26.8, OpenID Connect
-and SAML, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
+Single sign-on for a campus: [Keycloak](https://www.keycloak.org) 26.8, OpenID
+Connect and SAML, with PostgreSQL and Caddy. The form's manifest is
+[form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/keycloak/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -29,8 +30,9 @@ howl create keycloak --with keycloak --config config \
 ```
 
 Open `https://sso.home.arpa/admin` and sign in as `alice`. The password is in
-`config/keycloak/admin-password`. Caddy's own CA signs `.home.arpa`. Realms and clients
-are in [Keycloak's server guide](https://www.keycloak.org/docs/latest/server_admin/).
+`config/keycloak/admin-password`. Caddy's own CA signs `.home.arpa`. Realms and
+clients are in [Keycloak's server
+guide](https://www.keycloak.org/docs/latest/server_admin/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -49,10 +51,10 @@ PostgreSQL.
 
 ### Importing data
 
-PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once,
-in the `postgres` database, while the cluster is first made. See
-[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud
-cannot attach the disk.
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied
+once, in the `postgres` database, while the cluster is first made. See
+[postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A
+cloud cannot attach the disk.
 
 ```sh
 howl create keycloak --with keycloak --import ./dump
@@ -63,7 +65,8 @@ service after it is up.
 
 ### Known Quirks
 
-- Every link and token names `--base-url`, even if a client sends another Host header.
+- Every link and token names `--base-url`, even if a client sends another Host
+  header.
 - Health and metrics listen on loopback port 9180. Caddy does not forward them.
 - One node. A second machine is not a cluster.
 - Themes and providers of your own need a form on this one: `providers/` is in the

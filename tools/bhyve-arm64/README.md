@@ -3,9 +3,9 @@
 Experimental: these fixes restore RTC and EFI rename behavior, not sustained-network
 reliability. On 2026-10-18 smaug passed signed A/B recovery through normal howl, but
 its half-hour TAP soak failed after about 12 minutes and 286 verified transfers
-(17.875 GiB): a virtio TX descriptor error led to a soft-lockup panic. The exact cause
-is unresolved. Secure Boot and TPM were off; do not treat A/B success as production
-qualification. See [current validation](../../docs/testing-live.md#bhyve).
+(17.875 GiB): a virtio TX descriptor error led to a soft-lockup panic. The exact
+cause is unresolved. Secure Boot and TPM were off; do not treat A/B success as
+production qualification. See [current validation](../../docs/testing-live.md#bhyve).
 
 Run `zig run tools/bhyve-arm64/runtime.zig -- OUTPUT --packages PACKAGE_CACHE` on
 native FreeBSD 15.1-RELEASE-p5 ARM64. OUTPUT must not exist. The recipe pins FreeBSD
@@ -26,16 +26,16 @@ Optional `--freebsd-cache REPO` and `--uboot-cache REPO` export the pinned commi
 trees from local repositories without copying worktree modifications. Otherwise
 the recipe fetches the pinned commits from their upstream GitHub repositories.
 
-Source `OUTPUT/runtime.env` before normal unprotected howl launches on that host;
-it exports `BHYVE_BINARY` and `BHYVE_ARM64_FIRMWARE` pointing to the private binaries.
-Keep the output directory in place while VMs use it. No system bhyve or firmware
-is replaced; a new build uses a new output directory. The retained source trees,
-patches, configuration and `manifest.json` describe the resulting binaries.
-Both overrides must be absolute paths without commas or newlines. Invalid overrides
-or missing selected files fail without fallback; unset overrides use the installed
-defaults, not the fixed private runtime. The supervisor
-retains the resolved paths across guest reboots; set them again on subsequent
-create/reconfigure calls. ARM64 Secure Boot remains unsupported.
+Source `OUTPUT/runtime.env` before normal unprotected howl launches on that host; it
+exports `BHYVE_BINARY` and `BHYVE_ARM64_FIRMWARE` pointing to the private binaries.
+Keep the output directory in place while VMs use it. No system bhyve or firmware is
+replaced; a new build uses a new output directory. The retained source trees,
+patches, configuration and `manifest.json` describe the resulting binaries. Both
+overrides must be absolute paths without commas or newlines. Invalid overrides or
+missing selected files fail without fallback; unset overrides use the installed
+defaults, not the fixed private runtime. The supervisor retains the resolved paths
+across guest reboots; set them again on subsequent create/reconfigure calls. ARM64
+Secure Boot remains unsupported.
 
 For an A/B test through normal `howl create` and `howl delete`, set
 `BHYVE_LAUNCH=howl`, `BHYVE_BRIDGE=bridgeN`, `BHYVE_TEST_IP` and `BHYVE_TEST_GW`,
@@ -45,8 +45,8 @@ an existing-machine record around the prebuilt signed fixture so the host does
 not rebuild it. The test still requires verified root, IPE, a correct clock and
 all recovery phases. The direct launch mode remains available for isolation.
 
-`test/check-bhyve-lifecycle.zig` forwards both runtime overrides and checks guest time.
-Its duration argument controls sustained checksum-verified 64 MiB transfers;
+`test/check-bhyve-lifecycle.zig` forwards both runtime overrides and checks guest
+time. Its duration argument controls sustained checksum-verified 64 MiB transfers;
 use `1800` for a half-hour soak, followed by three reboots, stop/start, and an
 offline filesystem check. It uses a separate disposable disk, not the A/B disk.
 
@@ -57,4 +57,5 @@ Local evidence (not checked in):
 - `build/bhyve-validation/results-smaug-normal-runtime-20261018.json`: A/B pass,
   soak failure, cleanup and retained disk paths.
 - `build/bhyve-validation/runtime-recipe/reproducibility.json`: build comparisons.
-- `build/bhyve-validation/wwlife-f7ac486c01/console.log`: virtio TX failure and panic.
+- `build/bhyve-validation/wwlife-f7ac486c01/console.log`: virtio TX failure and
+  panic.

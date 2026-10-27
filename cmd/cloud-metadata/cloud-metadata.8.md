@@ -13,9 +13,10 @@ cloud-metadata — obtain boot configuration and account updates from cloud meta
 
 ## DESCRIPTION
 
-The **cloud-metadata** utility fetches a base64-encoded Werewolf configuration archive
-from GCP, AWS, Hetzner or Azure instance user data. With **once**, it validates and
-rewrites the archive for init(8). It does not execute cloud-init scripts.
+The **cloud-metadata** utility fetches a base64-encoded Werewolf configuration
+archive from GCP, AWS, Hetzner or Azure instance user data. With **once**, it
+validates and rewrites the archive for init(8). It does not execute cloud-init
+scripts.
 
 Without arguments, it checks cloud configuration each minute and reconciles account
 changes. On machines without cloud configuration, the service stays down.

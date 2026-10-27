@@ -516,11 +516,6 @@ fn powerless(raw: []const u8, sandboxed: bool) !bool {
     return true;
 }
 fn sealed(io: Io, a: Allocator) !void {
-    if (std.mem.find(
-        u8,
-        try system.read(io, a, "/proc/cmdline"),
-        "werewolf.seal=learn",
-    ) != null) return;
     const report = try command(io, a, &.{"/usr/lib/werewolf/seal"});
     if (report.term != .exited or report.term.exited != 0 or
         !std.mem.startsWith(u8, report.stdout, "seal: enforcing;")) return error.SealNotEnforcing;

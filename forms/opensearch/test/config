@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/opensearch/test/config DIR: the opensearch form's config for make
-# check, in DIR: admin's password, which test/checks signs in with, and a
+# check, in DIR: admin's password, which test/tests.yaml signs in with, and a
 # CA made here, in a corporation's CA's place, with the certificate it
 # signs for the machine, by name and by loopback address.
 set -eu

@@ -1,7 +1,7 @@
 # LimeSurvey - Hardened VM
 
-Surveys and research data: [LimeSurvey](https://www.limesurvey.org) 7.5, its tables in
-MariaDB. The 6.x line is no longer supported. The form's manifest is
+Surveys and research data: [LimeSurvey](https://www.limesurvey.org) 7.5, its tables
+in MariaDB. The 6.x line is no longer supported. The form's manifest is
 [form.yaml](form.yaml).
 
 [Images, test status and download
@@ -9,8 +9,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/limesurvey/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -43,14 +43,14 @@ howl create limesurvey --with limesurvey --on gcp --allow-from me \
 	--admin-email it@example.edu --admin-password-hash admin-password-hash
 ```
 
-Open `https://surveys.example.edu` once the name and TLS are in front of port 80. Mail
-is optional: `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password`,
+Open `https://surveys.example.edu` once the name and TLS are in front of port 80.
+Mail is optional: `--smtp HOST:PORT`, `--smtp-user`, `--smtp-password`,
 `--mail-from`.
 
 ### Importing data
 
-The database has no TCP port. `--import` attaches a directory of SQL. MariaDB applies it
-once, while it makes the data directory. See
+The database has no TCP port. `--import` attaches a directory of SQL. MariaDB applies
+it once, while it makes the data directory. See
 [mariadb-local](../mariadb-local/README.md). A cloud cannot attach the disk.
 
 ```sh

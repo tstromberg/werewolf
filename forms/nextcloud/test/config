@@ -2,7 +2,7 @@
 # forms/nextcloud/test/config DIR: the nextcloud form's config for make
 # check, in DIR: its base URL, https://localhost, for which Caddy's own CA
 # signs, its administrator and the administrator's password, which
-# forms/nextcloud/test/checks signs in with.
+# its native tests sign in with.
 set -eu
 mkdir -p "$1/nextcloud" "$1/caddy"
 umask 077

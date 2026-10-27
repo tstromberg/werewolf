@@ -15,10 +15,6 @@ packages:
   # What ../packages/security/authelia/authelia.yaml's build links, from Wolfi.
   - sqlite-libs
 
-# curl helps inspect the portal in development mode.
-dev:
-  - curl
-
 services:
   # Authelia, as its own user: it serves on loopback, behind Caddy, keeps
   # its SQLite database (sessions' second factors, bans) in its /data,

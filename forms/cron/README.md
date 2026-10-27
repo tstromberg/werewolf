@@ -1,8 +1,8 @@
 # cron - Hardened VM
 
 [supercronic](https://github.com/aptible/supercronic) runs one service's jobs. A form
-takes it with `with: [cron]` or `base: cron` and lays a crontab over `etc/cron/crontab`.
-The form's manifest is [form.yaml](form.yaml).
+takes it with `with: [cron]` or `base: cron` and lays a crontab over
+`etc/cron/crontab`. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/cron/index.html).
@@ -24,8 +24,8 @@ howl create cron --with cron
 ```
 
 This form has no jobs. Schedules are crontab lines, with an optional seconds field
-first, in UTC. A job never overlaps its own last run. Each event is a JSON line on the
-console.
+first, in UTC. A job never overlaps its own last run. Each event is a JSON line on
+the console.
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -43,4 +43,5 @@ The jobs are in the form. There is no database to import.
 ### Known Quirks
 
 - The user is `supercronic`. Wolfi already has an account named `cron`.
-- The crontab's `SHELL` is sh-shim. It runs one program. It does not run a shell script.
+- The crontab's `SHELL` is sh-shim. It runs one program. It does not run a shell
+  script.

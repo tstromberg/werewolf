@@ -108,16 +108,11 @@ fn report(
     // Say enforcing only when init wrote "mode enforce". Any other mode is
     // unknown, and calling it enforcing would mislead.
     const mode = field(policy, "mode") orelse "";
-    const state = if (std.mem.eql(u8, mode, "enforce"))
-        "enforcing"
-    else if (std.mem.eql(u8, mode, "learn"))
-        "learning: what no promise allows is allowed, and said"
-    else {
+    if (!std.mem.eql(u8, mode, "enforce")) {
         try w.print("seal: unknown mode \"{s}\" in {s}\n", .{ mode, seal.policy_path });
         return error.UnknownMode;
-    };
-    try w.print("seal: {s}; the machine promises {s}\n", .{
-        state,
+    }
+    try w.print("seal: enforcing; the machine promises {s}\n", .{
         field(policy, "promises") orelse "?",
     });
     if (services.len > 0) {
@@ -201,15 +196,13 @@ test "report: only an enforce mode is enforcing" {
         "promises stdio\n",
         "mode\npromises stdio\n",
         "mode enforcing\n",
+        "mode learn\npromises stdio\n",
     }) |policy| {
         var w: std.Io.Writer = .fixed(&buf);
         try testing.expectError(error.UnknownMode, report(&w, policy, &.{}, ""));
         try testing.expect(std.mem.startsWith(u8, w.buffered(), "seal: unknown mode"));
         try testing.expect(std.mem.find(u8, w.buffered(), "enforcing;") == null);
     }
-    var w: std.Io.Writer = .fixed(&buf);
-    try report(&w, "mode learn\npromises stdio\n", &.{}, "");
-    try testing.expect(std.mem.startsWith(u8, w.buffered(), "seal: learning:"));
 }
 
 test report {

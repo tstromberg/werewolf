@@ -103,20 +103,31 @@ fn encode(gpa: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
     }
 }
 
-/// login returns the bearer token, or an empty slice when the password is
+/// login returns the session token, or an empty slice when the password is
 /// refused. The token is the body itself. Any other answer is an error.
 fn login(io: Io, gpa: Allocator, body: []const u8) ![]const u8 {
     const got = try request(io, gpa, "POST", "/api/v1/user/login", null, form_type, body);
     if (got.status == 401 or got.status == 403) return "";
     if (got.status != 200) return error.LoginRefused;
     const token = std.mem.trim(u8, got.body, " \t\r\n");
-    var parts = std.mem.splitScalar(u8, token, '.');
-    const a = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    const b = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    const c = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    if (parts.next() != null or a.len == 0 or b.len == 0 or
-        c.len == 0) return error.LoginAnswerNotUnderstood;
+    if (!sessionToken(token)) return error.LoginAnswerNotUnderstood;
     return token;
+}
+
+/// sessionToken is whether token is a Dependency-Track 5 session: 32
+/// random bytes, unpadded base64url.
+fn sessionToken(token: []const u8) bool {
+    if (token.len != 43) return false;
+    for (token) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
+    return true;
+}
+
+test "a session token is 32 bytes of unpadded base64url" {
+    const token = "q1x9Zc-_" ++ "AAAAAAAAAA" ++ "AAAAAAAAAA" ++ "AAAAAAAAAA" ++ "AAAAA";
+    try std.testing.expect(sessionToken(token));
+    try std.testing.expect(!sessionToken(token[1..]));
+    try std.testing.expect(!sessionToken(token[1..] ++ "="));
+    try std.testing.expect(!sessionToken("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2ln"));
 }
 
 fn awaitApi(io: Io, gpa: Allocator) !void {

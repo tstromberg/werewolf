@@ -42,8 +42,8 @@ machine.
 
 ### Importing data
 
-`--import` streams `*.sql` into the `postgres` database once, while data is first made.
-`CREATE DATABASE` is not available. A cloud cannot attach the disk.
+`--import` streams `*.sql` into the `postgres` database once, while data is first
+made. `CREATE DATABASE` is not available. A cloud cannot attach the disk.
 
 ```sh
 openssl rand -base64 24 >admin-password

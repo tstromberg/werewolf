@@ -18,9 +18,9 @@ forms install it as /bin/sh. It is not an interactive shell and does not interpr
 scripts. The optional name and arguments are accepted but never expanded.
 
 Spaces and tabs separate words. Single quotes preserve literal text; double quotes do
-likewise but refuse characters that a shell would expand. Adjacent quoted and unquoted
-pieces form one word. Pipes, command chaining, substitutions, assignments, globbing,
-shell builtins and reserved words are refused.
+likewise but refuse characters that a shell would expand. Adjacent quoted and
+unquoted pieces form one word. Pipes, command chaining, substitutions, assignments,
+globbing, shell builtins and reserved words are refused.
 
 Only trailing redirections to the literal /dev/null are supported: one input and one
 output redirection, and 2>&1 after output is redirected. No command word may follow a

@@ -32,9 +32,8 @@ sshd:
 weaknesses:
   network-root-dns-assigned: interactive root tools may look up any name through unwound, audited; other DNS servers remain restricted
   network-root-https-arbitrary: root may reach SSH, HTTP and HTTPS anywhere (tcp/22, 80, 443, 8000, 8080), to try things out
-  network-ssh-config: forwarded agents provide fresh authentication for su
-  network-no-login: sshd provides operator access by key; BusyBox includes telnetd, which nothing starts
+  network-no-login: sshd provides operator access by key
   network-ssh-security-keys: a playground takes key files, Lima's and ~/.ssh's, beside security keys
-  programs-no-downloaders: SSH and scp support operator access; BusyBox provides wget, nc and telnet
-  programs-no-interpreters: hardened Python 3.15 and BusyBox awk support interactive use
+  programs-no-downloaders: BusyBox provides nc
+  programs-no-interpreters: hardened Python 3.15 and Perl support interactive use
   programs-no-shell: bash serves Lima readiness probes; mksh provides operator shells and /bin/sh

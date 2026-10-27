@@ -49,12 +49,13 @@ key.
 `make IPE=1 check-ab-PROVIDER` builds three disposable signed releases and drives the
 real updater over confined loopback HTTPS: upgrade A→B, a health commit, operator
 rollback B→A, another boot of A, then automatic recovery from an unhealthy signed
-candidate after 600 seconds, after which the updater must refuse that build again. Every
-boot must have a fresh boot id, the expected signed root hash, read-only dm-verity and
-enforcing IPE; where the firmware enforces, SecureBoot=1 and SetupMode=0. Logs and
-`phases.json` are under `CHECK/provider-ab-PROVIDER`, and only what the test made is
-removed. `AB_FIXTURE` reuses a fixture of the same architecture and mode, `IPE_KERNEL`
-an existing kernel archive ([test/check-provider-ab.zig](../test/check-provider-ab.zig),
+candidate after 600 seconds, after which the updater must refuse that build again.
+Every boot must have a fresh boot id, the expected signed root hash, read-only
+dm-verity and enforcing IPE; where the firmware enforces, SecureBoot=1 and
+SetupMode=0. Logs and `phases.json` are under `CHECK/provider-ab-PROVIDER`, and only
+what the test made is removed. `AB_FIXTURE` reuses a fixture of the same architecture
+and mode, `IPE_KERNEL` an existing kernel archive
+([test/check-provider-ab.zig](../test/check-provider-ab.zig),
 [design/provider-ab-tests.md](design/provider-ab-tests.md)).
 
 | Target | Mode | Needs |
@@ -68,41 +69,42 @@ an existing kernel archive ([test/check-provider-ab.zig](../test/check-provider-
 | `check-ab-firecracker` | signed updates | x86_64; `FIRECRACKER_HOST=galadriel`, KVM and passwordless `doas` |
 | `check-ab-proxmox` | signed updates | untested; `PROXMOX_HOST`, optional `PROXMOX_STORAGE` and `PROXMOX_BRIDGE` |
 
-Lima VZ, Firecracker, bhyve and Proxmox default to `AB_MODE=plain`: signed
-updates without Secure Boot enforcement. bhyve also takes `AB_MODE=secure`
-with `SECUREBOOT_DIR` holding its `code.fd` and `vars.fd`, and `make
-check-bhyve-secureboot AB_FIXTURE=...` checks that it refuses a tampered
-UKI; bhyve Secure Boot testing remains x86_64-only. ARM64 uses U-Boot and plain
-mode; passing it requires the same IPE, signed-update and rollback assertions.
-On 2026-10-18 smaug passed with the private RTC/firmware fixes through normal howl
-launches, but a longer TAP soak panicked in virtio TX. Secure Boot and TPM were off;
-see [current limits and evidence](testing-live.md#bhyve), not a reliability guarantee.
-On 2026-10-12 every target (bhyve: x86_64 only) passed but two: Azure reported
-SecureBoot=1 with SetupMode=1 and was blocked before handover, a failing
-deployment rather than a passing recovery, and Proxmox has no node
-([audit](audit/astra-2026-10-11.md#provider-ab-follow-up-2026-10-12)). The
-cloud targets make billable resources: use test credentials.
+Lima VZ, Firecracker, bhyve and Proxmox default to `AB_MODE=plain`: signed updates
+without Secure Boot enforcement. bhyve also takes `AB_MODE=secure` with
+`SECUREBOOT_DIR` holding its `code.fd` and `vars.fd`, and `make
+check-bhyve-secureboot AB_FIXTURE=...` checks that it refuses a tampered UKI; bhyve
+Secure Boot testing remains x86_64-only. ARM64 uses U-Boot and plain mode; passing it
+requires the same IPE, signed-update and rollback assertions. On 2026-10-18 smaug
+passed with the private RTC/firmware fixes through normal howl launches, but a longer
+TAP soak panicked in virtio TX. Secure Boot and TPM were off; see [current limits and
+evidence](testing-live.md#bhyve), not a reliability guarantee. On 2026-10-12 every
+target (bhyve: x86_64 only) passed but two: Azure reported SecureBoot=1 with
+SetupMode=1 and was blocked before handover, a failing deployment rather than a
+passing recovery, and Proxmox has no node
+([audit](audit/astra-2026-10-11.md#provider-ab-follow-up-2026-10-12)). The cloud
+targets make billable resources: use test credentials.
 
 ## TPM
 
 Each release channel has one TPM counter, its floor, and a release boots only if its
-index reaches it ([design/independent-updates.md](design/independent-updates.md)). `make
-check-tpm-floor`, also part of `make test` as `_test/tpm-floor`, runs
+index reaches it ([design/independent-updates.md](design/independent-updates.md)).
+`make check-tpm-floor`, also part of `make test` as `_test/tpm-floor`, runs
 [test/check-tpm-floor.zig](../test/check-tpm-floor.zig) against swtpm with
-`build/host/tpm-floor`, which drives lib/tpm.zig's code as stage0 and the mount broker
-do. A fresh TPM must enroll at the release's index, and an enrollment cut after each
-step must complete on the next boot. Then raw commands play guest root: undefining,
-redefining, writing, locking or re-passwording the counter, clearing the TPM or
-re-enabling clear, reopening the platform hierarchy and emptying the owner or lockout
-password must all fail, and incrementing must work. A release below the floor, another
-channel's release, a TPM someone else owns, an owner policy and a different counter at
-the handle must be refused.
+`build/host/tpm-floor`, which drives lib/tpm.zig's code as stage0 and the mount
+broker do. A fresh TPM must enroll at the release's index, and an enrollment cut
+after each step must complete on the next boot. Then raw commands play guest root:
+undefining, redefining, writing, locking or re-passwording the counter, clearing the
+TPM or re-enabling clear, reopening the platform hierarchy and emptying the owner or
+lockout password must all fail, and incrementing must work. A release below the
+floor, another channel's release, a TPM someone else owns, an owner policy and a
+different counter at the handle must be refused.
 
 ## Local deployment and publication
 
-`howl run --build` is the protected path: an arm64 Lima QEMU guest on macOS, protected
-QEMU on Linux ([design/secure-local-deployment.md](design/secure-local-deployment.md)).
-`make check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
+`howl run --build` is the protected path: an arm64 Lima QEMU guest on macOS,
+protected QEMU on Linux
+([design/secure-local-deployment.md](design/secure-local-deployment.md)). `make
+check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
 [test/check-independent-updates.zig](../test/check-independent-updates.zig): `howl
 create --build` makes release A (index 1) of a channel the test serves as static
 HTTPS files under a private CA, and boots it under Secure Boot, IPE and a fresh TPM,
@@ -124,13 +126,14 @@ custody, kernel and stub invalidation, interrupted builds), the tests of
 cmd/howl/boot-image.zig, cmd/howl/download.zig and lib/boot-download.zig (admission:
 foreign and altered signatures, weak profiles, unknown fields, release identity, size
 bounds, HTTPS bounds and redirects, torn heads, replay, equivocation), and
-tools/release's tests (`make _test/tools/release/release.zig`: signing custody, ordered
-uploads, interruption recovery, immutable collisions, release floors, an index that
-does not advance). Candidate CI has no publication permission
+tools/release's tests (`make _test/tools/release/release.zig`: signing custody,
+ordered uploads, interruption recovery, immutable collisions, release floors, an
+index that does not advance). Candidate CI has no publication permission
 ([design/protected-downloads.md](design/protected-downloads.md)).
 
-To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make`
-with a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
-checks its configuration, and requires IPE explicitly disabled. For strict IPE testing,
-use `IPE=1` and its three signing inputs instead. JIT forms can thus exercise the same
-candidate kernel through their normal profile without changing strict IPE policy.
+To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make` with
+a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
+checks its configuration, and requires IPE explicitly disabled. For strict IPE
+testing, use `IPE=1` and its three signing inputs instead. JIT forms can thus
+exercise the same candidate kernel through their normal profile without changing
+strict IPE policy.

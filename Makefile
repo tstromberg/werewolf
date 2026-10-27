@@ -23,7 +23,6 @@
 #   make clean            remove build/, except the package locks
 #
 # FORM picks the form (default sshd), ARCH the arch (default this machine's).
-# DEV=1 adds a shell, for debugging, never for release. See docs/testing.md.
 
 # := runs uname once; ARCH ?= $(shell ...) would run it at every use.
 HOST_ARCH := $(shell uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
@@ -89,8 +88,7 @@ $(error DISABLE must be explicit on the make command line, not inherited from th
 endif
 endif
 APP ?=
-DEV ?=
-OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
+OUT = $(BUILD)/$(FORM)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
 TAR ?= $(shell command -v bsdtar || echo tar)
 SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .DELETE_ON_ERROR:
@@ -101,7 +99,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	check-shellfree check-platform check-integrity check-cloud check-native check-one check-posture check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-dns check-lan check-unwound check-static check-verity check-deadman check-metadata check-persist \
-	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
+	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki $(OUT)/disk.qcow2
 
 all: image
 install-deps:
@@ -114,7 +112,7 @@ install-precommit hooks:
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
 HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) $(if $(DISABLE),--disable=$(DISABLE)) \
-	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
+	--build $(BUILD) --programs $(PROGRAMS) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
 	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL)) \
@@ -132,11 +130,10 @@ $(OUT)/disk.qcow2: $(HOWL)
 
 # apko locks pin every package; these rules serve relock, and release-inputs's boot locks.
 LOCK = build/lock
-FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev)$(if $(PUBLISHED),-published).lock.json
+FORM_LOCK = $(LOCK)/$(FORM)$(if $(PUBLISHED),-published).lock.json
 BOOT_LOCKS = $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 LOCKS = $(FORM_LOCK) $(BOOT_LOCKS)
-DEV_PACKAGES = busybox-full mksh $(call form_list,dev)
-FORM_APKO = $(BUILD)/form/$(FORM)$(if $(DEV),-dev).yaml
+FORM_APKO = $(BUILD)/form/$(FORM).yaml
 # apko_retry COMMAND retries after 15, 30 and 45 s: the package server refuses bursts (HTTP 403).
 APKO_NETWORK = status code (403|408|429|5[0-9][0-9])|connection reset|i/o timeout|TLS handshake|deadline exceeded|unexpected EOF|failed to fetch
 apko_retry = o=$(CURDIR)/$@.apko && for t in 1 2 3 4; do \
@@ -153,7 +150,7 @@ $(FORM_LOCK): $(FORM_FILES) | $(FORM_APKO)
 # Keep an unchanged config's mtime, as howl does, or howl rebuilds the root.
 # The config names werewolf's key in $(BUILD)/keys (lib/package.zig's keyring).
 $(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
-	mkdir -p $(dir $@) $(BUILD)/keys && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
+	mkdir -p $(dir $@) $(BUILD)/keys && $(FORM_TOOL) apko $(FORM_REF) >$@.tmp && \
 		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; } && \
 		{ cmp -s release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub || \
 			cp release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub; }
@@ -211,7 +208,7 @@ CONSOLE_CHECK = build/host/console
 # Host-side programs that scripts, workflows and release tools run: test/NAME.zig is build/host/NAME.
 HOST_PROGRAMS = cloud-console cloud-posture azure-security ssh-su metadata ipe-boot \
 	check-legacy-image check-public-image check-protected-qemu check-published-lifecycle check-published-run \
-	check-independent-updates remote-qemu
+	check-independent-updates remote-qemu check-hypervisor-isolation
 $(addprefix build/host/,$(HOST_PROGRAMS)): build/host/%: test/%.zig test/published.zig test/postdoc.zig $(wildcard test/host/*.zig test/host/*.yaml lib/*.zig)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -220,7 +217,7 @@ build/host/check-public-image build/host/check-protected-qemu build/host/check-p
 	build/host/check-legacy-image: test/published.zig
 build/host/check-legacy-image: $(CONSOLE_CHECK)
 # Host-side checks' own tests, in make test: they import host and the lib modules.
-HOST_TESTS = test/metadata.zig test/check-dist.zig test/check-legacy-image.zig test/check-secureboot.zig \
+HOST_TESTS = test/check-hypervisor-isolation.zig test/metadata.zig test/check-dist.zig test/check-legacy-image.zig test/check-secureboot.zig \
 	test/check-provider-ab.zig test/ab-fixture.zig test/check-bhyve-secureboot.zig test/check-bhyve-lifecycle.zig \
 	test/check-lima-secureboot.zig test/check-plex-import.zig test/gcp-metadata.zig \
 	test/build-traced-stub.zig test/trace-stub.zig test/check-image-updater.zig \
@@ -365,7 +362,6 @@ build/host/ci-forms: test/ci-forms.zig
 _test/cloud-console: build/host/cloud-console build/host/azure-security build/host/cloud-posture
 	zig test $(call HOST_ZIG_MODULES,test/cloud-posture.zig)
 	$(call host_test,test/cloud-checks.zig)
-	$(call host_test,test/check-host-keys.zig)
 $(addprefix _test/,$(HOST_TESTS)): _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/probes:
 	@mkdir -p build/test-probes
@@ -600,10 +596,10 @@ _howl-lock: $(HOWL)
 	$(HOWL_BUILD) lock
 dist:
 	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FORM=$$f _dist-form || exit 1; done
-# howl build always builds in build/ARCH, without DEV or APP, so refuse them.
+# howl build always builds in build/ARCH, without APP, so refuse it.
 _dist-form: $(HOWL)
-	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
-		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
+	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(APP)" ] || \
+		{ echo "_dist-form: a release builds in build/$(ARCH), without APP (howl build --app)" >&2; exit 1; }
 	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST) \
 		$(if $(DISABLE),--disable=$(DISABLE))
 
@@ -632,11 +628,9 @@ QEMU = $(if $(QEMU_HOST),$(REMOTE_QEMU) $(QEMU_HOST) )qemu-system-$(ARCH) -M $(M
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
 NATIVE_TEST_FORMS := $(filter-out bastion,$(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
-CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
+CHECK = $(BUILD)/check
 # A check boots directly: no firmware or TPM, and IPE only under IPE=1.
 CHECK_DISABLE = secureboot,tpm$(if $(IPE),,$(comma)ipe)
-# test/checks needs a root shell on the console, so checks build with DEV=1.
-CHECK_MAKE = $(MAKE) --no-print-directory DEV=1 DISABLE=$(CHECK_DISABLE)
 # 1 GiB keeps forms lean unless check: memory says more; an offline form gets restrict=on; no boot ROM.
 CHECK_MEMORY := $(or $(call form_check,memory),1024)
 CHECK_OFFLINE := $(if $(filter true,$(call form_check,offline)),$(,)restrict=on)
@@ -645,12 +639,11 @@ CHECK_QEMU = $(QEMU) -smp 2 -m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci
 # A stall panics and ends QEMU, so a hang fails in seconds with the kernel's reason.
 CHECK_STALLS = rcupdate.rcu_cpu_stall_timeout=20 sysctl.kernel.panic_on_rcu_stall=1 \
 	sysctl.kernel.hung_task_timeout_secs=120 sysctl.kernel.hung_task_panic=1 sysctl.kernel.softlockup_panic=1
-SEAL_ARGS = $(if $(SEAL_LEARN),werewolf.seal=learn)
-CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS) \
+CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) \
 	$(if $(DISABLE),werewolf.disable=$(DISABLE))
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
-# The posture failures test/boot expects: test/posture-known's and the form's weaknesses.
-POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
+# The posture failures the console expects: test/posture-known's and the form's weaknesses.
+POSTURE_KNOWN_KIND := $(shell awk -v b='*' -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 export POSTURE_KNOWN := $(if $(IPE),$(filter-out boot-ipe-enforced,$(POSTURE_KNOWN_KIND)),$(POSTURE_KNOWN_KIND)) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
 # A check script's environment (docs/testing.md). Homebrew keeps debugfs off PATH.
 SLOTS_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
@@ -662,7 +655,7 @@ built = mkdir -p $(CHECK) && $(2) >$(CHECK)/$(1)-build.log 2>&1 || \
 	{ tail -n 20 $(CHECK)/$(1)-build.log; echo "FAIL   $(1) build: see $(CHECK)/$(1)-build.log"; exit 1; }
 # What every check needs, built once, before the forms build in parallel.
 _check-shared: $(HOWL) $(TEST_SK)
-	@$(call built,shared,$(CHECK_MAKE) FORM=minimal APP= image)
+	@$(call built,shared,$(MAKE) --no-print-directory DISABLE=$(CHECK_DISABLE) FORM=minimal APP= image)
 
 # CI runs each group as a job; SHARD=K/N runs every Nth form from the Kth, in name order.
 ifneq ($(SHARD),)
@@ -703,10 +696,10 @@ $(IPE_PROBE): test/ipe-init.zig lib/ipe.zig lib/dm.zig lib/verity.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep dm --dep verity --dep ipe \
 		-Mroot=$< -Mdm=lib/dm.zig -Mverity=lib/verity.zig -Mipe=lib/ipe.zig -femit-bin=$@
-check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE) build/host/ipe-boot
+check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE) build/host/ipe-boot $(CONSOLE_CHECK)
 	@[ "$(IPE)" = 1 ] || { echo "check-ipe: set IPE=1 and the kernel, key and certificate paths" >&2; exit 1; }
-	$(CHECK_MAKE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root image
-	$(CHECK_MAKE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root _check-ipe
+	$(MAKE) --no-print-directory DISABLE=$(CHECK_DISABLE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root image
+	$(MAKE) --no-print-directory DISABLE=$(CHECK_DISABLE) FORM=minimal APP=$(BUILD)/test/ipe-probe-root _check-ipe
 _check-ipe:
 	@$(CHECK_ENV) IPE_PROBE=$(IPE_PROBE) VERITY=$(VERITY_BIN) \
 		IPE_KEY=$(WEREWOLF_IPE_KEY) IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-ipe $(CHECK_QEMU)
@@ -740,28 +733,18 @@ NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS_FO
 .PHONY: $(addprefix check-native-,$(NATIVE_FORMS))
 check-native: $(addprefix check-native-,$(call shard,$(NATIVE_FORMS)))
 $(addprefix check-native-,$(NATIVE_FORMS)): check-native-%: | _check-shared
-	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) slot)
-	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-native
+	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) slot)
+	@$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) _check-native
 _check-native:
 	@test/cage $(FORM) $(OUT)/slot/root.erofs $(CHECK)/$(FORM)-native.log
-seal-learn: | _check-shared
-	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(addprefix check-,$(FORMS)) check-slot check-persist \
-		check-nodata check-lease check-static check-metadata
-	@test/seal-learn $(BUILD)/check-learn
 
 REPEAT ?= 10
 check-one:
 	@mkdir -p $(CHECK)
 	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(MAKE) --no-print-directory check-$(FORM)
 
-$(addprefix check-,$(filter-out bastion people $(NATIVE_TEST_FORMS) $(APP_RUNTIME_FORMS),$(FORMS_FOR_ARCH))): check-%: _check-legacy-%
-
-_check-legacy-%: | _check-shared
-	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
-	@$(CHECK_MAKE) FORM=$* _check-form
-
-# Native clients are a separate generated form, never DEV and never a member
-# of /etc/sv. Compare their baseline before booting, then reuse one data disk.
+# Native clients are a separate generated form, never a member of /etc/sv.
+# Compare their baseline before booting, then reuse one data disk.
 .PHONY: check-native-tests _check-native-tests
 .PHONY: check-plex-import
 check-plex-import: $(HOWL)
@@ -785,9 +768,9 @@ check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(filte
 # production image and the native test image (below), and boots neither.
 define native_image
 	@$(NATIVE_TESTS) describe $(2) $(ARCH) >/dev/null
-	@$(call built,$(or $(3),$(1))$(if $(4),-app)-baseline,$(MAKE) --no-print-directory FORM=$(or $(3),$(2)) DEV= APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+	@$(call built,$(or $(3),$(1))$(if $(4),-app)-baseline,$(MAKE) --no-print-directory FORM=$(or $(3),$(2)) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
 	PRODUCTION_OUT=$(BUILD)/$(or $(3),$(1))$(if $(4),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
-	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
 endef
 # native_check NAME,REF,VARIABLES[,BASE[,APP]] builds the production image of
 # BASE, a scenario's stock form, or else of REF, and REF's native test image,
@@ -797,13 +780,14 @@ define native_check
 $(call native_image,$(1),$(2),$(4),$(5))
 	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
 		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) DEV= APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
 endef
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
 	$(call native_check,$*,$(call native_ref,$*))
 # A scenario (test/scenarios/NAME, docs/testing-scenarios.md) boots a stock form
-# some other way, built from that form's own production image.
-SCENARIOS := $(patsubst test/scenarios/%/tests.yaml,%,$(wildcard test/scenarios/*/tests.yaml))
+# some other way, built from that form's own production image. metadata's boots
+# are check-metadata's, and people-persist's check-people-persist's.
+SCENARIOS := $(filter-out metadata people-persist,$(patsubst test/scenarios/%/tests.yaml,%,$(wildcard test/scenarios/*/tests.yaml)))
 scenario_form = $(shell sed -n 's/^form: *//p' test/scenarios/$(1)/tests.yaml)
 .PHONY: check-scenarios $(addprefix check-scenario-,$(SCENARIOS))
 check-scenarios: $(addprefix check-scenario-,$(SCENARIOS))
@@ -830,13 +814,8 @@ _check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(REMOTE_QE
 		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
-# Shared checks run natively; retained form checks still run during migration.
+# A form's check is its native tests.
 $(addprefix check-,$(NATIVE_TEST_FORMS)): check-%: check-native-tests-%
-	@case "$$($(NATIVE_TESTS) describe $* $(ARCH))" in \
-		native) ;; \
-		legacy) $(MAKE) --no-print-directory _check-legacy-$* ;; \
-		*) echo 'native-tests: could not resolve remaining legacy coverage' >&2; exit 1 ;; \
-	esac
 
 # howl test --iterate reuses one SSH VM per form (docs/testing-native.md).
 .PHONY: $(addprefix iterate-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES))
@@ -849,23 +828,6 @@ $(addprefix iterate-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): iterate-%: $
 $(addprefix check-app-,$(APP_CHECK_FORMS)): check-app-%: check-scenario-app-%
 # Each form's ports get their own host ports, so forms boot in parallel.
 check_port = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(2)' | cut -d: -f1 | awk '{ print $(1) + $$1 }')
-# A honeypot may offer an SSH banner on 22 without operator logins.
-CHECK_SSH := $(if $(and $(filter sshd,$(CHAIN)),$(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF)))),$(call check_port,22200,$(FORM)))
-CHECK_WEB_PORT := $(call form_check,web)
-CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
-CHECK_SKIP ?= $(call form_check,skip)
-CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
-# The forms booted again on the disks they left (docs/testing.md).
-AGAIN_FORMS ?= minimal sshd prod-ssh vaultwarden demo samba paperless mongodb rabbitmq
-ifeq ($(AGAIN_FORMS),all)
-override AGAIN_FORMS := $(FORMS)
-endif
-_check-form: $(HOWL) $(TEST_SK) build/host/cloud-console build/host/ssh-su
-	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) SKIP='$(CHECK_SKIP)' \
-		CHECK_NAME='$(CHECK_NAME)' FORM_CHECKS='$(FORM_CHECKS)' \
-		AGAIN=$(filter $(AGAIN_FORMS),$(FORM)) SSH_PORT=$(CHECK_SSH) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
-		test/check-form \
-		$(subst user$(,)id=n0,user$(,)id=n0$(CHECK_FWD),$(CHECK_QEMU))
 
 # check-adhoc's checks run on howl form's form: prod with nginx's OCI image, whose
 # pledge adds sendfile, as nginx needs (docs/applications.md).
@@ -883,8 +845,8 @@ check-people: $(HOWL) $(NATIVE_TESTS)
 	@test/people-form $(CHECK) $(FORM_TOOL)
 	$(call native_check,people-check,$(CHECK)/people-check)
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
-	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) image)
-	@$(MAKE) --no-print-directory FORM=$* DEV= DISABLE=$(CHECK_DISABLE) _check-shellfree
+	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) image)
+	@$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) _check-shellfree
 _check-shellfree: $(CONSOLE_CHECK) $(REMOTE_QEMU)
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
@@ -1032,25 +994,24 @@ fuzz-unwound:
 		fi; \
 	done
 
-# These remaining console checks need their own debug image; check-prod is clean.
-.PHONY: _check-prod-console-image
-_check-prod-console-image: | _check-shared check-prod
-	@$(call built,prod-console,$(CHECK_MAKE) FORM=prod image)
-check-metadata check-people-persist: | _check-prod-console-image
-	@$(CHECK_MAKE) FORM=prod _$@
+# check-metadata boots metadata's native test image behind a stand-in metadata
+# server, or prod's own image for a machine that must take nothing (test/cloud-boot).
+check-metadata: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK) build/host/metadata
+	$(call native_image,scenario-metadata,test/scenarios/metadata,prod)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/scenario-metadata/native-test-scenario-metadata DISABLE=$(CHECK_DISABLE) _check-metadata
 # check-verity boots minimal's own image, its root changed after the build.
 check-verity: $(HOWL) $(CONSOLE_CHECK)
-	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DEV= DISABLE=$(CHECK_DISABLE) image)
-	@$(MAKE) --no-print-directory FORM=minimal DEV= DISABLE=$(CHECK_DISABLE) _check-verity
+	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) image)
+	@$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) _check-verity
 # check-slot boots minimal's native test image from a slot (test/check-slot).
 check-slot: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
 	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DEV= DISABLE=$(CHECK_DISABLE) _check-slot
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
 # check-deadman boots minimal's native test image, from which alone stage0
 # takes a shorter deadman.
 check-deadman: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
 	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DEV= DISABLE=$(CHECK_DISABLE) _check-deadman
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -1070,7 +1031,7 @@ POSTURE_KNOWN_X64 := $(shell awk -v b='*' -v a=x86_64 '$$1 == b || $$1 == a { $$
 	network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell network-ssh-security-keys
 check-firecracker: build/host/cloud-console | _check-shared
 	@rm -rf $(FC_FORM) && $(HOWL) form --build --with sshd --sshd.pubkey-accepted-algorithms ssh-ed25519 -o $(FC_FORM)/
-	@$(call built,firecracker,$(MAKE) --no-print-directory ARCH=x86_64 FORM=$(FC_FORM) DEV= DISABLE=$(CHECK_DISABLE) programs disk)
+	@$(call built,firecracker,$(MAKE) --no-print-directory ARCH=x86_64 FORM=$(FC_FORM) DISABLE=$(CHECK_DISABLE) programs disk)
 	@mkdir -p $(CHECK) build/x86_64/tools
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,cmd/howl/howl.zig) -femit-bin=build/x86_64/tools/howl
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(FORM_TOOL_MODULES) -femit-bin=build/x86_64/tools/form
@@ -1085,12 +1046,17 @@ _check-secureboot: $(HOWL)
 		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
 		-m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci
 _check-metadata: build/host/metadata
-	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
+	@$(CHECK_ENV) ARCH=$(ARCH) PRODUCTION_OUT=$(BUILD)/prod$(if $(IPE),-ipe) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
 
+# check-people-persist boots its scenario's native test image again and again
+# on one disk (test/check-people-persist.zig).
 .PHONY: check-people-persist _check-people-persist
+check-people-persist: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
+	$(call native_image,scenario-people-persist,test/scenarios/people-persist,prod)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/scenario-people-persist/native-test-scenario-people-persist DISABLE=$(CHECK_DISABLE) _check-people-persist
 _check-people-persist:
-	@$(CHECK_ENV) $(call host_test,test/check-people-persist.zig) $(CHECK_QEMU)
+	@$(CHECK_ENV) ARCH=$(ARCH) $(call host_test,test/check-people-persist.zig) $(CHECK_QEMU)
 
 # Each run copies x86_64's UEFI variables, sparing the template; splash-time=0 skips edk2's 5 s wait.
 UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
@@ -1128,7 +1094,7 @@ _check-dist: $(CONSOLE_CHECK)
 
 # check-persist boots the demo's own disk (test/check-persist) without EL2
 # (edk2 under HVF never boots) and offline; CI sets PERSIST_AFTER=.
-PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
+PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)
 PERSIST_AFTER ?= check-demo
 check-persist: $(HOWL) $(CONSOLE_CHECK) | $(PERSIST_AFTER)
 ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
@@ -1137,8 +1103,8 @@ else
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
 	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
 	@rm -f $(CHECK)/persist.img
-	@$(call built,persist,$(MAKE) --no-print-directory FORM=demo DEV= DISABLE=$(CHECK_DISABLE) disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
-	@$(MAKE) --no-print-directory FORM=demo DEV= DISABLE=$(CHECK_DISABLE) _check-persist
+	@$(call built,persist,$(MAKE) --no-print-directory FORM=demo DISABLE=$(CHECK_DISABLE) disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
+	@$(MAKE) --no-print-directory FORM=demo DISABLE=$(CHECK_DISABLE) _check-persist
 endif
 _check-persist:
 	@$(UEFI_ENV) test/check-persist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
@@ -1180,8 +1146,12 @@ build/x86_64/tools/howl-linux: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.z
 	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
 
 .PHONY: check-firecracker-protected
-check-firecracker-protected: $(HOWL)
+check-firecracker-protected: $(HOWL) build/host/check-hypervisor-isolation
 	HOWL=$(HOWL) sh test/check-firecracker-protected
+
+.PHONY: check-bhyve-protected
+check-bhyve-protected: $(HOWL) build/host/check-hypervisor-isolation
+	HOWL=$(HOWL) sh test/check-bhyve-protected
 build/x86_64/tools/howl-freebsd build/aarch64/tools/howl-freebsd: build/%/tools/howl-freebsd: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe -target $*-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
@@ -1203,18 +1173,18 @@ _check-cloud: $(HOWL) $(TEST_SK) build/host/cloud-console build/host/azure-secur
 		POSTURE_KNOWN='$(filter-out ?boot-secure-boot boot-rollback-protected boot-ipe-enforced,$(POSTURE_KNOWN))' \
 		"$$runner" $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot
-	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) \
+	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) \
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
 
 # EROFS_OPTS must match the options lib/image.zig gives mkfs.erofs.
 EROFS_OPTS = -b 4096 -zzstd,level=5 -C65536 -Efragments
 check-updater check-updater-staged check-updater-published: | _check-shared
-	@$(CHECK_MAKE) $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
+	@$(MAKE) --no-print-directory DISABLE=$(CHECK_DISABLE) $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
 	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) DEBUGFS=$(DEBUGFS) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
-		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
+		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
 		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
 		-device virtio-net-pci,netdev=n0,romfile=
 

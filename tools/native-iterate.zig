@@ -115,9 +115,11 @@ fn prepare(
         mem.eql(u8, f.name, "aspnet-example"))
     {
         try t.call(&.{
-            "make",                             "--no-print-directory",
-            try gpa.print("ARCH={s}", .{arch}), try gpa.print("FORM={s}", .{f.ref}),
-            "DEV=",                             "image",
+            "make",
+            "--no-print-directory",
+            try gpa.print("ARCH={s}", .{arch}),
+            try gpa.print("FORM={s}", .{f.ref}),
+            "image",
         }, .{});
         try tests.applicationOverlay(
             t,
@@ -332,7 +334,6 @@ pub fn digestInputs(t: *Tool, root: Dir, in: Inputs) ![64]u8 {
     var h = Sha256.init(.{});
     for (in.chain) |dir| try hashTree(t, root, &h, dir, .{ .tests = true });
     var fixed: std.ArrayList(u8) = .empty;
-    try fixed.print(t.gpa, "legacy {}\n", .{in.plan.legacy});
     for (in.plan.packages) |p| try fixed.print(t.gpa, "package {s}\n", .{p});
     for (in.plan.prune) |p| try fixed.print(t.gpa, "prune {s}\n", .{p});
     for (in.plan.drivers) |d| {

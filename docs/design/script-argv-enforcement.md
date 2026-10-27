@@ -68,9 +68,9 @@ as it activates IPE before `CAP_MAC_ADMIN` leaves. An enforcing root
   caller, who can change the bytes before the kernel copies them.
 - **seccomp user-notify.** The same race, and the seal refuses a listener
   ([narrow.md](narrow.md)).
-- **A regular expression.** `php -d open_basedir=/ /usr/share/moodle/admin/cli/cron.php`
-  matches a path under `/usr` and honors the attacker's `-d`. An exact vector
-  does not match.
+- **A regular expression.** `php -d open_basedir=/
+  /usr/share/moodle/admin/cli/cron.php` matches a path under `/usr` and honors the
+  attacker's `-d`. An exact vector does not match.
 - **execveat of a descriptor leash opened.** That fixes the binary. The caller
   still chooses argv.
 - **Patching interpreters** so a file on a writable mount is not compiled. That

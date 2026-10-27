@@ -3,34 +3,32 @@
 Accepted, 2026-10-15; rolling out. Replaces `boot/build-kernel` ([ipe.md](ipe.md),
 phase 4 of [verified-boot.md](verified-boot.md)) and Alpine's `linux-virt` on every
 machine.
-
 ## Summary
 
 A kernel for virtual machines whose configuration is one explicit list: every option
-that is on is named with the form or hypervisor that needs it; everything else is off,
-including what future kernels add. Built with Clang for kCFI, tuned for throughput with
-PostgreSQL as the yardstick, published as signed APKs hours after each `stable` release.
-
+that is on is named with the form or hypervisor that needs it; everything else is
+off, including what future kernels add. Built with Clang for kCFI, tuned for
+throughput with PostgreSQL as the yardstick, published as signed APKs hours after
+each `stable` release.
 ## Background
 
 werewolf booted Alpine's `linux-virt`: 2,572 options on x86_64, 884 of them modules,
-of which forms loaded nineteen; the rest was reachable code posture worked to prove off.
-IPE needed our own build anyway, and [linux-7.md](linux-7.md) wanted 7.x for Landlock's
-socket rules without Alpine's patch lag; kernel.org's `stable` series, 7.2, has none.
-
+of which forms loaded nineteen; the rest was reachable code posture worked to prove
+off. IPE needed our own build anyway, and [linux-7.md](linux-7.md) wanted 7.x for
+Landlock's socket rules without Alpine's patch lag; kernel.org's `stable` series,
+7.2, has none.
 ## Goals
 
 - Every form passes `make check` on QEMU, both arches; prod-ssh on every provider.
 - Under 40% of `linux-virt`'s options (971 of 2,572 on x86_64 today).
 - `kernel-hardening-checker` reports no `FAIL` outside the repository's exceptions.
 - pgbench on the postgresql form: TPS and p99 no worse than on `linux-virt`.
-- A kernel.org point release is in the stable repository within two hours, both arches.
-
+- A kernel.org point release is in the stable repository within two hours, both
+  arches.
 ## Non-Goals
 
 - Source patches beyond the MDWE line in `security/ipe/hooks.c`; release candidates.
 - Accelerated-networking VFs (mlx5, MANA), GPUs, nested TPMs; hardware, Xen, VMware.
-
 ## Detailed design
 
 **Source.** `scripts/refresh.py` takes the highest non-EOL `stable` version from
@@ -41,7 +39,8 @@ Kroah-Hartman and Linus Torvalds, and locks the tarball's SHA-256 with our own f
 one per line with its reason. `make config` runs `allnoconfig` with them as
 `KCONFIG_ALLCONFIG`, so nothing unnamed is on, then checks each line held and that
 `config/deny.cfg` holds; `config/ARCH.config`, the result, is for review. The build
-derives its own likewise for each release, so a new series comes with its options off.
+derives its own likewise for each release, so a new series comes with its options
+off.
 
 | On, by need | Options |
 | --- | --- |
@@ -61,16 +60,16 @@ derives its own likewise for each release, so a new series comes with its option
 | Costs more than it protects here | `INIT_ON_FREE_DEFAULT_ON` (zeroes every freed page, 5–10% on fork-heavy PostgreSQL), `PAGE_TABLE_CHECK` and `DEBUG_VIRTUAL` (page-fault-path cost for debug-grade checks), `RANDSTRUCT` (a public reproducible build keeps no secret), `KFENCE` (a sampling debugger), `EFI_DISABLE_PCI_DMA` and `RESET_ATTACK_MITIGATION` (physical attacks) |
 | Stays, though it looks like surface | `KVM` (one form; `/dev/kvm` is unlinked elsewhere), `IKCONFIG_PROC` (the evidence posture reads), `PERF_EVENTS` and `MICROCODE` (x86 selects both; the sysctl stays at 3, the hypervisor refuses microcode), `KALLSYMS` (readable oopses, with `kptr_restrict=2`) |
 
-**Package.** `linux-werewolf-7.2.11-rN` (N is `policy.json`'s revision), kernel release
-`7.2.11-werewolf`: `boot/vmlinuz-werewolf` (bzImage, or a raw arm64 `Image`),
-`boot/config-7.2.11-werewolf`, `boot/kernel-package`, `boot/ipe.crt`; no `lib/modules`.
-`werewolf-linux/kernel-build` builds it reproducibly with Melange, as
-[glibc-neutered](glibc-neutered.md) does; R2 `apk/kernel/` holds the stable repository
-`https://dist.werewolf-linux.org/apk/kernel` and immutable snapshots. Each GitHub
-release carries the config, implied options, checker report and boot logs.
+**Package.** `linux-werewolf-7.2.11-rN` (N is `policy.json`'s revision), kernel
+release `7.2.11-werewolf`: `boot/vmlinuz-werewolf` (bzImage, or a raw arm64 `Image`),
+`boot/config-7.2.11-werewolf`, `boot/kernel-package`, `boot/ipe.crt`; no
+`lib/modules`. `werewolf-linux/kernel-build` builds it reproducibly with Melange, as
+[glibc-neutered](glibc-neutered.md) does; R2 `apk/kernel/` holds the stable
+repository `https://dist.werewolf-linux.org/apk/kernel` and immutable snapshots. Each
+GitHub release carries the config, implied options, checker report and boot logs.
 
-**IPE.** Every kernel has IPE, lockdown at `confidentiality` and no policy of its own;
-stage0 loads an IPE image's signed policy. For tests' disposable keys
+**IPE.** Every kernel has IPE, lockdown at `confidentiality` and no policy of its
+own; stage0 loads an IPE image's signed policy. For tests' disposable keys
 `tools/test-kernel` builds `boot/kernel-build`'s commit with `IPE_CRT=`.
 
 **werewolf changes**, a clean break: a machine composed locally on `linux-virt` stays
@@ -87,16 +86,16 @@ on its slot until reinstalled.
 
 ## Drawbacks
 
-A kernel to keep patched forever, though kernel.org patches and CI builds. A new series
-ships before review (its notes list each changed option); one renaming a listed option
-stops releases until the list follows. Our Clang build shares no binary with anyone's.
-A dropped driver or protocol, IPv6 included, waits for a revision.
+A kernel to keep patched forever, though kernel.org patches and CI builds. A new
+series ships before review (its notes list each changed option); one renaming a
+listed option stops releases until the list follows. Our Clang build shares no binary
+with anyone's. A dropped driver or protocol, IPv6 included, waits for a revision.
 
 ## Alternatives Considered
 
 ### Merge our policy over Alpine's config
-Less typing, but what is on becomes "Alpine's defaults plus `olddefconfig`'s choices",
-readable only by diffing, and new series add options silently.
+Less typing, but what is on becomes "Alpine's defaults plus `olddefconfig`'s
+choices", readable only by diffing, and new series add options silently.
 
 ### GCC, as Alpine; kernel.org `longterm`; Alpine's `linux-stable`
 No kCFI until GCC 17, and kCFI is the one mitigation that changes the exploit class.
@@ -106,15 +105,16 @@ No kCFI until GCC 17, and kCFI is the one mitigation that changes the exploit cl
 ## Security Considerations
 
 Everything reachable is used by a form today, and the fragment names which; the four
-exceptions are in the table above. A machine's trust roots shrink to werewolf's key and
-Wolfi's. kernel.org is trusted through two committed developer keys, checked before
-anything is hashed. The IPE certificate is public; a kernel trusting another key is a
-different build, refused by Secure Boot and the updater. Mitigations stay `auto`.
+exceptions are in the table above. A machine's trust roots shrink to werewolf's key
+and Wolfi's. kernel.org is trusted through two committed developer keys, checked
+before anything is hashed. The IPE certificate is public; a kernel trusting another
+key is a different build, refused by Secure Boot and the updater. Mitigations stay
+`auto`.
 
 ## Reliability Considerations
 
-Every provider boot is a gate: QEMU on both arches in the kernel repository's CI before
-publication, werewolf's provider A/B tests before a release picks the kernel up. Drift
-fails closed: a list line a new release no longer honours, the deny list, the probe. A
-published APK is never replaced; A/B slots keep the previous kernel. `PANIC_ON_OOPS` and
-`PANIC_TIMEOUT=10` reboot a wedged kernel.
+Every provider boot is a gate: QEMU on both arches in the kernel repository's CI
+before publication, werewolf's provider A/B tests before a release picks the kernel
+up. Drift fails closed: a list line a new release no longer honours, the deny list,
+the probe. A published APK is never replaced; A/B slots keep the previous kernel.
+`PANIC_ON_OOPS` and `PANIC_TIMEOUT=10` reboot a wedged kernel.

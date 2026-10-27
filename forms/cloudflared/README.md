@@ -37,8 +37,8 @@ howl create cloudflared --with cloudflared --on gcp --allow-from me --tunnel-tok
 
 ### Importing data
 
-This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard, with
-the token. There is no database to import.
+This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard,
+with the token. There is no database to import.
 
 ### Known Quirks
 

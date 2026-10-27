@@ -45,7 +45,7 @@ serves plain HTTP behind `caddy` or a balancer; an edge (`caddy`,
 `mosquitto`, `nats`) takes its certificate from the config or `step-ca`.
 
 **Built**: nineteen of these forms, listed in docs/forms.md; their
-READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
+READMEs, forms/README.md and their native tests hold what tiers 1 and 2 taught.
 **Proposed**, besides `mastodon` ([mastodon.md](mastodon.md)):
 
 | Form | Defaults; its check's attack | Waits on |

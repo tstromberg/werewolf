@@ -30,9 +30,9 @@ prune:
   - usr/bin/unix_chkpwd  # No UNIX password authentication.
 
 # make check's (forms/README.md): Squid resolves names itself, from an
-# unconnected UDP socket on an ephemeral port, which test/checks' listeners
-# counts as listening; this form's own checks run it, letting that socket
-# alone through (squid-listeners).
+# unconnected UDP socket on an ephemeral port, which the shared listeners
+# check counts as listening; this form's own plan runs it, letting that
+# socket alone through (squid-listeners).
 check:
   memory: 512
   skip: [listeners]

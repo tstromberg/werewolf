@@ -22,6 +22,7 @@ pub const Inputs = struct {
     /// root is the empty directory the fixture is built in.
     root: []const u8,
     mode: []const u8,
+    tpm: bool = false,
 };
 
 const channel = "https://127.0.0.1/image";
@@ -108,6 +109,8 @@ pub fn build(c: *host.Check, in: Inputs) ![]const u8 {
     const cwd = Io.Dir.cwd();
     if (!mem.eql(u8, in.mode, "secure") and !mem.eql(u8, in.mode, "plain"))
         return c.fail("ab-fixture: mode must be secure or plain", .{});
+    if (in.tpm and !mem.eql(u8, in.mode, "secure"))
+        return c.fail("ab-fixture: TPM requires secure mode", .{});
     try cwd.createDirPath(io, in.root);
     var root = try cwd.openDir(io, in.root, .{ .iterate = true });
     defer root.close(io);
@@ -192,6 +195,13 @@ pub fn build(c: *host.Check, in: Inputs) ![]const u8 {
             .serial = version,
             .boot_key = if (secure) boot_key else null,
             .boot_cert = if (secure) boot_cert else null,
+            .tpm = in.tpm,
+            .index = if (!in.tpm or mem.eql(u8, r.label, "A"))
+                1
+            else if (mem.eql(u8, r.label, "B"))
+                2
+            else
+                3,
         });
         try step(c, in.root, &env, made.argv, try gpa.print("build-{s}", .{r.label}));
         try provider.exportRelease(io, gpa, made.output, form, in.arch, release);
@@ -231,6 +241,7 @@ pub fn build(c: *host.Check, in: Inputs) ![]const u8 {
     const result = try json.Stringify.valueAlloc(gpa, .{
         .arch = in.arch,
         .mode = in.mode,
+        .tpm = in.tpm,
         .form = form,
         .channel = channel,
         .boot_key = boot_key,

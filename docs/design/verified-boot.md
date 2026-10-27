@@ -1,15 +1,15 @@
 # Verified boot
 
-Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0, cmd/init); 2, a
-read-only root; 3, its dm-verity hash tree (lib/verity.zig) and signed releases
-([docs/releases.md](../releases.md)); and phase 5's first slice, a signed UKI on a local
-disk (make check-secureboot). Phase 4: every image boots our own kernel, with IPE built
-in ([custom-kernel.md](custom-kernel.md)); enforcing it is opt-in ([ipe.md](ipe.md)),
-and enrolled images have signed slot updates ([prebuilt-images.md](prebuilt-images.md)).
-Phase 5's Secure Boot passed on AWS and GCP; Azure firmware acceptance remains
-unreliable. Posture holds gaps as `boot-` checks (docs/posture.md); the kernel has no
-module loader. Protected images hold each release to a TPM floor
-([independent-updates.md](independent-updates.md)).
+Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0, cmd/init); 2,
+a read-only root; 3, its dm-verity hash tree (lib/verity.zig) and signed releases
+([docs/releases.md](../releases.md)); and phase 5's first slice, a signed UKI on a
+local disk (make check-secureboot). Phase 4: every image boots our own kernel, with
+IPE built in ([custom-kernel.md](custom-kernel.md)); enforcing it is opt-in
+([ipe.md](ipe.md)), and enrolled images have signed slot updates
+([prebuilt-images.md](prebuilt-images.md)). Phase 5's Secure Boot passed on AWS and
+GCP; Azure firmware acceptance remains unreliable. Posture holds gaps as `boot-`
+checks (docs/posture.md); the kernel has no module loader. Protected images hold each
+release to a TPM floor ([independent-updates.md](independent-updates.md)).
 
 ## Summary
 
@@ -89,9 +89,9 @@ before arming ([prebuilt-images.md](prebuilt-images.md)). A UKI packaged
 inside a locally recomposed root cannot preserve its sealed root hash.
 `make IPE=1 check-updater-uki` proves firmware delivery, verified slot b and commit.
 
-**Rollback (built).** A protected image's first boot takes its TPM; stage0 then refuses
-a release below its channel's floor, which rises only before the inactive slot is
-overwritten, so A/B rollback survives commit
+**Rollback (built).** A protected image's first boot takes its TPM; stage0 then
+refuses a release below its channel's floor, which rises only before the inactive
+slot is overwritten, so A/B rollback survives commit
 ([independent-updates.md](independent-updates.md)). **Open.** KMS custody.
 
 ## Drawbacks

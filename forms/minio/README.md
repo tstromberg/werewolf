@@ -1,15 +1,15 @@
 # MinIO - Hardened VM
 
-S3 on this machine: [MinIO](https://min.io), for restic, rclone, or an application. The
-form's manifest is [form.yaml](form.yaml).
+S3 on this machine: [MinIO](https://min.io), for restic, rclone, or an application.
+The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/minio/index.html).
 
 ## Security Posture
 
-MinIO runs as its own user. There is no shell. Landlock and seccomp hold it to port 9000
-and to `/data/svc/minio`. The root is read-only.
+MinIO runs as its own user. There is no shell. Landlock and seccomp hold it to port
+9000 and to `/data/svc/minio`. The root is read-only.
 
 - The console is off. The API is the interface, and `mc` is the client.
 - Nothing is anonymous until a bucket's policy says so.
@@ -26,8 +26,8 @@ openssl rand -base64 24 | tr -d '\n' >config/minio/root_password
 howl create minio --with minio --config config
 ```
 
-The API is `http://ADDRESS:9000`. TLS belongs in front, Caddy or the cloud's balancer.
-Then:
+The API is `http://ADDRESS:9000`. TLS belongs in front, Caddy or the cloud's
+balancer. Then:
 
 ```text
 mc alias set store http://ADDRESS:9000 admin "$(cat config/minio/root_password)"
@@ -55,8 +55,8 @@ This machine starts empty. Once port 9000 answers, mirror the old buckets to it 
 
 ### Known Quirks
 
-- The root user and password files have no newline. They are read into the environment
-  as they are.
+- The root user and password files have no newline. They are read into the
+  environment as they are.
 - Objects live in `/data/svc/minio`.
 
 ### Network Exposure

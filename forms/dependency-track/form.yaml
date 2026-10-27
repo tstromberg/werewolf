@@ -7,8 +7,12 @@ base: jre
 
 with: [postgresql, caddy]
 
-# LOCAL-PACKAGE-REVERT: the unpublished package, built here.
-recipes: [../../build/rendered/dependency-track.yaml]
+packages:
+  # Ours (../packages/security/dependency-track): the API server and its
+  # frontend, code and assets on the read-only image. Wolfi's
+  # dependency-track is 4.14's executable WAR on OpenJDK 21; the floor keeps
+  # it out.
+  - dependency-track>=5.2.1
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -28,8 +32,10 @@ services:
   dtrack:
     # DataNucleus keeps some columns, such as a license's seeAlso list, as
     # Java-serialized String arrays in PostgreSQL, and reads them back at the
-    # next start. The filter admits strings and nothing else.
-    allow: [java:deserialize]
+    # next start. The filter admits strings and nothing else. Stored files
+    # are compressed through zstd-jni's JNI library, which the package keeps
+    # on the image.
+    allow: [java:deserialize, java:native]
     # The API server, from the package's argument file. -host and -port are
     # its own flags; the default address is every one. Its management
     # server (health and metrics, :9000) is on loopback too.

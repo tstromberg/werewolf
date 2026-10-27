@@ -24,9 +24,7 @@ prune:
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-ssh-config: forwarded agents provide fresh authentication for su
   network-no-login: sshd, by security key, is how operators copy media in
-  programs-no-downloaders: SSH and scp support media transfers
   programs-no-interpreters: dotnet runs Jellyfin
   programs-no-shell: mksh provides operator shells and /bin/sh
   kernel-write-xor-execute: .NET compiles Jellyfin to machine code as it runs (allow jit)

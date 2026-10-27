@@ -52,7 +52,8 @@ broker-directory import helper.
 ### Known Quirks
 
 - One broker, without clustering or a management UI.
-- Changing the boot-config password updates the application user's password at restart.
+- Changing the boot-config password updates the application user's password at
+  restart.
 - Memory is limited to 1 GiB, with a 512 MiB broker watermark.
 - Upstream updates require a new image build and matching Erlang runtime paths.
 

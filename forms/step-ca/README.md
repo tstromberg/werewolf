@@ -1,8 +1,8 @@
 # step-ca - Hardened VM
 
-[step-ca](https://smallstep.com/docs/step-ca/) is a private certificate authority. You
-bring the root and the intermediate. The root key stays off the machine. The form's
-manifest is [form.yaml](form.yaml).
+[step-ca](https://smallstep.com/docs/step-ca/) is a private certificate authority.
+You bring the root and the intermediate. The root key stays off the machine. The
+form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/step-ca/index.html).

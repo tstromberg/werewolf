@@ -1,6 +1,6 @@
 # What the node-example form, booted as it ships, without a shell, must say on its
-# console (make check-shellfree-node-example; test/boot; forms/demo/test/console has the
-# format). That it answers is test/checks' answering, on the DEV=1 build.
+# console (make check-shellfree-node-example; test/console.zig; forms/demo/test/console
+# has the format). Its native tests check that it answers.
 # The application starts, leashed, and listens.
 
 seen    app-leashed       leash: \{"event":"start","service":"app"

@@ -17,10 +17,6 @@ packages:
 prune:
   - usr/bin/docker-entrypoint.sh
 
-# The check speaks S3 with MinIO's own client.
-dev:
-  - mc
-
 services:
   # MinIO, as its own user: it may bind :9000 and no other port, read the
   # image, and write only its own directories, where the objects are. It

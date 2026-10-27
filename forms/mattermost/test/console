@@ -1,6 +1,6 @@
 # What the mattermost form, booted as it ships, without a shell and
 # without a config, must say on its console (make
-# check-shellfree-mattermost; test/boot; forms/demo/test/console has the
+# check-shellfree-mattermost; test/console.zig; forms/demo/test/console has the
 # format). Caddy, given no admin's password, parks before
 # mattermost-setup runs, so Mattermost is never opened unclaimed;
 # Mattermost, given no base URL, parks and says why; PostgreSQL runs.

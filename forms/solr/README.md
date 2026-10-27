@@ -26,10 +26,11 @@ SolrCloud and a public unauthenticated administrator endpoint.
 listens on loopback; expose it through an authenticated proxy or SSH forwarding.
 The normal administrator UI is `/solr/`; the APIs keep their upstream paths.
 
-`/usr/lib/solr/setup` initializes `/data/svc/solr/home` as the service user, preserving
-existing configuration. Packaged configsets are copied into that private home so
-managed schemas can evolve. Java starts the packaged `server/start.jar` directly.
-Log4j writes to stdout. Data stays in the service's own persistent directory.
+`/usr/lib/solr/setup` initializes `/data/svc/solr/home` as the service user,
+preserving existing configuration. Packaged configsets are copied into that private
+home so managed schemas can evolve. Java starts the packaged `server/start.jar`
+directly. Log4j writes to stdout. Data stays in the service's own persistent
+directory.
 
 Use `howl test --with solr --iterate --driver test-solr` for a retained development
 VM. `howl test --with solr` checks a clean seed, indexing, reboot persistence,

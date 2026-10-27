@@ -1,5 +1,5 @@
 # What the greenbone form, booted as it ships, without a config, must say
-# on its console (make check-shellfree-greenbone; test/boot). Given no
+# on its console (make check-shellfree-greenbone; test/console.zig). Given no
 # administrator's password, gvmd parks before it migrates. With no
 # domain, so does Caddy. make check-greenbone boots it with its config.
 

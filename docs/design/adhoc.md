@@ -5,11 +5,11 @@ cmd/init/oci.zig, leash `root`), but for the open items below.
 
 ## Summary
 
-A werewolf machine from a command line alone: forms, Wolfi packages and
-OCI images, mixed freely. The flags write a form directory
-([docs/applications.md](../applications.md#forms-from-the-command-line)) that the build
-builds and `howl form -o` keeps, so a one-shot machine and a kept one are
-the same files. Only the operator writes policy.
+A werewolf machine from a command line alone: forms, Wolfi packages and OCI images,
+mixed freely. The flags write a form directory
+([docs/applications.md](../applications.md#forms-from-the-command-line)) that the
+build builds and `howl form -o` keeps, so a one-shot machine and a kept one are the
+same files. Only the operator writes policy.
 
 ## Background
 

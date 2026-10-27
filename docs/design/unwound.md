@@ -6,8 +6,8 @@ behavior; deferred ideas below are not implemented.
 
 ## Summary
 
-Propose a Linux Zig forwarder using [unwind]'s privilege separation, per-service
-DNS allowances and audit. DHCP supplies upstreams; limit DNS command-and-control (C2).
+Propose a Linux Zig forwarder using [unwind]'s privilege separation, per-service DNS
+allowances and audit. DHCP supplies upstreams; limit DNS command-and-control (C2).
 
 ## Background
 
@@ -39,7 +39,8 @@ Proved on Linux 6.8: the `n`th lookup UID gets label 127.53.n/256.n%256 and tabl
 | 2 | `from 127.0.0.0/8 to 127.0.0.53 prohibit` | other bound sources |
 | 3 | `to 127.0.0.53 uidrange U lookup T` | unbound: U's label |
 | 4 | `to 127.0.0.53 prohibit` | everyone else, root included |
-Service UIDs are unique/immutable; passed sockets share authority. Reject remote input.
+Service UIDs are unique/immutable; passed sockets share authority. Reject remote
+input.
 
 Setup opens listeners/control FDs; frontend and upstream drop root before parsing.
 Frontend checks policy. A socket opener runs as the upstream UID and accepts only
@@ -55,42 +56,43 @@ lookup 1001 _acme-challenge.example.com TXT
 ```
 No grant means no DNS. Grants union without ordering; no deny rules or service modes.
 Forms default omitted types to A AAAA; explicit lists replace that line's default.
-Named grants bypass screening; bare `*` requires it unless that line says `unfiltered`.
-`all` expands to supported query types. Framing, quotas and audit always apply.
-ASCII/A-label names are lowercase with one terminal dot removed; suffix matching is
-label-boundary only. Invalid declarations fail the load. IN/QUERY only; no expansion.
-No ANY/transfers/UPDATE; migrate `connect: dns` and direct port-53 grants explicitly.
+Named grants bypass screening; bare `*` requires it unless that line says
+`unfiltered`. `all` expands to supported query types. Framing, quotas and audit
+always apply. ASCII/A-label names are lowercase with one terminal dot removed; suffix
+matching is label-boundary only. Invalid declarations fail the load. IN/QUERY only;
+no expansion. No ANY/transfers/UPDATE; migrate `connect: dns` and direct port-53
+grants explicitly.
 
-DHCP sends up to three numeric upstreams via bounded, versioned IPC; static uses
-the same path. Pause, revoke grants/states, replace FDs, cancel queries, ack, resume.
-Empty/expired leases deny forwarding. Only the upstream role reaches their UDP/TCP 53.
+DHCP sends up to three numeric upstreams via bounded, versioned IPC; static uses the
+same path. Pause, revoke grants/states, replace FDs, cancel queries, ack, resume.
+Expired or empty leases deny forwarding. Only the upstream role reaches UDP/TCP 53.
 Priority denies override broad grants for external IPv4/IPv6 TCP/UDP 53/853. Other
 ports follow fence; DNS inside allowed HTTPS/tunnels cannot be identified by port.
 
 Parse one question and complete framing; reject unexplained trailing data. Re-encode
-canonical names, fresh IDs and controlled flags/options; discard caller EDNS payloads.
-Validate response peer, ID, name, class and type; bound TCP framing,
+canonical names, fresh IDs and controlled flags/options; discard caller EDNS
+payloads. Validate response peer, ID, name, class and type; bound TCP framing,
 compression traversal, record counts, alias hops, memory, connections and deadlines.
 Check alias targets before follow-up/return; a recursive upstream may follow them
-before we can check. Response types need separate parsing/serialization rules.
-Defer answer caching; DHCP DNS is trusted, upstream AD is not local validation.
+before we can check. Response types need separate parsing/serialization rules. Defer
+answer caching; DHCP DNS is trusted, upstream AD is not local validation.
 
 Requests emit escaped `unwound:` JSON: time, sequence, service, UID, question,
-allow/deny/reason, rule/generation; completion adds rcode/latency. Log malformed input.
-Return REFUSED for policy denial, FORMERR for malformed DNS, SERVFAIL for failures.
-Optional PID/exe/cgroup path/namespace snapshots describe socket-associated processes;
-never authorize with them. Bound entries; cache boot/PID/start time for <=1s with age.
-Exec/migration can stale data; unavailable/ambiguous data is unknown.
-Observer access needs separate confinement review; no privileged fallback.
-DNS logging is best effort through [syslog](syslog.md). No acknowledgement or
-durability is required before forwarding; logging failure never changes DNS policy
-or answers. Count failed local writes; syslogd reports later suppression and storage
-drops. An absent sink at startup falls back to stderr. Logs are private.
+allow/deny/reason, rule/generation; completion adds rcode/latency. Log malformed
+input. Return REFUSED for policy denial, FORMERR for malformed DNS, SERVFAIL for
+failures. Optional PID/exe/cgroup path/namespace snapshots describe socket-associated
+processes; never authorize with them. Bound entries; cache boot/PID/start time for
+<=1s with age. Exec/migration can stale data; unavailable/ambiguous data is unknown.
+Observer access needs separate confinement review; no privileged fallback. DNS
+logging is best effort through [syslog](syslog.md). No acknowledgement or durability
+is required before forwarding; logging failure never changes DNS policy or answers.
+Count failed local writes; syslogd reports later suppression and storage drops. An
+absent sink at startup falls back to stderr. Logs are private.
 
 ## Drawbacks
 
-Alias grants need maintenance; age/entropy filters can reject legitimate names.
-A new parser needs justification against existing resolvers; ReleaseSafe is not proof.
+Alias grants need maintenance; age/entropy filters can reject legitimate names. A new
+parser needs justification against existing resolvers; ReleaseSafe is not proof.
 
 ## Alternatives Considered
 
@@ -101,12 +103,13 @@ A policy frontend to Unbound/Hickory avoids a new resolver implementation.
 
 Fuzz framing/compression/serialization/IPC with fixed resource caps and checked math.
 Raw/network-admin services are outside the guarantee. Both DNS workers are trusted
-for C2 policy; confinement limits compromise impact, not malicious DNS to an upstream.
+for C2 policy; confinement limits compromise impact, not malicious DNS to an
+upstream.
 
 ## Reliability Considerations
 
-First test binds, IP_PKTINFO, output-interface/DONTROUTE paths, shared/passed sockets,
-UID/label reuse, stale routes and remote spoofing on Linux. Then implement
+First test binds, IP_PKTINFO, output-interface/DONTROUTE paths, shared/passed
+sockets, UID/label reuse, stale routes and remote spoofing on Linux. Then implement
 forwarding/audit, then metadata/cache. Test revocation, aliases, framing and crashes.
 
 [unwind]: https://github.com/openbsd/src/tree/master/sbin/unwind

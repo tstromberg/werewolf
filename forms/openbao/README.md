@@ -1,7 +1,7 @@
 # OpenBao - Hardened VM
 
-[OpenBao](https://openbao.org) stores secrets. You bring the TLS certificate, the unseal
-key, and an admin password. The form's manifest is [form.yaml](form.yaml).
+[OpenBao](https://openbao.org) stores secrets. You bring the TLS certificate, the
+unseal key, and an admin password. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/openbao/index.html).
@@ -28,8 +28,8 @@ printf '%s' 'a long admin password' >config/openbao/admin-password
 howl create openbao --with openbao --config config --api-addr https://bao.home.arpa:8200
 ```
 
-Initialize and unseal at `https://bao.home.arpa:8200`. The first steps are in [OpenBao's
-documentation](https://openbao.org/docs/concepts/seal/).
+Initialize and unseal at `https://bao.home.arpa:8200`. The first steps are in
+[OpenBao's documentation](https://openbao.org/docs/concepts/seal/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -50,8 +50,8 @@ clients will use.
 
 ### Importing data
 
-There is no database import. Initialize this server, then unseal it with the key file. A
-second create keeps the data disk and refuses a new import.
+There is no database import. Initialize this server, then unseal it with the key
+file. A second create keeps the data disk and refuses a new import.
 
 ### Known Quirks
 

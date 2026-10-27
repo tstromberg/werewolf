@@ -37,10 +37,11 @@ The source's execute permission remains available; `/data` itself stays noexec.
 Repositories and public keys are copied before the private launcher starts.
 
 The existing tool child closes inherited descriptors, retains its output pipe, and
-replaces stdin with an EOF pipe. No host device or file crosses the chroot. The launcher
-has already chrooted to `/data/svc/autoupdate` and dropped SYS_CHROOT. The tool changes
-directory to `/` and opens its narrower Landlock grants there. Fixed root/cache pairs
-select either `/work/root` and `/cache/root`, or `/work/kernel` and `/cache/kernel`.
+replaces stdin with an EOF pipe. No host device or file crosses the chroot. The
+launcher has already chrooted to `/data/svc/autoupdate` and dropped SYS_CHROOT. The
+tool changes directory to `/` and opens its narrower Landlock grants there. Fixed
+root/cache pairs select either `/work/root` and `/cache/root`, or `/work/kernel` and
+`/cache/kernel`.
 
 The runtime and matching cache are read-only. The candidate root permits normal
 files, directories, links and FIFOs, including cross-directory renames. No rule

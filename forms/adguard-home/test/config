@@ -2,8 +2,8 @@
 # forms/adguard-home/test/config DIR: the adguard-home form's config for
 # make check, in DIR: its domain, localhost, for which Caddy's own CA
 # signs; its one user, admin, whose password is werewolf-check-admin
-# (htpasswd -nbBC 10 made the hash), which test/checks signs in as; and
-# one upstream and one blocklist, which test/checks finds in its
+# (htpasswd -nbBC 10 made the hash), which test/tests.yaml signs in as; and
+# one upstream and one blocklist, which test/tests.yaml finds in its
 # configuration.
 set -eu
 mkdir -p "$1/caddy" "$1/adguard-home"

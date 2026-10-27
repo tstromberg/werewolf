@@ -1,17 +1,20 @@
 # Standard test probes
 
 ## Summary
-Run YAML workflows and native drivers with shared probes and explicit test identities.
+Run YAML workflows and native drivers with shared probes and explicit test
+identities.
 
 ## Background
-The [730949c inventory](https://github.com/werewolf-linux/werewolf/tree/730949c)
-has 113 forms, 722 legacy form cases and nine native plans. HTTP, file/policy, service
-and client checks dominate. Native ports duplicate HTTP code; failures lack diagnostics.
+The [730949c inventory](https://github.com/werewolf-linux/werewolf/tree/730949c) has
+113 forms, 722 legacy form cases and nine native plans. HTTP, file/policy, service
+and client checks dominate. Native ports duplicate HTTP code; failures lack
+diagnostics.
 
 ## Goals
 
 - Standard probes cover at least 578/722 baseline cases (80%); estimate: 80–90%.
-- Map every case to YAML, a native driver or a host check; preserve its full assertion.
+- Map every case to YAML, a native driver or a host check; preserve its full
+  assertion.
 - One `howl test --with FORM` path for clean runs, CI and existing `--iterate` use.
 
 ## Non-Goals
@@ -37,14 +40,15 @@ Reject old/new plans together. Cache shared probes/native drivers per architectu
 | `listeners` | TCP/UDP address sets, optionally scoped to one port; reject extras. |
 | `mount` | Filesystem type, source and required/forbidden mount flags. |
 
-`fetch` uses pinned test-only libcurl for TLS, framing, compression and HTTP/2/trailers.
-Support methods, literal paths, fixture bodies, form/multipart fields and named cookie
-sessions. Verify certificates with declared trust; explicit address mappings retain SNI.
-Disable ambient proxies and automatic redirects; follow only explicitly declared steps.
-Assertions use equality, membership, absence, counts, numeric bounds, regex or JSON
-Pointers. All assertions must hold; missing fields and parse errors fail. File reads
-distinguish absence from denial; refusal cases require the intended error.
-`exec` uses pinned clients with argv; no shell or lookup. Scripts count as custom code.
+`fetch` uses pinned test-only libcurl for TLS, framing, compression and
+HTTP/2/trailers. Support methods, literal paths, fixture bodies, form/multipart
+fields and named cookie sessions. Verify certificates with declared trust; explicit
+address mappings retain SNI. Disable ambient proxies and automatic redirects; follow
+only explicitly declared steps. Assertions use equality, membership, absence, counts,
+numeric bounds, regex or JSON Pointers. All assertions must hold; missing fields and
+parse errors fail. File reads distinguish absence from denial; refusal cases require
+the intended error. `exec` uses pinned clients with argv; no shell or lookup. Scripts
+count as custom code.
 
 ```yaml
 # Case within a suite declaring TCP/8000 and a password fixture.
@@ -64,19 +68,20 @@ steps:
     expect: {status: 200, json: {'/results': []}}
 ```
 
-Each case is an ordered workflow; steps reference prior responses using typed selectors.
-Missing/ambiguous captures fail; `regex` selects one nonempty group from one match.
-Sessions and captures stay within a case/phase. Use Zig for branching or
+Each case is an ordered workflow; steps reference prior responses using typed
+selectors. Missing/ambiguous captures fail; `regex` selects one nonempty group from
+one match. Sessions and captures stay within a case/phase. Use Zig for branching or
 computation. No loops or functions. PostgreSQL uses `psql`; expose a built-in run ID.
 The host retains run ID and disks for reboot; verify reads state before setup writes.
 Use existing native drivers for Greenbone GMP/OSP, inference, WebSockets, MQTT/NATS
-concurrency, malformed/fragmented packets and security attacks needing custom fixtures.
-Host drivers retain SSH/SFTP/Git, config rotation, power cuts and protected updates.
-Console checks and app fixtures share the result contract; test empty carriers too.
+concurrency, malformed/fragmented packets and security attacks needing custom
+fixtures. Host drivers retain SSH/SFTP/Git, config rotation, power cuts and protected
+updates. Console checks and app fixtures share the result contract; test empty
+carriers too.
 
-Track every case in `test/form-probe-baseline.yaml`; custom code does not count toward
-80%.
-Delete legacy dispatch after full parity on both architectures and reboot.
+Track every case in `test/form-probe-baseline.yaml`; custom code does not count
+toward 80%. Delete legacy dispatch after full parity on both architectures and
+reboot.
 
 ## Drawbacks
 YAML/libcurl add dependencies; root can mask access bugs. Keep complex cases in Zig.
@@ -85,17 +90,20 @@ YAML/libcurl add dependencies; root can mask access bugs. Keep complex cases in 
 ### Only Zig drivers
 Shares helpers too, but data edits require compilation; YAML suits ordered workflows.
 ### Shell commands or a growing HTTP shim
-Shell adds guest drift; maintaining another HTTP/TLS implementation adds avoidable bugs.
+Shell adds guest drift; maintaining another HTTP/TLS implementation adds avoidable
+bugs.
 
 ## Security Considerations
 Privileged tests preserve production policies, hidepid and package bytes.
-Peer-auth/access probes run as child processes with the tested user's groups and policy.
-Refusals must reach the intended control. No su/setuid or global enforcement changes.
-Clean tests add no BusyBox/shell/SSH; iteration uses SSH. Releases omit test payloads.
+Peer-auth/access probes run as child processes with the tested user's groups and
+policy. Refusals must reach the intended control. No su/setuid or global enforcement
+changes. Clean tests add no BusyBox/shell/SSH; iteration uses SSH. Releases omit test
+payloads.
 
 ## Reliability Considerations
 Bound time: `timeout` limits one fetch/exec; `await` polls only read-only predicates.
 Mutations run once; timeouts never prove refusal. Kill/reap timed-out children.
 Report source line, operation/input, got/want and diffs; redact secrets and captures.
-Stop dependent steps on failure; continue independent cases. Blocked cases cannot pass.
-Reject missing/duplicate/stale results; hash inputs. Test failures and shipping images.
+Stop dependent steps on failure; continue independent cases. Blocked cases cannot
+pass. Reject missing/duplicate/stale results; hash inputs. Test failures and shipping
+images.

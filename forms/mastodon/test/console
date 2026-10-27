@@ -1,6 +1,6 @@
 # What the mastodon form, booted as it ships, without a shell and without
 # a config, must say on its console (make check-shellfree-mastodon;
-# test/boot; forms/demo/test/console has the format). The streaming
+# test/console.zig; forms/demo/test/console has the format). The streaming
 # server starts on its leash and listens on loopback. The web, given no
 # owner, parks before anything is made or served, and says why; the jobs,
 # cron and nginx wait for what its first start makes. Nothing else fails.

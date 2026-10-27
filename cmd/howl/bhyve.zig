@@ -78,6 +78,10 @@ pub fn prepareNetwork(
     why: *howl.Why,
 ) !Network {
     if (mode == .slirp) {
+        howl.say(io, "warning: bhyve's outbound SLIRP helper runs as nobody outside Capsicum; " ++
+            "a helper exploit could access host files and network services available to that " ++
+            "account. " ++
+            "The bhyve VMM remains sandboxed; TAP avoids this helper", .{});
         try downNetwork(io, gpa, at, null);
         return .{ .mode = .slirp };
     }
@@ -704,6 +708,12 @@ fn keepWith(
     ) catch {};
     const owner = try networkOwner(io, gpa, at);
     defer if (owner) |token| downNetwork(io, gpa, at, token) catch {};
+    // Host TPM/ACPI diagnostics can interrupt a serial line byte by byte.
+    // Keep them separate so readiness and DHCP records remain readable.
+    const diagnostics = try Dir.cwd().createFile(io, try gpa.print("{s}/bhyve.log", .{at}), .{
+        .permissions = .fromMode(0o600),
+    });
+    defer diagnostics.close(io);
     while (true) {
         if (Dir.cwd().access(io, try gpa.print("{s}/bhyve.stop", .{at}), .{})) |_|
             return
@@ -715,7 +725,7 @@ fn keepWith(
             .argv = bhyve,
             .stdin = .pipe,
             .stdout = .inherit,
-            .stderr = .inherit,
+            .stderr = .{ .file = diagnostics },
         });
         const term = try child.wait(io);
         const code: u32 = if (term == .exited) term.exited else 4;

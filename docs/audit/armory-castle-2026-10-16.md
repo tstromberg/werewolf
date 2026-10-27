@@ -44,11 +44,12 @@ code and file-backed executable mappings. These kernel controls do not authentic
 PHP input. An include vulnerability or interpreter evaluation needs runtime guards.
 
 **Privilege escalation.** Services start without root, with a bounded capability set
-and `no_new_privs`; writable mounts are nosuid and the image contains no setuid files.
-Changing a file owner to root already needs authority: the report's SUID sequence
-does not establish how the actor first obtained that authority. Werewolf's inherited
-seal, Landlock and capability limits continue to apply even after an effective-root
-compromise. A trusted helper or kernel compromise remains outside that claim.
+and `no_new_privs`; writable mounts are nosuid and the image contains no setuid
+files. Changing a file owner to root already needs authority: the report's SUID
+sequence does not establish how the actor first obtained that authority. Werewolf's
+inherited seal, Landlock and capability limits continue to apply even after an
+effective-root compromise. A trusted helper or kernel compromise remains outside that
+claim.
 
 **Persistence.** A file written to a data directory does not become a runit startup
 script. Service definitions and native programs come from the image. Fixed broker
@@ -56,7 +57,8 @@ operations do not let a service remount or rewrite the root. Signed boot and upd
 verification protect replacement system images in the protected profile; deployments
 with protections explicitly disabled retain the documented weaker boot guarantees.
 Application configuration, accounts, sessions and data on `/data` survive updates and
-must be reviewed separately; rebooting or installing a clean slot does not clean them.
+must be reviewed separately; rebooting or installing a clean slot does not clean
+them.
 
 **Vault and lateral movement.** A web service cannot open another service's private
 secrets, control its processes or execute an undeclared credential utility. It can
@@ -83,7 +85,8 @@ guarantee that every request is durably recorded by the guest.
 Hardened PHP previously checked only primary scripts with a path-based `statvfs`
 lookup. A failed lookup permitted execution; includes, generated streams and stdin
 were incompletely covered. Its compiler hook installed before OPcache's startup hook,
-allowing a warm cache to precede the check. PHP string compilation remained permitted.
+allowing a warm cache to precede the check. PHP string compilation remained
+permitted.
 
 The PHP policy revision now:
 
@@ -130,15 +133,16 @@ make FORM=php DEV=1 APP=build/php-security-overlay \
 ## Remaining work and deployment requirements
 
 1. **Migrate the native PHP forms before crediting runtime protection.** `php`,
-   WordPress, WordPress on MariaDB, MediaWiki, LimeSurvey, Moodle and Nextcloud request
-   PHP 8.4; hardened PHP currently follows 8.5. Merely adding the feed does not replace
-   them. WordPress salts and MediaWiki secrets are currently loaded as writable PHP;
-   Nextcloud uses writable configuration and apps; Moodle and LimeSurvey generate
-   template code. Convert secrets and configuration to parsed data and precompile
-   templates into the image where possible. Compatibility tests must cover upgrades
-   of existing data. Blanket writable-source and inline grants would restore the
-   webshell risk. Current runtime grants are image-wide, so isolate any required
-   exceptions on separate machines until service-specific grants are available.
+   WordPress, WordPress on MariaDB, MediaWiki, LimeSurvey, Moodle and Nextcloud
+   request PHP 8.4; hardened PHP currently follows 8.5. Merely adding the feed does
+   not replace them. WordPress salts and MediaWiki secrets are currently loaded as
+   writable PHP; Nextcloud uses writable configuration and apps; Moodle and
+   LimeSurvey generate template code. Convert secrets and configuration to parsed
+   data and precompile templates into the image where possible. Compatibility tests
+   must cover upgrades of existing data. Blanket writable-source and inline grants
+   would restore the webshell risk. Current runtime grants are image-wide, so isolate
+   any required exceptions on separate machines until service-specific grants are
+   available.
 2. **Keep privileged credentials outside the web process.** Use a separate broker
    with fixed operations or an external vault with credential injection; do not hand
    the web service a reusable vault export credential. Scope secrets to a service.
@@ -146,9 +150,10 @@ make FORM=php DEV=1 APP=build/php-security-overlay \
    credentials and inspect application data and downstream endpoints.
 3. **Constrain destinations beyond ports.** A permitted HTTPS port is not a host
    allowlist. `public` excludes private destinations where declared, and DNS grants
-   constrain resolvers, but neither binds HTTPS to a particular service. Use perimeter
-   destination restrictions and separate broker identities for sensitive operations.
-   Keep `netadmin`, `packet`, `jit`, exec and interpreter grants to demonstrated need.
+   constrain resolvers, but neither binds HTTPS to a particular service. Use
+   perimeter destination restrictions and separate broker identities for sensitive
+   operations. Keep `netadmin`, `packet`, `jit`, exec and interpreter grants to
+   demonstrated need.
 4. **Protect the application control plane.** Patch the origin-validation flaw, use
    phishing-resistant administrator authentication and least-privilege roles, audit
    role changes, and restrict endpoint file transfers. Filesystem immutability does

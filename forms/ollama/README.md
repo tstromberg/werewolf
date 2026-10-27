@@ -11,8 +11,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/ollama/index.html).
 Ollama runs as its own user. There is no shell. Landlock and seccomp hold it to port
 11434, to the registry, and to `/data/svc/ollama`. The root is read-only.
 
-- The API has no login. Put oauth2-proxy, Caddy or a tailnet in front before you serve
-  it past this machine.
+- The API has no login. Put oauth2-proxy, Caddy or a tailnet in front before you
+  serve it past this machine.
 - A browser on another origin is refused.
 - It may run only itself, which is how a model is loaded.
 
@@ -43,9 +43,9 @@ howl create ollama --with ollama --on gcp --allow-from me
 
 ### Importing data
 
-This machine starts empty. Pull a model with the client against the address howl prints.
-Models already on disk are in `/data/svc/ollama`, and the host cannot write that
-directory.
+This machine starts empty. Pull a model with the client against the address howl
+prints. Models already on disk are in `/data/svc/ollama`, and the host cannot write
+that directory.
 
 ### Known Quirks
 

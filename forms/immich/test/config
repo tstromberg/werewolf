@@ -1,7 +1,7 @@
 #!/bin/sh
 # forms/immich/test/config DIR: the immich form's config for make check, in
 # DIR: its base URL, https://localhost, for which Caddy's own CA signs, and
-# the admin's address and password, which test/checks signs in with.
+# the admin's address and password, which test/tests.yaml signs in with.
 set -eu
 mkdir -p "$1/caddy" "$1/tests/immich"
 cp "$(dirname "$0")/photo.jpg" "$1/tests/immich/photo"

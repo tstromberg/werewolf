@@ -50,8 +50,8 @@ fn dispatch(t: *Tool, args: []const []const u8) !void {
         return t.fail("invalid architecture {s}", .{arch});
     const verb = args[0];
     if (mem.eql(u8, verb, "describe") and args.len == 3) {
-        const plan = try t.formPlan(form);
-        try t.say("{s}", .{if (plan.legacy) "legacy" else "native"});
+        // A valid plan lists its suites; an invalid one is refused.
+        for ((try t.formPlan(form)).drivers) |d| try t.say("{s}", .{d.name});
     } else if (mem.eql(u8, verb, "prepare") and args.len == 3) {
         try prepare(t, form, arch);
     } else if (mem.eql(u8, verb, "compare") and args.len == 3) {
@@ -729,8 +729,8 @@ fn runPlan(
 }
 
 /// Work is a run's directory under CHECK, its config directory, and the
-/// data key that holds.
-const Work = struct { dir: []const u8, config: []const u8, key_path: []const u8, key: [64]u8 };
+/// digest of the data key that holds, unless the config is a check's own.
+const Work = struct { dir: []const u8, config: []const u8, key_path: []const u8, key: ?[64]u8 };
 
 /// freshWork makes a run's directory anew, as CHECK/NAME-native, with f's
 /// config directory and a new data key in it.
@@ -776,10 +776,14 @@ const Booting = struct {
     ssh: ?hosts.Ssh = null,
     /// inputs must be as they were when the run began.
     inputs: []const Input = &.{},
+    /// context, if set, is the file the run's context goes to, for the check
+    /// to deliver itself: the machine then gets no config disk.
+    context: ?[]const u8 = null,
 };
 
 /// boot makes phase's config, with fixture if there is one, packs it, boots
 /// machine with it as a read-only disk, and accepts the phase's transcript.
+/// A check that delivers the context itself (Booting.context) gets no disk.
 fn boot(
     t: *Tool,
     b: Booting,
@@ -795,49 +799,56 @@ fn boot(
     if (Dir.cwd().access(io, fixture, .{})) |_|
         try t.call(&.{ fixture, w.config }, .{})
     else |_| {}
-    if (!mem.eql(u8, &try hexDigest(io, w.key_path), &w.key))
+    if (w.key) |key| if (!mem.eql(u8, &try hexDigest(io, w.key_path), &key))
         return t.fail("test configuration replaced the data key", .{});
     const context: Run = .{
         .run = b.run_id,
         .phase = @tagName(phase),
         .timeout_seconds = plan.timeout_seconds,
     };
-    try t.write(
-        try gpa.print("{s}/tests/context", .{w.config}),
-        try std.json.Stringify.valueAlloc(gpa, context, .{}),
-    );
-    const packed_path = try gpa.print("{s}/{s}.tar", .{ w.dir, @tagName(phase) });
-    // A boot without data.key packs its config without it, held outside
-    // it, and puts it back for the next (scenario.zig, Boot).
-    const without_key = !switch (phase) {
-        .seed => plan.boots.seed,
-        .verify => plan.boots.verify,
-    }.data_key;
-    const held = try gpa.print("{s}/held.key", .{w.dir});
-    if (without_key) try Dir.rename(Dir.cwd(), w.key_path, Dir.cwd(), held, io);
-    {
-        const log = try Dir.cwd().createFile(
-            io,
-            try gpa.print("{s}/{s}-pack.log", .{ w.dir, @tagName(phase) }),
-            .{},
-        );
-        defer log.close(io);
-        try t.call(
-            &.{
-                howl,
-                "pack",
-                "--build",
-                "--with",
-                b.f.ref,
-                "--config",
-                w.config,
-                "-o",
-                packed_path,
-            },
-            .{ .log = log },
-        );
+    const context_json = try std.json.Stringify.valueAlloc(gpa, context, .{});
+    var disk: []const []const u8 = &.{};
+    if (b.context) |path| {
+        try t.write(path, context_json);
+    } else {
+        try t.write(try gpa.print("{s}/tests/context", .{w.config}), context_json);
+        const packed_path = try gpa.print("{s}/{s}.tar", .{ w.dir, @tagName(phase) });
+        // A boot without data.key packs its config without it, held outside
+        // it, and puts it back for the next (scenario.zig, Boot).
+        const without_key = !switch (phase) {
+            .seed => plan.boots.seed,
+            .verify => plan.boots.verify,
+        }.data_key;
+        const held = try gpa.print("{s}/held.key", .{w.dir});
+        if (without_key) try Dir.rename(Dir.cwd(), w.key_path, Dir.cwd(), held, io);
+        {
+            const log = try Dir.cwd().createFile(
+                io,
+                try gpa.print("{s}/{s}-pack.log", .{ w.dir, @tagName(phase) }),
+                .{},
+            );
+            defer log.close(io);
+            try t.call(
+                &.{
+                    howl,
+                    "pack",
+                    "--build",
+                    "--with",
+                    b.f.ref,
+                    "--config",
+                    w.config,
+                    "-o",
+                    packed_path,
+                },
+                .{ .log = log },
+            );
+        }
+        if (without_key) try Dir.rename(Dir.cwd(), held, Dir.cwd(), w.key_path, io);
+        disk = &.{
+            "-drive",
+            try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{packed_path}),
+        };
     }
-    if (without_key) try Dir.rename(Dir.cwd(), held, Dir.cwd(), w.key_path, io);
     const console = try gpa.print("{s}/console", .{w.dir});
     var lines: std.ArrayList(u8) = .empty;
     try lines.appendSlice(gpa, "seen native-completed " ++ plans.completion ++ "\n" ++
@@ -854,9 +865,7 @@ fn boot(
         log,
     });
     try argv.appendSlice(gpa, machine);
-    try argv.appendSlice(gpa, &.{
-        "-drive", try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{packed_path}),
-    });
+    try argv.appendSlice(gpa, disk);
     var env = try t.env.clone(gpa);
     try env.put(
         "CONSOLE_TIMEOUT",
@@ -900,7 +909,12 @@ fn boot(
 /// once boots f's test image, judged by plan, as phase of a run of its own, on the machine
 /// qemu describes whole but for the config disk: a check's own kernel,
 /// disks and command line (test/check-slot). Host suites need a run's
-/// forwarded login, so a plan with them is refused.
+/// forwarded login, so a plan with them is refused. NATIVE_CONFIG names a
+/// config directory the check keeps from boot to boot, with its own data
+/// key or none, in place of a fresh one (test/check-people-persist.zig).
+/// NATIVE_CONTEXT names a file for the run's context, which the check
+/// delivers itself, as a cloud's metadata server does a config: the
+/// machine then gets no config disk (test/cloud-boot).
 fn once(
     t: *Tool,
     f: Form,
@@ -919,13 +933,21 @@ fn once(
     const fixture = try t.gpa.print("{s}/{s}", .{
         f.tests, if (phase == .seed) "config" else "config-again",
     });
+    var work = try freshWork(t, check, name, f);
+    if (t.variable("NATIVE_CONFIG")) |config| work = .{
+        .dir = work.dir,
+        .config = config,
+        .key_path = try t.gpa.print("{s}/data.key", .{config}),
+        .key = null,
+    };
     _ = try boot(t, .{
         .f = f,
         .plan = plan,
         .harness = harness,
         .name = name,
         .run_id = &run_id,
-        .work = try freshWork(t, check, name, f),
+        .work = work,
+        .context = t.variable("NATIVE_CONTEXT"),
     }, phase, fixture, qemu);
 }
 
@@ -1624,6 +1646,8 @@ const fake_boot =
     \\    file=*) disk=${arg#file=} disk=${disk%%,*} ;;
     \\    esac
     \\done
+    \\# A check delivering the context itself gives the machine no config disk.
+    \\if [ -n "${NATIVE_CONTEXT:-}" ]; then [ -z "${packed:-}" ]; packed=$NATIVE_CONTEXT; fi
     \\context=$(cat "$packed")
     \\run=$(printf '%s' "$context" | sed 's/.*"run":"\([0-9a-f]*\)".*/\1/')
     \\phase=$(printf '%s' "$context" | sed 's/.*"phase":"\([a-z]*\)".*/\1/')
@@ -1891,6 +1915,39 @@ test "a check's own machine boots one phase, with only the config disk added" {
     try testing.expectError(
         error.FileNotFound,
         s.tmp.dir.statFile(io, "check/slot-native/data.img", .{}),
+    );
+}
+
+test "a check keeping its config, or delivering the context, boots as it says" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s: Scratch = undefined;
+    try s.init(a);
+    defer s.tmp.cleanup();
+    const io = s.t.io;
+    try s.file("slot.img", "", 0o644);
+    const disk = [_][]const u8{
+        "-drive", try a.print("file={s},format=raw,if=virtio", .{try s.path("slot.img")}),
+    };
+    // Its own config, with no data key, is packed as it is, context and all.
+    try s.file("kept/hostname", "people-enroll\n", 0o600);
+    try s.env.put("NATIVE_CONFIG", try s.path("kept"));
+    try once(&s.t, try s.form(), s.plan(), try s.harness(), .seed, "kept", &disk);
+    try testing.expectEqualStrings(
+        "none\n",
+        try s.tmp.dir.readFileAlloc(io, "check/kept-native/seed.tar.key", a, .limited(64)),
+    );
+    _ = try s.tmp.dir.statFile(io, "kept/tests/context", .{});
+    // A context the check delivers is written for it, and no disk is packed.
+    _ = s.env.swapRemove("NATIVE_CONFIG");
+    try s.env.put("NATIVE_CONTEXT", try s.path("served/context"));
+    try once(&s.t, try s.form(), s.plan(), try s.harness(), .seed, "cloud", &disk);
+    const context = try s.tmp.dir.readFileAlloc(io, "served/context", a, .limited(4096));
+    try testing.expect(mem.find(u8, context, "\"phase\":\"seed\"") != null);
+    try testing.expectError(
+        error.FileNotFound,
+        s.tmp.dir.statFile(io, "check/cloud-native/seed.tar", .{}),
     );
 }
 

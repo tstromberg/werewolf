@@ -1,15 +1,15 @@
 # Home Assistant - Hardened VM
 
-A home's devices and automations: [Home Assistant](https://www.home-assistant.io), the
-stable image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
+A home's devices and automations: [Home Assistant](https://www.home-assistant.io),
+the stable image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/home-assistant/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 - HTTP's stable configuration is set at each start: loopback behind Caddy, without
   a pending trial that would revert after five minutes without UI confirmation.
 - mDNS (UDP/5353) discovers devices on the LAN. Fence limits discovery to
@@ -33,9 +33,9 @@ howl create home-assistant --with home-assistant \
 	--time-zone America/New_York --country US
 ```
 
-Open `https://home.home.arpa` and sign in as `me`. The password is in `owner-password`,
-12 to 72 bytes. Names under `.home.arpa` get a certificate from Caddy's own CA.
-Integrations are in [Home Assistant's
+Open `https://home.home.arpa` and sign in as `me`. The password is in
+`owner-password`, 12 to 72 bytes. Names under `.home.arpa` get a certificate from
+Caddy's own CA. Integrations are in [Home Assistant's
 documentation](https://www.home-assistant.io/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)

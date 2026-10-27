@@ -17,12 +17,12 @@ for Landlock rules 6.18 lacks: which UNIX sockets a service may reach
 ## Background
 
 leash holds each service to its files, TCP ports and system calls
-([cmd/leash](../../cmd/leash/leash.8.md)). A socket file is the gap: Landlock does not
-check `connect()` to one, so only the directory's mode (`share`) stands between
+([cmd/leash](../../cmd/leash/leash.8.md)). A socket file is the gap: Landlock does
+not check `connect()` to one, so only the directory's mode (`share`) stands between
 services. Linux 7.1 added
 [`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`](https://docs.kernel.org/userspace-api/landlock.html):
-a socket outside the domain is reached only beneath a rule granting it, and a refusal is
-`EACCES`. Alpine ships 7.x only as `community/linux-stable`.
+a socket outside the domain is reached only beneath a rule granting it, and a refusal
+is `EACCES`. Alpine ships 7.x only as `community/linux-stable`.
 
 ## Goals
 

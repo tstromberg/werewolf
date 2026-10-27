@@ -94,7 +94,6 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         const kind: compose.Build = .{
             .arch = b.arch,
             .dev = b.spec.dev,
-            .dev_shell = b.spec.dev_shell,
             .ipe = b.spec.ipe_kernel != null,
             .tpm = b.spec.tpm,
             .posture_known = embedded.posture_known,
@@ -424,6 +423,7 @@ fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
         for (names) |name| switch (laid.get(name).?) {
             .directory => try header(b.gpa, &w.interface, name, '5', 0o755, 0, ""),
             .link => |link| try header(b.gpa, &w.interface, name, '2', 0o777, 0, link),
+            // Stream complete files: mkfs.erofs cannot decode GNU sparse records.
             .file => |f| try layFile(b, &w.interface, name, f.source, f.exec),
         };
         // The end: two empty blocks.

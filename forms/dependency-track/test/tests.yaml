@@ -76,8 +76,9 @@ suites:
                 password: werewolf-check-pass-1
             expect:
               status: 200
+              # A session: 32 random bytes, unpadded base64url.
               body:
-                matches: ^eyJ
+                matches: '^[A-Za-z0-9_-]{43}$'
           - fetch:
               url: https://localhost/api/v1/project
               ca: /data/svc/caddy/pki/authorities/local/root.crt

@@ -26,9 +26,9 @@ files are refused. No provisioning shell script is executed.
 
 The mount broker, DHCP renewal and domain-age authority start before fence removes
 privileges needed for their setup. Service programs then run under the machine's seal
-and filesystem policy. Failure of a required protection stops boot. Other failed setup
-steps are logged and boot proceeds where possible. Only a blank data disk may be
-formatted automatically.
+and filesystem policy. Failure of a required protection stops boot. Other failed
+setup steps are logged and boot proceeds where possible. Only a blank data disk may
+be formatted automatically.
 
 ## FILES
 

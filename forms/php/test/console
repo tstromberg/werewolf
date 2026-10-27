@@ -1,6 +1,6 @@
 # What the php form, booted as it ships, without a shell, must say on its
-# console (make check-shellfree-php; test/boot; forms/demo/test/console has the
-# format). That it answers is test/checks' answering, on the DEV=1 build.
+# console (make check-shellfree-php; test/console.zig; forms/demo/test/console
+# has the format). Its native tests check that it answers.
 # nginx and php-fpm start, leashed, and php-fpm takes connections.
 
 seen    nginx-leashed     leash: \{"event":"start","service":"nginx"

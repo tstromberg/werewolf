@@ -3,7 +3,7 @@
 # an operator would make one (forms/step-ca/README.md): a root CA whose key stays
 # here (DIR.work), an intermediate signed by it, with its key encrypted
 # under the password file, the CA's name and the names ACME may issue
-# for (forms/step-ca/test/checks).
+# for (forms/step-ca/test/tests.yaml).
 set -eu
 d=$1/step-ca
 w=$1.work

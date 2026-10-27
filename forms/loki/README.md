@@ -22,8 +22,9 @@ openssl rand -base64 24 >loki-password
 howl create loki --with loki --domain logs.home.arpa --loki-user alloy --loki-password loki-password
 ```
 
-Point a client at `https://logs.home.arpa` with that user and the password file. Pushing
-logs is in [Loki's documentation](https://grafana.com/docs/loki/latest/send-data/).
+Point a client at `https://logs.home.arpa` with that user and the password file.
+Pushing logs is in [Loki's
+documentation](https://grafana.com/docs/loki/latest/send-data/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -33,8 +34,8 @@ howl create loki --with loki --on gcp --allow-from me \
 	--domain logs.example.com --loki-user alloy --loki-password loki-password
 ```
 
-`--allow-from me` admits your address to ports 80 and 443. Use a name you control, and
-point it at the machine.
+`--allow-from me` admits your address to ports 80 and 443. Use a name you control,
+and point it at the machine.
 
 ### Importing data
 

@@ -48,11 +48,9 @@ pub const Spec = struct {
     /// form is a form's name, or the directory of one outside forms/.
     form: []const u8,
     arch: howl.Arch,
-    /// dev adds a shell, as DEV=1 does.
+    /// dev adds developer SSH for test iteration (--dev=ssh): sh-shim and the
+    /// native clients, with no shell.
     dev: bool = false,
-    /// dev_shell adds mksh, BusyBox tools and form-specific debug tools. SSH iteration
-    /// keeps developer access but uses sh-shim and the native clients only.
-    dev_shell: bool = true,
     /// disabled is what --disable gave up of werewolf's protections. An
     /// image may lack only these (unnamed), and its command line says which.
     disabled: cmdline.Protections = .empty,
@@ -122,7 +120,7 @@ pub const Spec = struct {
     }
 
     pub fn devSuffix(s: Spec) []const u8 {
-        return if (!s.dev) "" else if (s.dev_shell) "-dev" else "-dev-ssh";
+        return if (s.dev) "-dev-ssh" else "";
     }
 };
 
@@ -156,15 +154,15 @@ pub fn paths(gpa: Allocator, s: Spec) !Paths {
     };
 }
 
-test "SSH and shell developer images have separate cache paths" {
+test "developer images build apart from production ones" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var spec: Spec = .{ .form = "minimal", .arch = .aarch64, .dev = true };
-    const shell = try paths(gpa, spec);
-    spec.dev_shell = false;
+    var spec: Spec = .{ .form = "minimal", .arch = .aarch64 };
+    const production = try paths(gpa, spec);
+    spec.dev = true;
     const ssh = try paths(gpa, spec);
-    try std.testing.expect(!mem.eql(u8, shell.out, ssh.out));
+    try std.testing.expect(!mem.eql(u8, production.out, ssh.out));
     try std.testing.expect(mem.endsWith(u8, ssh.out, "-dev-ssh"));
 }
 
@@ -373,10 +371,10 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
             .{ .slot = true, .qcow2 = true, .prebuilt = o.ipe_updates != null },
     );
     const p = try paths(gpa, spec);
-    // A DEV=1 build has a root shell on its console (cmd/debug-shell): never one to publish.
+    // A developer image takes SSH logins with howl's local key: never one to publish.
     if (Dir.cwd().access(io, try gpa.print("{s}/meta/usr/share/werewolf/dev", .{p.out}), .{})) |_|
         return steps.fail(try gpa.print(
-            "refused: {s} is a DEV=1 build, with a root shell on its console",
+            "refused: {s} is a developer image, with SSH for test iteration",
             .{f},
         ))
     else |_| {}
@@ -507,7 +505,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
 /// DISK_MIB and DISK_ARGS; the qcow2 goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev[=ssh]] [--disable=LIST] " ++
+    const syntax = "_build --with FORM [--arch ARCH] [--dev=ssh] [--disable=LIST] " ++
         "[--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
@@ -523,11 +521,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     var goals: Goals = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--dev")) {
+        if (std.mem.eql(u8, args[i], "--dev=ssh")) {
             spec.dev = true;
-        } else if (std.mem.eql(u8, args[i], "--dev=ssh")) {
-            spec.dev = true;
-            spec.dev_shell = false;
         } else if (std.mem.eql(u8, args[i], "--boot-native")) {
             spec.boot_native = true;
         } else if (std.mem.eql(u8, args[i], "--tpm")) {
@@ -1112,10 +1107,10 @@ test "image enrollment requires IPE, a safe channel and a release serial" {
 /// posture, the seal's two, and those that replace shell scripts
 /// (docs/design/shell-free.md).
 pub const every_program = [_][]const u8{
-    "stage0",     "iface-up",     "fence",       "mount",        "mount-broker",
-    "posture",    "seal-watch",   "seal",        "runit-stage",  "reboot",
-    "slot-keep",  "power-button", "debug-shell", "ssh-host-key", "leash",
-    "leash-reap", "syslogd",      "unwound",     "unwound-age",
+    "stage0",    "iface-up",     "fence",        "mount",       "mount-broker",
+    "posture",   "seal-watch",   "seal",         "runit-stage", "reboot",
+    "slot-keep", "power-button", "ssh-host-key", "leash",       "leash-reap",
+    "syslogd",   "unwound",      "unwound-age",
 };
 
 /// plan reads the form's chain and works out everything the steps need.

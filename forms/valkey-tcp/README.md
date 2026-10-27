@@ -1,15 +1,15 @@
 # Valkey TCP - Hardened VM
 
-[Valkey](https://valkey.io) 9.1 on TCP port 6379: [valkey](../valkey/README.md) with a
-reachable listener. The form's manifest is [form.yaml](form.yaml).
+[Valkey](https://valkey.io) 9.1 on TCP port 6379: [valkey](../valkey/README.md) with
+a reachable listener. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/valkey-tcp/index.html).
 
 ## Security Posture
 
-The server runs as its own user. There is no shell. Landlock and seccomp hold it to its
-socket, to port 6379, and to `/data/svc/valkey`. The root is read-only.
+The server runs as its own user. There is no shell. Landlock and seccomp hold it to
+its socket, to port 6379, and to `/data/svc/valkey`. The root is read-only.
 
 - The socket remains. A client on the network needs the password. `nopass` does not
   leave the machine.
@@ -29,7 +29,8 @@ openssl rand -base64 24 | tr -d '\n' >password
 howl create valkey-tcp --with valkey-tcp --maxmemory 256 --valkey-password password
 ```
 
-The server answers on port 6379 of ADDRESS. The client is `valkey-cli -h ADDRESS -p 6379
+The server answers on port 6379 of ADDRESS. The client is `valkey-cli -h ADDRESS -p
+6379
 -a "$(cat password)"`. Commands are in [Valkey's command
 reference](https://valkey.io/commands/).
 
@@ -42,15 +43,15 @@ howl create valkey-tcp --with valkey-tcp --on gcp --allow-from me \
 ```
 
 `--allow-from me` admits your address to port 6379. `--maxmemory` is mebibytes.
-`--maxmemory 0` removes the cap. A form that must also keep a cgroup cap restates this
-service with `memory:` set above that number. The cgroup is in the image, so it cannot
-follow the flag.
+`--maxmemory 0` removes the cap. A form that must also keep a cgroup cap restates
+this service with `memory:` set above that number. The cgroup is in the image, so it
+cannot follow the flag.
 
 ### Importing data
 
-`--import` copies `dump.rdb` once, before the first start. Take it from the old server
-with `valkey-cli --rdb dump.rdb`. The password and the cap are the same flags as a fresh
-install.
+`--import` copies `dump.rdb` once, before the first start. Take it from the old
+server with `valkey-cli --rdb dump.rdb`. The password and the cap are the same flags
+as a fresh install.
 
 ```sh
 openssl rand -base64 24 | tr -d '\n' >password

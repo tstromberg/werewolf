@@ -1,6 +1,7 @@
 # howl builds images
 
-Built, 2026-10-09: howl builds every image and make asks it; the Makefile is 599 lines.
+Built, 2026-10-09: howl builds every image and make asks it; the Makefile is 599
+lines.
 
 ## Summary
 

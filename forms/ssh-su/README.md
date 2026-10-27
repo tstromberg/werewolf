@@ -33,7 +33,7 @@ Inherited authentication requirements, including two distinct keys, remain in
 force. Load each required credential into the dedicated agent described below.
 
 The machine's own `weaknesses:` must include su's declarations, since forms
-do not inherit excuses. Agent forwarding is the additional SSH policy weakness.
+do not inherit excuses.
 The network grant permits all guest users to reach 127.0.0.1:22; SSH still
 requires an authorized root key. It grants no external SSH connections.
 

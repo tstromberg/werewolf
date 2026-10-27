@@ -15,10 +15,6 @@ packages:
 
 with: [postgresql, caddy]
 
-# The check reads Mattermost's schema with psql.
-dev:
-  - postgresql-client~18
-
 # make check's, for this form alone (forms/README.md)
 check:
   memory: 2048

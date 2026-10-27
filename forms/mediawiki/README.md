@@ -8,8 +8,8 @@ instructions](https://dist.werewolf-linux.org/boot/v1/mediawiki/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -41,20 +41,22 @@ howl create mediawiki --with mediawiki --on gcp --allow-from me \
 ```
 
 Open `https://wiki.lab.example.edu` once Caddy or the load balancer is in front and
-sends `X-Forwarded-Proto`. Reading is closed until you set `public-read` true. Only an
-administrator makes accounts. There is no mail, so there is no password reset by email.
+sends `X-Forwarded-Proto`. Reading is closed until you set `public-read` true. Only
+an administrator makes accounts. There is no mail, so there is no password reset by
+email.
 
 ### Importing data
 
 The database is SQLite in `/data`, and the host cannot write that directory. Export
-pages as XML from the old wiki and import them with Special:Import after this one is up.
+pages as XML from the old wiki and import them with Special:Import after this one is
+up.
 
 ### Known Quirks
 
 - MediaWiki's dependency caches and persisted authentication requests contain PHP
   objects. Only its PHP service receives the `php:deserialize` allowance.
-- The wiki installs itself before it serves. A later image runs `update.php` only when
-  the code has changed.
+- The wiki installs itself before it serves. A later image runs `update.php` only
+  when the code has changed.
 - Uploads are images and PDF. SVG and HTML are refused.
 - Extensions that run programs are not installed: Scribunto, SyntaxHighlight, Math,
   PdfHandler.

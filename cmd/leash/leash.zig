@@ -9,7 +9,6 @@ const seal = @import("seal");
 const settings = @import("settings");
 const sandbox = @import("sandbox");
 const service = @import("service");
-const cmdline = @import("cmdline");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -382,7 +381,6 @@ pub fn main(init: std.process.Init) !void {
         copyConfig(own_run, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
             l.fail(.park, "config {s}: {s}", .{ cfg.name, @errorName(err) });
     }
-    const learn = learning();
     record(
         io,
         .stdout(),
@@ -397,8 +395,6 @@ pub fn main(init: std.process.Init) !void {
             .connect = s.connect,
             .landlock = rules.abi,
             .pledge = try words(gpa, s.pledge),
-            // While the machine learns, the service gets no filter.
-            .pledged = !learn,
         },
     );
 
@@ -449,7 +445,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 0;
     while (env_it.next()) |e| : (i += 1)
         envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
-    pledgeAndExec(l, prog_rc, s.exec[0], s.pledge, learn, argv.ptr, envp.ptr);
+    pledgeAndExec(l, prog_rc, s.exec[0], s.pledge, argv.ptr, envp.ptr);
 }
 
 /// Developer SSH is the local, disposable arbitrary-execution boundary. It
@@ -471,14 +467,12 @@ test "only developer SSH can launch a nested leash" {
 /// pledgeAndExec installs a pledge of promises and becomes the program
 /// opened as prog, which a pledge without exec allows. The pledge returns
 /// ENOSYS outside its promises and has no listener, so no_new_privs
-/// suffices to install it. While the machine learns there is none, so
-/// every call reaches seal-watch.
+/// suffices to install it.
 fn pledgeAndExec(
     l: Leash,
     prog: usize,
     path: []const u8,
     promises: seal.Set,
-    learn: bool,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
 ) noreturn {
@@ -493,11 +487,9 @@ fn pledgeAndExec(
         _ = linux.close(@intCast(prog));
         break :blk @intCast(high_fd);
     } else prog;
-    if (!learn) {
-        var filter_buf: [seal.max_filter]seal.Filter = undefined;
-        const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(exec_fd));
-        _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
-    }
+    var filter_buf: [seal.max_filter]seal.Filter = undefined;
+    const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(exec_fd));
+    _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
     const rc = linux.syscall5(
         .execveat,
         exec_fd,
@@ -569,7 +561,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     for (n.read) |p| allowPath(l, rules, gpa, p, read_tree, false);
     for (n.write) |p| allowPath(l, rules, gpa, p, write_tree, false);
     allowProgram(l, rules, gpa, n.program, false);
-    const learn = learning();
     rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     record(io, .stderr(), .{
         .event = "narrow",
@@ -577,7 +568,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         .program = n.program,
         .landlock = rules.abi,
         .pledge = try words(gpa, n.pledge),
-        .pledged = !learn,
     });
 
     const prog_rc = linux.open(
@@ -591,7 +581,7 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     for (m.args.vector, argv) |a, *p| p.* = a;
     const envp = try gpa.allocSentinel(?[*:0]const u8, m.environ.block.slice.len, null);
     for (m.environ.block.slice, envp) |e, *p| p.* = e;
-    pledgeAndExec(l, prog_rc, n.program, n.pledge, learn, argv.ptr, envp.ptr);
+    pledgeAndExec(l, prog_rc, n.program, n.pledge, argv.ptr, envp.ptr);
 }
 
 /// readRootFile reads the file at path, at most max_file bytes, if root
@@ -621,30 +611,6 @@ fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
         off += got;
     }
     return buf;
-}
-
-/// learning reports whether the machine is learning pledges: werewolf.seal=learn
-/// on a DEV=1 build. It reads /proc/cmdline, which root cannot rewrite as it
-/// could a file in /run; an unparsable command line means not learning.
-fn learning() bool {
-    var buf: [4096]u8 = undefined;
-    const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.errno(fd) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(fd));
-    const n = linux.read(@intCast(fd), &buf, buf.len);
-    if (linux.errno(n) != .SUCCESS) return false;
-    var refused: cmdline.Failure = .{};
-    const c = cmdline.parse(buf[0..n], &refused) orelse return false;
-    if (c.seal != .learn) return false;
-    const profile = linux.open(
-        "/usr/share/werewolf/dev",
-        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
-        0,
-    );
-    if (linux.errno(profile) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(profile));
-    const size = linux.read(@intCast(profile), &buf, buf.len);
-    return linux.errno(size) == .SUCCESS and std.mem.eql(u8, buf[0..size], "dev\n");
 }
 
 // --- as root ---------------------------------------------------------------------

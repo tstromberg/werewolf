@@ -1,10 +1,10 @@
 # Microsoft's third-party UEFI CAs
 
-Azure's firmware keeps Microsoft's PK: a gallery image that brings its own PK boots in
-setup mode. So `howl` takes Azure's `MicrosoftUefiCertificateAuthorityTemplate`, adds
-the image's boot certificate to db, and revokes in dbx the certificates that template
-trusts, which sign every other vendor's loader. Firmware then admits the image's signer
-alone, as on GCP and AWS, and stage0 checks that it does.
+Azure's firmware keeps Microsoft's PK: a gallery image that brings its own PK boots
+in setup mode. So `howl` takes Azure's `MicrosoftUefiCertificateAuthorityTemplate`,
+adds the image's boot certificate to db, and revokes in dbx the certificates that
+template trusts, which sign every other vendor's loader. Firmware then admits the
+image's signer alone, as on GCP and AWS, and stage0 checks that it does.
 
 The certificates are Microsoft's published Secure Boot objects,
 [microsoft/secureboot_objects](https://github.com/microsoft/secureboot_objects)

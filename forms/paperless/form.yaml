@@ -32,11 +32,6 @@ packages:
   - fontconfig
   - tzdata
 
-# The checks sign in with curl, which keeps the token.
-dev:
-  - curl
-  - postgresql-client~18
-
 # make check's (forms/README.md): four Paperless services, Valkey and Caddy.
 check:
   memory: 4096
@@ -58,7 +53,8 @@ services:
   # PostgreSQL sockets; neither needs a network listener.
   paperless:
     allow: [python:native]
-    exec: /usr/lib/paperless/bin/python3 -B -u -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1 paperless.asgi:application
+    exec: /usr/lib/paperless/bin/python3 -B -u -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1
+      paperless.asgi:application
     before:
       - /usr/lib/werewolf/paperless-init
       - /usr/lib/paperless/bin/python3 -B -u /usr/lib/paperless/app/manage.py migrate --skip-checks --no-input

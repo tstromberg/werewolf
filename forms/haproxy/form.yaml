@@ -19,7 +19,7 @@ prune:
   - usr/bin/bash
 
 # make check's (forms/README.md): with no certificate in its config, as
-# its check has, nothing listens on :443; test/checks puts the backend
+# its check has, nothing listens on :443; test/tests.yaml puts the backend
 # there instead, on loopback.
 check:
   skip: [answering]

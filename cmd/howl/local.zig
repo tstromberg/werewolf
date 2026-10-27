@@ -100,7 +100,6 @@ pub fn createQemu(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
-            .dev_shell = o.dev_shell,
             .disabled = disabled,
             .published = !o.local,
             .app = ab.root,
@@ -248,6 +247,10 @@ pub fn protectedReady(
 ) !void {
     const ports = try listens(io, gpa, form, why);
     const dir = try machineDir(gpa, name);
+    const host = if (provider == .bhyve)
+        qemu.record(io, gpa, dir, "host") orelse "127.0.0.1"
+    else
+        "127.0.0.1";
     var mappings: std.ArrayList(lima.Forward) = .empty;
     if (provider == .lima) {
         try mappings.appendSlice(gpa, lima.forward(io, gpa, name, ports) catch |err|
@@ -262,6 +265,10 @@ pub fn protectedReady(
             .{ mapping.guest, mapping.host },
         );
         try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), record.written(), why);
+    } else if (provider == .bhyve) {
+        const tap = std.mem.eql(u8, qemu.record(io, gpa, dir, "network") orelse "slirp", "tap");
+        for (try bhyve.forwards(gpa, name, ports)) |f|
+            try mappings.append(gpa, .{ .guest = f.guest, .host = if (tap) f.guest else f.host });
     } else {
         var web: ?u16 = null;
         for (ports) |port| if (port != 22) {
@@ -269,10 +276,10 @@ pub fn protectedReady(
         };
         for (ports) |port| {
             const key = if (port == 22) "ssh" else if (web == port) "web" else continue;
-            const host = qemu.record(io, gpa, dir, key) orelse continue;
+            const forwarded = qemu.record(io, gpa, dir, key) orelse continue;
             try mappings.append(
                 gpa,
-                .{ .guest = port, .host = try std.fmt.parseInt(u16, host, 10) },
+                .{ .guest = port, .host = try std.fmt.parseInt(u16, forwarded, 10) },
             );
         }
     }
@@ -280,7 +287,7 @@ pub fn protectedReady(
     for (mappings.items) |mapping| {
         if (primary == null or mapping.guest != 22) primary = mapping.host;
     }
-    const address = if (primary) |port| try gpa.print("127.0.0.1:{d}", .{port}) else "-";
+    const address = if (primary) |port| try gpa.print("{s}:{d}", .{ host, port }) else "-";
     if (!(Io.File.stdout().isTty(io) catch false)) {
         try w.print(
             "{s}\t{s}\t{s}\tSecure Boot, IPE, TPM A/B{s}\n",
@@ -292,14 +299,14 @@ pub fn protectedReady(
     for (mappings.items) |mapping| {
         if (mapping.guest == 22) {
             try next.print(
-                "     SSH      {s}  (127.0.0.1:{d})\n",
-                .{ try sshCommand(gpa, name, false), mapping.host },
+                "     SSH      {s}  ({s}:{d})\n",
+                .{ try sshCommand(gpa, name, false), host, mapping.host },
             );
         } else if (mapping.guest == 80 or mapping.guest == 443) {
-            try next.print("     Open     {s}://127.0.0.1:{d}\n", .{
-                if (mapping.guest == 443) "https" else "http", mapping.host,
+            try next.print("     Open     {s}://{s}:{d}\n", .{
+                if (mapping.guest == 443) "https" else "http", host, mapping.host,
             });
-        } else try next.print("     TCP/{d}  127.0.0.1:{d}\n", .{ mapping.guest, mapping.host });
+        } else try next.print("     TCP/{d}  {s}:{d}\n", .{ mapping.guest, host, mapping.host });
     }
     try next.print("     Console  {s}\n     Stop     {s}\n", .{
         try consoleCommand(gpa, name), try stopCommand(gpa, name),
@@ -387,7 +394,6 @@ pub fn createLima(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
-            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,
@@ -718,6 +724,15 @@ pub fn createBhyve(
     w: *Io.Writer,
     why: *Why,
 ) !void {
+    const secured = if (Dir.cwd().access(io, try gpa.print("{s}/authority/profile.json", .{
+        try machineDir(gpa, name),
+    }), .{})) |_| true else |_| false;
+    if (secured and !o.protected()) return why.refuse(
+        "{s}: an enrolled machine keeps its protections: --disable cannot remove them",
+        .{name},
+    );
+    if (o.protected() or secured)
+        return @import("local-secure.zig").create(io, gpa, o, name, tar, tell, w, why);
     if (!bhyve.installed(io))
         return why.refuse(
             "--on bhyve: FreeBSD on x86_64 or arm64, with vmm loaded (kldload vmm)",
@@ -788,7 +803,6 @@ pub fn createBhyve(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
-            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,
@@ -913,7 +927,8 @@ pub fn createFirecracker(
         .{},
     );
     if (!firecracker.installed(io, gpa)) return why.refuse(
-        "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH (tools/install-deps)",
+        "--on firecracker: Linux with /dev/kvm, Firecracker 1.17+, bubblewrap and prlimit " ++
+            "(tools/install-deps)",
         .{},
     );
     const root = firecracker.asRoot(io, gpa) catch
@@ -927,7 +942,13 @@ pub fn createFirecracker(
     const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
     const kept = if (Dir.cwd().access(io, disk, .{})) |_| true else |_| false;
     if (kept) {
-        const has_pin = if (Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }), .{})) |_| true else |err| switch (err) {
+        const has_pin = if (Dir.cwd().access(
+            io,
+            try gpa.print("{s}/{s}", .{ dir, firecracker.trust_file }),
+            .{},
+        )) |_|
+            true
+        else |err| switch (err) {
             error.FileNotFound => false,
             else => return err,
         };
@@ -959,7 +980,6 @@ pub fn createFirecracker(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
-            .dev_shell = o.dev_shell,
             .disabled = o.disabled,
             .published = !o.local,
             .app = ab.root,

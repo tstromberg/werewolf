@@ -1,14 +1,14 @@
 # forms
 
-To choose a VM, browse the [available forms and setup guides](../docs/forms-catalog.md).
-For prebuilt disks, see [image availability and download
-instructions](../docs/forms-catalog.md#images-and-downloads). This page is the reference
-for defining a form.
+To choose a VM, browse the [available forms and setup
+guides](../docs/forms-catalog.md). For prebuilt disks, see [image availability and
+download instructions](../docs/forms-catalog.md#images-and-downloads). This page is
+the reference for defining a form.
 
-Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
-holds its service policy and configuration: a new form is a new directory.
-Third-party package recipes, patches and build sources live in the sibling
-`../packages` checkout, organized under `CATEGORY/NAME/`, including hardened runtimes.
+Each directory here is a form ([docs/forms.md](../docs/forms.md)), and holds its
+service policy and configuration: a new form is a new directory. Third-party package
+recipes, patches and build sources live in the sibling `../packages` checkout,
+organized under `CATEGORY/NAME/`, including hardened runtimes.
 
 ```text
 forms/NAME/
@@ -17,18 +17,18 @@ forms/NAME/
   cmd/PROGRAM/    a program only this form needs, PROGRAM.zig, built and laid
                   at /usr/lib/werewolf/PROGRAM (docs/programs.md)
   melange/        distro-specific package recipes beside their source (docs/forms.md)
-  test/checks     make check's checks for it, beside test/checks
+  test/tests.yaml its native tests: YAML probes and Zig drivers (docs/testing-native.md)
   test/config     writes its config for make check: config DIR
   test/console    console lines its as-shipped boot must show
   README.md       what it is, how to use it, what it refuses, and how data comes in (TEMPLATE.md)
 ```
 
-A form has the parts of every form in its chain, base first and its own
-last, so its files win; `make list-forms` shows each chain. CI publishes
-each form but those with melange recipes as NAME-form
-([docs/releases.md](../docs/releases.md#packages)), and howl takes a form
-by name from there, so the machine updates it; `--build` takes this tree's.
-These are APK packages, not bootable qcow2 images; disk publication has separate gates.
+A form has the parts of every form in its chain, base first and its own last, so its
+files win; `make list-forms` shows each chain. CI publishes each form but those with
+melange recipes as NAME-form ([docs/releases.md](../docs/releases.md#packages)), and
+howl takes a form by name from there, so the machine updates it; `--build` takes this
+tree's. These are APK packages, not bootable qcow2 images; disk publication has
+separate gates.
 
 ## form.yaml
 
@@ -48,11 +48,10 @@ These are APK packages, not bootable qcow2 images; disk publication has separate
 | `imports` | supported data import modes: `[init]` (the default), `[init, sync]`, or `[]` to refuse imports. The form must implement each declared mode; `sync` preserves destination-only files. Signed into the deployment definition; see [data import](../docs/design/data-import.md) | the last declaration's |
 | `net` | the network of what is no service, as the updater's fetcher (`connect _update tcp/443`, `lookup _update packages.wolfi.dev`) or root's: `listen tcp/PORT... [loopback|lan]`, `listen USER udp/PORT... [lan]` (a kernel's socket is root's), `connect USER\|:all\|:people tcp/PORT udp/PORT icmp [public]` (UDP also accepts `lan` for connected subnets and discovery multicast, for a USER), `metadata USER`, `lookup USER\|:people NAME [TYPE...]`; `:all` is every user, and `:people` every person, Lima's NoCloud login included, by the uid ranges init gives them alone (an account the image declares there fails the build); no account name begins with `:`. A line for a service's user is refused ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
 | `prune` | files its packages bring that nothing runs, as each is in the image: `usr/bin/bash` | added to |
-| `dev` | packages for DEV=1 builds alone: a daemon's client, for its checks | added to |
 | `weaknesses` | the posture checks it fails, each with its excuse: why this image has the weakness, not what the check tests. `?ID` may fail or not, as the host decides. None named, none excused: any posture failure fails `make check` | its own |
 | `sshd` | sshd_config settings, each named in lowercase with dashes, from a closed list ([lib/sshd.zig](../lib/sshd.zig)): `pubkey-accepted-algorithms: ssh-ed25519,sk-ssh-ed25519@openssh.com` lets key files in beside security keys; werewolf's own `verify-required-keys`, none or security key types, puts `verify-required` before each such key of `users:`. The image holds them in `/etc/ssh/sshd_config.d/form.conf`, which sshd reads before werewolf's policy. Only where the chain has the `sshd` form or the `bastion`; a setting posture checks wants its weakness named. howl's `--sshd.KEYWORD=VALUE` writes the same | a later form's value in place of its base's |
 | `bastion` | the bastion's users: `users:`, each a name with `keys:` (lines of a `.pub`, security keys' unless `sshd:` takes key files) and `destinations:` (literal `ADDRESS:PORT`s). The image holds them in `/etc/ssh/bastion`, each key held to its user's destinations ([bastion](bastion/README.md)) | added to |
-| `check` | how `make check` boots it: `memory` (MiB, a number), `offline: true`, `web` (a port test/boot drives from the host), `skip` (a list of the checks of test/checks it skips), `native: false` (not checked under systemd-nspawn, as every other form is; say why). `offline` and `native` are `true` or `false`; anything else fails the build | its own |
+| `check` | how `make check` boots it: `memory` (MiB, a number), `offline: true`, `skip` (the shared platform checks its boot rules out, such as `http-answering`), `native: false` (not checked under systemd-nspawn, as every other form is; say why). `offline` and `native` are `true` or `false`; anything else fails the build | its own |
 
 A service's `allow: [java:native]` grants a hardened runtime capability to that
 service's cgroup alone. The builder generates its read-only marker under
@@ -75,8 +74,8 @@ keys are its own because they describe the machine as built: a form on
 `python` that ships no interpreter would fail no check, so it does not
 inherit `python`'s excuse. `make check` fails a machine on any posture
 failure its form does not excuse, and on any excused one that passes;
-[test/posture-known](../test/posture-known) holds what every form of a
-kind fails (a DEV=1 build's shell, an architecture's gap). The image
+[test/posture-known](../test/posture-known) holds what every form
+fails (a boot-chain gap, an architecture's). The image
 carries both, with their excuses, in `/usr/share/werewolf/weaknesses`, so
 every machine knows which failures are expected: posture marks each
 excused one in its JSON and warns on the console of any other, wherever
@@ -145,8 +144,8 @@ file ownership before updating a machine that used the old id.
    `packages`; and its `net`.
 2. its `services`: how leash starts each, as whom, on which ports
    ([cmd/leash](../cmd/leash/leash.zig) lists the directives).
-3. `forms/NAME/test/checks`: at least five distinct integration cases proving what works
-   and what is refused ([coverage
+3. `forms/NAME/test/tests.yaml`: at least five distinct integration cases proving
+   what works and what is refused ([coverage
    policy](../docs/testing.md#form-integration-coverage)).
 4. `make check-NAME`, then name each posture failure in `weaknesses`
    with its excuse, or fix it.

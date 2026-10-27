@@ -44,13 +44,8 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
         .{},
     );
     try std.Io.Dir.cwd().setFilePermissions(io, "/untrusted/probe", .fromMode(0o755), .{});
-    try std.Io.Dir.cwd().copyFile(
-        "/trusted/usr/bin/busybox",
-        .cwd(),
-        "/untrusted/busybox",
-        io,
-        .{},
-    );
+    // A dynamically linked program the image has, for the loader to map.
+    try std.Io.Dir.cwd().copyFile("/trusted/usr/bin/zstd", .cwd(), "/untrusted/zstd", io, .{});
     const signed = try std.Io.Dir.cwd().readFileAlloc(
         io,
         "/ipe.p7b",
@@ -78,14 +73,14 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
     };
     try execResult(
         loader_path,
-        &.{ loader_path, "/tmp/busybox", "true" },
+        &.{ loader_path, "/tmp/zstd", "-V" },
         true,
         "/trusted",
     );
     // Also prove this loader works for the trusted copy with the same libs.
     try execResult(
         loader_path,
-        &.{ loader_path, "/usr/bin/busybox", "true" },
+        &.{ loader_path, "/usr/bin/zstd", "-V" },
         false,
         "/trusted",
     );

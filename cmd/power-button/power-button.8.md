@@ -15,8 +15,9 @@ power-button — request clean shutdown on a virtual power-button press
 
 The **power-button** service listens for power-key input events from ACPI or GPIO
 devices. A press requests runit's orderly poweroff: services stop and persistent
-storage is unmounted before the machine powers off. Cloud stop requests and hypervisor
-power-down operations use this path when they deliver a virtual button event.
+storage is unmounted before the machine powers off. Cloud stop requests and
+hypervisor power-down operations use this path when they deliver a virtual button
+event.
 
 An unprivileged _power child reads input events. A root monitor without capabilities
 receives only a one-byte decision; its system call filter restricts the flag writes

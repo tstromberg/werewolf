@@ -1,8 +1,8 @@
 # Operating a VM without SSH
 
-Current enrolled QEMU images support a host-private control channel through the existing
-updater. It works across forms, retaining their normal shell and login policies. Both
-the image and the host `howl` must support it.
+Current enrolled QEMU images support a host-private control channel through the
+existing updater. It works across forms, retaining their normal shell and login
+policies. Both the image and the host `howl` must support it.
 
 ```sh
 howl owner status
@@ -34,12 +34,12 @@ descriptor only over the updater's existing private socketpair. Fence continues 
 deny other programs access to that device. The updater retains uid 77, no
 capabilities, Landlock, seccomp and its existing authenticated broker operations.
 
-Requests contain a correlation ID and one fixed operation, with a hash allowed only for
-`try`. Oversized frames are discarded; requests select no executable or path. Status is
-guest diagnostics, not independent attestation.
+Requests contain a correlation ID and one fixed operation, with a hash allowed only
+for `try`. Oversized frames are discarded; requests select no executable or path.
+Status is guest diagnostics, not independent attestation.
 
-The QEMU lifecycle test uses this production interface on unmodified signed images, to
-read status and pause the updater; it neither edits the image nor installs a guest test
-agent. A candidate's own updates follow the public mirror, so failed trials are tested
-on disposable keys
+The QEMU lifecycle test uses this production interface on unmodified signed images,
+to read status and pause the updater; it neither edits the image nor installs a guest
+test agent. A candidate's own updates follow the public mirror, so failed trials are
+tested on disposable keys
 ([test/check-independent-updates](../test/check-independent-updates.zig)).

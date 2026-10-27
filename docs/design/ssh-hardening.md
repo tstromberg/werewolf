@@ -13,7 +13,8 @@ leash ([su.md](su.md)). Of ~30 server-side OpenSSH bugs since 2016, ~20 needed a
 feature werewolf leaves off (GSSAPI, X11, tunnels, compression); the rest, such as
 regreSSHion (CVE-2024-6387), are in code every build has. Wolfi's sshd loads libpam,
 libselinux, libpcre2 and libz, unused here, as liblzma reached it (CVE-2024-3094).
-Apple's Secure Enclave keys never report verification; `verify-required` refuses them.
+Apple's Secure Enclave keys never report verification; `verify-required` refuses
+them.
 
 ## Goals
 
@@ -21,13 +22,16 @@ Apple's Secure Enclave keys never report verification; `verify-required` refuses
   load no PAM, SELinux, PCRE2 or zlib; sshd refuses `Compression yes`.
 - `sshd -T`: post-quantum key exchange, AES-GCM, ed25519 host keys, no compression.
 - A root SSH session's CapBnd is `4004404ed` (was `4254404ff`); capset, seccomp,
-  Landlock, netlink and AF_PACKET fail with ENOSYS; it writes only where listed below.
-- prod-ssh takes Touch ID keys; ed25519 keys still need a PIN; no one edits their keys.
+  Landlock, netlink and AF_PACKET fail with ENOSYS; it writes only where listed
+  below.
+- prod-ssh takes Touch ID keys; ed25519 keys still need a PIN; no one edits their
+  keys.
 
 ## Non-Goals
 
-Removing uid 0 from sshd's monitor ([privilege-separation.md](privilege-separation.md))
-and attesting Secure Enclave keys.
+Removing uid 0 from sshd's monitor
+([privilege-separation.md](privilege-separation.md)) and attesting Secure Enclave
+keys.
 
 ## Detailed design
 
@@ -39,11 +43,12 @@ address (glibc asked netlink to sort it). It keeps Wolfi's names and outranks Wo
 build; a changed option, step or subpackage stops derivation. Published, it takes
 `unix_chkpwd` away.
 
-**Configuration** (`forms/sshd/.../werewolf.conf`): mlkem768x25519 and sntrup761x25519
-key exchange; AES-GCM alone, which Terrapin cannot attack with any client;
-`HostKeyAlgorithms ssh-ed25519`, `Compression no` (the bastion's too), `PermitUserRC
-no`, `PerSourceMaxStartups 3`, `UnusedConnectionTimeout 60`, `TCPKeepAlive no`, and
-`ListenAddress` 0.0.0.0 and :: apart, each a one-result lookup. `UsePAM` is gone.
+**Configuration** (`forms/sshd/.../werewolf.conf`): mlkem768x25519 and
+sntrup761x25519 key exchange; AES-GCM alone, which Terrapin cannot attack with any
+client; `HostKeyAlgorithms ssh-ed25519`, `Compression no` (the bastion's too),
+`PermitUserRC no`, `PerSourceMaxStartups 3`, `UnusedConnectionTimeout 60`,
+`TCPKeepAlive no`, and `ListenAddress` 0.0.0.0 and :: apart, each a one-result
+lookup. `UsePAM` is gone.
 
 **Keys.** werewolf's `sshd: verify-required-keys` names the security key types to
 verify, or none: ssh-su names `sk-ssh-ed25519@openssh.com` beside `PubkeyAuthOptions
@@ -64,34 +69,34 @@ sandbox uses prctl) and `netlink` (no ip or ss); operators keep `reboot` and `sy
 handles writes, granting only /data, /tmp, /var/tmp, /dev/shm, /dev/pts, /run/runit
 (sv, reboot), /run/ssh-agent, /dev/ptmx, tty and null: never /run/werewolf,
 /run/cgroup or the TPM, whose PCR 11 a session could extend. It goes on after
-`before`, which publishes ssh-su's host-key pin. Developer SSH (`--dev`, sshd-dev)
-keeps the old pledge, DAC_OVERRIDE, SYS_RESOURCE, SETPCAP and a bind-only layer,
-which the services its nested leashes test inherit. Posture in a session takes
-boot's result, named `(cached)`, for what it cannot ask (netlink, leashing, its attack
-lock), `--no-cache` skipping them; ab-status reads stage0's TPM floor record.
+`before`, which publishes ssh-su's host-key pin. Developer SSH (`--dev=ssh`,
+sshd-dev) keeps the old pledge, DAC_OVERRIDE, SYS_RESOURCE, SETPCAP and a bind-only
+layer, which the services its nested leashes test inherit. Posture in a session takes
+boot's result, named `(cached)`, for what it cannot ask (netlink, leashing, its
+attack lock), `--no-cache` skipping them; ab-status reads stage0's TPM floor record.
 
 ## Drawbacks
 
 Another overlay follows Wolfi; a CVE fix waits for its next build. Clients before
-OpenSSH 8.5 cannot connect; hosts without AES instructions lose ChaCha20. P-256
-keys, YubiKeys' too, need no PIN on prod-ssh. Sessions share 512 MiB; three su
-callers can authenticate at once. Root cannot fix a service's files, kill a cgroup
-or run ip. Until the package is published, Wolfi's sshd logs both refusals it patches.
+OpenSSH 8.5 cannot connect; hosts without AES instructions lose ChaCha20. P-256 keys,
+YubiKeys' too, need no PIN on prod-ssh. Sessions share 512 MiB; three su callers can
+authenticate at once. Root cannot fix a service's files, kill a cgroup or run ip.
+Until the package is published, Wolfi's sshd logs both refusals it patches.
 
 ## Alternatives Considered
 
 - **`--without-openssl`**: drops libcrypto and Brotli too, but refuses Touch ID keys.
 - **Global `verify-required`, touch alone, or a per-key flag in `users:`**: refuses
   Apple's keys, drops YubiKey PINs, or changes the schema for what the type says.
-- **Later, operator verbs behind a broker**, leaving sshd CHOWN, FOWNER, KILL, SETUID,
-  SETGID, NET_BIND_SERVICE and SYS_CHROOT.
+- **Later, operator verbs behind a broker**, leaving sshd CHOWN, FOWNER, KILL,
+  SETUID, SETGID, NET_BIND_SERVICE and SYS_CHROOT.
 
 ## Security Considerations
 
 Theo would delete code rather than configure it off: PAM, SELinux, zlib and PKCS#11
 are gone; GSSAPI was never built. sshd-auth runs chrooted as `sshd` under OpenSSH's
-filter, but the listener and monitor hold every operator power. macOS software reports
-a Touch ID key's presence; only the enclave policy (`-t bio`) enforces it.
+filter, but the listener and monitor hold every operator power. macOS software
+reports a Touch ID key's presence; only the enclave policy (`-t bio`) enforces it.
 
 ## Reliability Considerations
 

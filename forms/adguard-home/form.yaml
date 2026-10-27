@@ -13,7 +13,7 @@ base: prod
 with: [caddy]
 
 check:
-  # :53 speaks DNS, not HTTP; test/checks asks it questions.
+  # :53 speaks DNS, not HTTP; test/tests.yaml asks it questions.
   skip: [http-answering]
 
 services:

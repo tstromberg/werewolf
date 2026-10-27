@@ -33,8 +33,9 @@ The kernel arguments select the root:
   Use /root.erofs appended to the initramfs.
 
 TPM-enrolled images verify enrollment and reject a release below the channel's
-rollback floor. On a slot boot, a deadman reboots after ten minutes unless the running
-system has committed the slot. The boot loader then falls back to the last good slot.
+rollback floor. On a slot boot, a deadman reboots after ten minutes unless the
+running system has committed the slot. The boot loader then falls back to the last
+good slot.
 
 ## FILES
 

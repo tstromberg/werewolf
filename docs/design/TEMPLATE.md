@@ -1,8 +1,8 @@
 # My Design Doc
 
-**Note for authors**: 100 lines maximum. No unnecessary words or sentences - value the
-reader's time. **Note for reviewers**: While reviewing this proposal, focus on answering
-for yourself:
+**Note for authors**: 100 lines maximum; 85 columns maximum. No unnecessary words or
+sentences - value the reader's time. **Note for reviewers**: While reviewing this
+proposal, focus on answering for yourself:
 
 * Does this proposal fit with our engineering principles?
 * Are there unexplored concerns with this design, such as reliability or usability
@@ -17,16 +17,16 @@ for yourself:
 ## Background
 The background serves to ground all readers in the same context that you have as an
 author. You should describe how the problem came to be, why it's worth solving, and
-whether there were previous attempts to solve it. Assume that the reader is new to this
-project.
+whether there were previous attempts to solve it. Assume that the reader is new to
+this project.
 
 Define or add hyperlinks to terms the reader may not yet be familiar with.
 
 ## Goals
 
-A bulleted list of specific goals for this proposal How will we know that this proposal
-has succeeded? Include specific, measurable outcomes, such as a check that passes or a
-number that moves.
+A bulleted list of specific goals for this proposal How will we know that this
+proposal has succeeded? Include specific, measurable outcomes, such as a check that
+passes or a number that moves.
 
 ## Non-Goals
 A bulleted list of what is out of scope for this proposal
@@ -37,16 +37,16 @@ This section is the bulk of the document. It should focus on the novel implement
 idea and specific corner cases.
 
 ## Drawbacks
-There are tradeoffs to choosing any path: this is where you identify them. Why should we
-not implement this design? Consider costs in additional complexity, training,
+There are tradeoffs to choosing any path: this is where you identify them. Why should
+we not implement this design? Consider costs in additional complexity, training,
 reliability, and dollars.
 
 ## Alternatives Considered
 This is the most critical section of an RFC. It serves as an enumeration of ideas
 imagined that were determined to be suboptimal.
 
-This section lets readers know you have done your homework and helps them assess if the
-solution is sized appropriately.
+This section lets readers know you have done your homework and helps them assess if
+the solution is sized appropriately.
 
 ### Title of Alternative #1
 What other ideas did you consider and discard? What is the impact of not taking this

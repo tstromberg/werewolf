@@ -34,6 +34,7 @@ pub const Kind = enum {
 pub const Fixture = struct {
     arch: []const u8,
     mode: []const u8,
+    tpm: bool = false,
     ssh_key: []const u8,
     form: []const u8 = "",
     channel: []const u8 = "",
@@ -604,6 +605,7 @@ pub const Provider = struct {
             return null;
         }
         var firmware: ?[]const u8 = null;
+        var tpm_socket: ?[]const u8 = null;
         if (p.fixture.secure()) {
             const enrolled = try p.path("enrolled");
             try p.enroll(enrolled);
@@ -612,6 +614,30 @@ pub const Provider = struct {
             try p.copyOut(&.{ code, vars });
             const dir = p.remote_dir.?;
             firmware = try gpa.print("bootrom,{s}/code.fd,{s}/vars.fd", .{ dir, dir });
+        }
+        if (p.fixture.tpm) {
+            if (!p.fixture.secure()) return p.refuse("TPM fixture requires Secure Boot", .{});
+            const profile = try p.path("profile.json");
+            const profile_data = try json.Stringify.valueAlloc(gpa, .{
+                .spec = .{ .form = "provider-ab", .arch = p.fixture.arch },
+                .managed = false,
+                .provider = "bhyve",
+            }, .{});
+            try Io.Dir.cwd().writeFile(p.io, .{ .sub_path = profile, .data = profile_data });
+            try p.copyOut(&.{profile});
+            const authority = try p.remotePath("authority");
+            _ = try p.remoteCommand(&.{ "mkdir", "-m", "700", authority }, .{});
+            _ = try p.remoteCommand(
+                &.{
+                    "mv",
+                    try p.remotePath("profile.json"),
+                    try gpa.print("{s}/profile.json", .{authority}),
+                },
+                .{},
+            );
+            var hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(p.remote_dir.?, &hash, .{});
+            tpm_socket = try gpa.print("/tmp/ww-tpm-{x}/data.sock", .{hash[0..12]});
         }
         const args = try bhyveArgv(gpa, .{
             .binary = p.bhyve_binary,
@@ -622,8 +648,11 @@ pub const Provider = struct {
             .ssh_port = forwarded,
             .arm64_firmware = p.bhyve_arm64_firmware,
             .enrolled = firmware,
+            .tpm_socket = tpm_socket,
         });
-        const supervisor = [_][]const u8{
+        const supervisor: []const []const u8 = if (p.fixture.tpm) &.{
+            try p.remotePath("howl-freebsd"), "_bhyve-secure", p.name, p.remote_dir.?, "doas", "-n",
+        } else &.{
             "doas",
             "-n",
             try p.remotePath("howl-freebsd"),
@@ -636,7 +665,7 @@ pub const Provider = struct {
         else
             try gpa.print("127.0.0.1:{d}", .{forwarded}));
         p.ssh_port = 22;
-        return try mem.concat(gpa, []const u8, &.{ &supervisor, args });
+        return try mem.concat(gpa, []const u8, &.{ supervisor, args });
     }
 
     /// firecrackerLaunch gives the machine a TAP of its own and a boot
@@ -665,12 +694,39 @@ pub const Provider = struct {
         try p.copyOut(&.{patched});
         const copied = try p.remotePath("entry.conf");
         _ = try p.remoteCommand(&.{ "mcopy", "-o", "-i", image, copied, entry_path }, .{});
+        if (mem.eql(u8, p.env.get("AB_FIRECRACKER_PINNED") orelse "0", "1")) {
+            // The fixture is fresh and host-built. Pin it before first boot,
+            // exactly as the production create path pins its initial image.
+            var hashes: [2][64]u8 = undefined;
+            for ([_][]const u8{ "vmlinuz", "stage0.zst" }, 0..) |file, i| {
+                const target = try p.remotePath(try gpa.print("pin-{s}", .{file}));
+                _ = try p.remoteCommand(
+                    &.{ "mcopy", "-i", image, try gpa.print("::/werewolf/a/{s}", .{file}), target },
+                    .{},
+                );
+                const digest = try p.remoteCommand(&.{ "sha256sum", target }, .{});
+                if (digest.stdout.len < 64) return error.BadPinDigest;
+                hashes[i] = digest.stdout[0..64].*;
+            }
+            const trust = try p.path("firecracker-boot.json");
+            const trust_data = try json.Stringify.valueAlloc(gpa, .{
+                .version = 1,
+                .entry = rebooting,
+                .kernel = hashes[0],
+                .initrd = hashes[1],
+            }, .{});
+            try Io.Dir.cwd().writeFile(p.io, .{ .sub_path = trust, .data = trust_data });
+            try p.copyOut(&.{trust});
+        }
         const binary = "build/x86_64/tools/howl-linux";
         _ = try p.run(&.{ "make", binary }, .{});
         try p.copyOut(&.{ try p.path("config.tar"), try check.absolutePath(p.io, gpa, binary) });
         const tap = p.tap.?;
+        const identity = try p.remoteCommand(&.{ "id", "-u" }, .{});
+        const uid = mem.trim(u8, identity.stdout, " \t\r\n");
+        _ = try std.fmt.parseUnsigned(u32, uid, 10);
         _ = try p.remoteCommand(
-            &.{ "doas", "-n", "ip", "tuntap", "add", "dev", tap, "mode", "tap" },
+            &.{ "doas", "-n", "ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", uid },
             .{},
         );
         p.tap_created = true;
@@ -679,7 +735,20 @@ pub const Provider = struct {
         _ = try p.remoteCommand(&.{ "doas", "-n", "ip", "link", "set", tap, "up" }, .{});
         p.proxy = try p.jump(try gpa.print("{s}:22", .{p.address}));
         const supervisor = try p.remotePath("howl-linux");
-        return gpa.dupe([]const u8, &.{ "doas", "-n", supervisor, "_firecracker", dir });
+        // Match howl: the directory owner runs the sandbox and opens its own
+        // TAP. Root in a user namespace cannot traverse another user's 0700 directory.
+        if (p.env.get("FIRECRACKER_REMOTE_PATH")) |remote_path|
+            return gpa.dupe(
+                []const u8,
+                &.{
+                    "env",
+                    try gpa.print("PATH={s}", .{remote_path}),
+                    supervisor,
+                    "_firecracker",
+                    dir,
+                },
+            );
+        return gpa.dupe([]const u8, &.{ supervisor, "_firecracker", dir });
     }
 
     fn remoteHowl(p: *Provider, args: []const []const u8) !Result {
@@ -852,11 +921,28 @@ pub const Provider = struct {
                     return p.refuse("howl cleanup failed; retained {s}: {s}", .{ dir, all });
                 }
             } else if (p.kind == .bhyve) {
+                if (p.fixture.tpm) p.note(&errors, p.remoteQuietly(&.{
+                    "touch", try p.remotePath("bhyve.stop"),
+                }, true));
                 const vm = try gpa.print("--vm={s}", .{p.name});
                 p.note(
                     &errors,
                     p.remoteQuietly(&.{ "doas", "-n", "bhyvectl", vm, "--destroy" }, false),
                 );
+                if (p.fixture.tpm) if (p.remote_pid) |pid| {
+                    p.note(&errors, p.remoteQuietly(&.{
+                        "sh",
+                        "-c",
+                        "n=0; while kill -0 \"$1\" 2>/dev/null; do " ++
+                            "n=$((n+1)); [ \"$n\" -lt 15 ] || exit 1; sleep 1; done",
+                        "wait-bhyve",
+                        pid,
+                    }, true));
+                    if (errors.items.len > 0) return p.refuse(
+                        "protected supervisor did not stop; retained {s}",
+                        .{dir},
+                    );
+                };
             }
             if (p.remote_pid) |pid| if (pid.len > 0 and allDigits(pid))
                 p.note(&errors, p.remoteQuietly(&.{ "doas", "-n", "kill", pid }, false));
@@ -1217,6 +1303,7 @@ pub const BhyveSetup = struct {
     arm64_firmware: []const u8,
     /// enrolled is bhyve's -l bootrom argument for enrolled firmware.
     enrolled: ?[]const u8 = null,
+    tpm_socket: ?[]const u8 = null,
 };
 
 /// bhyveArgv is bhyve booting the fixture's disk.
@@ -1240,6 +1327,9 @@ pub fn bhyveArgv(gpa: Allocator, s: BhyveSetup) ![]const []const u8 {
     if (x86) {
         const bootrom = s.enrolled orelse "bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd";
         try args.appendSlice(gpa, &.{ "-l", "com1,stdio", "-l", bootrom });
+        if (s.tpm_socket) |socket| try args.appendSlice(gpa, &.{
+            "-o", "lpc.fwcfg=qemu", "-l", try gpa.print("tpm,swtpm,{s}", .{socket}),
+        });
     } else {
         if (s.enrolled != null) return error.Arm64SecureBootUnsupported;
         const bootrom = try gpa.print("bootrom={s}", .{s.arm64_firmware});
@@ -1555,6 +1645,40 @@ test "a QEMU machine has its entropy device" {
         } else return error.NoEntropyDevice;
         try testing.expectEqualStrings("-device", args[rng - 1]);
     }
+}
+
+test "protected bhyve uses the persistent TPM supervisor and waits for cleanup" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var b = try bench(gpa, testing.io, &tmp);
+    var env: Environ.Map = .init(gpa);
+    try env.put("SECUREBOOT_DIR", "firmware-templates");
+    var fixture = b.fixture;
+    fixture.mode = "secure";
+    fixture.tpm = true;
+    fixture.disk = "fixture.qcow2";
+    const vm = try b.machine(.bhyve, fixture, &env);
+    var fake: Fake = .{ .gpa = gpa };
+    vm.runner = fake.runner();
+    try vm.start();
+    const launch = fake.launch();
+    try testing.expect(holds(launch, "nohup /tmp/ww-ab.unit/howl-freebsd _bhyve-secure"));
+    try testing.expect(holds(launch, "doas -n bhyve"));
+    try testing.expect(holds(launch, "lpc.fwcfg=qemu"));
+    try testing.expect(holds(launch, "tpm,swtpm,/tmp/ww-tpm-"));
+    try testing.expect(holds(launch, "bootrom,/tmp/ww-ab.unit/code.fd,/tmp/ww-ab.unit/vars.fd"));
+    fake.calls.clearRetainingCapacity();
+    fake.fail = "wait-bhyve";
+    try testing.expectError(error.ProviderFailed, vm.stop());
+    try testing.expect(fake.any("touch /tmp/ww-ab.unit/bhyve.stop"));
+    try testing.expect(fake.any("bhyvectl"));
+    try testing.expect(!fake.any("rm -rf"));
+    fake.fail = null;
+    try vm.stop();
+    try testing.expect(fake.any("rm -rf /tmp/ww-ab.unit"));
 }
 
 test "bhyve takes the caller's TAP and overrides, and leaves the TAP to its owner" {

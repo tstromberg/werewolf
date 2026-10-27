@@ -9,10 +9,6 @@ base: prod
 packages:
   - samba-server
 
-# The check speaks SMB with Samba's own client.
-dev:
-  - samba-client
-
 # Nothing here authenticates with a UNIX password.
 prune:
   - usr/bin/unix_chkpwd

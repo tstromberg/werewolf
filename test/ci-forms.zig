@@ -291,7 +291,7 @@ fn clean(io: Io, gpa: Allocator, root: Dir, arch: Arch, name: []const u8) !void 
         if (mem.eql(u8, name, kept)) break true;
     } else false;
     if (!reused) {
-        for ([_][]const u8{ "", "-dev", "-app", "-dev-app" }) |suffix|
+        for ([_][]const u8{ "", "-app" }) |suffix|
             try paths.append(gpa, try gpa.print("{s}/{s}{s}", .{ build, name, suffix }));
         try paths.append(gpa, try gpa.print("{s}/native-test-{s}", .{ build, name }));
     }
@@ -719,8 +719,7 @@ test "release forms dispatch to their native checks, and runtimes to a hello-wor
         .sub_path = "checks.mk",
         .data = "check-native-tests-prod-ssh:\n\t@echo dispatched-native-prod-ssh\n" ++
             "check-native-tests-minimal:\n\t@echo dispatched-native-minimal\n" ++
-            "check-scenario-app-python-app:\n\t@echo dispatched-app-python-app\n" ++
-            "_check-legacy-%:\n\t@echo unexpected-legacy-$*; exit 99\n",
+            "check-scenario-app-python-app:\n\t@echo dispatched-app-python-app\n",
     });
     // howl, which every check needs, must be neither built nor run.
     try tmp.dir.writeFile(io, .{

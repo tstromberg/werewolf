@@ -1,5 +1,5 @@
 # What the suricata form, booted as it ships, must say on its console
-# (make check-shellfree-suricata; test/boot; forms/demo/test/console has
+# (make check-shellfree-suricata; test/console.zig; forms/demo/test/console has
 # the format). Suricata starts. make check-suricata checks the engine
 # and the rule.
 

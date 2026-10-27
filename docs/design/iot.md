@@ -96,5 +96,6 @@ server is the outage domain, and a lost `packages.rsa` means new devices.
 
 ## Reliability Considerations
 
-A failed commit boots the previous slot and is not installed again. Back up howl's data
-directory, `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), and the lab declaration.
+A failed commit boots the previous slot and is not installed again. Back up howl's
+data directory, `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), and the lab
+declaration.

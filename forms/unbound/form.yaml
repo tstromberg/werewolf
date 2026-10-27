@@ -29,12 +29,8 @@ prune:
   - usr/bin/sh
   - usr/bin/bash
 
-# The check queries Unbound by UDP and TCP with drill.
-dev:
-  - drill
-
 # make check's (forms/README.md): :53 speaks DNS, not HTTP, and its own
-# test/checks speaks to it. Offline, so nothing it checks rests on the
+# test/tests.yaml speaks to it. Offline, so nothing it checks rests on the
 # root servers answering. Unbound's caches fill a quarter of its 256 MiB.
 check:
   memory: 512

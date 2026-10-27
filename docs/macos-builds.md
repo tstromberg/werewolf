@@ -1,30 +1,31 @@
 # Builds on macOS
 
-`howl run --build` builds a protected image and deploys it through Lima QEMU on an arm64
-Mac. Signing keys remain on the Mac. Builds honor caller boot credentials; howl manages
-local credentials when none are supplied. Plain `howl run` downloads a protected image
-with embedded production trust. Targets remain unavailable until their signed artifacts
-pass the [publication gates](design/protected-downloads.md); there is no implicit source
-build. howl's downloader ([boot-download](../lib/boot-download.zig)) identifies Werewolf
-to the mirror and speaks TLS 1.3 itself, with certificate verification and bounded,
-authenticated downloads.
+`howl run --build` builds a protected image and deploys it through Lima QEMU on an
+arm64 Mac. Signing keys remain on the Mac. Builds honor caller boot credentials; howl
+manages local credentials when none are supplied. Plain `howl run` downloads a
+protected image with embedded production trust. Targets remain unavailable until
+their signed artifacts pass the [publication gates](design/protected-downloads.md);
+there is no implicit source build. howl's downloader
+([boot-download](../lib/boot-download.zig)) identifies Werewolf to the mirror and
+speaks TLS 1.3 itself, with certificate verification and bounded, authenticated
+downloads.
 
 ## Why a Linux guest is needed
 
 The EFI stub, and the test kernels IPE tests boot, use native Linux build tools and
-headers. Melange runs those tools in a temporary Linux guest under QEMU on the Mac. Its
-kernel is Alpine's `linux-virt`, as melange's initramfs loads 9p and overlayfs as
+headers. Melange runs those tools in a temporary Linux guest under QEMU on the Mac.
+Its kernel is Alpine's `linux-virt`, as melange's initramfs loads 9p and overlayfs as
 modules, which werewolf's kernel lacks: howl makes it from
 [melange-guest.yaml](../boot/melange-guest.yaml) as
-`build/vendor/melange-guest-ARCH.{vmlinuz,cpio}` (`guest()` in cmd/howl/melange.zig). It
-only builds; no Werewolf image boots it, and it is separate from the protected Werewolf
-guest that Lima deploys. Ubuntu is not required for the default build path.
+`build/vendor/melange-guest-ARCH.{vmlinuz,cpio}` (`guest()` in cmd/howl/melange.zig).
+It only builds; no Werewolf image boots it, and it is separate from the protected
+Werewolf guest that Lima deploys. Ubuntu is not required for the default build path.
 
-Only explicitly staged public sources and the public IPE certificate enter the builder.
-Private policy and boot keys stay on the Mac. Protected builds use the published
-`linux-werewolf`, whose IPE trusts the protected image certificate, installed by apko
-from [kernel.yaml](../boot/kernel.yaml); they build only the stub. The kernel has no
-modules, so nothing is signed for it.
+Only explicitly staged public sources and the public IPE certificate enter the
+builder. Private policy and boot keys stay on the Mac. Protected builds use the
+published `linux-werewolf`, whose IPE trusts the protected image certificate,
+installed by apko from [kernel.yaml](../boot/kernel.yaml); they build only the stub.
+The kernel has no modules, so nothing is signed for it.
 
 The stub's recipe is [tpm-stub.melange.yaml](../boot/tpm-stub.melange.yaml).
 howl ([security-inputs](../lib/security-inputs.zig)) stages its inputs, builds a test
@@ -37,15 +38,16 @@ kernel; changing the certificate or the kernel-build commit
 [kernel-build](../boot/kernel-build) pins reuses the stub. A failed stub build keeps
 the completed kernel. Builder sources are written only when their bytes change.
 
-An unchanged `howl run --build` reuses the running protected machine without building,
-signing or rebooting. It checks image inputs, caller credentials, configuration, guest
-source bytes and provider, and preserves signing keys and TPM state. Changed inputs
-reinstall `howl run`'s machine; a named machine keeps the image it was made with, since
-an image signed with your keys takes changes by reinstalling unless its builder serves
-a channel ([local deployment](design/secure-local-deployment.md)). A stopped machine
-resumes its existing image; changed configuration updates only its config disk. `howl
-stop` keeps protected disks and TPM state; `howl delete` explicitly removes a machine
-for a fresh run.
+An unchanged `howl run --build` reuses the running protected machine without
+building, signing or rebooting. It checks image inputs, caller credentials,
+configuration, guest source bytes and provider, and preserves signing keys and TPM
+state. Changed inputs reinstall `howl run`'s machine; a named machine keeps the image
+it was made with, since an image signed with your keys takes changes by reinstalling
+unless its builder serves a channel ([local
+deployment](design/secure-local-deployment.md)). A stopped machine resumes its
+existing image; changed configuration updates only its config disk. `howl stop` keeps
+protected disks and TPM state; `howl delete` explicitly removes a machine for a fresh
+run.
 
 kernel-build compiles the kernel with Wolfi's pinned Clang 22. On macOS,
 `make ipe-kernel` (with `WEREWOLF_IPE_CRT`) needs `QEMU_KERNEL_IMAGE` and
@@ -58,19 +60,18 @@ howl ([firmware.zig](../cmd/howl/firmware.zig), run by
 [enroll-boot](../tools/enroll-boot) as `howl _native-firmware`) verifies the firmware
 package and extracted code/template hashes, then installs virt-firmware's enrollment
 tool in a private Python environment.
-[firmware-requirements.txt](../boot/firmware-requirements.txt) pins dependency versions
-and hashes; installation requires binary wheels. The unused Linux cloud-password
-dependency is excluded.
-The pinned tools use Python 3.10-3.14 (`make install-deps` installs Python 3.14).
-Enrollment selects a compatible installed interpreter when the host default is
-outside that range.
+[firmware-requirements.txt](../boot/firmware-requirements.txt) pins dependency
+versions and hashes; installation requires binary wheels. The unused Linux
+cloud-password dependency is excluded. The pinned tools use Python 3.10-3.14 (`make
+install-deps` installs Python 3.14). Enrollment selects a compatible installed
+interpreter when the host default is outside that range.
 
 Enrollment puts the image's boot certificate in PK, KEK and db, and nothing else.
 Bundled default certificates and sample private keys are not extracted. The tested
 maintained firmware package is selected independently of the compiler guest's
-distribution. Ubuntu 26.04 firmware enrolled successfully but failed the protected boot
-probe; it is not a validated replacement. Missing or invalid protected firmware refuses
-startup.
+distribution. Ubuntu 26.04 firmware enrolled successfully but failed the protected
+boot probe; it is not a validated replacement. Missing or invalid protected firmware
+refuses startup.
 
 ## Optional persistent Lima builder
 
@@ -84,12 +85,12 @@ VM is required. Its Ubuntu version does not select the enrolled firmware.
 
 ## Validation
 
-security-inputs' tests cover public staging, private-input exclusion, cache integrity,
-and the builder's creation, restart and unsafe configuration rejection. firmware.zig's
-tests cover package authentication, component corruption, symlinks and unsupported
-architectures. `make check-independent-updates` deploys and
-updates a protected Lima machine ([live tests](testing-live.md)). kernel-build's CI
-boots each kernel with its probe before publishing it.
+security-inputs' tests cover public staging, private-input exclusion, cache
+integrity, and the builder's creation, restart and unsafe configuration rejection.
+firmware.zig's tests cover package authentication, component corruption, symlinks and
+unsupported architectures. `make check-independent-updates` deploys and updates a
+protected Lima machine ([live tests](testing-live.md)). kernel-build's CI boots each
+kernel with its probe before publishing it.
 
 Stub compilation through Melange QEMU and native firmware enrollment have passed
 on this arm64 Mac; the current enrollment dependencies require Python 3.10+. Complete

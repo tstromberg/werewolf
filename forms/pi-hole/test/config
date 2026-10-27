@@ -1,6 +1,6 @@
 #!/bin/sh
 # forms/pi-hole/test/config DIR: the pi-hole form's config for make check,
-# in DIR: the web interface's password, which test/checks signs in with,
+# in DIR: the web interface's password, which test/tests.yaml signs in with,
 # and Caddy's domain, localhost, for which Caddy's own CA signs.
 set -eu
 mkdir -p "$1/pi-hole" "$1/caddy"

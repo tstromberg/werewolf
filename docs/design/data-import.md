@@ -1,113 +1,100 @@
-# Data import and sync
+# Data import v1 (proposed)
 
-## Contract
+## Summary
 
-Imports are application input. They do not become boot images, configuration archives,
-executable packages, or TPM authority. The operator selects a local source; Howl
-snapshots it into a separate, read-only ext4 disk. Init mounts it at
-`/run/werewolf/import`. A confined application importer decides how to use it.
+Import a [data export] archive into an empty destination, optionally one service.
+Export and import use one filesystem format and preserve the `/data` layout.
 
-The standalone commands serve protected local Lima and QEMU machines. They stage data
-for the next **cold start through Howl**, even while the VM runs (its QEMU keeps the
-open, immutable disk, and a guest reboot changes nothing), and never stop it. Only the
-latest selection is attached; this is not a queue of jobs.
+## Background
 
-`create --import` and `import` request **init**: initialize an empty application
-destination. `sync` adds files and replaces changed files, preserving files found only
-at the destination. Neither operation deletes files, clears a database, formats `/data`,
-changes enrollment, or modifies the original source.
+Current import handles SQL/media/Valkey seed data. This unimplemented proposal
+replaces it. Remove directory/dump import, `create --import`, snapshot-retry syntax
+and `sync`. Keep one `howl import`, no `--restore` or legacy-format fallback.
 
-The standalone commands support protected local Lima and QEMU machines. They stage data
-for the next **cold start through Howl**. Staging can happen while the VM runs: the
-running QEMU keeps its already-open, immutable disk. A guest reboot alone does not
-change the attached disk. The commands never stop a running VM. Use the normal
-stop/create lifecycle when ready to apply the selected snapshot. Only the latest
-selected snapshot is attached; this is not a queue of jobs.
+## Goals
 
-Forms opt in to modes with `imports: [init, sync]`. The supported modes are included in
-the signed boot manifest's deployment definition. Old definitions admit init only. A
-sync command for an image without sync support is refused before staging. Database
-restores remain init-only unless their form explicitly implements sync; file sync is not
-a database replication protocol.
+- Restore exported bytes, paths, modes, timestamps and approved ownership.
+- Support full and single-service imports; preserve every unselected directory.
+- Pass [application tests] for each advertised provider and cross-cloud pair.
 
-Cloud attachment, protected bhyve imports, online application, exports, deletion,
-ownership preservation, and rsync-compatible filters are outside this version.
+## Non-Goals
 
-## Host snapshot and publication
+- Merge/overwrite, raw SQL/media ingestion, data conversion, upgrades,
+  cross-architecture moves, running-destination import and automatic activation.
 
-The machine directory is private (0700). Howl copies the source's regular files, hidden
-ones included, into private scratch outside it: bytes only, 0644 (directories 0755),
-with no hard links, ownership, ACLs, extended attributes, executable bits or implicit
-filters. Symlinks, special files, set-id entries and the reserved names
-(`.werewolf-import`, `.werewolf-import-state`, `.werewolf-import-part`, `import-failed`,
-`lost+found`) are refused.
+## Detailed design
 
-Each traversal opens child directories without following links. Regular files are opened
-with `O_NOFOLLOW|O_NONBLOCK` and checked after opening; exchanging a file for a FIFO
-cannot make the opener wait indefinitely. Copying checks size, inode and change
-timestamps before and after reading. A changed source aborts staging. This detects
-ordinary concurrent changes; it is not a filesystem-wide point-in-time snapshot. Quiesce
-writers when consistency across files matters. Sources and outputs must not overlap:
-staging inside the source would otherwise recursively import its own scratch directory
-or VM disks.
+```sh
+howl import replacement ./backup.tar.zst --on gcp
+howl import replacement ./backup.tar.zst --service plex
+```
 
-The content checksum hashes the mode, sorted relative names, entry types and file
-contents. Each explicit import or sync also gets a securely random batch ID. A small
-`.werewolf-import` manifest contains version 1, mode, batch ID and content checksum. A
-reboot replays the same batch; a new sync can repair a changed destination even when its
-source checksum is unchanged. Howl builds a new filesystem from these staged regular
-files. It does not accept an arbitrary filesystem image as a volume to mount: an input
-image file is itself copied as ordinary data.
+Default scope is the archive's; a service archive never becomes full.
+`--service NAME` selects only `/data/svc/NAME`, required in archive and target image.
+Reject paths and system services. Never rename, infer dependencies or widen scope.
 
-An installed snapshot lives at `imports/BATCH-ID/disk.img`, with a private `record.json`
-recording its batch ID, content checksum, mode, byte length and image SHA-256. The image
-and record are synced before their directory is installed with a non-replacing rename.
-The private `import.json` selection is replaced atomically and its parent synced. A
-failed or repeated build never truncates an existing artifact. An ordinary repeated
-`create --import` reuses the selected init batch when its content checksum matches; it
-cannot implicitly select different input. Explicit import/sync commands create new
-batches. `--retry` reselects the original batch without rebuilding it.
+For a new name, use existing provisioning without starting applications. Require the
+recorded image/architecture through normal trusted verification; an archive cannot
+supply code or authorize signers. Existing VMs must be stopped and match that
+image/architecture. Full import requires empty application data; service import
+requires only its root empty. Leave all unselected data untouched; never erase
+conflicts. Supply deployment configuration separately.
 
-Previous snapshots stay for recovery. Howl attaches only an ordinary file of the
-recorded length and digest: anything else is an error, never an empty import. A crash
-leaves the old or the new complete selection and deletes no image; interrupted staging
-leaves only private scratch, never attached. A cross-filesystem rename fails, never
-copying. Snapshots need space beyond the source and guest data; none are collected yet.
+**Delivery.** Howl copies the archive into a private transfer disk. Local adapters
+attach it directly; cloud adapters upload it through private provider storage and
+create an attachable volume. Remote hypervisors receive it over authenticated SSH.
+Hold the destination lifecycle lock from inspection through installation.
+An isolated Linux helper reads that disk read-only and writes destination storage,
+with no network or host shares. The destination stays stopped; no guest SSH is used.
+Remove transfer disks and remote staging; keep archives out of user-data and logs.
 
-The protected lifecycle uses the machine's existing lock to serialize selection with
-create/start. Selection changes application input only. It does not rebuild or re-sign a
-UKI, alter a measured command line, or reset TPM state. Both provider paths attach the
-selected disk with `readonly=on`; Lima uses its private QEMU wrapper, preserving
-`mounts: []` and avoiding host directory sharing.
+Stream-decompress to private staging on the destination data volume. Validate the
+entire archive, including unselected entries, before publishing selected data.
+Require its manifest, completion digest and one complete Zstandard frame; reject
+trailing data. Bound decoder window, headers, file count and expanded bytes. Check
+selection against manifest inventory; reject mismatches and duplicate entries.
 
-## Guest mount boundary
+Preserve modes/timestamps; map ownership through approved destination identities.
+Refuse unknown owners or unsupported metadata. Initialize new machine identities
+before publishing data; an archive cannot create OS accounts. Regenerate new-machine
+SSH keys/enrollment; retain existing-machine authority. Old import receipts are
+inert, never instructions to replay a source batch.
 
-Init mounts exactly one ext4 disk labelled `werewolf-import`, with
-`ro,nosuid,nodev,noexec,nosymfollow`. The directory exists even without a disk. Multiple
-labelled disks or mount failures leave `import-failed` instead of a partially usable
-mount. Importers must treat that marker as a failure.
+Persist one receipt binding the archive digest, selected scope and target identity.
+Stage files, sync, install without replacement, then publish readiness after every
+selected directory is durable. Block boot during a pending receipt. On interruption,
+the same invocation may finish that receipt; another digest/scope is refused.
+Completed import is not replayed at boot. Never declare partial data ready.
 
-Only a service with an explicit read grant can read the mounted input. The service owns
-its application destination; it receives no additional root or mount privileges. IPE
-still admits code only from the selected dm-verity root. The import's checksum
-identifies and checks application data; it does not grant that data code trust.
-Interpreters and applications must still treat content as untrusted input. A privileged
-malicious host remains outside this boundary.
+Leave the VM stopped after success. The operator starts it through the normal
+lifecycle after stopping/fencing the source where application identity is shared. A
+single-service import guarantees only that directory; the operator must supply
+compatible companion data. Plex state and media are separate services.
 
-## Plex application semantics
+## Drawbacks
 
-See [application import behavior](data-import-application.md#plex-application-semantics)
-for atomic file installation, receipts, retry and readiness.
+Import needs temporary storage and a matching image/architecture. Replacing the old
+seed/sync workflow is intentional; update help, form declarations, examples and tests
+in the same change. A single service may be insufficient to run an application.
 
-## Database importers
+## Alternatives Considered
 
-MariaDB and PostgreSQL retain their application-specific initialization. A dump is
-streamed into new data, and successful initialization is committed by the form. Valkey
-copies a snapshot because its format requires a file. Transport metadata does not turn
-these operations into file sync. Existing data is never removed merely because a new
-import disk has been selected.
+- Auto-detect SQL/media formats: restores ambiguity and application-specific code.
+- A separate restore command: duplicates import's new meaning.
+- Merge into existing data: complicates rollback; refuse occupied destinations.
 
-## Verification
+## Security Considerations
 
-See [verification](data-import-application.md#verification) for unit and protected Plex
-lifecycle coverage.
+Treat archives as untrusted: digests detect damage, not intent. Reject traversal,
+absolute paths, links, special files and privileged metadata. Pin directory
+descriptors; never follow destination links or extract onto host paths. Only selected
+roots change; data gains no code trust. Keep staging private and clean up. Enforce
+signed machine-state exclusions, not archive claims.
+
+## Reliability Considerations
+
+Delivery or extraction failure leaves applications stopped and source bytes intact.
+Require [application tests] for each provider, retries, cleanup and target isolation.
+
+[data export]: data-export.md
+[application tests]: data-import-application.md

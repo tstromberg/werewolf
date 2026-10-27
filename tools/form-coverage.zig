@@ -1,6 +1,7 @@
 //! form-coverage checks that each service form declares at least five
-//! distinct integration cases, and accounts for every case of the legacy
-//! inventory (test/form-probe-baseline.yaml) by what implements it now.
+//! distinct integration cases, and accounts for every case of the retired
+//! shell checks' inventory (test/form-probe-baseline.yaml) by what
+//! implements it now.
 //! Shared platform checks do not count; a supplied-code fixture or a host
 //! SSH suite counts only for the forms the harness runs it on. It guards
 //! coverage quantity; review still judges whether cases are useful.
@@ -14,15 +15,6 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
 const usage = "usage: form-coverage [--root DIR] [--list] [--form NAME] [--probes] [--mapping]";
-
-const ssh_cases = [_][]const u8{
-    "ssh-login",         "ssh-command-output",     "ssh-command-status",
-    "ssh-no-forwarding", "ssh-security-keys-only",
-};
-const playground_cases = [_][]const u8{
-    "ssh-login",         "ssh-command-output", "ssh-command-status",
-    "ssh-no-forwarding", "ssh-keys-only",
-};
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -71,14 +63,13 @@ fn run(c: *Coverage, args: []const []const u8) !u8 {
     var failed = false;
     var exceptions: usize = 0;
     for (selected.items) |row| {
-        if (list) try c.say("{s: <20} {d: >2} cases ({d} guest, {d} supplied-code, {d} host, " ++
-            "{d} native){s}{s}", .{
+        if (list) try c.say("{s: <20} {d: >2} cases ({d} native, {d} supplied-code, {d} host)" ++
+            "{s}{s}", .{
             row.name,
             row.count,
-            row.own,
+            row.native,
             row.fixture,
             row.host,
-            row.native,
             if (row.reason.len > 0) "; exception: " else "",
             row.reason,
         });
@@ -164,22 +155,6 @@ fn records(gpa: Allocator, text: []const u8) ![]const Record {
     return out.items;
 }
 
-/// cases are the check names of a console checks file: KIND NAME COMMAND.
-fn cases(c: *Coverage, path: []const u8) ![]const []const u8 {
-    const text = try c.read(path) orelse return &.{};
-    var out: std.ArrayList([]const u8) = .empty;
-    for (try records(c.gpa, text)) |r| {
-        if (r.fields.len != 3 or !has(&.{ "ok", "gap", "seen", "unseen" }, r.fields[0]))
-            return c.fail("{s}:{d}: expected KIND NAME COMMAND", .{ path, r.line });
-        if (has(
-            out.items,
-            r.fields[1],
-        )) return c.fail("{s}:{d}: duplicate check {s}", .{ path, r.line, r.fields[1] });
-        try out.append(c.gpa, r.fields[1]);
-    }
-    return out.items;
-}
-
 fn has(names: []const []const u8, name: []const u8) bool {
     for (names) |n| if (mem.eql(u8, n, name)) return true;
     return false;
@@ -189,7 +164,6 @@ const Row = struct {
     name: []const u8,
     count: usize,
     minimum: usize,
-    own: usize,
     fixture: usize,
     host: usize,
     native: usize,
@@ -265,47 +239,28 @@ fn audit(c: *Coverage) ![]const Row {
         for (p.drivers) |d| n += distinct(d.seed, d.verify);
         try fixtures.append(gpa, .{ .name = r.fields[0], .cases = n });
     }
-    const boot = try c.read("test/boot") orelse return c.fail("no test/boot", .{});
     var rows: std.ArrayList(Row) = .empty;
     for (names.items) |name| {
-        const own = try cases(c, try gpa.print("forms/{s}/test/checks", .{name}));
         var native: usize = 0;
-        // A plan's host suites are its own: test/boot's are a legacy form's.
-        var host_cases: usize = 0;
+        var host: usize = 0;
         if (try c.plan(name)) |p| {
             for (p.drivers) |d| native += distinct(d.seed, d.verify);
-            for (p.host) |s| host_cases += distinct(s.seed, s.verify);
+            for (p.host) |s| host += distinct(s.seed, s.verify);
         }
         const fixture = for (fixtures.items) |f| {
             if (mem.eql(u8, f.name, name)) break f.cases;
         } else 0;
-        const host: []const []const u8 = if (host_cases > 0)
-            &.{}
-        else if (mem.eql(u8, name, "sshd") or mem.eql(u8, name, "prod-ssh"))
-            &ssh_cases
-        else if (mem.eql(u8, name, "playground"))
-            &playground_cases
-        else
-            &.{};
-        for (host) |check| if (!hostCheck(
-            boot,
-            check,
-        )) return c.fail("test/boot: missing host check {s}", .{check});
-        host_cases += host.len;
         const exception = for (exceptions.items) |e| {
             if (mem.eql(u8, e.name, name)) break e;
         } else Exception{ .name = name, .minimum = 5, .reason = "" };
         // Counts refer to deployments: an unshipped-code boot and a supplied-code
-        // boot exercise different contracts even when a name is shared. A shell
-        // assertion migrated to a native client must not count twice, so the
-        // larger suite counts until the legacy one is retired.
+        // boot exercise different contracts even when a name is shared.
         try rows.append(gpa, .{
             .name = name,
-            .count = @max(own.len, native) + fixture + host_cases,
+            .count = native + fixture + host,
             .minimum = exception.minimum,
-            .own = own.len,
             .fixture = fixture,
-            .host = host_cases,
+            .host = host,
             .native = native,
             .reason = exception.reason,
         });
@@ -313,8 +268,6 @@ fn audit(c: *Coverage) ![]const Row {
     return rows.items;
 }
 
-/// hostCheck reports whether test/boot runs check: `say ok CHECK`,
-/// `refused CHECK`, or CHECK first on an indented line.
 /// distinct counts a suite's cases once: one repeated after the reboot is
 /// still one behavioral case.
 fn distinct(seed: []const []const u8, verify: []const []const u8) usize {
@@ -325,27 +278,11 @@ fn distinct(seed: []const []const u8, verify: []const []const u8) usize {
     return n;
 }
 
-fn hostCheck(boot: []const u8, check: []const u8) bool {
-    var lines = mem.splitScalar(u8, boot, '\n');
-    while (lines.next()) |line| {
-        var at: usize = 0;
-        while (mem.findPos(u8, line, at, check)) |i| : (at = i + 1) {
-            const end = i + check.len;
-            if (end < line.len and !std.ascii.isWhitespace(line[end])) continue;
-            const before = line[0..i];
-            if (mem.endsWith(u8, before, "say ok ") or
-                mem.endsWith(u8, before, "refused ")) return true;
-            if (before.len > 0 and mem.trim(u8, before, " \t").len == 0) return true;
-        }
-    }
-    return false;
-}
-
-pub const Counts = struct { probes: usize = 0, native: usize = 0, legacy: usize = 0 };
+pub const Counts = struct { probes: usize = 0, native: usize = 0 };
 
 /// probeCoverage accounts for every baseline case: implemented by YAML
-/// probes, by native code, or still by a legacy check. A YAML case that
-/// runs a form's own native client is native code too.
+/// probes or by native code. A YAML case that runs a form's own native
+/// client is native code too.
 fn probeCoverage(c: *Coverage, listing: bool) !Counts {
     const gpa = c.gpa;
     const path = "test/form-probe-baseline.yaml";
@@ -370,7 +307,7 @@ fn probeCoverage(c: *Coverage, listing: bool) !Counts {
     for (forms.map) |entry| {
         const form = entry.key;
         const expected = try scalars(c, entry.value, path, entry.line);
-        const Kind = enum { probes, native, legacy };
+        const Kind = enum { probes, native };
         const Target = struct { name: []const u8, kind: Kind };
         var targets: std.ArrayList(Target) = .empty;
         var migrated: std.ArrayList(Target) = .empty;
@@ -412,10 +349,6 @@ fn probeCoverage(c: *Coverage, listing: bool) !Counts {
                 };
             }
         }
-        const legacy = try mem.concat(gpa, []const u8, &.{
-            try cases(c, try gpa.print("forms/{s}/test/checks", .{form})),
-            try cases(c, try gpa.print("forms/{s}/test/checks-again", .{form})),
-        });
         const replaced = replacements.get(form);
         for (expected) |case| {
             var kind: ?Kind = null;
@@ -436,12 +369,10 @@ fn probeCoverage(c: *Coverage, listing: bool) !Counts {
                 for (migrated.items) |m| if (mem.eql(u8, m.name, case)) {
                     kind = m.kind;
                 };
-                if (kind == null and has(legacy, case)) kind = .legacy;
             }
             if (kind) |k| switch (k) {
                 .probes => counts.probes += 1,
                 .native => counts.native += 1,
-                .legacy => counts.legacy += 1,
             } else try missing.append(gpa, try gpa.print("{s}/{s}", .{ form, case }));
             if (listing) try c.say(
                 "{s}/{s}: {s}",
@@ -453,15 +384,14 @@ fn probeCoverage(c: *Coverage, listing: bool) !Counts {
         "unmapped baseline cases: {s}",
         .{try mem.join(gpa, ", ", missing.items)},
     );
-    const total = counts.probes + counts.native + counts.legacy;
-    try c.say("form-coverage: baseline {s}: {d}/{d} ({d:.1}%) probe cases; {d} native, {d} " ++
-        "legacy; target 80%", .{
+    const total = counts.probes + counts.native;
+    try c.say("form-coverage: baseline {s}: {d}/{d} ({d:.1}%) probe cases; {d} native; " ++
+        "target 80%", .{
         base.scalar.text[0..7],
         counts.probes,
         total,
         @as(f64, @floatFromInt(counts.probes * 100)) / @as(f64, @floatFromInt(@max(total, 1))),
         counts.native,
-        counts.legacy,
     });
     return counts;
 }
@@ -534,24 +464,20 @@ test "native clients a YAML case runs do not count as standard probes" {
     });
     var c: Coverage = .{ .io = io, .gpa = a, .root = tmp.dir };
     try testing.expectEqualDeep(
-        Counts{ .probes = 2, .native = 1, .legacy = 0 },
+        Counts{ .probes = 2, .native = 1 },
         try probeCoverage(&c, false),
     );
     try tmp.dir.writeFile(io, .{ .sub_path = "test/form-probe-baseline.yaml", .data =
         \\base: fixture-base
         \\forms:
-        \\  example: [custom, client, file, gone, kept]
+        \\  example: [custom, client, file, gone]
         \\replacements:
         \\  example:
         \\    gone: [test-cases/file, test-helper/control]
         \\
     });
-    try tmp.dir.writeFile(
-        io,
-        .{ .sub_path = "forms/example/test/checks", .data = "ok kept true\n" },
-    );
     try testing.expectEqualDeep(
-        Counts{ .probes = 2, .native = 2, .legacy = 1 },
+        Counts{ .probes = 2, .native = 2 },
         try probeCoverage(&c, false),
     );
     try tmp.dir.writeFile(io, .{ .sub_path = "test/form-probe-baseline.yaml", .data =
@@ -573,34 +499,6 @@ test "native clients a YAML case runs do not count as standard probes" {
     });
     try testing.expectError(error.Refused, probeCoverage(&c, false));
     try testing.expect(mem.find(u8, c.why, "missing replacement assertion") != null);
-}
-
-test "checks, exceptions and fixtures are strict tables" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var c: Coverage = .{ .io = io, .gpa = a, .root = tmp.dir };
-    try tmp.dir.writeFile(
-        io,
-        .{ .sub_path = "checks", .data = "# comment\nok  one  true\nseen two  ready\n" },
-    );
-    try testing.expectEqualDeep(
-        @as([]const []const u8, &.{ "one", "two" }),
-        try cases(&c, "checks"),
-    );
-    for ([_][]const u8{ "ok one\n", "maybe one true\n", "ok one true\nok one again\n" }) |bad| {
-        try tmp.dir.writeFile(io, .{ .sub_path = "checks", .data = bad });
-        try testing.expectError(error.Refused, cases(&c, "checks"));
-    }
-    try testing.expectEqual(0, (try cases(&c, "absent")).len);
-    try testing.expect(hostCheck("\tsay ok ssh-login\n", "ssh-login"));
-    try testing.expect(hostCheck("refused ssh-no-forwarding root -N\n", "ssh-no-forwarding"));
-    try testing.expect(hostCheck("\t\tssh-command-output {echo}\n", "ssh-command-output"));
-    try testing.expect(!hostCheck("say ok ssh-login-extra\n", "ssh-login"));
-    try testing.expect(!hostCheck("# ssh-login\n", "ssh-login"));
 }
 
 test "every form meets its minimum and the inventory is accounted for" {

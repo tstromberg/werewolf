@@ -1,16 +1,16 @@
 # Unbound - Hardened VM
 
 A recursive, validating resolver for a private network:
-[Unbound](https://nlnetlabs.nl/projects/unbound/). It answers the addresses you allow,
-and no one else. The form's manifest is [form.yaml](form.yaml).
+[Unbound](https://nlnetlabs.nl/projects/unbound/). It answers the addresses you
+allow, and no one else. The form's manifest is [form.yaml](form.yaml).
 
 [Images, test status and download
 instructions](https://dist.werewolf-linux.org/boot/v1/unbound/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The
-  root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names.
+  The root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -30,22 +30,22 @@ documentation](https://unbound.docs.nlnetlabs.nl/).
 howl create unbound --with unbound --on gcp --allow-from me
 ```
 
-`--allow-from me` opens port 53 to the address you run this from. For a cloud's private
-zones, send those to the cloud's resolver:
+`--allow-from me` opens port 53 to the address you run this from. For a cloud's
+private zones, send those to the cloud's resolver:
 
 ```text
 howl create unbound --with unbound --on gcp --allow-from 10.128.0.0/9 \
 	--forward-zones corp.example,10.in-addr.arpa --forward-to 169.254.169.254
 ```
 
-`--forward-zones` is up to 32 names, each taken as unsigned. `--forward-to` is up to 32
-addresses, all on port 53. AWS's resolver is the VPC network plus two (10.0.0.2). GCP's
-is 169.254.169.254. Azure's is 168.63.129.16.
+`--forward-zones` is up to 32 names, each taken as unsigned. `--forward-to` is up to
+32 addresses, all on port 53. AWS's resolver is the VPC network plus two (10.0.0.2).
+GCP's is 169.254.169.254. Azure's is 168.63.129.16.
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command or `--config`.
-There is no database to import.
+This machine starts empty. What it must remember is in the create command or
+`--config`. There is no database to import.
 
 ### Known Quirks
 

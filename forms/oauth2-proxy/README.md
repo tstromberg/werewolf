@@ -1,8 +1,8 @@
 # oauth2-proxy - Hardened VM
 
 A login in front of another service:
-[oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) 7. It sends visitors to an
-OIDC provider and lets those the settings allow through. The form's manifest is
+[oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) 7. It sends visitors to
+an OIDC provider and lets those the settings allow through. The form's manifest is
 [form.yaml](form.yaml).
 
 [Images, test status and download
@@ -55,14 +55,14 @@ howl create oauth2-proxy --with oauth2-proxy --on gcp --allow-from me --config c
 
 ### Importing data
 
-This machine starts empty. What it must remember is in the create command. There is no
-database to import.
+This machine starts empty. What it must remember is in the create command. There is
+no database to import.
 
 ### Known Quirks
 
 - The cookie secret is 24 random bytes, base64, with no newline.
-- A provider without discovery takes `--skip-discovery` and the login, redeem and JWKS
-  URLs.
+- A provider without discovery takes `--skip-discovery` and the login, redeem and
+  JWKS URLs.
 
 ### Network Exposure
 

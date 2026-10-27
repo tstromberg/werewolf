@@ -17,12 +17,6 @@ archs: [x86_64]
 # services to machine code as they run.
 allow: [jit]
 
-# The check signs in with curl, which keeps the cookies, and uploads a
-# project as Overleaf takes one, zipped.
-dev:
-  - curl
-  - zip
-
 # make check's (forms/README.md): ten Node services, MongoDB and TeX.
 check:
   memory: 8192
