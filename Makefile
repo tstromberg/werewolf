@@ -1225,10 +1225,13 @@ fix:
 # other Python or Go file, Python script, or Python a build step writes inline.
 # Each needs its language: the example apps; onnx's checks drive Python's own
 # onnxruntime and ctypes, which nothing but Python can; opencanary's and
-# paperless's sitecustomize patch those apps' interpreters as they start; and
+# paperless's sitecustomize patch those apps' interpreters as they start;
+# webshell's launcher loads its packaged pure Python framework with the
+# hardened interpreter; and
 # vuln-console is the vuln-demo form's Go helper.
 WORKLOAD_CODE = examples/go/main.go forms/python-example/rootfs/usr/lib/app/main.py \
 	forms/webshell-example/rootfs/usr/lib/app/webshell.py forms/onnx/rootfs/usr/lib/onnx/check.py \
+	forms/webshell-example/rootfs/usr/lib/app/serve.py \
 	forms/onnx/rootfs/usr/lib/libffi-static/check.py \
 	forms/opencanary/rootfs/oci/opencanary/opencanary/sitecustomize.py \
 	forms/paperless/rootfs/usr/lib/paperless/lib/python3.13/site-packages/sitecustomize.py \

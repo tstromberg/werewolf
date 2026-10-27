@@ -15,9 +15,12 @@ pub fn main(init: std.process.Init) !void {
     var nonce: [8]u8 = undefined;
     io.random(&nonce);
     const suffix = std.fmt.bytesToHex(nonce, .lower);
-    const query = try a.print("ww-{s}-{s}-{s}.invalid", .{ ctx.run, &suffix, ctx.phase });
-    const dns = try capturedQuery(io, a, query);
-    try ctx.result(io, args[1], "zeek-dns-log", stringIs(dns, "rcode_name", "NXDOMAIN"));
+    // Stay below unwound's wildcard screening limits and use an established
+    // registered domain so the production age gate can admit the lookup.
+    const query = try a.print("ww-{s}.example.com", .{&suffix});
+    const captured = try capturedQuery(io, a, query);
+    const dns = captured.record;
+    try ctx.result(io, args[1], "zeek-dns-log", stringIs(dns, "rcode_name", captured.rcode));
     const uid = dns.object.get("uid") orelse return error.ConnectionId;
     if (uid != .string or uid.string.len == 0) return error.ConnectionId;
     const conn = try awaitRecord(
@@ -33,21 +36,38 @@ pub fn main(init: std.process.Init) !void {
         port.integer == 53 and stringIs(conn, "id.orig_h", "10.0.2.15"));
 }
 
-fn capturedQuery(io: Io, a: Allocator, query: []const u8) !Json {
+const Captured = struct { record: Json, rcode: []const u8 };
+
+fn capturedQuery(io: Io, a: Allocator, query: []const u8) !Captured {
     const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(45));
     var attempts: usize = 0;
     while (Io.Clock.awake.now(io).compare(.lt, deadline)) {
         attempts += 1;
+        // Each retry must miss unwound's cache to produce another packet on eth0.
+        const fresh = try a.print("{d}.{s}", .{ attempts, query });
         const request_end = Io.Clock.awake.now(io).addDuration(.fromSeconds(15));
         const stop = if (request_end.compare(.lt, deadline)) request_end else deadline;
         const result = try std.process.run(a, io, .{
-            .argv = &.{ "/usr/bin/drill", query, "@10.0.2.3" },
+            // The production fence permits this user to query unwound only.
+            .argv = &.{ "/usr/bin/drill", "-t", fresh, "@127.0.0.53" },
             .stdout_limit = .limited(16384),
             .stderr_limit = .limited(4096),
             .timeout = .{ .deadline = .{ .clock = .awake, .raw = stop } },
         });
-        if (result.term != .exited or result.term.exited != 0 or
-            std.mem.find(u8, result.stdout, "rcode: NXDOMAIN") == null) return error.DnsQuery;
+        // Upstream can return an empty NOERROR answer or NXDOMAIN. Require
+        // Zeek's captured transaction to agree with the actual DNS response.
+        const rcode: ?[]const u8 = if (std.mem.find(u8, result.stdout, "rcode: NXDOMAIN,") != null)
+            "NXDOMAIN"
+        else if (std.mem.find(u8, result.stdout, "rcode: NOERROR,") != null)
+            "NOERROR"
+        else
+            null;
+        if (result.term != .exited or result.term.exited != 0 or rcode == null) {
+            std.debug.print("test-zeek: DNS query failed: {any}\nstdout: {s}\nstderr: {s}\n", .{
+                result.term, result.stdout, result.stderr,
+            });
+            return error.DnsQuery;
+        }
         // Require a captured packet, rather than just script initialization.
         const poll_end = Io.Clock.awake.now(io).addDuration(.fromSeconds(2));
         const record = awaitRecord(
@@ -55,14 +75,14 @@ fn capturedQuery(io: Io, a: Allocator, query: []const u8) !Json {
             a,
             "/data/svc/zeek/dns.log",
             "query",
-            query,
+            fresh,
             if (poll_end.compare(.lt, deadline)) poll_end else deadline,
         ) catch |err| {
             if (err == error.RecordNotFound) continue;
             return err;
         };
         std.debug.print("test-zeek: captured DNS after {d} query attempt(s)\n", .{attempts});
-        return record;
+        return .{ .record = record, .rcode = rcode.? };
     }
     std.debug.print("test-zeek: no captured DNS record for {s}\n", .{query});
     return error.CaptureNotReady;
