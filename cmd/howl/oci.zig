@@ -24,6 +24,8 @@ const max_component = 255;
 const max_pax = 64 << 10;
 const max_config = 4 << 20;
 const max_links = 40;
+// A shared registry's minute-long burst window can outlast crane's retries.
+const registry_backoff = [3]i64{ 15, 30, 60 };
 
 pub const default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// devices are the device nodes init binds into an image's root.
@@ -130,6 +132,16 @@ fn crane(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) ![]const u
 }
 
 fn runCrane(io: Io, gpa: Allocator, argv: []const []const u8, why: *Why) ![]const u8 {
+    return runCraneWith(io, gpa, argv, registry_backoff, why);
+}
+
+fn runCraneWith(
+    io: Io,
+    gpa: Allocator,
+    argv: []const []const u8,
+    backoff: [3]i64,
+    why: *Why,
+) ![]const u8 {
     for (0..4) |attempt| {
         const r = std.process.run(gpa, io, .{
             .argv = argv,
@@ -144,7 +156,7 @@ fn runCrane(io: Io, gpa: Allocator, argv: []const []const u8, why: *Why) ![]cons
         // GHCR's short burst limits can outlast crane's own retries. Keep
         // the same arguments and bound our backoff; other refusals fail now.
         if (attempt < 3 and rateLimited(r.stderr)) {
-            try io.sleep(.fromSeconds(@as(i64, 1) << @intCast(attempt)), .awake);
+            try io.sleep(.fromSeconds(backoff[attempt]), .awake);
             continue;
         }
         return why.refuse(
@@ -197,10 +209,11 @@ test "crane retries burst limits, bounds repeated limits, and preserves other re
         try env.put("FAILURE", case[1]);
         try env.put("STATE", try gpa.print("{s}/{s}", .{ root, case[0] }));
         var why: Why = .{};
-        const result = runCrane(
+        const result = runCraneWith(
             io,
             gpa,
             &.{ try gpa.print("{s}/crane", .{root}), "config", "example.invalid/pinned" },
+            .{ 0, 0, 0 },
             &why,
         );
         if (comptime std.mem.eql(u8, case[0], "recover")) {
@@ -246,6 +259,7 @@ pub fn pull(
         dir,
         &.{ "crane", "--platform", platform(arch), "export", ref, "-" },
         &.{ self, "_unpack", dir },
+        registry_backoff,
         why,
     );
 }
@@ -257,6 +271,7 @@ fn pullWith(
     dir: []const u8,
     exporter: []const []const u8,
     unpacker: []const []const u8,
+    backoff: [3]i64,
     why: *Why,
 ) !Unpacked {
     const existed = exists: {
@@ -280,7 +295,7 @@ fn pullWith(
             !existed and attempt < 3 and rateLimited(stderr))
         {
             try Dir.cwd().deleteTree(io, dir);
-            try io.sleep(.fromSeconds(@as(i64, 1) << @intCast(attempt)), .awake);
+            try io.sleep(.fromSeconds(backoff[attempt]), .awake);
             continue;
         }
         // An unpacker refusal can make crane fail with a broken pipe. It
@@ -288,7 +303,9 @@ fn pullWith(
         if (result.unpacked != .exited or result.unpacked.exited != 0)
             return why.refuse("{s}: the image was refused, as said above", .{ref});
         if (result.exported != .exited or result.exported.exited != 0)
-            return why.refuse("crane export {s} failed; what it said is above", .{ref});
+            return why.refuse("crane export {s} failed ({any}): {s}", .{
+                ref, result.exported, lastLine(stderr),
+            });
         var words = std.mem.tokenizeAny(u8, result.said, " \n");
         return .{
             .files = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch 0,
@@ -373,6 +390,7 @@ test "export retries clean partial images, isolate credentials and preserve refu
             dir,
             &.{try gpa.print("{s}/exporter", .{root})},
             &.{ try gpa.print("{s}/unpacker", .{root}), dir, case[3] },
+            .{ 0, 0, 0 },
             &why,
         );
         if (n == 0) {

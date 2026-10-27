@@ -29,11 +29,12 @@ services:
     # DataNucleus keeps some columns, such as a license's seeAlso list, as
     # Java-serialized String arrays in PostgreSQL, and reads them back at the
     # next start. The filter admits strings and nothing else.
-    allow: [java:deserialize]
+    # Stored files use the package's zstd JNI library from the read-only image.
+    allow: [java:deserialize, java:native]
     # The API server, from the package's argument file. -host and -port are
     # its own flags; the default address is every one. Its management
     # server (health and metrics, :9000) is on loopback too.
-    exec: /usr/bin/java -Xms256m -Xmx768m -Djdk.serialFilter=java.lang.String;!* -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack
+    exec: /usr/bin/java -Xms256m -Xmx768m --enable-native-access=ALL-UNNAMED -Djdk.serialFilter=java.lang.String;!* -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack
       @/usr/share/java/dependency-track/java.args -host 127.0.0.1 -port 8080
     user: dtrack
     # netlink: the JVM lists the host's addresses.
