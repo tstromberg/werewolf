@@ -5,7 +5,7 @@
 # forward zones, and Unbound starts validating, with no control socket.
 
 seen    anchor-seeded     unbound-setup: trust anchor seeded from /usr/share/dnssec-root/trusted-key\.key into /data/svc/unbound/root\.key
-seen    setup-wrote       unbound-setup: unbound-setup\.conf written: IPv4 on :53, no forward zones
+seen    setup-wrote       unbound-setup: unbound-setup\.conf written: loopback and 10\.0\.2\.15 \(IPv4\) on :53, no forward zones
 seen    validating        unbound\[[0-9]+:0\] notice: init module 0: validator
 seen    serving           unbound\[[0-9]+:0\] info: start of service
 unseen  unbound-failed    unbound\[[0-9]+:0\] fatal error

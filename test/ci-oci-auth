@@ -1,0 +1,35 @@
+#!/bin/sh
+# Job-scoped GHCR credentials for crane; never use the runner's Docker config.
+set -eu
+
+case "${1:-}" in
+  login)
+    : "${RUNNER_TEMP:?}" "${GITHUB_ENV:?}" "${GHCR_USER:?}" "${GHCR_TOKEN:?}"
+    umask 077
+    DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/howl-oci.XXXXXX")
+    export DOCKER_CONFIG
+    # Publish the path before login so the always() cleanup also covers failure.
+    printf 'DOCKER_CONFIG=%s\n' "$DOCKER_CONFIG" >> "$GITHUB_ENV"
+    printf '%s' "$GHCR_TOKEN" | crane auth login ghcr.io \
+      --username "$GHCR_USER" --password-stdin
+    ;;
+  clear)
+    test -n "${DOCKER_CONFIG:-}" || exit 0
+    case "$DOCKER_CONFIG" in
+      "${RUNNER_TEMP:?}"/*) ;;
+      *) echo 'ci-oci-auth: refusing a credentials path outside RUNNER_TEMP' >&2; exit 1 ;;
+    esac
+    relative=${DOCKER_CONFIG#"${RUNNER_TEMP:?}/"}
+    case "$relative" in
+      */*) echo 'ci-oci-auth: refusing a redirected credentials path' >&2; exit 1 ;;
+    esac
+    case "$relative" in
+      howl-oci.??????) ;;
+      *) echo 'ci-oci-auth: refusing an unrelated credentials directory' >&2; exit 1 ;;
+    esac
+    test ! -L "$DOCKER_CONFIG"
+    rm -f -- "$DOCKER_CONFIG/config.json"
+    rmdir -- "$DOCKER_CONFIG"
+    ;;
+  *) echo 'usage: ci-oci-auth login|clear' >&2; exit 2 ;;
+esac

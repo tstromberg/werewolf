@@ -721,7 +721,7 @@ test "release forms dispatch to their native checks, and runtimes to a hello-wor
             "check-native-tests-minimal:\n\t@echo dispatched-native-minimal\n" ++
             "check-scenario-app-python-app:\n\t@echo dispatched-app-python-app\n",
     });
-    // howl, which every check needs, must be neither built nor run.
+    // Image preparation and howl are outside this dispatch-only check.
     try tmp.dir.writeFile(io, .{
         .sub_path = "howl",
         .data = "#!/bin/sh\nexit 99\n",
@@ -739,6 +739,10 @@ test "release forms dispatch to their native checks, and runtimes to a hello-wor
         overrides,
         "-o",
         howl,
+        "-o",
+        "_check-native-image-prod-ssh",
+        "-o",
+        "_check-native-image-minimal",
         "FORMS_FOR_ARCH=minimal prod-ssh python",
         try gpa.print("HOWL={s}", .{howl}),
         "check-prod-ssh",
