@@ -200,10 +200,17 @@ pub fn matches(arena: Allocator, got: Json, want: Json) !bool {
             if (value != .string) return error.InvalidMatcher;
             break :blk std.mem.eql(u8, @tagName(got), value.string);
         } else if (std.mem.eql(u8, op, "matches") or std.mem.eql(u8, op, "not_matches")) blk: {
-            if (got != .string or value != .string or value.string.len > 512 or
-                std.mem.findScalar(u8, value.string, 0) != null or
-                std.mem.findScalar(u8, got.string, 0) != null)
+            if (value != .string or value.string.len > 512 or
+                std.mem.findScalar(u8, value.string, 0) != null)
                 return error.InvalidMatcher;
+            // A value that is not text cannot match a positive expression.
+            // Treat an unfinished nullable field as a mismatch so await can
+            // retry it. A negative assertion must still refuse non-text.
+            if (got != .string) {
+                if (std.mem.eql(u8, op, "matches")) break :blk false;
+                return error.InvalidMatcher;
+            }
+            if (std.mem.findScalar(u8, got.string, 0) != null) return error.InvalidMatcher;
             const result = werewolf_regex_match(
                 (try arena.dupeSentinel(u8, value.string, 0)).ptr,
                 (try arena.dupeSentinel(u8, got.string, 0)).ptr,
@@ -249,6 +256,19 @@ test "absence with an incompatible type must not pass" {
     const a = arena.allocator();
     const invalid = try std.json.parseFromSliceLeaky(Json, a, "{\"absent\":1}", .{});
     try std.testing.expectError(error.InvalidMatcher, matches(a, .{ .string = "secret" }, invalid));
+}
+
+test "positive regex can await a nullable field without accepting it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try std.json.parseFromSliceLeaky(Json, a, "{\"matches\":\".+\"}", .{});
+    try std.testing.expect(!try matches(a, .null, want));
+    try std.testing.expect(!try matches(a, .{ .integer = 1 }, want));
+    try std.testing.expect(!try matches(a, .{ .string = "" }, want));
+    try std.testing.expect(try matches(a, .{ .string = "thumbhash" }, want));
+    const invalid = try std.json.parseFromSliceLeaky(Json, a, "{\"matches\":true}", .{});
+    try std.testing.expectError(error.InvalidMatcher, matches(a, .null, invalid));
 }
 
 test "negative regex rejects matches, malformed patterns and incompatible input" {

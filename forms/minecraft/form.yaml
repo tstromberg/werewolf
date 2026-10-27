@@ -7,7 +7,7 @@
 base: jre
 
 packages:
-  - minecraft
+  - minecraft>=26.3-r6
 
 # make check's (forms/README.md). The game port speaks Minecraft's
 # protocol, not HTTP. The heap and the world sit beside the machine's.

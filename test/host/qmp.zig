@@ -30,6 +30,61 @@ pub fn command(
     return exchange(gpa, &reader.interface, &writer.interface, 2, operation, arguments);
 }
 
+/// watch enables asynchronous events and passes them to context.event until
+/// the monitor closes. context.ready runs after capabilities are negotiated.
+pub fn watch(io: Io, gpa: Allocator, path: []const u8, context: anytype) !void {
+    const address = try Io.net.UnixAddress.init(path);
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    var in_buf: [max_reply]u8 = undefined;
+    var out_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    var writer = stream.writer(io, &out_buf);
+    const greeting = try reply(gpa, &reader.interface);
+    if (greeting != .object or !greeting.object.contains("QMP")) return error.MissingQmpGreeting;
+    _ = try exchange(gpa, &reader.interface, &writer.interface, 1, "qmp_capabilities", null);
+    context.ready();
+    while (true) context.event(try reply(gpa, &reader.interface));
+}
+
+/// guestPoweroff excludes resets, panics and host-initiated QEMU exits.
+pub fn guestPoweroff(message: json.Value) bool {
+    if (message != .object) return false;
+    const event = message.object.get("event") orelse return false;
+    if (event != .string or !std.mem.eql(u8, event.string, "SHUTDOWN")) return false;
+    const data = message.object.get("data") orelse return false;
+    if (data != .object) return false;
+    const guest = data.object.get("guest") orelse return false;
+    const reason = data.object.get("reason") orelse return false;
+    return guest == .bool and guest.bool and reason == .string and
+        std.mem.eql(u8, reason.string, "guest-shutdown");
+}
+
+test "guest poweroff requires the shutdown event and its exact guest reason" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const cases = .{
+        .{ "SHUTDOWN", true, "guest-shutdown", true },
+        .{ "SHUTDOWN", false, "guest-shutdown", false },
+        .{ "SHUTDOWN", true, "guest-reset", false },
+        .{ "SHUTDOWN", true, "guest-panic", false },
+        .{ "SHUTDOWN", false, "host-qmp-quit", false },
+        .{ "POWERDOWN", true, "guest-shutdown", false },
+    };
+    inline for (cases) |case| {
+        const text = try json.Stringify.valueAlloc(gpa, .{
+            .event = case[0],
+            .data = .{ .guest = case[1], .reason = case[2] },
+        }, .{});
+        const message = try json.parseFromSliceLeaky(json.Value, gpa, text, .{});
+        try std.testing.expectEqual(case[3], guestPoweroff(message));
+    }
+    const missing_reason = "{\"event\":\"SHUTDOWN\",\"data\":{\"guest\":true}}";
+    const malformed = try json.parseFromSliceLeaky(json.Value, gpa, missing_reason, .{});
+    try std.testing.expect(!guestPoweroff(malformed));
+}
+
 fn exchange(
     gpa: Allocator,
     r: *Io.Reader,
