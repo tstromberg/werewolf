@@ -109,8 +109,17 @@ Logs are in `build/check/gcp-metadata-*`.
 
 ## Firecracker
 
-See [Firecracker live tests](testing-hypervisors.md#firecracker) for protected boot,
-containment, signed A/B recovery and the default host-pin limitation check.
+[Protected Firecracker checks](testing-secure-boot.md#firecracker) exercise the
+host-pinned IPE mode on Linux/KVM.
+
+`make check-firecracker` boots `sshd` on `FIRECRACKER_HOST` (default `galadriel`).
+The host needs Linux/KVM, Firecracker, mtools, erofs-utils and passwordless `doas`.
+The x86_64 tree, howl, form and verity tools are copied there; no Zig toolchain is
+needed. A mismatched lock is resolved with `go install`'s apko, pinned in
+`tools/install-deps`. The form accepts the host's key file and declares the
+`network-ssh-security-keys` weakness. It must hand over to runit with a verified root,
+match the form's and `test/posture-known`'s expected posture, and accept SSH through
+the tap with that key. Delete must remove the VM; `FIRECRACKER_KEEP=1` retains it.
 
 ## bhyve
 

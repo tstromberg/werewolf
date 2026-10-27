@@ -7,12 +7,8 @@ base: jre
 
 with: [postgresql, caddy]
 
-packages:
-  # Ours (../packages/security/dependency-track): the API server and its
-  # frontend, code and assets on the read-only image. Wolfi's
-  # dependency-track is 4.14's executable WAR on OpenJDK 21; the floor keeps
-  # it out.
-  - dependency-track>=5.2.1
+# LOCAL-PACKAGE-REVERT: use the published package once its version 5 build is available.
+# Until then, melange/dependency-track.yaml supplies the complete local recipe.
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -32,14 +28,13 @@ services:
   dtrack:
     # DataNucleus keeps some columns, such as a license's seeAlso list, as
     # Java-serialized String arrays in PostgreSQL, and reads them back at the
-    # next start. The filter admits strings and nothing else. Stored files
-    # are compressed through zstd-jni's JNI library, which the package keeps
-    # on the image.
+    # next start. The filter admits strings and nothing else.
+    # Stored files use the package's zstd JNI library from the read-only image.
     allow: [java:deserialize, java:native]
     # The API server, from the package's argument file. -host and -port are
     # its own flags; the default address is every one. Its management
     # server (health and metrics, :9000) is on loopback too.
-    exec: /usr/bin/java -Xms256m -Xmx768m -Djdk.serialFilter=java.lang.String;!* -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack
+    exec: /usr/bin/java -Xms256m -Xmx768m --enable-native-access=ALL-UNNAMED -Djdk.serialFilter=java.lang.String;!* -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack
       @/usr/share/java/dependency-track/java.args -host 127.0.0.1 -port 8080
     user: dtrack
     # netlink: the JVM lists the host's addresses.

@@ -18,14 +18,16 @@ out=$("$howl" create version-check --with playground --version ../image 2>&1)
 "$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
 "$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"
 "$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
-"$howl" run --build --disable=secureboot,tpm,ipe --dev=ssh -h >/dev/null 2>&1 || fail "explicit unprotected development help"
-"$howl" create --build smoke --with playground --on firecracker -h >/dev/null 2>&1 ||
-    fail "default Firecracker IPE mode was refused"
+"$howl" run --build --disable=secureboot,tpm,ipe --dev -h >/dev/null 2>&1 || fail "explicit unprotected development help"
+"$howl" create --build smoke --with playground --on firecracker -n 2>&1 | grep -q 'as it is' ||
+	fail "Firecracker's default build plan failed"
+out=$("$howl" create --build smoke --with playground --dev 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q -- '--dev --disable=secureboot,tpm,ipe' || fail "--dev silently disabled protection"
 out=$("$howl" create --build smoke --with playground --dev=ssh 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q -- '--dev=ssh --disable=secureboot,tpm,ipe' || fail "SSH iteration silently disabled protection"
 out=$("$howl" run --build --disable=tpm 2>&1)
-[ $? -ne 0 ] && echo "$out" | grep -q -- '--disable=tpm: use secureboot,tpm' ||
-    fail "a partial --disable was accepted"
+[ $? -ne 0 ] && echo "$out" | grep -q 'use secureboot,tpm for Firecracker with IPE' ||
+	fail "a partial --disable was accepted"
 out=$("$howl" run --on gcp 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'werewolf publishes no gcp image yet' || fail "a cloud took an unpublished download"
 out=$(WEREWOLF_BOOT_MIRROR=http://127.0.0.1 "$howl" run 2>&1)

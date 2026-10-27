@@ -131,9 +131,21 @@ ordered uploads, interruption recovery, immutable collisions, release floors, an
 index that does not advance). Candidate CI has no publication permission
 ([design/protected-downloads.md](design/protected-downloads.md)).
 
-To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make` with
-a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
-checks its configuration, and requires IPE explicitly disabled. For strict IPE
-testing, use `IPE=1` and its three signing inputs instead. JIT forms can thus
-exercise the same candidate kernel through their normal profile without changing
-strict IPE policy.
+To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make`
+with a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
+checks its configuration, and requires IPE explicitly disabled. For strict IPE testing,
+use `IPE=1` and its three signing inputs instead. JIT forms can thus exercise the same
+candidate kernel through their normal profile without changing strict IPE policy.
+
+## Firecracker
+
+On a Linux/KVM host, `make check-firecracker-protected` builds a private playground
+guest using Firecracker's default IPE mode. It checks the limitation warning, active
+and locked IPE, guest reboot, stop/start, refusal of changed kernels, initrds and boot
+arguments, missing host trust, explicit protection downgrades, and delete. It needs
+Firecracker 1.17+, mtools, erofs-utils, passwordless sudo/doas and source-build tools,
+with TUN and NAT modules available for the running host kernel. x86_64 boots the
+original bzImage to retain kernel address randomization; extracting its ELF bypasses
+it. The first run builds the local IPE kernel. Logs stay under
+`build/check/fc-protected-PID`; failures stop the guest and retain its artifacts.
+Boot files are pinned on the host; this mode takes image changes through host rebuilds.

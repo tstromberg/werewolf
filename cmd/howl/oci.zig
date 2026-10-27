@@ -24,6 +24,8 @@ const max_component = 255;
 const max_pax = 64 << 10;
 const max_config = 4 << 20;
 const max_links = 40;
+// A shared registry's minute-long burst window can outlast crane's retries.
+const registry_backoff = [3]i64{ 15, 30, 60 };
 
 pub const default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// devices are the device nodes init binds into an image's root.
@@ -130,6 +132,16 @@ fn crane(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) ![]const u
 }
 
 fn runCrane(io: Io, gpa: Allocator, argv: []const []const u8, why: *Why) ![]const u8 {
+    return runCraneWith(io, gpa, argv, registry_backoff, why);
+}
+
+fn runCraneWith(
+    io: Io,
+    gpa: Allocator,
+    argv: []const []const u8,
+    backoff: [3]i64,
+    why: *Why,
+) ![]const u8 {
     for (0..4) |attempt| {
         const r = std.process.run(gpa, io, .{
             .argv = argv,
@@ -144,7 +156,7 @@ fn runCrane(io: Io, gpa: Allocator, argv: []const []const u8, why: *Why) ![]cons
         // GHCR's short burst limits can outlast crane's own retries. Keep
         // the same arguments and bound our backoff; other refusals fail now.
         if (attempt < 3 and rateLimited(r.stderr)) {
-            try io.sleep(.fromSeconds(@as(i64, 1) << @intCast(attempt)), .awake);
+            try io.sleep(.fromSeconds(backoff[attempt]), .awake);
             continue;
         }
         return why.refuse(
@@ -197,10 +209,11 @@ test "crane retries burst limits, bounds repeated limits, and preserves other re
         try env.put("FAILURE", case[1]);
         try env.put("STATE", try gpa.print("{s}/{s}", .{ root, case[0] }));
         var why: Why = .{};
-        const result = runCrane(
+        const result = runCraneWith(
             io,
             gpa,
             &.{ try gpa.print("{s}/crane", .{root}), "config", "example.invalid/pinned" },
+            .{ 0, 0, 0 },
             &why,
         );
         if (comptime std.mem.eql(u8, case[0], "recover")) {
@@ -239,10 +252,202 @@ pub fn pull(
     why: *Why,
 ) !Unpacked {
     const self = try std.process.executablePathAlloc(io, gpa);
+    return pullWith(
+        io,
+        gpa,
+        ref,
+        dir,
+        &.{ "crane", "--platform", platform(arch), "export", ref, "-" },
+        &.{ self, "_unpack", dir },
+        registry_backoff,
+        why,
+    );
+}
+
+fn pullWith(
+    io: Io,
+    gpa: Allocator,
+    ref: []const u8,
+    dir: []const u8,
+    exporter: []const []const u8,
+    unpacker: []const []const u8,
+    backoff: [3]i64,
+    why: *Why,
+) !Unpacked {
+    const existed = exists: {
+        _ = Dir.cwd().statFile(io, dir, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => break :exists false,
+            else => return err,
+        };
+        break :exists true;
+    };
+    // A failed extraction must not become the next attempt's image. Never
+    // remove a caller's pre-existing directory, including on a refusal.
+    errdefer if (!existed) Dir.cwd().deleteTree(io, dir) catch {};
+    const capture = try exportCapture(io, gpa);
+    defer Dir.cwd().deleteTree(io, capture) catch {};
+    const diagnostics = try gpa.print("{s}/stderr", .{capture});
+    for (0..4) |attempt| {
+        const result = try pullAttempt(io, gpa, exporter, unpacker, diagnostics, why);
+        const stderr = try Dir.cwd().readFileAlloc(io, diagnostics, gpa, .limited(64 << 10));
+        if (stderr.len > 0) Io.File.stderr().writeStreamingAll(io, stderr) catch {};
+        if ((result.exported != .exited or result.exported.exited != 0) and
+            !existed and attempt < 3 and rateLimited(stderr))
+        {
+            try Dir.cwd().deleteTree(io, dir);
+            try io.sleep(.fromSeconds(backoff[attempt]), .awake);
+            continue;
+        }
+        // An unpacker refusal can make crane fail with a broken pipe. It
+        // remains the primary error unless the registry explicitly throttled.
+        if (result.unpacked != .exited or result.unpacked.exited != 0)
+            return why.refuse("{s}: the image was refused, as said above", .{ref});
+        if (result.exported != .exited or result.exported.exited != 0)
+            return why.refuse("crane export {s} failed ({any}): {s}", .{
+                ref, result.exported, lastLine(stderr),
+            });
+        var words = std.mem.tokenizeAny(u8, result.said, " \n");
+        return .{
+            .files = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch 0,
+            .bytes = std.fmt.parseInt(u64, words.next() orelse "0", 10) catch 0,
+            .left_out = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch 0,
+        };
+    }
+    unreachable;
+}
+
+fn exportCapture(io: Io, gpa: Allocator) ![]const u8 {
+    while (true) {
+        var id: [6]u8 = undefined;
+        io.random(&id);
+        const dir = try gpa.print("/tmp/ww-oci-export-{s}", .{&std.fmt.bytesToHex(id, .lower)});
+        Dir.cwd().createDir(io, dir, .fromMode(0o700)) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        return dir;
+    }
+}
+
+test "export retries clean partial images, isolate credentials and preserve refusals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "exporter",
+        .flags = .{ .permissions = .fromMode(0o755) },
+        .data = "#!/bin/sh\nn=0; if [ -e \"$STATE\" ]; then read n < \"$STATE\"; fi\n" ++
+            "n=$((n + 1)); printf '%s' \"$n\" > \"$STATE\"\n" ++
+            "if [ \"$MODE\" = valid ] || { [ \"$MODE\" = recover ] && [ \"$n\" -gt 1 ]; }; then " ++
+            "printf 'complete'; exit 0; fi\n" ++
+            "printf 'incomplete'; printf '%s\\n' \"$FAILURE\" >&2; exit 1\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "unpacker",
+        .flags = .{ .permissions = .fromMode(0o755) },
+        .data = "#!/bin/sh\n[ -z \"${SECRET_MARKER+x}\" ] || exit 19\n" ++
+            "data=$(/bin/cat); /bin/mkdir -p \"$1\"\n" ++
+            "if [ \"$data\" = incomplete ]; then printf bad >\"$1/partial\"; exit 0; fi\n" ++
+            "[ ! -e \"$1/partial\" ] || exit 23\n" ++
+            "[ \"${2:-}\" != refuse ] || exit 31\n" ++
+            "printf final >\"$1/final\"; printf '1 5 0\\n'\n",
+    });
+    var env: std.process.Environ.Map = .init(gpa);
+    try env.put("SECRET_MARKER", "operator-credentials");
+    const saved = howl.environ;
+    defer howl.environ = saved;
+    howl.environ = &env;
+    const cases = .{
+        .{ "recover", "TOOMANYREQUESTS: retry-after: 364.243us", "2", "", false },
+        .{ "limited", "unexpected status code 429", "4", "", false },
+        .{ "unauthorized", "UNAUTHORIZED: authentication required", "1", "", false },
+        .{ "valid", "", "1", "refuse", false },
+        .{ "existing", "TOOMANYREQUESTS", "1", "", true },
+    };
+    inline for (cases, 0..) |case, n| {
+        const name = try gpa.print("case-{d}", .{n});
+        const dir = try gpa.print("{s}/{s}", .{ root, name });
+        const state = try gpa.print("{s}/state-{d}", .{ root, n });
+        try env.put("MODE", case[0]);
+        try env.put("FAILURE", case[1]);
+        try env.put("STATE", state);
+        if (case[4]) {
+            try tmp.dir.createDir(io, name, .default_dir);
+            try tmp.dir.writeFile(
+                io,
+                .{ .sub_path = try gpa.print("{s}/operator", .{name}), .data = "keep" },
+            );
+        }
+        var why: Why = .{};
+        const result = pullWith(
+            io,
+            gpa,
+            "example.invalid/image@sha256:pinned",
+            dir,
+            &.{try gpa.print("{s}/exporter", .{root})},
+            &.{ try gpa.print("{s}/unpacker", .{root}), dir, case[3] },
+            .{ 0, 0, 0 },
+            &why,
+        );
+        if (n == 0) {
+            const unpacked = try result;
+            try std.testing.expectEqual(1, unpacked.files);
+            try std.testing.expectEqualStrings(
+                "final",
+                try tmp.dir.readFileAlloc(
+                    io,
+                    try gpa.print("{s}/final", .{name}),
+                    gpa,
+                    .limited(16),
+                ),
+            );
+        } else {
+            try std.testing.expectError(error.Refused, result);
+            if (case[4]) {
+                try std.testing.expectEqualStrings(
+                    "keep",
+                    try tmp.dir.readFileAlloc(
+                        io,
+                        try gpa.print("{s}/operator", .{name}),
+                        gpa,
+                        .limited(16),
+                    ),
+                );
+            } else try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, name, .{}));
+        }
+        try std.testing.expectEqualStrings(
+            case[2],
+            try Dir.cwd().readFileAlloc(io, state, gpa, .limited(16)),
+        );
+    }
+}
+
+const PullAttempt = struct {
+    exported: std.process.Child.Term,
+    unpacked: std.process.Child.Term,
+    said: []const u8,
+};
+
+fn pullAttempt(
+    io: Io,
+    gpa: Allocator,
+    exporter: []const []const u8,
+    unpacker: []const []const u8,
+    diagnostics: []const u8,
+    why: *Why,
+) !PullAttempt {
+    const errors = try Dir.cwd().createFile(io, diagnostics, .{ .permissions = .fromMode(0o600) });
+    defer errors.close(io);
     var puller = std.process.spawn(io, .{
-        .argv = &.{ "crane", "--platform", platform(arch), "export", ref, "-" },
+        .argv = exporter,
+        .environ_map = howl.environ,
         .stdin = .ignore,
         .stdout = .pipe,
+        .stderr = .{ .file = errors },
     }) catch |err| return why.refuse(
         "crane: {s}; crane pulls images, and tools/install-deps installs it",
         .{@errorName(err)},
@@ -250,16 +455,18 @@ pub fn pull(
     const from = puller.stdout.?;
     var none: std.process.Environ.Map = .init(gpa);
     var unpack_child = std.process.spawn(io, .{
-        .argv = &.{ self, "_unpack", dir },
+        .argv = unpacker,
         .stdin = .{ .file = from },
         .stdout = .pipe,
         .environ_map = &none,
     }) catch |err| {
         from.close(io);
+        puller.stdout = null;
         _ = puller.wait(io) catch {};
         return why.refuse("howl _unpack: {s}", .{@errorName(err)});
     };
     from.close(io);
+    puller.stdout = null;
     var said_buf: [256]u8 = undefined;
     var rd = unpack_child.stdout.?.readerStreaming(io, &said_buf);
     const said = rd.interface.allocRemaining(gpa, .limited(4096)) catch "";
@@ -271,22 +478,7 @@ pub fn pull(
         "crane export: {s}",
         .{@errorName(err)},
     );
-    // Check the unpacker first: when it refuses, crane dies of a broken
-    // pipe and would otherwise be blamed.
-    if (ut != .exited or ut.exited != 0) return why.refuse(
-        "{s}: the image was refused, as said above",
-        .{ref},
-    );
-    if (pt != .exited or pt.exited != 0) return why.refuse(
-        "crane export {s} failed; what it said is above",
-        .{ref},
-    );
-    var words = std.mem.tokenizeAny(u8, said, " \n");
-    return .{
-        .files = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch 0,
-        .bytes = std.fmt.parseInt(u64, words.next() orelse "0", 10) catch 0,
-        .left_out = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch 0,
-    };
+    return .{ .exported = pt, .unpacked = ut, .said = said };
 }
 
 /// unpackMain is `howl _unpack DIR`: it unpacks a tar from standard input into

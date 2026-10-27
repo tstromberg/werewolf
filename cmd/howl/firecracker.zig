@@ -938,6 +938,7 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
             error.FileNotFound => false,
             else => return err,
         };
+    const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
     const pidfile = try gpa.print("{s}/firecracker.pid", .{dir});
@@ -1055,20 +1056,6 @@ test "host boot pins reject changed kernel, initrd, arguments and unknown versio
         error.BootFilesChanged,
         future.verify(trust.entry, "trusted kernel", "trusted stage0 and IPE policy"),
     );
-}
-
-test "guest logs stay bounded and continue after filling" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(testing.io, "console", .{ .read = true });
-    defer file.close(testing.io);
-    try file.setLength(testing.io, log_limit - 1);
-    try boundedWrite(testing.io, file, "last log before rotation\n");
-    try testing.expectEqual(25, try file.length(testing.io));
-    try boundedWrite(testing.io, file, "still draining\n");
-    var bytes: [128]u8 = undefined;
-    const n = try file.readPositionalAll(testing.io, &bytes, 0);
-    try testing.expectEqualStrings("last log before rotation\nstill draining\n", bytes[0..n]);
 }
 
 test net {

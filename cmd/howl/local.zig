@@ -927,7 +927,7 @@ pub fn createFirecracker(
         .{},
     );
     if (!firecracker.installed(io, gpa)) return why.refuse(
-        "--on firecracker: Linux with /dev/kvm, Firecracker 1.17+, bubblewrap and prlimit " ++
+        "--on firecracker: Linux with /dev/kvm, and Firecracker 1.17+ on the PATH " ++
             "(tools/install-deps)",
         .{},
     );

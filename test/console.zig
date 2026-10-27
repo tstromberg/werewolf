@@ -67,6 +67,7 @@ const Boot = struct {
     started: bool = false,
     failed: usize = 0,
     host: []const u8 = "",
+    monitor: []const u8 = "",
 
     fn run(b: *Boot, checks: []const u8, argv: []const []const u8) !void {
         const gpa = b.c.gpa;
@@ -79,7 +80,21 @@ const Boot = struct {
             false,
         );
         b.host = try describe(b.c, argv);
-        try b.m.start(b.c.io, gpa, argv, .{ .log = b.log, .input = true });
+        const monitor_dir = try monitorDirectory(b.c.io, gpa);
+        defer Io.Dir.cwd().deleteTree(b.c.io, monitor_dir) catch {};
+        // remote-qemu forwards the serial console, not host Unix sockets.
+        // Keep its existing serial poweroff proof until it can forward QMP.
+        const remote = mem.eql(u8, std.fs.path.basename(argv[0]), "remote-qemu");
+        b.monitor = if (remote) "" else try gpa.print("{s}/qmp", .{monitor_dir});
+        const monitored = if (remote) argv else try mem.concat(gpa, []const u8, &.{
+            argv,
+            &.{
+                "-qmp",    try gpa.print("unix:{s},server=on,wait=off", .{b.monitor}),
+                // An explicit QMP monitor suppresses -nographic's implicit HMP.
+                "-serial", "mon:stdio",
+            },
+        });
+        try b.m.start(b.c.io, gpa, monitored, .{ .log = b.log, .input = true });
         b.started = true;
         defer b.m.stop(.fromSeconds(10));
         b.m.note(try gpa.print("werewolf-check: host {s}\n", .{b.host}));
@@ -307,12 +322,29 @@ const Boot = struct {
         try b.m.send("\x01c");
         b.m.until(qemu.after(io, 10), After{ .start = start, .needle = "(qemu)" }) catch
             return b.giveUp("shutdown", "no QEMU monitor", false);
+        var watched: PowerWatch = .{ .machine = &b.m };
+        var events: Io.Group = .init;
+        defer events.cancel(io);
+        if (b.monitor.len != 0) {
+            try events.concurrent(io, PowerWatch.run, .{ &watched, io, b.monitor });
+            try b.m.until(qemu.after(io, 10), PowerWatch.Ready{ .watch = &watched });
+        }
         start = (try b.m.console(gpa)).len;
         try b.m.send("system_powerdown\r");
         b.m.until(qemu.after(io, 10), After{ .start = start, .needle = "(qemu)" }) catch {};
         try b.m.send("\x01c");
-        b.m.waitFor("reboot: Power down", qemu.after(io, 60)) catch |err| switch (err) {
-            error.MachineExited => b.fail("shutdown", "QEMU ended without the kernel powering off"),
+        b.m.until(
+            qemu.after(io, 60),
+            PowerWatch.Off{ .watch = &watched },
+        ) catch |err| switch (err) {
+            error.MachineExited => {
+                // The serial readers can reach EOF before the QMP reader has
+                // consumed QEMU's final event. Drain that connection too.
+                events.await(io) catch {};
+                const text = try b.m.console(gpa);
+                if (!watched.poweroff and mem.find(u8, text, "reboot: Power down") == null)
+                    b.fail("shutdown", "QEMU ended without the kernel powering off");
+            },
             error.Timeout => b.fail("shutdown", "no power-off 60 s after the power button"),
             else => return err,
         };
@@ -353,6 +385,116 @@ const Boot = struct {
         return explain(gpa, qemu.clean(gpa, text) catch text, b.host) catch b.host;
     }
 };
+
+fn monitorDirectory(io: Io, gpa: Allocator) ![]const u8 {
+    while (true) {
+        var id: [6]u8 = undefined;
+        io.random(&id);
+        const dir = try gpa.print("/tmp/ww-console-{s}", .{&std.fmt.bytesToHex(id, .lower)});
+        Io.Dir.cwd().createDir(io, dir, .fromMode(0o700)) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => |e| return e,
+        };
+        return dir;
+    }
+}
+
+/// QEMU's guest-shutdown event survives a lost final serial-console line.
+/// The console alone can still prove poweroff; a reset or host quit cannot.
+const PowerWatch = struct {
+    machine: *qemu.Machine,
+    ready_seen: bool = false,
+    poweroff: bool = false,
+    ended: bool = false,
+
+    fn run(w: *PowerWatch, io: Io, path: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        host.qmp.watch(io, arena.allocator(), path, w) catch {};
+        w.machine.mutex.lockUncancelable(io);
+        defer w.machine.mutex.unlock(io);
+        w.ended = true;
+        w.machine.changed.broadcast(io);
+    }
+
+    pub fn ready(w: *PowerWatch) void {
+        const m = w.machine;
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        w.ready_seen = true;
+        m.changed.broadcast(m.io);
+    }
+
+    pub fn event(w: *PowerWatch, message: std.json.Value) void {
+        if (!host.qmp.guestPoweroff(message)) return;
+        const m = w.machine;
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        w.poweroff = true;
+        m.log.writeStreamingAll(
+            m.io,
+            "\nwerewolf-check: QMP guest-shutdown (guest=true)\n",
+        ) catch {};
+        m.changed.broadcast(m.io);
+    }
+
+    const Ready = struct {
+        watch: *PowerWatch,
+        pub fn done(r: Ready, _: []const u8) !bool {
+            if (r.watch.ready_seen) return true;
+            if (r.watch.ended) return error.QmpMonitorClosed;
+            return false;
+        }
+    };
+
+    const Off = struct {
+        watch: *PowerWatch,
+        pub fn done(o: Off, text: []const u8) !bool {
+            return o.watch.poweroff or mem.find(u8, text, "reboot: Power down") != null;
+        }
+    };
+};
+
+test "a host QMP quit is not a guest poweroff" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    const directory = try monitorDirectory(io, gpa);
+    defer Io.Dir.cwd().deleteTree(io, directory) catch {};
+    const socket = try gpa.print("{s}/qmp", .{directory});
+    var machine: qemu.Machine = undefined;
+    try machine.start(io, gpa, &.{
+        try gpa.print("qemu-system-{s}", .{@tagName(@import("builtin").cpu.arch)}),
+        "-M",
+        "none",
+        "-display",
+        "none",
+        "-monitor",
+        "stdio",
+        "-qmp",
+        try gpa.print("unix:{s},server=on,wait=off", .{socket}),
+    }, .{ .log = try gpa.print("{s}/console.log", .{directory}), .input = true });
+    defer machine.stop(.fromSeconds(2));
+    for (0..100) |_| {
+        if (Io.Dir.cwd().access(io, socket, .{}))
+            break
+        else |_|
+            try io.sleep(.fromMilliseconds(50), .awake);
+    }
+    var watched: PowerWatch = .{ .machine = &machine };
+    var events: Io.Group = .init;
+    defer events.cancel(io);
+    try events.concurrent(io, PowerWatch.run, .{ &watched, io, socket });
+    try machine.until(qemu.after(io, 5), PowerWatch.Ready{ .watch = &watched });
+    try machine.send("quit\r");
+    try testing.expectError(
+        error.MachineExited,
+        machine.until(qemu.after(io, 5), PowerWatch.Off{ .watch = &watched }),
+    );
+    try events.await(io);
+    try testing.expect(!watched.poweroff);
+}
 
 const Handover = struct {
     panic: *[]const u8,

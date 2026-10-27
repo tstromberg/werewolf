@@ -81,7 +81,8 @@ jobs:
       - name: Make room for VM images
         # Drop unused hosted SDKs; ci-compilers installs pinned .NET privately.
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet/sdk /usr/share/dotnet/packs
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost
           df -h .
       - name: Install tools
         run: sudo test/ci-setup
