@@ -48,6 +48,9 @@ jobs:
         run: make check-unwound-age-authority DNS_TEST_RUNNER=sudo
 
   check:
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +141,11 @@ jobs:
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
+      - name: Authenticate public GHCR pulls with this job's token
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: sh test/ci-oci-auth login
       - name: Boot and check (${{ matrix.group }}${{ matrix.shard && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
         # Boots spend much of their time waiting on services. Share CPUs,
         # but reserve the largest form's RAM so large guests cannot exhaust
@@ -151,6 +159,9 @@ jobs:
             make -k -j"$jobs" DISABLE=secureboot,tpm,ipe PERSIST_AFTER= \
               ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
           fi
+      - name: Remove this job's registry credentials
+        if: always()
+        run: sh test/ci-oci-auth clear
       # integrity saves the Zig cache, when this week's has no entry for
       # these sources yet: every check job compiles the same programs, and
       # integrity is off the critical path.
@@ -209,6 +220,9 @@ jobs:
   # (sudo test/ci-setup, a JDK and rustup). Each checkout restores its public
   # EFI stubs without root, then checks that the system tools are there.
   vm-arm64:
+    permissions:
+      contents: read
+      packages: read
     if: >-
       vars.WEREWOLF_ARM64_CHECK_RUNNER != '' && (github.event_name == 'push' ||
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
@@ -272,6 +286,11 @@ jobs:
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
+      - name: Authenticate public GHCR pulls with this job's token
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: sh test/ci-oci-auth login
       - name: Boot and check this catalog shard
         # Complete and clean each form before the next.
         run: |
@@ -284,6 +303,9 @@ jobs:
           jobs=$(test/ci-vm-jobs)
           echo "vm-arm64: $jobs platform boots at once"
           make -k -j"$jobs" DISABLE=secureboot,tpm,ipe check-platform
+      - name: Remove this job's registry credentials
+        if: always()
+        run: sh test/ci-oci-auth clear
       # Each arm64 shard saves its melange packages, as the check job's
       # forms jobs do x86_64's: saved even when a check fails.
       - name: Save melange packages

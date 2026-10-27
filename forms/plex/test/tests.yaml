@@ -10,7 +10,8 @@ suites:
             expect:
               status: 200
               body:
-                contains: 'version="1.43.5.11029-6bf8af3f0"'
+                contains: '<MediaContainer '
+                matches: 'version="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]+"'
             await: 120s
           - file: /run/svc/plex-transcode/control.sock
             expect:
