@@ -1,6 +1,6 @@
 version: 1
 packages:
-  - restic
+  - restic>=0.19.1-r1000
 suites:
   - name: restic
     policy:
