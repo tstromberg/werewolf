@@ -56,8 +56,8 @@ On any VM built with `postgresql`, `php`, `wordpress`, `mastodon`, `greenbone`,
 
 - **Files:**
   - `cmd/sh-shim/sh-shim.zig`
-  - `docs/design/glibc-neutered.md`
-  - `docs/design/script-argv-enforcement.md`
+  - `docs/design/implemented/glibc-neutered.md`
+  - `docs/design/retired/script-argv-enforcement.md`
 
 ### Mechanism
 - Design documents describe `/usr/share/werewolf/sh-allow`, `popen-shim`, and

@@ -18,6 +18,71 @@ pub const Images = struct {
     shards: u32,
     checks: []const []const u8,
     focused: Target,
+    variants: []const Variant = &.{},
+    catalog_forms: []const []const u8 = &.{},
+
+    pub fn entire(t: Images, s: *Sys) !Images {
+        var out = t;
+        if (t.catalog_forms.len == 0) return out;
+        out.forms = t.catalog_forms;
+        var gates: std.ArrayList(Gate) = .empty;
+        for (t.gates) |gate| try gates.append(s.gpa, .{
+            .provider = gate.provider,
+            .forms = if (mem.eql(u8, gate.provider, "qemu")) out.forms else gate.forms,
+        });
+        out.gates = gates.items;
+        return out;
+    }
+
+    pub fn selections(t: Images, s: *Sys) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        try out.appendSlice(s.gpa, &.{ "", "ssh" });
+        for (t.variants) |variant| for (variant.combinations) |combination| {
+            const base = try canonical(s, combination);
+            const ssh = try canonical(s, try s.gpa.print("{s},ssh", .{combination}));
+            for ([_][]const u8{
+                base,
+                ssh,
+            }) |selection| if (!has(out.items, selection)) try out.append(s.gpa, selection);
+        };
+        return out.items;
+    }
+
+    pub fn selected(t: Images, s: *Sys) !Images {
+        var out = t;
+        var names_: std.ArrayList([]const u8) = .empty;
+        var workload: std.ArrayList([]const u8) = .empty;
+        for (try s.variantNames()) |name| if (!mem.eql(
+            u8,
+            name,
+            "ssh",
+        )) try workload.append(s.gpa, name);
+        const wanted = try mem.join(s.gpa, ",", workload.items);
+        for (t.forms) |name| {
+            var allowed = wanted.len == 0;
+            for (t.variants) |variant| if (mem.eql(u8, name, variant.form)) {
+                for (variant.combinations) |combination| if (mem.eql(
+                    u8,
+                    try canonical(s, combination),
+                    wanted,
+                )) {
+                    allowed = true;
+                    break;
+                };
+            };
+            if (allowed) try names_.append(s.gpa, name);
+        }
+        out.forms = names_.items;
+        if (has(try s.variantNames(), "ssh")) {
+            var gates: std.ArrayList(Gate) = .empty;
+            for (t.gates) |gate| try gates.append(
+                s.gpa,
+                .{ .provider = gate.provider, .forms = out.forms },
+            );
+            out.gates = gates.items;
+        }
+        return out;
+    }
 
     pub fn hasForm(t: Images, name: []const u8) bool {
         return has(t.forms, name);
@@ -61,6 +126,14 @@ pub const Images = struct {
             mem.eql(u8, arch_name, t.focused.arch);
     }
 };
+
+pub const Variant = struct { form: []const u8, combinations: []const []const u8 };
+
+fn canonical(s: *Sys, value: []const u8) ![]const u8 {
+    var f: form.Failure = .{};
+    const names_ = form.variantNames(s.gpa, &.{value}, &f) catch return s.refuse("{s}", .{f.text});
+    return mem.join(s.gpa, ",", names_);
+}
 
 pub const Arch = struct {
     name: []const u8,
@@ -113,13 +186,15 @@ pub fn parse(s: *Sys, text: []const u8) !Images {
         "shards",
         "checks",
         "focused",
+        "variants",
+        "catalog",
     };
     for (doc.map) |e| if (!has(
         &known,
         e.key,
     )) return s.refuse("{s}: unknown key {s}", .{ path, e.key });
     var t: Images = .{
-        .forms = try names(s, doc, "forms"),
+        .forms = try catalogForms(s, doc.get("forms") orelse return missing(s, "forms")),
         .profiles = try names(s, doc, "profiles"),
         .arches = &.{},
         .gates = &.{},
@@ -128,6 +203,25 @@ pub fn parse(s: *Sys, text: []const u8) !Images {
         .checks = try scalars(s, doc.get("checks") orelse return missing(s, "checks"), "checks"),
         .focused = undefined,
     };
+    if (doc.get("catalog")) |catalog| t.catalog_forms = try catalogForms(s, catalog);
+    if (doc.get("variants")) |variants| {
+        if (variants != .map) return s.refuse(
+            "variants must map forms to supported combinations",
+            .{},
+        );
+        var combinations: std.ArrayList(Variant) = .empty;
+        for (variants.map) |entry| {
+            if (!t.hasForm(entry.key) and
+                !has(
+                    t.catalog_forms,
+                    entry.key,
+                )) return s.refuse("variants name unpublished form {s}", .{entry.key});
+            const sets = try scalars(s, entry.value, "variants");
+            for (sets) |set| _ = try canonical(s, set);
+            try combinations.append(s.gpa, .{ .form = entry.key, .combinations = sets });
+        }
+        t.variants = combinations.items;
+    }
     for ([_][]const u8{ "secure-boot", "legacy-boot" }) |p|
         if (!has(t.profiles, p)) return s.refuse("{s}: profiles must name {s}", .{ path, p });
     var arches: std.ArrayList(Arch) = .empty;
@@ -152,7 +246,10 @@ pub fn parse(s: *Sys, text: []const u8) !Images {
     const gate_map = doc.get("gates") orelse return missing(s, "gates");
     if (gate_map != .map) return s.refuse("{s}: gates is a map", .{path});
     for (gate_map.map) |e| {
-        const gated_forms = try scalars(s, e.value, "gates");
+        const gated_forms = if (e.value == .scalar and mem.eql(u8, e.value.scalar.text, "all"))
+            t.forms
+        else
+            try scalars(s, e.value, "gates");
         for (gated_forms) |f| if (!t.hasForm(f)) return s.refuse(
             "{s}: gates name unpublished form {s}",
             .{ path, f },
@@ -239,6 +336,34 @@ fn split(s: *Sys, node: form.Node, comptime n: usize) ![n][]const u8 {
 const testing = std.testing;
 const fixture = @import("fixture.zig");
 
+test "each workload combination has one canonical SSH counterpart" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var t = try load(&f.s);
+    t.variants = &.{.{
+        .form = "playground",
+        .combinations = &.{ "vector", "tcp,vector", "vector" },
+    }};
+    const selections_ = try t.selections(&f.s);
+    try testing.expectEqual(@as(usize, 6), selections_.len);
+    for ([_][]const u8{
+        "",
+        "ssh",
+        "vector",
+        "ssh,vector",
+        "tcp,vector",
+        "ssh,tcp,vector",
+    }) |expected|
+        try testing.expect(has(selections_, expected));
+    f.s.variants = "ssh,vector";
+    const selected = try t.selected(&f.s);
+    try testing.expectEqual(@as(usize, 1), selected.forms.len);
+    try testing.expectEqualStrings("playground", selected.forms[0]);
+    f.s.variants = "ssh";
+    try testing.expectEqual(t.forms.len, (try t.selected(&f.s)).forms.len);
+}
+
 test "the published forms in both profiles are the only publication identities" {
     var f: fixture.Fixture = undefined;
     try f.init();
@@ -292,4 +417,23 @@ test "a table that is not exactly the release dialect refuses" {
         try testing.expect(!mem.eql(u8, bad, good));
         try testing.expectError(error.Refused, parse(s, bad));
     }
+}
+
+fn catalogForms(s: *Sys, node: form.Node) ![]const []const u8 {
+    if (node != .scalar or !mem.eql(u8, node.scalar.text, "all")) return scalars(s, node, "forms");
+    var dir = try std.Io.Dir.cwd().openDir(s.io, "forms", .{ .iterate = true });
+    defer dir.close(s.io);
+    var it = dir.iterate();
+    var out: std.ArrayList([]const u8) = .empty;
+    while (try it.next(s.io)) |entry| {
+        if (entry.kind != .directory or !form.isName(entry.name)) continue;
+        dir.access(s.io, try s.gpa.print("{s}/form.yaml", .{entry.name}), .{}) catch continue;
+        try out.append(s.gpa, try s.gpa.dupe(u8, entry.name));
+    }
+    mem.sortUnstable([]const u8, out.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
+        }
+    }.less);
+    return out.items;
 }

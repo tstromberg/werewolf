@@ -38,7 +38,7 @@ were removed. Evidence is under
 `build/ab-validation-20261026/firecracker-v2/provider-ab-firecracker/` and
 `build/ab-validation-20261026/firecracker-pinned-v2/provider-ab-firecracker/` (local,
 not checked in). See [provider A/B
-tests](design/provider-ab-tests.md#firecracker-and-bhyve).
+tests](design/implemented/provider-ab-tests.md#firecracker-and-bhyve).
 
 `make check-firecracker` boots the `sshd` form as a Firecracker microVM on
 `FIRECRACKER_HOST` (default `galadriel`), a Linux host with KVM, Firecracker, mtools,
@@ -68,16 +68,15 @@ check reported `current`; this run did not exercise a complete A/B upgrade. Evid
 is in `build/bhyve-validation/bilbo-20261026/` (local, not checked in). Host ACPI/TPM
 diagnostics now go to `bhyve.log` so they cannot interrupt serial readiness lines.
 
-The separate 2026-10-26 signed A/B run on bilbo also passed with
-`AB_MODE=secure AB_TPM=1`: A→B and commit, operator rollback to A, another reboot,
-an unhealthy candidate that remained uncommitted for the full 600 seconds,
-automatic recovery to A, and refusal to retry the failed image. Every boot
-verified the expected signed root, Secure Boot, IPE, dm-verity and TPM admission.
-The protected supervisor kept the same TPM state across reboots; cleanup removed
-the VM and TPM. Evidence is under
-`build/ab-validation-20261026/bhyve/provider-ab-bhyve/` (local, not checked in).
-See [provider A/B tests](design/provider-ab-tests.md#firecracker-and-bhyve) for
-fixture preparation and commands.
+The separate 2026-10-26 signed A/B run on bilbo also passed with `AB_MODE=secure
+AB_TPM=1`: A→B and commit, operator rollback to A, another reboot, an unhealthy
+candidate that remained uncommitted for the full 600 seconds, automatic recovery to
+A, and refusal to retry the failed image. Every boot verified the expected signed
+root, Secure Boot, IPE, dm-verity and TPM admission. The protected supervisor kept
+the same TPM state across reboots; cleanup removed the VM and TPM. Evidence is under
+`build/ab-validation-20261026/bhyve/provider-ab-bhyve/` (local, not checked in). See
+[provider A/B tests](design/implemented/provider-ab-tests.md#firecracker-and-bhyve)
+for fixture preparation and commands.
 
 The published x86 image uses the QEMU channel's signed SLIRP network; howl selects
 SLIRP automatically. A bridged TAP guest needs an image built for TAP. The outbound

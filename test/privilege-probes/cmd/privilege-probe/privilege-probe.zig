@@ -160,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
     if (failures != 0) linux.exit_group(1);
 }
 
-/// rootSession checks what a root SSH login holds (docs/design/ssh-hardening.md):
+/// rootSession checks what a root SSH login holds (docs/design/implemented/ssh-hardening.md):
 /// sshd's login capabilities and no others, a pledge without netlink, packet,
 /// caps, Landlock or seccomp, and writes only where forms/sshd's layer grants.
 fn rootSession() void {

@@ -1,6 +1,6 @@
 //! boot holds posture's boot-chain checks: what the firmware, the
 //! kernel's own build, and the update machinery vouch for before PID 1
-//! runs (docs/design/verified-boot.md).
+//! runs (docs/design/implemented/verified-boot.md).
 
 const std = @import("std");
 const linux = std.os.linux;

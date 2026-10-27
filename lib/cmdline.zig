@@ -82,7 +82,7 @@ pub const Cmdline = struct {
     /// --disable), less any its provider supplies regardless.
     disable: Protections = .empty,
     /// channel is the release channel's 32-byte identity, from the signed UKI;
-    /// with index it selects the machine's TPM floor (docs/design/independent-updates.md).
+    /// with index it selects the machine's TPM floor (docs/design/implemented/independent-updates.md).
     channel: ?[32]u8 = null,
     /// index is this release's place in its channel: 1, 2, 3, ...
     index: ?u64 = null,

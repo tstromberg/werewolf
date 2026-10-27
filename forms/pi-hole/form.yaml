@@ -2,7 +2,7 @@
 # the machine's local networks alone, with its web interface behind Caddy,
 # which serves it over HTTPS for the machine's domain. It runs Pi-hole's
 # own image, its latest release, pinned by digest when built, in a tree
-# of its own (docs/design/oci.md, cmd/howl/oci.zig): pihole-FTL itself,
+# of its own (docs/design/implemented/oci.md, cmd/howl/oci.zig): pihole-FTL itself,
 # not the image's shell entrypoint. The admin password is the config's.
 # Its blocklists are fetched at the first start and refreshed at a start
 # a week later, by Pi-hole's own gravity script under bash, from the

@@ -30,5 +30,6 @@ one, that part is in scope.
 
 Fixes to werewolf's own code are published as advisories in
 [release/advisories](release/advisories), which machines read to decide how soon to
-update ([docs/design/update-policy.md](docs/design/update-policy.md)). The design
-behind werewolf's defenses is in [docs/security.md](docs/security.md).
+update
+([docs/design/implemented/update-policy.md](docs/design/implemented/update-policy.md)).
+The design behind werewolf's defenses is in [docs/security.md](docs/security.md).

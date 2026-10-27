@@ -30,6 +30,18 @@ ARCH ?= $(HOST_ARCH)
 HOST_OS := $(shell uname -s)
 
 FORM ?= sshd
+VARIANTS ?=
+export VARIANTS
+# Resolve the requested check's form before asking about its workload variants.
+ifneq ($(strip $(VARIANTS)),)
+ifeq ($(origin FORM),file)
+VARIANT_CHECK_FORMS := $(sort $(foreach goal,$(MAKECMDGOALS),$(foreach name,$(patsubst check-native-tests-%,%,$(patsubst check-shellfree-%,%,$(patsubst check-%,%,$(goal)))),$(if $(wildcard forms/$(name)/form.yaml),$(name)))))
+ifeq ($(words $(VARIANT_CHECK_FORMS)),1)
+FORM := $(VARIANT_CHECK_FORMS)
+endif
+endif
+endif
+FORM_SELECTION = $(if $(VARIANTS),--variant $(VARIANTS))
 FORM_TOOL = build/host/form
 FORM_TOOL_SOURCES = lib/baselayout.zig tools/form.zig lib/form.zig lib/yaml.zig lib/lookup.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig lib/people.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
@@ -47,7 +59,7 @@ FORMLESS = install-deps install uninstall howl $(HOWL) build/host/mdoc clean hel
 ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
 FORM_ASK = :
 else
-FORM_ASK = $(FORM_TOOL)
+FORM_ASK = $(FORM_TOOL) $(FORM_SELECTION)
 # make asks the tool as it reads this file, so build it first.
 FORM_TOOL_BUILT := $(shell [ -x $(FORM_TOOL) ] && [ -z "$$(find $(FORM_TOOL_SOURCES) -newer $(FORM_TOOL))" ] || \
 	{ mkdir -p build/host && zig build-exe -O ReleaseSafe $(FORM_TOOL_MODULES) -femit-bin=$(FORM_TOOL).$$$$ >&2 && \
@@ -55,9 +67,18 @@ FORM_TOOL_BUILT := $(shell [ -x $(FORM_TOOL) ] && [ -z "$$(find $(FORM_TOOL_SOUR
 ifeq ($(wildcard $(FORM_TOOL)),)
 $(error no $(FORM_TOOL), as zig says above; `make install-deps` installs zig)
 endif
-CHAIN := $(shell $(FORM_TOOL) names $(FORM_REF))
+CHAIN := $(shell $(FORM_TOOL) $(FORM_SELECTION) names $(FORM_REF))
 ifeq ($(CHAIN),)
 $(error no form $(FORM_REF), as build/host/form says above; `make list-forms` lists them)
+endif
+endif
+ifneq ($(strip $(VARIANTS)),)
+ifneq ($(FORM_ASK),:)
+NORMAL_VARIANTS := $(shell $(FORM_TOOL) --variant '$(VARIANTS)' variant-names)
+ifeq ($(NORMAL_VARIANTS),)
+$(error invalid VARIANTS selection)
+endif
+override VARIANTS := $(NORMAL_VARIANTS)
 endif
 endif
 FORM_DIRS := $(shell $(FORM_ASK) dirs $(FORM_REF))
@@ -88,7 +109,7 @@ $(error DISABLE must be explicit on the make command line, not inherited from th
 endif
 endif
 APP ?=
-OUT = $(BUILD)/$(FORM)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
+OUT = $(BUILD)/$(FORM)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
 TAR ?= $(shell command -v bsdtar || echo tar)
 SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .DELETE_ON_ERROR:
@@ -111,7 +132,7 @@ install-precommit hooks:
 	@echo "pre-commit installed: test, lint, and a local howl run"
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
-HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) $(if $(DISABLE),--disable=$(DISABLE)) \
+HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) $(FORM_SELECTION) --arch $(ARCH) $(if $(DISABLE),--disable=$(DISABLE)) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(KERNEL_ROOTFS),--kernel-rootfs $(KERNEL_ROOTFS)) \
@@ -130,10 +151,10 @@ $(OUT)/disk.qcow2: $(HOWL)
 
 # apko locks pin every package; these rules serve relock, and release-inputs's boot locks.
 LOCK = build/lock
-FORM_LOCK = $(LOCK)/$(FORM)$(if $(PUBLISHED),-published).lock.json
+FORM_LOCK = $(LOCK)/$(FORM)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(PUBLISHED),-published).lock.json
 BOOT_LOCKS = $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 LOCKS = $(FORM_LOCK) $(BOOT_LOCKS)
-FORM_APKO = $(BUILD)/form/$(FORM).yaml
+FORM_APKO = $(BUILD)/form/$(FORM)$(if $(VARIANTS),-variants-$(VARIANTS)).yaml
 # apko_retry COMMAND retries after 15, 30 and 45 s: the package server refuses bursts (HTTP 403).
 APKO_NETWORK = status code (403|408|429|5[0-9][0-9])|connection reset|i/o timeout|TLS handshake|deadline exceeded|unexpected EOF|failed to fetch
 apko_retry = o=$(CURDIR)/$@.apko && for t in 1 2 3 4; do \
@@ -150,7 +171,7 @@ $(FORM_LOCK): $(FORM_FILES) | $(FORM_APKO)
 # Keep an unchanged config's mtime, as howl does, or howl rebuilds the root.
 # The config names werewolf's key in $(BUILD)/keys (lib/package.zig's keyring).
 $(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
-	mkdir -p $(dir $@) $(BUILD)/keys && $(FORM_TOOL) apko $(FORM_REF) >$@.tmp && \
+	mkdir -p $(dir $@) $(BUILD)/keys && $(FORM_TOOL) $(FORM_SELECTION) apko $(FORM_REF) >$@.tmp && \
 		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; } && \
 		{ cmp -s release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub || \
 			cp release/packages.pub $(BUILD)/keys/werewolf-packages.rsa.pub; }
@@ -182,7 +203,7 @@ mkdir -p $(dir $@)
 endef
 
 # A program may import any library; a library, only what its --dep flags name.
-LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
+LIB_MODULES = --dep data-transfer --dep sandbox --dep seal -Mdata-read=lib/data-transfer-read.zig --dep data-transfer --dep people --dep service -Mdata-source=lib/data-transfer-source.zig -Mdata-transfer=lib/data-transfer.zig --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
 	-Mverity=lib/verity.zig -Mipe=lib/ipe.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig \
 	--dep sandbox -Mnet-rule=lib/net-rule.zig --dep network --dep net-rule --dep sandbox -Mdns=lib/dns.zig -Mhostkey=lib/hostkey.zig \
@@ -194,7 +215,7 @@ LIB_MODULES = -Mimport-data=lib/import-data.zig --dep seal -Msandbox=lib/sandbox
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep prebuilt --dep update-policy -Mboot-download=lib/boot-download.zig -Msecurity-inputs=lib/security-inputs.zig \
 	--dep form -Mtest-plan=test/native/plan.zig
-ZIG_MODULES =--dep import-data --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
+ZIG_MODULES =--dep data-read --dep data-source --dep data-transfer --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
 	--dep boot-download --dep security-inputs --dep test-plan \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
@@ -290,7 +311,7 @@ $(UKI_BIN): tools/uki.zig
 	zig build-exe -O ReleaseSafe -Mroot=$< -femit-bin=$@
 
 # A release's UKI: kernel, stage0, root and command line as one PE the boot
-# key signs (tools/uki; docs/design/verified-boot.md, docs/releases.md).
+# key signs (tools/uki; docs/design/implemented/verified-boot.md, docs/releases.md).
 # Built when WEREWOLF_BOOT_KEY names the key; the certificate is the
 # committed release/boot.crt, and UKI_STUB systemd's linuxaa64.efi.stub.
 WEREWOLF_BOOT_CRT ?= release/boot.crt
@@ -320,7 +341,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
-$(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
+$(HOWL): cmd/howl/howl.zig $(wildcard lib/data-transfer*.zig) $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/yaml.zig test/native/plan.zig test/native/steps.zig test/native/host.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
 	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig \
 	lib/boot-download.zig lib/security-inputs.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
@@ -345,7 +366,7 @@ $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zi
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig lib/import-data.zig cmd/howl/import.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = lib/data-transfer.zig cmd/howl/data.zig cmd/howl/data-helper.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
@@ -457,7 +478,7 @@ build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib
 check-tpm-floor: _test/tpm-floor
 
 # Unrelated machines install from a public image, take their own TPMs, and update
-# from a static channel with no host help (docs/design/independent-updates.md).
+# from a static channel with no host help (docs/design/implemented/independent-updates.md).
 check-independent-updates: $(HOWL)
 	$(call host_test,test/check-independent-updates.zig) $(HOWL) $(BUILD)/check/independent-updates $(PROVIDER)
 
@@ -540,13 +561,13 @@ packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	$(PACKAGE_TOOL) baselayout $(PACKAGES)/$(ARCH) $(ARCH) $(PACKAGE_TIME)
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
-	# A signed UKI, when the boot key built one (docs/design/verified-boot.md):
+	# A signed UKI, when the boot key built one (docs/design/implemented/verified-boot.md):
 	# its package puts it in new roots, where installEsp lays it.
 	for f in $(RELEASE_FORMS); do [ ! -f $(BUILD)/$$f/slot/uki.efi ] || { \
 		t=$(PACKAGES)/uki/$$f/usr/lib/werewolf/uki && mkdir -p $$t && \
 		cp $(BUILD)/$$f/slot/uki.efi $$t/slot.efi && \
 		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/uki/$$f uki-$$f - \
-		$(ARCH) $(PACKAGE_TIME) "werewolf's signed UKI for $$f (docs/design/verified-boot.md)" \
+		$(ARCH) $(PACKAGE_TIME) "werewolf's signed UKI for $$f (docs/design/implemented/verified-boot.md)" \
 		depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; }; done
 	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \
 		{ [ ! -d $(PROGRAMS)/forms/$$f ] || cp -R $(PROGRAMS)/forms/$$f/. $$t/; } && \
@@ -628,7 +649,8 @@ QEMU = $(if $(QEMU_HOST),$(REMOTE_QEMU) $(QEMU_HOST) )qemu-system-$(ARCH) -M $(M
 FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 FORMS_FOR_ARCH := $(shell $(FORM_ASK) for-arch $(ARCH))
 NATIVE_TEST_FORMS := $(filter-out bastion,$(filter $(FORMS_FOR_ARCH),$(patsubst forms/%/test/tests.yaml,%,$(wildcard forms/*/test/tests.yaml))))
-CHECK = $(BUILD)/check
+CHECK = $(BUILD)/check$(if $(VARIANTS),/variants-$(VARIANTS))
+NATIVE_WORK = build/native-tests/$(ARCH)$(if $(VARIANTS),/variants-$(VARIANTS))
 # A check boots directly: no firmware or TPM, and IPE only under IPE=1.
 CHECK_DISABLE = secureboot,tpm$(if $(IPE),,$(comma)ipe)
 # 1 GiB keeps forms lean unless check: memory says more; an offline form gets restrict=on; no boot ROM.
@@ -768,9 +790,9 @@ check-native-tests: $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(filte
 # production image and the native test image (below), and boots neither.
 define native_image
 	@$(NATIVE_TESTS) describe $(2) $(ARCH) >/dev/null
-	@$(call built,$(or $(3),$(1))$(if $(4),-app)-baseline,$(MAKE) --no-print-directory FORM=$(or $(3),$(2)) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
-	PRODUCTION_OUT=$(BUILD)/$(or $(3),$(1))$(if $(4),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
-	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+	@$(call built,$(or $(3),$(1))$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(4),-app)-baseline,$(MAKE) --no-print-directory FORM=$(or $(3),$(2)) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
+	PRODUCTION_OUT=$(BUILD)/$(or $(3),$(1))$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(4),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) prepare $(2) $(ARCH)
+	@$(call built,$(1)-native,$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/$(1)/native-test-$(1) APP=$(4) DISABLE=$(CHECK_DISABLE) image)
 endef
 # native_check NAME,REF,VARIABLES[,BASE[,APP]] builds the production image of
 # BASE, a scenario's stock form, or else of REF, and REF's native test image,
@@ -778,9 +800,9 @@ endef
 # test image with VARIABLES.
 define native_check
 $(call native_image,$(1),$(2),$(4),$(5))
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
-		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
 endef
 $(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
 	$(call native_check,$*,$(call native_ref,$*))
@@ -801,8 +823,7 @@ check-lease: check-scenario-lease
 check-static: check-scenario-static
 check-posture: check-scenario-posture
 check-nodata: check-scenario-nodata
-# bastion's checks run on test/bastion-form's form, the bastion with two
-# users, whose keys it makes beside it: its host suites log in with them.
+# bastion's checks use an ordinary login and one permitted destination.
 check-native-tests-bastion: $(HOWL) $(NATIVE_TESTS) $(TEST_SK)
 	@test/bastion-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
 	$(call native_check,bastion-check,$(CHECK)/bastion-check,NATIVE_SSH_PORT=$(call check_port,24200,bastion) NATIVE_SSH_KEYS=$(CHECK)/bastion-check)
@@ -810,7 +831,7 @@ check-bastion: check-native-tests-bastion
 # A run's host suites log in through its own forwarded port (tools/native-ssh.zig).
 NATIVE_SSH_PORT ?= $(call check_port,24200,$(notdir $(NATIVE_FORM)))
 _check-native-tests: $(NATIVE_TESTS) $(NATIVE_HOST) $(CONSOLE_CHECK) $(REMOTE_QEMU) $(TEST_SK) build/host/ssh-su
-	@$(CHECK_ENV) PRODUCTION_OUT=$(or $(NATIVE_PRODUCTION),$(BUILD)/$(notdir $(NATIVE_FORM)))$(if $(IPE),-ipe) \
+	@$(CHECK_ENV) PRODUCTION_OUT=$(or $(NATIVE_PRODUCTION),$(BUILD)/$(notdir $(NATIVE_FORM))$(if $(VARIANTS),-variants-$(VARIANTS)))$(if $(IPE),-ipe) \
 		NATIVE_SSH_PORT=$(NATIVE_SSH_PORT) NATIVE_SSH_KEYS=$(NATIVE_SSH_KEYS) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		$(NATIVE_TESTS) run $(NATIVE_FORM) $(ARCH) $(CHECK_QEMU)
 
@@ -998,7 +1019,7 @@ fuzz-unwound:
 # server, or prod's own image for a machine that must take nothing (test/cloud-boot).
 check-metadata: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK) build/host/metadata
 	$(call native_image,scenario-metadata,test/scenarios/metadata,prod)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/scenario-metadata/native-test-scenario-metadata DISABLE=$(CHECK_DISABLE) _check-metadata
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/scenario-metadata/native-test-scenario-metadata DISABLE=$(CHECK_DISABLE) _check-metadata
 # check-verity boots minimal's own image, its root changed after the build.
 check-verity: $(HOWL) $(CONSOLE_CHECK)
 	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) image)
@@ -1006,12 +1027,12 @@ check-verity: $(HOWL) $(CONSOLE_CHECK)
 # check-slot boots minimal's native test image from a slot (test/check-slot).
 check-slot: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
 	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
 # check-deadman boots minimal's native test image, from which alone stage0
 # takes a shorter deadman.
 check-deadman: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
 	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -1054,7 +1075,7 @@ _check-metadata: build/host/metadata
 .PHONY: check-people-persist _check-people-persist
 check-people-persist: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
 	$(call native_image,scenario-people-persist,test/scenarios/people-persist,prod)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/scenario-people-persist/native-test-scenario-people-persist DISABLE=$(CHECK_DISABLE) _check-people-persist
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/scenario-people-persist/native-test-scenario-people-persist DISABLE=$(CHECK_DISABLE) _check-people-persist
 _check-people-persist:
 	@$(CHECK_ENV) ARCH=$(ARCH) $(call host_test,test/check-people-persist.zig) $(CHECK_QEMU)
 
@@ -1156,7 +1177,7 @@ build/x86_64/tools/howl-freebsd build/aarch64/tools/howl-freebsd: build/%/tools/
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe -target $*-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
 
-# A form README's fences (docs/design/examples.md). Not part of make check:
+# A form README's fences (docs/design/implemented/examples.md). Not part of make check:
 # the console checks stay, and a README with no Getting Started is skipped.
 example-%: $(HOWL)
 	@test/example local $*
@@ -1289,3 +1310,22 @@ doc-lint: $(DOC_CHECK)
 	@for f in $(FORMS); do test/example check $$f >/dev/null || exit 1; done
 doc-fix: $(DOC_CHECK)
 	$(DOC_CHECK) --fix $(DOC_SOURCES)
+
+# Public fixture storage tests; source image and verity parameters must match.
+DATA_TRANSFER_IMAGE ?= build/$(ARCH)/postgresql/slot/root.erofs
+DATA_TRANSFER_VERITY ?= build/$(ARCH)/postgresql/verity/verity
+DATA_TRANSFER_KERNEL ?= build/$(ARCH)/postgresql/slot/vmlinuz
+.PHONY: check-data-transfer-helper
+build/host/data-transfer-check: cmd/howl/data-transfer-check.zig cmd/howl/data-helper.zig $(wildcard lib/data-transfer*.zig)
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
+check-data-transfer-helper: $(HOWL) build/host/data-transfer-check build/$(ARCH)/transfer-boundaries.cpio
+	$(HOWL) _build --with data-transfer-helper --arch $(ARCH) transfer_helper
+	build/host/data-transfer-check $(DATA_TRANSFER_KERNEL) build/$(ARCH)/data-transfer-helper/helper.cpio.zst $(DATA_TRANSFER_IMAGE) $(DATA_TRANSFER_VERITY) build/$(ARCH)/transfer-boundaries.cpio $(HOWL)
+
+# Linux kernel enforcement is checked in its own networkless disposable VM.
+build/$(ARCH)/transfer-boundaries.cpio: cmd/data-transfer/data-transfer.zig test/transfer-boundary-init.zig $(wildcard lib/*.zig)
+	@mkdir -p build/$(ARCH)/transfer-boundaries
+	zig test -O ReleaseSafe -target $(ARCH)-linux-musl --test-no-exec $(call ZIG_MODULES,cmd/data-transfer/data-transfer.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/checks
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl test/transfer-boundary-init.zig -femit-bin=build/$(ARCH)/transfer-boundaries/init
+	bsdtar -cf $@ --format newc --uid 0 --gid 0 --numeric-owner -C build/$(ARCH)/transfer-boundaries init checks

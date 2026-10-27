@@ -1,0 +1,101 @@
+# Native boot
+
+**Status:** Implemented
+[2026-10-06](https://github.com/werewolf-linux/werewolf/commit/86e26ddd)
+
+Proposed, 2026-10-06. Built (cmd/howl/disk.zig, boot/gpt.zig, `make disk`;
+`installEsp` in cmd/slot-update; cmd/slot-keep).
+
+## Summary
+
+A werewolf disk that boots on its own (UEFI firmware, systemd-boot, a slot)
+and updates itself wherever a VM boots a disk.
+
+## Background
+
+Booted directly (`howl run --on qemu`), a machine takes its kernel from the
+host and has nothing to update. Debian updates itself under Lima because
+its image is a disk with its own bootloader, as each werewolf release now is
+([releases.md](../../releases.md)).
+
+## Goals
+
+- One disk that boots wherever UEFI firmware finds it, built on a Mac or
+  on Linux, and the same bytes from the same slot.
+- A new slot gets one try and falls back on its own.
+
+## Non-Goals
+
+- Secure Boot (verified-boot.md phase 5), and growing the disk.
+
+## Detailed design
+
+GPT, two partitions; every GUID, UUID, serial number and time is fixed.
+
+| Partition | Holds |
+| --- | --- |
+| EFI system, FAT32, 256 MiB | systemd-boot at the removable-media path (`EFI/BOOT/BOOTAA64.EFI` or `BOOTX64.EFI`), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz` and `stage0.zst` |
+| ext4 (`/boot`), the rest | `slot/{a,b}/root.erofs`; init adds `data/`, which is bind-mounted at `/data` |
+
+The removable-media path needs no NVRAM entry, so the disk boots wherever it is
+attached. stage0 finds the ext4 partition by `werewolf.slots=UUID`. systemd-boot
+sorts entries by `sort-key`, then newest `version`, with any entry out of tries last.
+No default is set, so the newest slot not known bad wins; slot a's version is 1980,
+older than any update's. `make disk` needs no Linux: it uses `boot/gpt.zig` (no
+`sfdisk`), mtools and `mke2fs -d`.
+
+The updater knows the disk by `werewolf.esp`. It builds the other slot as
+always, and asks the mount broker — which never lends the EFI partition
+as a mount — to install it:
+
+1. The broker removes the other slot's entries. The updater writes
+   `root.erofs` to ext4, and the broker writes the staged kernel, stage0
+   and optional UKI to the EFI partition, each whole, checking each
+   against the size and SHA-256 the updater named, and syncs.
+2. The broker writes `werewolf-<other>+1.conf`, with one try, dated now
+   or a second past the newest entry. Its options are this boot's, with
+   `werewolf.slot` and the new image's arguments swapped in.
+3. Reboots. systemd-boot renames the entry `+0-1` and boots it.
+
+| Then | Happens |
+| --- | --- |
+| it commits | slot-keep renames it `werewolf-<slot>.conf`, with no counter: good for good |
+| it panics | the reset finds it out of tries; the old slot boots, and the updater logs `rollback` |
+| it hangs | stage0's deadman reboots it after ten minutes; as above |
+
+The old slot stays a good, older entry: the fallback, and the next target.
+
+### Open questions
+
+- **Growing the data partition.** A larger disk leaves the partition at its
+  built size. Growing it means rewriting the GPT's end and `resize2fs` at
+  boot, or `/data` on a second disk, as `werewolf.data=` already allows.
+- **Lima's networks.** Under vz, DHCP takes Lima's own NIC, not vzNAT's, so
+  `howl create` pins vzNAT's MAC and builds the disk with `werewolf.mac=`.
+
+## Drawbacks
+
+- The build needs mtools and e2fsprogs.
+
+## Alternatives Considered
+
+- **GRUB.** `grub-mkimage` needs Linux, its configuration is
+  a script plus an environment block, and one try takes `next_entry`, the deadman and
+  slot-keep. systemd-boot is one EFI file from Wolfi, a text file per
+  entry, counts tries itself, and its editor can be turned off.
+
+## Security Considerations
+
+| Risk | Mitigation |
+| --- | --- |
+| A console user adds `init=/bin/sh` | `timeout 0` and `editor no`: no menu, no editor. |
+| A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `disk.zig` zeroes every staged inode's uid/gid; `slot/` and `state/` are root's. |
+| The EFI partition | Never lent as a mount. The broker works on it detached, only for the supervised slot-update and slot-keep services, writing only digest-checked slot files and entries it generates. root in a shell is refused; Secure Boot remains the firmware-side answer. |
+| Kernel arguments that start a new entry line | `disk.zig` takes only letters, digits and `_.,= -` from the image, and no control character from `DISK_ARGS`. |
+
+## Reliability Considerations
+
+- **Whole files**, copied under a temporary name; vfat has no journal, so
+  deletes are synced before any file changes.
+- **Tested:** `make check-persist` and `make check-dist` boot this disk
+  under UEFI; unit tests cover the updater's entries (cmd/slot-update).

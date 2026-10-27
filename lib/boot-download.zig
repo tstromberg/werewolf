@@ -33,6 +33,7 @@ pub const Request = struct {
     image_certificate: []const u8,
     channel: []const u8,
     form: []const u8,
+    variants: ?[]const u8 = null,
     arch: []const u8,
     provider: []const u8,
     /// version is a serial or a base-images- or protected- release tag.
@@ -152,12 +153,21 @@ pub fn validate(r: Request) !void {
     for (r.form) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-')
         return error.NotAPublishedForm;
     // Machines follow werewolf's channel for the form and provider themselves
-    // (docs/design/independent-updates.md); a mirror serves its bundles.
+    // (docs/design/implemented/independent-updates.md); a mirror serves its bundles.
     prebuilt.channel(r.channel) catch return error.WrongProtectedChannel;
     const tail = mem.cutSuffix(u8, r.channel, r.provider) orelse
         return error.WrongProtectedChannel;
     const head = mem.cutSuffix(u8, tail, "/") orelse return error.WrongProtectedChannel;
-    const rest = mem.cutSuffix(u8, head, r.form) orelse return error.WrongProtectedChannel;
+    var buffer: [1200]u8 = undefined;
+    const path = if (r.variants) |v| blk: {
+        if (!prebuilt.variantSelection(v)) return error.BadDownloadRequest;
+        break :blk std.mem.print(
+            &buffer,
+            "{s}/variants/{s}",
+            .{ r.form, v },
+        ) catch return error.BadDownloadRequest;
+    } else r.form;
+    const rest = mem.cutSuffix(u8, head, path) orelse return error.WrongProtectedChannel;
     if (!mem.endsWith(u8, rest, "/")) return error.WrongProtectedChannel;
 }
 
@@ -395,14 +405,19 @@ pub fn download(
     // Renamed into place on success; anything left is partial.
     defer Dir.cwd().deleteTree(io, staging) catch {};
 
-    const target = try gpa.print("{s}-{s}-{s}", .{ r.form, r.provider, r.arch });
+    const form_path = if (r.variants) |v|
+        try gpa.print("{s}/variants/{s}", .{ r.form, v })
+    else
+        r.form;
+    const asset = if (r.variants) |v| try gpa.print("{s}-variants-{s}", .{ r.form, v }) else r.form;
+    const target = try gpa.print("{s}-{s}-{s}", .{ asset, r.provider, r.arch });
     var base = if (r.version) |v|
         try gpa.print("{s}{s}{s}/{s}-", .{
             releases, if (serial(v)) "base-images-" else "", v, target,
         })
     else
         try gpa.print("{s}/{s}/{s}/{s}", .{
-            mem.trimEnd(u8, r.source, "/"), r.form, r.provider, r.arch,
+            mem.trimEnd(u8, r.source, "/"), form_path, r.provider, r.arch,
         });
     const latest = if (r.version != null) "" else "/latest/";
     const sig = try gpa.print("{s}/boot.json.sig", .{staging});
@@ -819,6 +834,20 @@ fn testRequest() Request {
         .arch = "aarch64",
         .provider = "lima",
     };
+}
+
+test "variant downloads require the exact canonical channel" {
+    var r = testRequest();
+    r.variants = "ssh,vector";
+    r.channel = "https://vendor.test/boot/v1/playground/variants/ssh,vector/lima";
+    try validate(r);
+    r.variants = null;
+    try testing.expectError(error.WrongProtectedChannel, validate(r));
+    r.variants = "vector,ssh";
+    try testing.expectError(error.BadDownloadRequest, validate(r));
+    r.variants = "ssh,vector";
+    r.channel = "https://vendor.test/boot/v1/playground/lima";
+    try testing.expectError(error.WrongProtectedChannel, validate(r));
 }
 
 test "image versions are release tags, never paths or URLs" {

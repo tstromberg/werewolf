@@ -428,6 +428,7 @@ pub fn checkOne(
         .bundles = descriptors,
         .checks = checks,
         .form = name,
+        .variants = try s.variantNames(),
         .arch = arch,
         .inputs = try json.field(target, "inputs"),
     }));
@@ -527,7 +528,12 @@ pub fn gate(
     for (selected) |name| {
         const initial = try sys.join(s, &.{ lifecycle, name, provider });
         if (!sys.exists(s, initial)) continue;
-        gateOne(s, tree, howl, initial, evidence, name, provider, output) catch |err| {
+        const own_evidence = try sys.join(s, &.{ evidence, name });
+        const source = if (sys.isFile(s, try sys.join(s, &.{ own_evidence, "result.json" })))
+            own_evidence
+        else
+            evidence;
+        gateOne(s, tree, howl, initial, source, name, provider, output) catch |err| {
             s.say(
                 "form-images: {s}/{s}/{s} lifecycle failed: {s}",
                 .{ name, provider, arch, s.reason(err) },
@@ -622,6 +628,7 @@ test "a gate failure keeps other forms, and unchanged targets need no authorizat
             &.{ dir, "boot.json" },
         ), try json.dumps(gpa, try json.from(gpa, .{
             .form = name,
+            .variants = try s.variantNames(),
             .image = .{ .arch = "x86_64", .serial = &serial, .build = fixture.rep('a', 64) },
         })));
     }
@@ -703,6 +710,7 @@ fn testBundle(s: *Sys, dir: []const u8, name: []const u8, serial: []const u8, in
         &.{ dir, "boot.json" },
     ), try json.dumps(s.gpa, try json.from(s.gpa, .{
         .form = name,
+        .variants = try s.variantNames(),
         .image = .{
             .arch = "x86_64",
             .build = try s.gpa.dupe(u8, &sys.sha256(serial)),

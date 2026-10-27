@@ -42,18 +42,18 @@ howl create mariadb-local --with mariadb-local --on gcp --allow-from me
 `--allow-from` opens no port: there is no listener. Keep the database on the same
 machine as the service that queries it.
 
-### Importing data
+### Exporting and importing data
 
-The host cannot reach this server. `--import` attaches a directory of SQL.
-mariadb-init applies it once, while it makes the data directory, and reads it from
-the disk. [example/shop.sql](example/shop.sql) is a two-row shop. The account is the
-system user `app`.
+Use a physical archive from the same image and architecture. The service scope is
+`mariadb`; full transfer also includes companion service data. The destination
+must have empty selected data and remains stopped after import. See [data storage](../../docs/data.md) for supported adapters and consistency requirements.
 
 ```sh
-howl create mariadb-local --with mariadb-local --import ./dump
+howl export source --service mariadb --output backup.tar.zst
+howl import replacement backup.tar.zst
 ```
 
-A form can still carry `rootfs/usr/share/werewolf-mariadb/NAME.sql`. That SQL runs on
+A form may carry `rootfs/usr/share/werewolf-mariadb/NAME.sql` for setup on
 every start.
 
 ### Known Quirks
@@ -64,7 +64,7 @@ every start.
 - A dump's `IDENTIFIED BY` does not work here until the account is `unix_socket` and
   names a system user on this machine.
 - The image's SQL files run on every start. An `INSERT` needs a key and `INSERT
-  IGNORE`, or the rows multiply. `--import` runs once.
+  IGNORE`, or the rows multiply.
 - There is no replication. A new MariaDB series upgrades the data in place, with
   `mariadb-upgrade`, on its first start. An older release refuses data a newer one
   upgraded, so falling back past an upgrade needs a backup.

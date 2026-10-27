@@ -48,7 +48,7 @@ services:
     nofile: 1024
     # Its sessions share it: a pre-auth flood (CVE-2025-26466) stops here.
     memory: 512
-    # Every session inherits this (docs/design/ssh-hardening.md). sshd's own
+    # Every session inherits this (docs/design/implemented/ssh-hardening.md). sshd's own
     # sandbox installs its filter with prctl, so no seccomp; nothing logged
     # in sets capabilities or Landlock rules; AF_PACKET needs NET_RAW, which
     # login lacks; no netlink, so no ip or ss. reboot and syslog are an

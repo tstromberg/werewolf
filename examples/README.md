@@ -135,7 +135,7 @@ A machine lets nothing in: `--allow-from me` opens the form's TCP ports to
 this host's address (`--allow-from CIDR` to a network), or create prints the
 gcloud commands that would. The machine has no service account, and Secure
 Boot is off, because werewolf's boot loader is not signed for it
-([verified-boot.md](../docs/design/verified-boot.md)). Its config travels
+([verified-boot.md](../docs/design/implemented/verified-boot.md)). Its config travels
 as a base64 config tar in `user-data` metadata ([cloud.md](../docs/cloud.md)).
 Application code, users and packages come from the image. These examples
 have no SSH daemon: the console has boot messages, service failures,

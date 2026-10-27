@@ -49,6 +49,12 @@ architectures with their build runners and providers, the forms each provider's
 lifecycle gates test, the gate runners, shards, checks and the focused recovery
 target. lib/form.zig parses it, refusing unknown keys and names.
 
+`catalog: all` expands hourly runs to the complete form catalog. `variants` lists
+supported workload combinations by form; the matrices add each SSH counterpart.
+`FORM_IMAGES_VARIANTS` carries one canonical comma-separated selection between jobs.
+Artifacts and signed records retain that selection. Export and publication combine
+the results while preserving each channel's history. See [variants](../../docs/variants.md).
+
 `json.zig` writes what Python's json module wrote: sorted keys and no spaces for
 records, its default style for the workflows' outputs, ensure_ascii escapes and float
 repr. `catalog.zig` is the signed catalog and its pages, `notes.zig` inventories and

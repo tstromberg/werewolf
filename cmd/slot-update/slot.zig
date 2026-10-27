@@ -194,7 +194,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // A published UKI rides in the slot beside the kernel: the whole slot
     // as one PE the boot key signed, which firmware with Secure Boot on
     // boots whole and anything else boots as plainly
-    // (docs/design/verified-boot.md). installEsp's entry names it.
+    // (docs/design/implemented/verified-boot.md). installEsp's entry names it.
     if (try r.exists(u, "usr/lib/werewolf/uki/slot.efi")) {
         const slot_dir = try Dir.cwd().createDirPathOpen(io, work_dir ++ "/slot", .{});
         defer slot_dir.close(io);
@@ -257,7 +257,7 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
 }
 
 /// installEsp installs the other slot on werewolf's own disk
-/// (docs/design/native-boot.md): root.erofs to the ext4 partition, the
+/// (docs/design/implemented/native-boot.md): root.erofs to the ext4 partition, the
 /// kernel and stage0 to the EFI partition, and a loader entry with one try,
 /// which systemd-boot boots next because it is newest. slot-keep removes
 /// the try count once the slot is healthy; otherwise the try is spent and
@@ -835,6 +835,11 @@ fn composeInto(u: *Update, r: Root) !void {
         error.FileNotFound => false,
         else => return err,
     };
+    const selection = u.read(meta_dir ++ "/variants") catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+    try staged.writeFile(io, .{ .sub_path = "variants", .data = selection });
     const forms = try compose.stagedChain(io, u.gpa, staged, leaf, dev, &f);
     const b: compose.Build = .{
         .arch = switch (@import("builtin").cpu.arch) {

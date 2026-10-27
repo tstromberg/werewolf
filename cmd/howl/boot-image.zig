@@ -18,11 +18,28 @@ pub const format = "werewolf-boot/2";
 pub const Manifest = struct {
     format: []const u8 = format,
     form: []const u8,
+    variants: []const []const u8 = &.{},
     image: image.Manifest,
     disk: image.Artifact,
     raw_size: u64,
     boot_certificate: []const u8,
     configuration: ?@import("boot-config.zig").Definition = null,
+
+    pub fn jsonStringify(m: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        inline for (@typeInfo(@This()).@"struct".field_names) |field| {
+            if (comptime std.mem.eql(u8, field, "variants")) {
+                if (m.variants.len > 0) {
+                    try jw.objectField(field);
+                    try jw.write(m.variants);
+                }
+            } else {
+                try jw.objectField(field);
+                try jw.write(@field(m, field));
+            }
+        }
+        try jw.endObject();
+    }
 };
 pub const Verified = struct { manifest: Manifest };
 pub const Producer = struct {
@@ -102,7 +119,16 @@ fn key(io: Io, gpa: Allocator, cert: []const u8) !@import("apk").Key {
 pub fn check(m: Manifest, expected: image.Identity) !void {
     if (!std.mem.eql(u8, m.format, format) or
         !@import("form").isName(m.form)) return error.BadBootImageProfile;
-    try image.check(m.image, expected);
+    if (m.variants.len > 0) {
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        const text = try std.mem.join(arena.allocator(), ",", m.variants);
+        if (!image.variantSelection(text)) return error.BadBootVariants;
+    }
+    var identity = expected;
+    identity.variants = m.variants;
+    if (m.variants.len > 0) identity.form = m.form;
+    try image.check(m.image, identity);
     if (m.configuration) |definition| try @import("boot-config.zig").check(definition, m.form);
     if (m.image.files.@"uki.efi" == null) return error.BadBootImageProfile;
     if (m.disk.size == 0 or m.disk.size > 2 << 30 or m.raw_size < 512 << 20 or
@@ -154,6 +180,12 @@ pub fn admitDeployment(
 ) !Manifest {
     const m = try admitHead(io, gpa, request, arch);
     if (!std.mem.eql(u8, m.form, form)) return error.WrongBootForm;
+    if (m.variants.len != howl.variants.len) return error.WrongBootVariants;
+    for (m.variants, howl.variants) |actual, wanted| if (!std.mem.eql(
+        u8,
+        actual,
+        wanted,
+    )) return error.WrongBootVariants;
     if (m.configuration == null) return error.MissingDeploymentDefinition;
     return m;
 }
@@ -443,6 +475,7 @@ pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
     try howl.run(io, why, &.{ "zstd", "-q", "-T0", p.disk, "-o", disk });
     const m: Manifest = .{
         .form = p.form,
+        .variants = howl.variants,
         .configuration = try @import("boot-config.zig").derive(
             io,
             gpa,

@@ -1,6 +1,6 @@
 //! deployment packs the caller's image declaration as local-NAME. Its
 //! repository is signed with packages.rsa in howl's data directory; only its public key
-//! reaches the image. See docs/design/manifest.md.
+//! reaches the image. See docs/design/implemented/manifest.md.
 const std = @import("std");
 const forms = @import("form");
 const compose = @import("compose");
@@ -401,8 +401,9 @@ pub const Definition = struct {
     dhcp: bool,
     ssh: enum { disabled, security_keys, files },
     lima_managed: bool,
-    /// Explicit opt-in to replacing imported files; older images admit init only.
-    imports: []const []const u8 = &.{"init"},
+    /// Read compatibility for signed images published before archive transfer.
+    /// This field grants no operation and is never consulted at runtime.
+    imports: []const []const u8 = &.{},
 };
 
 /// Present only during authenticated downloaded deployment; source builds use their form tree.
@@ -433,36 +434,10 @@ pub fn derive(
         else
             .security_keys,
         .lima_managed = try @import("local.zig").limaManages(io, gpa, ref, false, why),
-        .imports = blk: {
-            var result: []const []const u8 = &.{"init"};
-            for (chain) |fm| if (fm.spec.get("imports") != null) {
-                result = try fm.items(gpa, "imports");
-            };
-            for (result, 0..) |mode, i| {
-                if (!mem.eql(u8, mode, "init") and
-                    !mem.eql(u8, mode, "sync")) return error.InvalidImportMode;
-                for (result[0..i]) |prior| if (mem.eql(
-                    u8,
-                    mode,
-                    prior,
-                )) return error.InvalidImportMode;
-            }
-            break :blk result;
-        },
     };
 }
 
 pub fn check(definition: Definition, form: []const u8) !void {
-    if (definition.imports.len > 2) return error.BadDeploymentDefinition;
-    for (definition.imports, 0..) |mode, i| {
-        if (!mem.eql(u8, mode, "init") and
-            !mem.eql(u8, mode, "sync")) return error.BadDeploymentDefinition;
-        for (definition.imports[0..i]) |prior| if (mem.eql(
-            u8,
-            mode,
-            prior,
-        )) return error.BadDeploymentDefinition;
-    }
     if (!std.mem.eql(u8, definition.form, form) or definition.ports.len > 64 or
         definition.interface.files.len > 256 or definition.interface.settings.len > 256)
         return error.BadDeploymentDefinition;
@@ -495,11 +470,6 @@ test "signed deployment identity refuses form substitution, bad paths and ambigu
     try check(valid, "playground");
     try t.expectError(error.BadDeploymentDefinition, check(valid, "prod"));
     var changed = valid;
-    changed.imports = &.{ "init", "init" };
-    try t.expectError(error.BadDeploymentDefinition, check(changed, "playground"));
-    changed.imports = &.{"delete"};
-    try t.expectError(error.BadDeploymentDefinition, check(changed, "playground"));
-    changed = valid;
     changed.ports = &.{ 22, 22 };
     try t.expectError(error.BadDeploymentDefinition, check(changed, "playground"));
     changed = valid;

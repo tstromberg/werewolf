@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const people = @import("people");
 
 pub fn main(init: std.process.Init) !void {
     if (linux.getauxval(std.elf.AT.SECURE) != 0)
@@ -14,6 +15,18 @@ pub fn main(init: std.process.Init) !void {
         !(std.Io.File.stdin().isTty(init.io) catch false) or
         !(std.Io.File.stdout().isTty(init.io) catch false))
         fail("unauthenticated session");
+    const passwd = try std.Io.Dir.cwd().readFileAlloc(
+        init.io,
+        "/etc/passwd",
+        gpa,
+        .limited(1 << 20),
+    );
+    const group = try std.Io.Dir.cwd().readFileAlloc(init.io, "/etc/group", gpa, .limited(1 << 20));
+    if (!people.administrator(
+        passwd,
+        group,
+        linux.getuid(),
+    )) fail("administrator membership required");
     const agent_needed = "agent forwarding required; reconnect with ssh -A";
     const socket = init.environ_map.get("SSH_AUTH_SOCK") orelse fail(agent_needed);
     if (!std.fs.path.isAbsolute(socket)) fail(agent_needed);

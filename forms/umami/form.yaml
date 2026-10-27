@@ -2,7 +2,7 @@
 # beside it (with): Caddy serves it over HTTPS for the machine's domain,
 # with a certificate from Let's Encrypt; Umami, on loopback, runs from its
 # project's OCI image, pinned by digest, in a tree of its own
-# (docs/design/oci.md), and keeps its tables in a schema of its own. Its
+# (docs/design/implemented/oci.md), and keeps its tables in a schema of its own. Its
 # administrator's password comes from the config before it serves, so
 # Umami's default (admin, umami) never works. See forms/umami/README.md.
 base: prod

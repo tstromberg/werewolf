@@ -12,7 +12,7 @@
 # First boot, slot a: it commits, and the updater finds Alpine's kernel
 # newer. It builds slot b and stages it. This is
 # the machine's first check, so slot b is due within two minutes, and the
-# updater reboots into it, which ends QEMU (docs/design/update-policy.md).
+# updater reboots into it, which ends QEMU (docs/design/implemented/update-policy.md).
 # Then update checks the disk: the report lists each CVE source with a
 # sha256 and no error; each apk cache kept its packages; slot b's root is
 # owned by root, mode 0755; the EFI entry allows one try of b; and slot b's stage0 has
@@ -30,7 +30,7 @@
 # updater stages slot b and waits hours for it to be due. update cuts QEMU
 # off the moment slot b is staged, as a crash or an operator's reboot
 # would, and slot b must boot all the same, because a staged slot is armed
-# (docs/design/update-policy.md).
+# (docs/design/implemented/update-policy.md).
 set -u
 staged=${STAGED:-}
 [ $# -ge 3 ] || { echo "usage: update DIR CMDLINE QEMU..." >&2; exit 2; }

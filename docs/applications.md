@@ -9,7 +9,6 @@ its working directory, `/data/svc/app`. The [tutorials](../examples/README.md)
 run PHP, Python, Node.js, Go, Rust and ASP.NET Core here and on GCP.
 
 ## Without a form: `--app`
-
 When a form already starts the application the right way, as the `-app`
 forms do, its files are all a machine needs. `--app DIR` lays a directory
 where the form keeps its application (form.yaml's `app`): `/usr/lib/app` for
@@ -97,12 +96,12 @@ and nothing else. The kernel enforces each limit:
 
 | It tries | Without a line for it | The line |
 | --- | --- | --- |
-| to make a system call | refused as if the kernel had no such call (seccomp) | `pledge PROMISE...`: the classes of call it may make, OpenBSD's pledge words mapped to calls ([design/pledge.md](design/pledge.md)) |
+| to make a system call | refused as if the kernel had no such call (seccomp) | `pledge PROMISE...`: the classes of call it may make, OpenBSD's pledge words mapped to calls ([design/implemented/pledge.md](design/implemented/pledge.md)) |
 | to listen on another port | the bind fails (Landlock) | `listen tcp/PORT` in the service, and in the form's `net` for fence |
 | to reach another machine | the connect fails (Landlock), and fence drops the packet | `connect tcp/PORT` in the service, and `connect app tcp/PORT` in the form's `net` |
 | to write outside `/data/svc/app` and `/run/svc/app` | refused; the root is read-only anyway | `write PATH` |
 | to run another program: a shell, `curl` | refused (`pledge exec`, then Landlock); there is no shell anyway | `run PROGRAM` |
-| through a program it runs on a stranger's file (ffmpeg), taken over, to do all the service may | it may: the program holds the service's leash | `narrow PROGRAM pledge\|read\|write ...`, run by its link `/etc/sv/NAME/narrow/PROGRAM` ([design/narrow.md](design/narrow.md)) |
+| through a program it runs on a stranger's file (ffmpeg), taken over, to do all the service may | it may: the program holds the service's leash | `narrow PROGRAM pledge\|read\|write ...`, run by its link `/etc/sv/NAME/narrow/PROGRAM` ([design/implemented/narrow.md](design/implemented/narrow.md)) |
 | to read a secret | it has none | `secret NAME PATH`: a variable read from a file in the config |
 | to exhaust the machine's memory | capped where the service sets a cap | `memory MiB`: its cgroup's `memory.max`, resident memory, so it suits an interpreter, the JVM and V8 alike |
 | to leave a process running after it is stopped | killed with the service | nothing: each service is a cgroup, and its `finish` writes `cgroup.kill` on stop, restart and shutdown, a detached backdoor included |
@@ -123,15 +122,15 @@ and `connect` are its network policy for leash and fence alike.
 UEFI boot disk (`--format raw|vhd|vmdk`); `howl create NAME --with helloworld
 --on gcp|aws|azure` makes a cloud machine of it.
 
-It updates itself unless `updates: off` leaves the updater out and records
-the `updates-enabled` weakness: the updater follows Wolfi's packages, builds
-a new slot with your files carried forward, boots it once, and keeps it only
-if it commits ([updater.md](updater.md)). For later changes to the
-application, set `updates.from` to an HTTPS apk repository before creation;
-`howl apply FILE` signs and publishes `local-NAME`, which the updater
-composes into the other slot ([design/manifest.md](design/manifest.md)).
-A form of your own that `make check` boots names its weaknesses, as
-`python-example` does, since excuses are not inherited.
+It updates itself unless `updates: off` leaves the updater out and records the
+`updates-enabled` weakness: the updater follows Wolfi's packages, builds a new slot
+with your files carried forward, boots it once, and keeps it only if it commits
+([updater.md](updater.md)). For later changes to the application, set `updates.from`
+to an HTTPS apk repository before creation; `howl apply FILE` signs and publishes
+`local-NAME`, which the updater composes into the other slot
+([design/implemented/manifest.md](design/implemented/manifest.md)). A form of your
+own that `make check` boots names its weaknesses, as `python-example` does, since
+excuses are not inherited.
 
 A Node, Ruby or Java application works the same way, with a service file of
 its own: `jre-app`'s runs `java -jar /usr/lib/app/app.jar` with
@@ -143,7 +142,8 @@ its own: `jre-app`'s runs `java -jar /usr/lib/app/app.jar` with
 
 To try something, you need not write a form. howl's `build`, `run`, `create` and
 `pack` take a manifest, `-f FILE`, and flags that are its keys, and write a form from
-them ([design/adhoc.md](design/adhoc.md), [design/manifest.md](design/manifest.md)):
+them ([design/implemented/adhoc.md](design/implemented/adhoc.md),
+[design/implemented/manifest.md](design/implemented/manifest.md)):
 
 ```sh
 build/host/howl run --with python-app --app ./api --packages py3.13-flask
@@ -171,4 +171,5 @@ inside it as `_oci-NAME`, with its entrypoint (an ELF program, never a `#!` scri
 its own `/tmp`, `/run`, `/data` and `/proc`, and, unless you say otherwise, a pledge
 of `stdio rpath wpath inet unix connect listen proc`; nginx, above, adds `sendfile`
 ([why](../lib/seal.zig)). Without a `listen` or `write` line, howl refuses and prints
-the lines to choose from. The unpack's rules are in [design/oci.md](design/oci.md).
+the lines to choose from. The unpack's rules are in
+[design/implemented/oci.md](design/implemented/oci.md).

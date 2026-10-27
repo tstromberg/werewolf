@@ -3,7 +3,7 @@
 //! policy: `lookup USER PATTERN TYPE... [unfiltered]`. A pattern is a name,
 //! `*.NAME` for every name below it, or `*`. Names become lowercase without
 //! one final dot; no type means A and AAAA; `all` is every type unwound
-//! forwards. Anything else fails the build (docs/design/unwound-policy.md).
+//! forwards. Anything else fails the build (docs/design/implemented/unwound-policy.md).
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;

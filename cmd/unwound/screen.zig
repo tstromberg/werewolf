@@ -8,7 +8,7 @@
 //! its TTL, and charges the budget again for a name whose answer it lets
 //! go early. Exact and `*.NAME` grants are never screened. No system
 //! calls: the caller gives the time and the hash key, and fuzz.zig drives
-//! it. See docs/design/unwound-plan.md.
+//! it. See docs/design/implemented/unwound-plan.md.
 const std = @import("std");
 const network = @import("network");
 const wire = @import("wire.zig");

@@ -9,16 +9,36 @@ const Allocator = std.mem.Allocator;
 const form = @import("form");
 const compose = @import("compose");
 
+var selected: []const []const u8 = &.{};
+
 const usage = "usage: form names|dirs|recipes|listens|weaknesses|excuses FORM, " ++
     "base-accounts DIR, list|check FORM KEY, cmdline FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [ssh], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
-    "stage FORM DIR, depends FORM, archs FORM, for-arch ARCH";
+    "stage FORM DIR, depends FORM, archs FORM, for-arch ARCH, variant-descriptions FORM";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const io = init.io;
-    const args = try init.minimal.args.toSlice(gpa);
+    const raw = try init.minimal.args.toSlice(gpa);
+    var rest: std.ArrayList([]const u8) = .empty;
+    var selections: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        if (std.mem.eql(u8, raw[i], "--variant")) {
+            i += 1;
+            if (i == raw.len) return error.Usage;
+            try selections.append(gpa, raw[i]);
+        } else if (std.mem.eql(u8, raw[i], "--ssh")) {
+            try selections.append(gpa, "ssh");
+        } else try rest.append(gpa, raw[i]);
+    }
+    var failure: form.Failure = .{};
+    selected = form.variantNames(gpa, selections.items, &failure) catch {
+        std.log.err("{s}", .{failure.text});
+        std.process.exit(1);
+    };
+    const args = rest.items;
     var buf: [4096]u8 = undefined;
     var out = Io.File.stdout().writerStreaming(io, &buf);
     const w = &out.interface;
@@ -40,7 +60,20 @@ pub fn main(init: std.process.Init) !void {
 fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form.Failure) !void {
     if (args.len == 0) return error.Usage;
     const verb = args[0];
+    if (is(verb, "variant-names") and args.len == 1) {
+        try w.print("{s}\n", .{try std.mem.join(gpa, ",", selected)});
+        return;
+    }
     const root = Dir.cwd();
+    if (is(verb, "variant-descriptions") and args.len == 2) {
+        const descriptions = try form.variantDescriptions(
+            gpa,
+            try form.load(io, gpa, root, args[1], f),
+        );
+        try w.writeAll(try std.json.Stringify.valueAlloc(gpa, descriptions, .{}));
+        try w.writeByte('\n');
+        return;
+    }
     if (is(verb, "tree") and args.len == 1) {
         for (try all(io, gpa)) |name| {
             const top = try form.load(io, gpa, root, name, f);
@@ -134,7 +167,7 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     const forms = if (is(verb, "compose"))
         try compose.stagedChain(io, gpa, root, args[1], development, f)
     else
-        try form.chain(io, gpa, root, args[1], f);
+        try form.chainSelectedIn(io, gpa, root, "forms", args[1], selected, f);
     if (is(verb, "archs") and args.len == 2) {
         for (try architectures(gpa, forms)) |a| try w.print("{s}\n", .{a});
     } else if (is(verb, "names") and args.len == 2) {

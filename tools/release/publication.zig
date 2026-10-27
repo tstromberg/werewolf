@@ -61,6 +61,7 @@ pub fn plans(s: *Sys, snapshots: []const u8) !Targets {
     for (directories) |dir| {
         const p = try sys.readJson(s, try sys.join(s, &.{ dir, "plan.json" }), 1 << 20);
         for (try json.items(try json.field(p, "targets"))) |target| {
+            if (!s.matchesVariants(target)) continue;
             const x: Targets = .{ .items = out.items };
             if (x.get(try json.text(target, "form"), try json.text(target, "arch")) != null or
                 !json.eql(try json.field(target, "arch"), try json.field(p, "arch")))
@@ -83,6 +84,7 @@ pub fn verifiedResults(s: *Sys, verified: []const u8) !Targets {
             try sys.join(s, &.{ dir, "results.json" }),
             1 << 20,
         ))) |result| {
+            if (!s.matchesVariants(result)) continue;
             var r = try json.parse(s.gpa, try json.encode(s.gpa, result));
             try r.object.put(
                 s.gpa,
@@ -293,6 +295,7 @@ fn exportOne(
     const output = try sys.join(s, &.{ assets, try dashed(s, key) });
     const entry = try json.from(s.gpa, .{
         .form = name,
+        .variants = try s.variantNames(),
         .provider = provider,
         .arch = arch,
         .bundle = try sys.resolve(s, bundle),
@@ -318,6 +321,7 @@ fn exportOne(
     const packages = try sys.readJson(s, try sys.join(s, &.{ verified, "packages.json" }), 4 << 20);
     const release = try notes.release(s, .{
         .form = name,
+        .variants = try s.variantNames(),
         .provider = provider,
         .arch = arch,
         .serial = try json.text(try json.field(manifest, "image"), "serial"),
@@ -372,7 +376,8 @@ pub fn exportAll(
     const results = try verifiedResults(s, verified);
     const previous = try index(s, t, tree, store);
     const assets = try sys.resolve(s, assets_dir);
-    if (sys.exists(s, assets)) return s.refuse("{s} already exists", .{assets});
+    if (sys.exists(s, assets) and
+        !s.collect_outputs) return s.refuse("{s} already exists", .{assets});
     try sys.mkdirs(s, assets);
     var exported: std.ArrayList(Json) = .empty;
     var directories: std.ArrayList([]const u8) = .empty;
@@ -385,6 +390,11 @@ pub fn exportAll(
     };
     mem.sort([]const u8, directories.items, {}, sys.pathLess);
     for (directories.items) |dir| {
+        if (!s.matchesVariants(try sys.readJson(
+            s,
+            try sys.join(s, &.{ dir, "bundle/boot.json" }),
+            1 << 20,
+        ))) continue;
         if (exportOne(s, t, tree, dir, targets, results, previous, store, assets)) |entry| {
             try exported.append(s.gpa, entry);
         } else |err| s.say(
@@ -397,6 +407,11 @@ pub fn exportAll(
             if (e.kind != .file or
                 !mem.eql(u8, std.fs.path.basename(e.path), "manifest.json")) continue;
             const dir = std.fs.path.dirname(try sys.join(s, &.{ root, e.path })).?;
+            if (!s.matchesVariants(try sys.readJson(
+                s,
+                try sys.join(s, &.{ dir, "manifest.json" }),
+                4 << 20,
+            ))) continue;
             const provenance = try exporter.provenance(s);
             if (legacy.exportVerified(
                 s,
@@ -421,6 +436,8 @@ pub fn exportAll(
 
 /// githubOutput adds step outputs for later jobs, when run by Actions.
 pub fn githubOutput(s: *Sys, values: []const [2][]const u8) !void {
+    for (values) |value| try s.outputs.put(s.gpa, value[0], value[1]);
+    if (s.collect_outputs) return;
     const path = s.getenv("GITHUB_OUTPUT") orelse return;
     var text: std.ArrayList(u8) = .empty;
     for (values) |v| try text.print(s.gpa, "{s}={s}\n", .{ v[0], v[1] });
@@ -439,6 +456,7 @@ fn append(s: *Sys, path: []const u8, bytes: []const u8) !void {
 pub fn publicMatrix(s: *Sys, t: images.Images, published: []const Published, groups: Json) !Json {
     var include: std.ArrayList(Json) = .empty;
     for (try json.items(try json.field(groups, "include"))) |group| {
+        if (!s.matchesVariants(group)) continue;
         if (!mem.eql(u8, try json.text(group, "provider"), "qemu")) continue;
         const arch = try json.text(group, "arch");
         var targets: std.ArrayList(Json) = .empty;
@@ -449,6 +467,11 @@ pub fn publicMatrix(s: *Sys, t: images.Images, published: []const Published, gro
             } else continue;
             var target: json.Map = .empty;
             try target.put(s.gpa, "form", f);
+            if (s.variants.len > 0) try target.put(
+                s.gpa,
+                "variants",
+                try json.from(s.gpa, try s.variantNames()),
+            );
             try target.put(s.gpa, "provider", .{ .string = "qemu" });
             try target.put(s.gpa, "arch", .{ .string = arch });
             var it = p.latest.object.iterator();
@@ -477,16 +500,16 @@ pub fn gatedTargets(s: *Sys, groups: Json) ![]const Gated {
     for (try json.items(try json.field(
         groups,
         "include",
-    ))) |g| for (try json.items(try json.field(g, "forms"))) |f| {
-        try out.append(
-            s.gpa,
-            .{
+    ))) |g| {
+        if (!s.matchesVariants(g)) continue;
+        for (try json.items(try json.field(g, "forms"))) |f| {
+            try out.append(s.gpa, .{
                 .form = f.string,
                 .provider = try json.text(g, "provider"),
                 .arch = try json.text(g, "arch"),
-            },
-        );
-    };
+            });
+        }
+    }
     return out.items;
 }
 
@@ -517,6 +540,7 @@ pub fn publishAll(
     var secure: std.ArrayList(Json) = .empty;
     var legacy_listed: std.ArrayList(Json) = .empty;
     for (listed) |target| {
+        if (!s.matchesVariants(target)) continue;
         const profile = if (json.get(target, "boot_profile")) |p| p.string else "secure-boot";
         if (!t.identity(try json.text(target, "form"), try json.text(target, "arch"), profile))
             return s.refuse("unsupported published image identity", .{});
@@ -588,7 +612,14 @@ pub fn publishAll(
     // rows, including failures, inputs and last publications, without relabeling.
     for (previous.rows) |row| {
         const name = try json.text(row, "form");
-        if (!t.hasForm(name)) continue;
+        if (!t.hasForm(name)) {
+            if (images.has(t.catalog_forms, name)) try rows.append(s.gpa, row);
+            continue;
+        }
+        if (!s.matchesVariants(row)) {
+            try rows.append(s.gpa, row);
+            continue;
+        }
         if (recovery) {
             if (!t.isFocused(
                 name,
@@ -606,6 +637,13 @@ pub fn publishAll(
         try arches.append(s.gpa, t.focused.arch)
     else for (t.arches) |a| try arches.append(s.gpa, a.name);
     for (forms) |name| for (arches.items) |arch| {
+        const variant_descriptions = plan.variantDescriptions(s, tree, name) catch |err| blk: {
+            s.say(
+                "form-images: {s} variant descriptions unavailable: {s}",
+                .{ name, s.reason(err) },
+            );
+            break :blk json.Json{ .object = .empty };
+        };
         const target = targets.get(name, arch);
         var status: []const u8 = if (target) |x|
             try json.text(x, "status")
@@ -621,6 +659,15 @@ pub fn publishAll(
             const last = previous.row(name, provider, arch) orelse Json{ .null = {} };
             var row: json.Map = .empty;
             try row.put(s.gpa, "form", .{ .string = name });
+            if (variant_descriptions.object.count() > 0) {
+                try row.put(s.gpa, "variant_descriptions", variant_descriptions);
+            } else if (json.get(last, "variant_descriptions")) |previous_descriptions|
+                try row.put(s.gpa, "variant_descriptions", previous_descriptions);
+            if (s.variants.len > 0) try row.put(
+                s.gpa,
+                "variants",
+                try json.from(s.gpa, try s.variantNames()),
+            );
             try row.put(s.gpa, "provider", .{ .string = provider });
             try row.put(s.gpa, "arch", .{ .string = arch });
             try row.put(s.gpa, "status", .{ .string = status });
@@ -914,6 +961,10 @@ const Pipeline = struct {
     /// every form is for every arch, but each form only for x86_64.
     fn answer(f: *fixture.Fixture, argv: []const []const u8) anyerror!?sys.Result {
         if (mem.endsWith(u8, argv[0], "form-tool")) {
+            if (mem.eql(u8, argv[1], "variant-descriptions")) return .{
+                .term = .{ .exited = 0 },
+                .stdout = "{\"ssh\":\"SSH access\"}\n",
+            };
             const out = if (mem.eql(u8, argv[1], "for-arch"))
                 "minimal\nprod-ssh\nplayground\n"
             else
@@ -951,6 +1002,7 @@ const Pipeline = struct {
         const head = try sys.join(s, &.{ dir, "boot.json" });
         try sys.write(s, head, try json.dumps(gpa, try json.from(gpa, .{
             .form = name,
+            .variants = try s.variantNames(),
             .image = .{
                 .arch = "x86_64",
                 .build = try gpa.dupe(u8, &sha256(serial)),
@@ -974,6 +1026,7 @@ const Pipeline = struct {
         return json.from(p.f.gpa(), .{
             .format = notes.format,
             .form = name,
+            .variants = try p.f.s.variantNames(),
             .arch = "x86_64",
             .packages = p.packages.items,
             .images = &[_]Json{},
@@ -1011,6 +1064,7 @@ const Pipeline = struct {
             };
             try targets.append(gpa, try json.from(gpa, .{
                 .form = name,
+                .variants = try s.variantNames(),
                 .arch = "x86_64",
                 .status = status,
                 .inputs = try gpa.dupe(u8, &sha256(name)),
@@ -1076,6 +1130,7 @@ const Pipeline = struct {
             try sys.writeJson(s, try sys.join(s, &.{ dir, "tests.json" }), try json.from(gpa, .{
                 .format = "werewolf-form-tests/1",
                 .form = name,
+                .variants = try s.variantNames(),
                 .arch = "x86_64",
                 .inputs = try json.field(target, "inputs"),
                 .checks = checks,
@@ -1201,6 +1256,32 @@ test "missing plans fail before the catalog changes" {
     try testing.expect(!sys.exists(s, p.f.path("store")));
 }
 
+test "variant channels keep independent indices and retain their siblings on failure" {
+    var p: Pipeline = undefined;
+    try p.init();
+    defer p.deinit();
+    const s = &p.f.s;
+    _ = try p.run(&p.serial, .{ .recovery = true });
+    const base = try latestOf(&p, "playground", "qemu", "x86_64");
+    s.variants = "ssh";
+    _ = try p.run(&p.later(1), .{ .recovery = true });
+    const ssh = try latestOf(&p, "playground", "qemu", "x86_64");
+    try testing.expectEqual(@as(i64, 1), try json.int(ssh, "index"));
+    try testing.expect(!mem.eql(u8, try json.text(base, "object"), try json.text(ssh, "object")));
+    const failed = try p.run(&p.later(2), .{ .recovery = true, .gated = false });
+    try testing.expect(failed.failed);
+    try testing.expect(json.eql(ssh, try latestOf(&p, "playground", "qemu", "x86_64")));
+    s.variants = "";
+    try testing.expect(json.eql(base, try latestOf(&p, "playground", "qemu", "x86_64")));
+    _ = try p.run(&p.later(3), .{ .recovery = true });
+    try testing.expectEqual(
+        @as(i64, 2),
+        try json.int(try latestOf(&p, "playground", "qemu", "x86_64"), "index"),
+    );
+    s.variants = "ssh";
+    try testing.expect(json.eql(ssh, try latestOf(&p, "playground", "qemu", "x86_64")));
+}
+
 test "unlisted profiles and forms, and an unrelated focused legacy target, never publish" {
     var p: Pipeline = undefined;
     try p.init();
@@ -1266,6 +1347,10 @@ test "a gated target publishes and every target is cataloged" {
     try testing.expectEqual(@as(usize, 1), r.listing.len);
     const rows = try p.rows();
     const published = rows.row("playground", "qemu", "x86_64").?;
+    try testing.expectEqualStrings(
+        "SSH access",
+        try json.text(try json.field(published, "variant_descriptions"), "ssh"),
+    );
     try testing.expectEqualStrings(catalog.published, try json.text(published, "status"));
     const latest = json.get(published, "latest").?;
     try testing.expectEqualStrings(&p.serial, try json.text(latest, "serial"));

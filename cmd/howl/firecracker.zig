@@ -136,10 +136,6 @@ fn sandboxArgs(io: Io, gpa: Allocator, dir: []const u8) ![]const []const u8 {
         gpa,
         &.{ "--bind", try gpa.print("{s}/disk.img", .{dir}), "/vm/disk.img" },
     );
-    const import_disk = try gpa.print("{s}/import.img", .{dir});
-    if (Dir.cwd().access(io, import_disk, .{})) |_|
-        try args.appendSlice(gpa, &.{ "--ro-bind", import_disk, "/vm/import.img" })
-    else |err| if (err != error.FileNotFound) return err;
     try args.appendSlice(
         gpa,
         &.{
@@ -250,7 +246,7 @@ const Drive = struct {
 const Bucket = struct { size: u64, refill_time: u64 = 100 };
 
 /// config returns Firecracker's JSON configuration: the boot disk, the
-/// config tar, and the import disk when import_disk is set.
+/// config tar.
 fn config(
     gpa: Allocator,
     kernel: []const u8,
@@ -258,34 +254,24 @@ fn config(
     args: []const u8,
     disk: []const u8,
     tar: []const u8,
-    import_disk: ?[]const u8,
     log: []const u8,
     n: Net,
 ) ![]u8 {
-    const extra: []const Drive = if (import_disk) |p| &.{.{
-        .drive_id = "import",
-        .path_on_host = p,
-        .is_root_device = false,
-        .is_read_only = true,
-    }} else &.{};
-    const drives = try mem.concat(gpa, Drive, &.{
-        &.{
-            .{
-                .drive_id = "disk",
-                .path_on_host = disk,
-                .is_root_device = false,
-                .is_read_only = false,
-                .rate_limiter = .{ .bandwidth = .{ .size = 16 << 20 }, .ops = .{ .size = 1000 } },
-            },
-            .{
-                .drive_id = "config",
-                .path_on_host = tar,
-                .is_root_device = false,
-                .is_read_only = true,
-            },
+    const drives = [_]Drive{
+        .{
+            .drive_id = "disk",
+            .path_on_host = disk,
+            .is_root_device = false,
+            .is_read_only = false,
+            .rate_limiter = .{ .bandwidth = .{ .size = 16 << 20 }, .ops = .{ .size = 1000 } },
         },
-        extra,
-    });
+        .{
+            .drive_id = "config",
+            .path_on_host = tar,
+            .is_root_device = false,
+            .is_read_only = true,
+        },
+    };
     return std.json.Stringify.valueAlloc(gpa, .{
         .@"boot-source" = .{
             .kernel_image_path = kernel,
@@ -860,11 +846,6 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) !
         if (added(w)) continue;
         try args.print(gpa, "{s}{s}", .{ if (args.items.len > 0) " " else "", w });
     }
-    const import_path = try gpa.print("{s}/import.img", .{dir});
-    const import_disk: ?[]const u8 = if (Dir.cwd().access(io, import_path, .{})) |_|
-        import_path
-    else |_|
-        null;
     try Dir.cwd().writeFile(io, .{
         .sub_path = try gpa.print("{s}/vm.json", .{dir}),
         .data = try config(
@@ -874,7 +855,6 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why, pinned: bool) !
             args.items,
             "/vm/disk.img",
             "/vm/config.tar",
-            if (import_disk != null) "/vm/import.img" else null,
             "/dev/stderr",
             try net(gpa, std.fs.path.basename(dir)),
         ),
@@ -938,7 +918,6 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
             error.FileNotFound => false,
             else => return err,
         };
-    const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
     const pidfile = try gpa.print("{s}/firecracker.pid", .{dir});
@@ -1109,7 +1088,6 @@ test config {
         args,
         "/m/disk.img",
         "/m/config.tar",
-        null,
         "/m/firecracker.log",
         n,
     );
@@ -1118,19 +1096,6 @@ test config {
     const disk = mem.find(u8, c, "\"/m/disk.img\"").?;
     const tar = mem.find(u8, c, "\"/m/config.tar\"").?;
     try testing.expect(disk < tar);
-    const brought = try config(
-        gpa,
-        "/m/kernel",
-        "/m/stage0.zst",
-        args,
-        "/m/disk.img",
-        "/m/config.tar",
-        "/m/import.img",
-        "/m/firecracker.log",
-        n,
-    );
-    const imported = mem.find(u8, brought, "\"/m/import.img\"").?;
-    try testing.expect(mem.find(u8, brought, "\"/m/config.tar\"").? < imported);
     try testing.expect(mem.find(u8, c, "\"is_read_only\": false") != null);
     try testing.expect(mem.find(u8, c, n.tap) != null);
     const mib = std.fmt.comptimePrint("\"mem_size_mib\": {d}", .{howl.local_mib});

@@ -90,6 +90,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.variants }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -107,7 +109,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
-          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}
+          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: snapshot/
 
   build:
@@ -122,13 +124,15 @@ jobs:
         target: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 360
+    env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.target.variants }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}
+          name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.target.variants || 'default' }}
           path: snapshot
       - name: Install pinned tools
         run: sudo test/ci-setup
@@ -146,7 +150,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
-          name: images-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.copy }}
+          name: images-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.target.variants || 'default' }}-${{ matrix.copy }}
           path: |
             candidates/
             !candidates/**/boot.json.sig
@@ -155,7 +159,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
         with:
-          name: build-logs-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.copy }}
+          name: build-logs-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.target.variants || 'default' }}-${{ matrix.copy }}
           path: build/protected-cache/**/build.log
 
   check:
@@ -167,17 +171,19 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
+    env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.variants }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}
+          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: snapshot
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          pattern: images-${{ matrix.arch }}-${{ matrix.shard }}-*
+          pattern: images-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}-*
           path: copies
       - name: Install pinned tools
         run: sudo test/ci-setup
@@ -190,18 +196,19 @@ jobs:
           mkdir -p lifecycle
           cp snapshot/plan.json lifecycle/plan.json
           build/host/release form-images check snapshot \
-            "copies/images-$ARCH-$FORM_IMAGES_SHARD-1" "copies/images-$ARCH-$FORM_IMAGES_SHARD-2" verified lifecycle
+            "copies/images-$ARCH-$FORM_IMAGES_SHARD-${FORM_IMAGES_VARIANTS:-default}-1" \
+            "copies/images-$ARCH-$FORM_IMAGES_SHARD-${FORM_IMAGES_VARIANTS:-default}-2" verified lifecycle
       # Evidence and inventories for every form; bundles only for the forms
       # the lifecycle gates, which alone can be published.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
-          name: verified-${{ matrix.arch }}-${{ matrix.shard }}
+          name: verified-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: verified/
           retention-days: 3
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}
+          name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: lifecycle/
           if-no-files-found: ignore
           compression-level: 0
@@ -209,7 +216,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
         with:
-          name: form-test-logs-${{ matrix.arch }}-${{ matrix.shard }}
+          name: form-test-logs-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: |
             build/**/check/**/*.log
             build/**/check/*-native/results.json
@@ -225,13 +232,15 @@ jobs:
         target: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 360
+    env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.target.variants }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}
+          name: inputs-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.target.variants || 'default' }}
           path: snapshot
       - run: sudo test/ci-setup
       - run: make howl build/host/release
@@ -240,7 +249,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: legacy-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.copy }}
+          name: legacy-${{ matrix.target.arch }}-${{ matrix.target.shard }}-${{ matrix.target.variants || 'default' }}-${{ matrix.copy }}
           path: legacy-candidates/
           compression-level: 0
 
@@ -252,29 +261,31 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
+    env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.variants }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}
+          name: inputs-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: snapshot
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: legacy-${{ matrix.arch }}-${{ matrix.shard }}-*
+          pattern: legacy-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}-*
           path: copies
       - run: sudo test/ci-setup
       - run: make howl build/host/form build/host/release build/host/form-coverage build/host/check-legacy-image
       - name: Compare builds, run integration tests and boot exact legacy images
         run: |
           build/host/release legacy-images check snapshot \
-            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-1 \
-            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-2 legacy-verified
+            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}-1 \
+            copies/legacy-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}-2 legacy-verified
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: legacy-verified-${{ matrix.arch }}-${{ matrix.shard }}
+          name: legacy-verified-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: legacy-verified/
           compression-level: 0
 
@@ -290,6 +301,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     env:
+      FORM_IMAGES_VARIANTS: ${{ matrix.variants }}
       PROVIDER: ${{ matrix.provider }}
       ARCH: ${{ matrix.arch }}
       FORMS: ${{ join(matrix.forms, ',') }}
@@ -299,7 +311,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}
+          name: lifecycle-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: lifecycle
       # Self-hosted runners keep these tools installed (docs/releases.md).
       - name: Ensure macOS protected runtime
@@ -326,10 +338,19 @@ jobs:
           mkdir -p "$keys"
           workload=playground
           case ",$FORMS," in *,postdoc-server,*) workload=postdoc-server ;; esac
+          case ",${FORM_IMAGES_VARIANTS:-}," in *,vector,*) workload=postgresql ;; esac
           # howl manages a fresh IPE identity and matching test kernel here;
           # it also prepares the stock Melange builder when running on macOS.
           XDG_DATA_HOME="$keys/data" \
             build/host/check-independent-updates build/host/howl updates "$PROVIDER" "$workload"
+          case ",$FORMS," in
+            *,postgresql,*)
+              if [ "$workload" != postgresql ]; then
+                XDG_DATA_HOME="$keys/postgres-data" \
+                  build/host/check-independent-updates build/host/howl updates/postgresql "$PROVIDER" postgresql
+              fi
+              ;;
+          esac
       - name: Gate each form's exact candidate where it boots
         env:
           WEREWOLF_PROTECTED_BOOT_KEY: ${{ secrets.WEREWOLF_PROTECTED_BOOT_KEY }}
@@ -340,7 +361,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
-          name: gated-${{ matrix.provider }}-${{ matrix.arch }}-${{ matrix.shard }}
+          name: gated-${{ matrix.provider }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: gated/
           if-no-files-found: ignore
           compression-level: 0
@@ -348,12 +369,12 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
-          name: lifecycle-evidence-${{ matrix.provider }}-${{ matrix.arch }}-${{ matrix.shard }}
+          name: lifecycle-evidence-${{ matrix.provider }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ matrix.variants || 'default' }}
           path: |
             build/lifecycle/**/*.log
             build/lifecycle/**/result.json
             build/lifecycle/**/storage-fault.json
-            updates/*.log
+            updates/**/*.log
             updates/evidence.jsonl
             updates/result.json
 

@@ -3,14 +3,14 @@
 `/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current. It asks
 werewolf's repositories and Wolfi for anything newer than the running image, builds
 the other slot from it on the machine (werewolf's programs and forms are packages:
-[custom-updates.md](design/custom-updates.md)), boots that slot once, and records
-what changed and which CVEs that fixes. Enrolled IPE images fetch signed prebuilt
-slots instead ([prebuilt-images.md](design/prebuilt-images.md)); protected images
-take them from their channel themselves, and the mount broker raises the TPM floor
-before a slot is overwritten
-([independent-updates.md](design/independent-updates.md)). The policy below decides
-when any staged slot boots. It is one Zig program, `cmd/slot-update/slot-update.zig`,
-in `minimal` and so every form.
+[custom-updates.md](design/implemented/custom-updates.md)), boots that slot once, and
+records what changed and which CVEs that fixes. Enrolled IPE images fetch signed
+prebuilt slots instead ([prebuilt-images.md](design/implemented/prebuilt-images.md));
+protected images take them from their channel themselves, and the mount broker raises
+the TPM floor before a slot is overwritten
+([independent-updates.md](design/implemented/independent-updates.md)). The policy
+below decides when any staged slot boots. It is one Zig program,
+`cmd/slot-update/slot-update.zig`, in `minimal` and so every form.
 
 ## Running
 
@@ -52,7 +52,7 @@ then the operator's `update-policy.json` in the config tar (howl's
 (default `daily 02:00-05:00`); a tier is a whole number of `m`, `h` or `d`,
 at most its limit; `limits`, in the form's file only, lowers the limits. A
 file is taken whole or refused whole, naming the key. Nothing turns updates
-off (lib/update-policy.zig, [update-policy.md](design/update-policy.md)).
+off (lib/update-policy.zig, [update-policy.md](design/implemented/update-policy.md)).
 
 ## What a check does
 
@@ -67,16 +67,16 @@ off (lib/update-policy.zig, [update-policy.md](design/update-policy.md)).
 | `install` | Disarm the other slot through the mount broker; install root, kernel, stage0 and UKI with digest-checked broker operations; arm one try; write `attempt`. |
 | `stage`, `report` | Fetch the tiers feed, tier the fixes, note in `pending` when each tier was first seen, work out when the slot is due, write the report; log `stage`. |
 
-When the slot is due, the service writes wall notices a minute, fifteen
-seconds and a second ahead, naming each package, CVE and risk
-([current.md](design/current.md)), logs `reboot` and reboots; a second
-update reboot waits an hour after the last, and any earlier reboot boots
-the slot too. `slot-keep` commits the slot once it is healthy, which includes the
-updater writing `/run/werewolf/updater-ready` and posture reporting no failure the
-image does not excuse; anything else ends on the previous slot
-([native-boot.md](design/native-boot.md)), and `outcome` then logs `commit` or
-`rollback`, putting a rolled-back build in `bad`. `build`, everywhere, is the first
-16 hex digits of the sha256 of a slot's package list and kernel.
+When the slot is due, the service writes wall notices a minute, fifteen seconds and a
+second ahead, naming each package, CVE and risk
+([current.md](design/implemented/current.md)), logs `reboot` and reboots; a second
+update reboot waits an hour after the last, and any earlier reboot boots the slot
+too. `slot-keep` commits the slot once it is healthy, which includes the updater
+writing `/run/werewolf/updater-ready` and posture reporting no failure the image does
+not excuse; anything else ends on the previous slot
+([native-boot.md](design/implemented/native-boot.md)), and `outcome` then logs
+`commit` or `rollback`, putting a rolled-back build in `bad`. `build`, everywhere, is
+the first 16 hex digits of the sha256 of a slot's package list and kernel.
 
 ## Trust and separation
 
@@ -129,9 +129,9 @@ pruned: about 2 MB a year), `reports/TIME-BUILD.json` (the newest 500),
 
 ## Events
 
-Every line has `time` (RFC 3339, UTC), `host`, `seq`, `prev` and `event`;
-`prev` is the first 16 hex digits of the previous line's SHA-256, so an
-edited line breaks the chain ([audit log](design/update-policy.md#the-audit-log)).
+Every line has `time` (RFC 3339, UTC), `host`, `seq`, `prev` and `event`; `prev` is
+the first 16 hex digits of the previous line's SHA-256, so an edited line breaks the
+chain ([audit log](design/implemented/update-policy.md#the-audit-log)).
 
 | Event | Fields |
 | --- | --- |

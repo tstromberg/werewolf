@@ -52,7 +52,7 @@ fn prefix(s: *Sys, t: images.Images, name: []const u8, arch: []const u8) ![]cons
         arch,
         "legacy-boot",
     )) return s.refuse("unsupported published image identity", .{});
-    return s.gpa.print("{s}-{s}-legacy-boot", .{ name, arch });
+    return s.gpa.print("{s}-{s}-legacy-boot", .{ try s.variantKey(name), arch });
 }
 
 /// assetName is a file's release asset name: the disk is FORM-ARCH-legacy-boot.qcow2.
@@ -100,7 +100,7 @@ pub fn settled(
     )) return s.refuse("unsupported published image identity", .{});
     const url = try s.gpa.print(
         "{s}/legacy-boot/{s}/{s}/latest/accepted.json",
-        .{ try catalog.public(s), name, arch },
+        .{ try catalog.public(s), try s.variantKey(name), arch },
     );
     const raw = switch (try sys.get(s, url, 4 << 20)) {
         .missing => return false,
@@ -127,6 +127,10 @@ pub fn validate(s: *Sys, t: images.Images, manifest: Json, directory: []const u8
         arch,
         profile,
     )) return s.refuse("unsupported published image identity", .{});
+    if (!s.matchesVariants(manifest)) return s.refuse(
+        "legacy image describes another variant selection",
+        .{},
+    );
     const listed = try json.field(manifest, "files");
     if (!mem.eql(u8, try json.text(manifest, "format"), format) or
         !mem.eql(u8, profile, "legacy-boot") or
@@ -216,7 +220,7 @@ fn buildOne(
         "slot",
         "qcow2",
     }, .{ .env = &env });
-    const root = try sys.join(s, &.{ work, name });
+    const root = try sys.join(s, &.{ work, try s.variantKey(name) });
     if (sys.exists(
         s,
         try sys.join(s, &.{ root, "meta/usr/share/werewolf/dev" }),
@@ -281,6 +285,7 @@ fn buildOne(
     const manifest = try json.from(s.gpa, .{
         .format = format,
         .form = name,
+        .variants = try s.variantNames(),
         .arch = arch,
         .boot_profile = "legacy-boot",
         .disabled = try disabledJson(s),
@@ -417,7 +422,10 @@ pub fn check(
         const name = try json.text(target, "form");
         if (!t.hasForm(name)) return s.refuse("unlisted form in legacy image plan", .{});
         const arch = try json.text(target, "arch");
-        var result = try json.from(s.gpa, .{ .form = name, .arch = arch, .status = "failed" });
+        var result = try json.from(
+            s.gpa,
+            .{ .form = name, .variants = try s.variantNames(), .arch = arch, .status = "failed" },
+        );
         if (skipped(target)) |why| {
             try result.object.put(s.gpa, "status", .{ .string = why });
         } else if (checkOne(s, t, tree, target, snapshot, first, second, output)) {
@@ -532,7 +540,7 @@ fn previousInventory(
     work: []const u8,
 ) !?Previous {
     const st = store orelse return null;
-    const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ name, arch });
+    const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ try s.variantKey(name), arch });
     const receipt = try sys.join(s, &.{ work, "accepted.json" });
     if (!try st.fetch(
         s,
@@ -586,7 +594,7 @@ fn reuseExport(
     const st = store orelse return false;
     const name = try json.text(manifest, "form");
     const arch = try json.text(manifest, "arch");
-    const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ name, arch });
+    const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ try s.variantKey(name), arch });
     const work = try sys.scratch(s, null, "ww-legacy-retry-");
     defer sys.remove(s, work);
     const receipt = try sys.join(s, &.{ work, "accepted.json" });
@@ -661,10 +669,12 @@ pub fn exportVerified(
         try manifests.append(s.gpa, try sys.join(s, &.{ verified, e.path }));
     for (manifests.items) |path| {
         const directory = std.fs.path.dirname(path).?;
-        const manifest = try validate(s, t, try sys.readJson(s, path, 1 << 20), directory);
+        const raw = try sys.readJson(s, path, 1 << 20);
+        if (!s.matchesVariants(raw)) continue;
+        const manifest = try validate(s, t, raw, directory);
         const name = try json.text(manifest, "form");
         const arch = try json.text(manifest, "arch");
-        const identity = try s.gpa.print("{s}/{s}", .{ name, arch });
+        const identity = try s.gpa.print("{s}/{s}", .{ try s.variantKey(name), arch });
         const target = for (targets) |x| {
             if (mem.eql(u8, json.text(x, "form") catch "", name) and
                 mem.eql(u8, json.text(x, "arch") catch "", arch)) break x;
@@ -715,6 +725,7 @@ pub fn exportVerified(
             s.gpa,
             .{
                 .form = name,
+                .variants = try s.variantNames(),
                 .arch = arch,
                 .boot_profile = "legacy-boot",
                 .serial = try json.field(manifest, "serial"),
@@ -750,6 +761,7 @@ pub fn exportVerified(
             );
             const release = try notes.release(s, .{
                 .form = name,
+                .variants = try s.variantNames(),
                 .provider = "legacy-boot",
                 .arch = arch,
                 .serial = try json.text(manifest, "serial"),
@@ -919,7 +931,10 @@ pub fn publish(
             )) return s.refuse("invalid prior boot profile catalog", .{});
             for (try json.items(try json.field(signed, "legacy_boot"))) |row| {
                 const name = try json.text(row, "form");
-                if (!t.hasForm(name)) continue;
+                if (!t.hasForm(name)) {
+                    if (images.has(t.catalog_forms, name)) try putRow(s, &rows, row);
+                    continue;
+                }
                 if (!t.identity(
                     name,
                     try json.text(row, "arch"),
@@ -935,7 +950,7 @@ pub fn publish(
         const manifest = try verify(s, t, directory, certificate);
         const name = try json.text(manifest, "form");
         const arch = try json.text(manifest, "arch");
-        const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ name, arch });
+        const namespace = try s.gpa.print("legacy-boot/{s}/{s}", .{ try s.variantKey(name), arch });
         const head = try sys.join(
             s,
             &.{ directory, try s.gpa.print("{s}-downloads.json", .{try prefix(s, t, name, arch)}) },
@@ -1017,6 +1032,7 @@ pub fn publish(
             );
         try putRow(s, &rows, try json.from(s.gpa, .{
             .form = name,
+            .variants = try s.variantNames(),
             .arch = arch,
             .boot_profile = "legacy-boot",
             .serial = try json.field(manifest, "serial"),
@@ -1030,7 +1046,9 @@ pub fn publish(
 
 /// putRow replaces the row of row's form and arch, or adds it.
 fn putRow(s: *Sys, rows: *std.ArrayList(Json), row: Json) !void {
+    const selection = try sys.selection(s, row);
     for (rows.items) |*r| {
+        if (!sys.selectionMatches(r.*, selection)) continue;
         if (mem.eql(u8, try json.text(r.*, "form"), try json.text(row, "form")) and
             mem.eql(u8, try json.text(r.*, "arch"), try json.text(row, "arch")))
         {
@@ -1140,6 +1158,7 @@ pub fn testCandidate(
     try sys.writeJson(s, try sys.join(s, &.{ dir, "packages.json" }), try json.from(gpa, .{
         .format = notes.format,
         .form = name,
+        .variants = try s.variantNames(),
         .arch = "x86_64",
         .packages = &[_]Json{try json.from(
             gpa,
@@ -1179,6 +1198,7 @@ fn testManifest(s: *Sys, dir: []const u8, name: []const u8, serial: []const u8) 
     try sys.writeJson(s, try sys.join(s, &.{ dir, "manifest.json" }), try json.from(s.gpa, .{
         .format = format,
         .form = name,
+        .variants = try s.variantNames(),
         .arch = "x86_64",
         .boot_profile = "legacy-boot",
         .disabled = try disabledJson(s),
@@ -1327,6 +1347,50 @@ test "signed legacy assets name their profile and keep their own namespace" {
     }
 }
 
+test "legacy variant publications keep their siblings and accepted release floors" {
+    var l: Legacy = undefined;
+    try l.init();
+    defer l.deinit();
+    const s = &l.f.s;
+    const base_rows = try l.publishOne(try l.exported(try l.candidate(
+        "minimal",
+        "20261017T010000Z",
+        "1",
+    )));
+    try sys.write(s, l.f.path(
+        "store/boot-profiles.json",
+    ), try catalog.envelope(s, try json.from(s.gpa, .{
+        .format = "werewolf-boot-profiles/" ++
+            "1",
+        .secure_boot = &[_]Json{},
+        .legacy_boot = base_rows,
+    }), l.keys.key));
+    s.variants = "ssh";
+    const ssh = try l.exported(try l.candidate("minimal", "20261017T010001Z", "1"));
+    const rows = try l.publishOne(ssh);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    var ordinary: ?Json = null;
+    var selected: ?Json = null;
+    for (rows) |row| {
+        if (sys.selectionMatches(row, "ssh")) selected = row;
+        if (sys.selectionMatches(row, "")) ordinary = row;
+    }
+    try testing.expect(ordinary != null and selected != null);
+    try testing.expect(!mem.eql(
+        u8,
+        try json.text(ordinary.?, "object"),
+        try json.text(selected.?, "object"),
+    ));
+    try testing.expect(sys.isFile(
+        s,
+        l.f.path("store/legacy-boot/minimal/x86_64/latest/accepted.json"),
+    ));
+    try testing.expect(sys.isFile(
+        s,
+        l.f.path("store/legacy-boot/minimal-variants-ssh/x86_64/latest/accepted.json"),
+    ));
+}
+
 test "the prior catalog keeps selected forms and retires excluded ones" {
     var l: Legacy = undefined;
     try l.init();
@@ -1339,7 +1403,7 @@ test "the prior catalog keeps selected forms and retires excluded ones" {
     )));
     var all: std.ArrayList(Json) = .empty;
     try all.appendSlice(s.gpa, rows);
-    for ([_][]const u8{ "prod", "caddy" }) |name| {
+    for ([_][]const u8{ "retired-form", "removed-form" }) |name| {
         var retired = try json.parse(s.gpa, try json.encode(s.gpa, rows[0]));
         try retired.object.put(s.gpa, "form", .{ .string = name });
         try all.append(s.gpa, retired);

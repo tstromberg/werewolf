@@ -1,6 +1,6 @@
 //! oci pulls an OCI image with crane and unpacks it into a form's root at
 //! /oci/NAME, so the machine never pulls or mounts anything. See README.md
-//! and docs/design/oci.md.
+//! and docs/design/implemented/oci.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,7 +16,7 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 const Why = howl.Why;
 
-// The unpacker's limits are fixed by docs/design/oci.md, not configurable.
+// The unpacker's limits are fixed by docs/design/implemented/oci.md, not configurable.
 const max_entries = 500_000;
 const max_bytes: u64 = 8 << 30;
 const max_name = 4096;

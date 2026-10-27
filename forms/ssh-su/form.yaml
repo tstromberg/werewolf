@@ -22,7 +22,7 @@ net:
 # localhost host-key pin published before the same daemon starts.
 services:
   sshd:
-    exec: /usr/bin/sshd -D -e
+    exec: /usr/bin/sshd -D -e -f /etc/ssh/operator.conf
     before:
       - /usr/bin/mkdir -p -m 1777 /run/ssh-agent
       - /usr/lib/werewolf/ssh-host-key /data/svc/sshd/host-key /run/svc/sshd/host-key /run/werewolf/ssh_known_hosts

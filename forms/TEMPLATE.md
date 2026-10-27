@@ -22,10 +22,10 @@ weaken the security model.
 ### Local test deployment (lima, qemu, firecracker)
 
 One fenced `sh` block. It is the whole setup, and `make example-NAME` runs it
-([docs/design/examples.md](../docs/design/examples.md)). Leave `--on` out: howl picks
-Lima, bhyve, Firecracker, or QEMU. The machine's name is the form's name. A secret is
-a command (`openssl rand`). A file the command reads is written in the fence, or
-lives in `forms/NAME/example/`. A variant is a `text` block.
+([docs/design/implemented/examples.md](../docs/design/implemented/examples.md)).
+Leave `--on` out: howl picks Lima, bhyve, Firecracker, or QEMU. The machine's name is
+the form's name. A secret is a command (`openssl rand`). A file the command reads is
+written in the fence, or lives in `forms/NAME/example/`. A variant is a `text` block.
 
 ```sh
 howl create NAME --with NAME

@@ -35,7 +35,7 @@ A reboot returns the machine to the signed image regardless.
 
 A program the app runs on what a stranger sends -- a media tool, say -- can
 be held tighter than the app: cat, run by its link /etc/sv/app/narrow/cat,
-is narrowed (docs/design/narrow.md). It reads the image, but neither the
+is narrowed (docs/design/implemented/narrow.md). It reads the image, but neither the
 account list nor the app's own files, which the app and plain cat may.
 
 At boot the application attacks itself with a battery of representative

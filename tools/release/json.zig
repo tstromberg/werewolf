@@ -225,11 +225,15 @@ pub fn from(gpa: Allocator, x: anytype) Allocator.Error!Json {
         },
         .@"struct" => |s| {
             var map: Map = .empty;
-            inline for (s.field_names) |name| try map.put(
-                gpa,
-                name,
-                try from(gpa, @field(x, name)),
-            );
+            inline for (s.field_names) |name| {
+                const value = try from(gpa, @field(x, name));
+                // Default-selection records retain their historical wire shape.
+                const omit = if (comptime mem.eql(u8, name, "variants"))
+                    value == .array and value.array.items.len == 0
+                else
+                    false;
+                if (!omit) try map.put(gpa, name, value);
+            }
             return .{ .object = map };
         },
         else => @compileError("json.from: unsupported type " ++ @typeName(T)),

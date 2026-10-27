@@ -1,46 +1,11 @@
-# A forwarding-only OpenSSH service, with no login shell.
+# Ordinary operator SSH, with outbound SSH restricted to declared destinations.
 base: prod
+with: [ssh-su]
 
-packages:
-  - openssh-server
-  - coreutils             # /usr/bin/false is the account's login shell
-accounts:
-  groups:
-    - groupname: sshd
-      gid: 22
-  users:
-    # sshd -T checks this account even when the server runs as bastion.
-    - username: sshd
-      uid: 22
-      gid: 22
-      homedir: /var/empty
-      shell: /sbin/nologin
-    - username: bastion
-      shell: /usr/bin/false
-prune:
-  - usr/bin/unix_chkpwd
+bastion:
+  destinations: []
 
-# The posture checks this form fails, and why: its own, never inherited
-# (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-no-login: sshd, by security key, which forwards to the destinations form.yaml names and opens no session
-  network-ssh-config: sshd forwards ports, which is what a bastion is for
-
-services:
-  sshd:
-    exec: /usr/bin/sshd -D -e -f /etc/ssh/sshd_config
-    user: bastion
-    pledge: stdio rpath wpath inet unix listen connect proc exec seccomp
-    listen: [tcp/22]
-    # The build puts its connect line where the form's net lets the bastion
-    # connect (lib/form.zig's bastionService); this one is the shipped form's.
-    connect: [tcp/22]
-    # Its users, their keys and destinations, are the image's, from form.yaml's
-    # bastion: (etc/ssh/bastion, written by the build).
-    read: /etc/ssh
-    run: /usr/lib/ssh/sshd-auth /usr/lib/ssh/sshd-session /usr/bin/ssh-keygen
-    # Its host key, made on the first boot and kept in /data; without /data
-    # it stays down rather than change identity each boot.
-    before: /usr/lib/werewolf/ssh-host-key /data/svc/sshd/host-key
-    memory: 256
-    nofile: 1024
+  network-no-login: SSH provides operator access
+  programs-no-shell: mksh provides operator shells and /bin/sh
+  network-ssh-config: SSH forwards only to the declared destinations

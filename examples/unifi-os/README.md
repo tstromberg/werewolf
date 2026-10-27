@@ -3,7 +3,7 @@
 An ARM64 integration spike for UniFi OS Server 5.1.42 on Werewolf. Its
 [manifest](form.yaml) includes the reusable PostgreSQL, MongoDB and
 RabbitMQ and nginx forms. It is outside the released catalog while compatibility
-work remains. See the [design](../../docs/design/unifi-os.md).
+work remains. See the [design](../../docs/design/pending/unifi-os.md).
 
 ## Security Posture
 

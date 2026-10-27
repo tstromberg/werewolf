@@ -491,7 +491,10 @@ fn ssh(p: *Posture) !void {
     } else return;
     const dev = p.werewolf and exists(p.io, "/etc/sv/sshd-dev/service");
     if (!dev or exists(p.io, "/etc/sv/sshd/service"))
-        try sshConfig(p, sshd, "/etc/ssh/sshd_config", false);
+        try sshConfig(p, sshd, if (exists(p.io, "/etc/ssh/operator.conf"))
+            "/etc/ssh/operator.conf"
+        else
+            "/etc/ssh/sshd_config", false);
     if (dev) try sshConfig(p, sshd, "/etc/ssh/howl-dev.conf", true);
 }
 
@@ -695,7 +698,7 @@ test sshLimits {
     );
 }
 
-/// fence checks werewolf's network policy (docs/design/fence.md); policy is
+/// fence checks werewolf's network policy (docs/design/implemented/fence.md); policy is
 /// "" if there is none. Only declared ports can be bound, only declared
 /// traffic sent, nothing unsolicited received, the metadata server reached
 /// only by those named, and IPv6 is off or under the same rules. Tests are

@@ -14,7 +14,7 @@ packages:
   - nodejs-hardened>=26.12.1-r5002
   - jemalloc
   # Media: libvips in the web and jobs, by FFI; ffmpeg, ffprobe and file
-  # each narrowed (docs/design/narrow.md).
+  # each narrowed (docs/design/implemented/narrow.md).
   - libvips-hardened>=8.18.7-r1001
   - ffmpeg-hardened>=9.0.2-r1003
   - file

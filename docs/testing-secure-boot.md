@@ -1,30 +1,30 @@
 # Secure Boot, TPM and signed-update tests
 
-These suites prove the protections that reach across reboots: Secure Boot
-on the boot files, a TPM that records which releases may boot, and IPE,
-which runs only native code from the verified root
-([security.md](security.md)). Most take `IPE=1`, which needs a test kernel
-whose IPE trusts a disposable certificate: `make ipe-kernel` builds one with
-`tools/test-kernel`, from kernel-build at the commit `boot/kernel-build` pins,
-howl makes and caches one where none is given, and `WEREWOLF_IPE_KEY` and
-`WEREWOLF_IPE_CRT` name its signer
-([design/ipe.md](design/ipe.md), [macos-builds.md](macos-builds.md)). CI
-runs them with disposable keys on both architectures. Private signers stay
-on the host and never enter a guest or a build VM.
+These suites prove the protections that reach across reboots: Secure Boot on the boot
+files, a TPM that records which releases may boot, and IPE, which runs only native
+code from the verified root ([security.md](security.md)). Most take `IPE=1`, which
+needs a test kernel whose IPE trusts a disposable certificate: `make ipe-kernel`
+builds one with `tools/test-kernel`, from kernel-build at the commit
+`boot/kernel-build` pins, howl makes and caches one where none is given, and
+`WEREWOLF_IPE_KEY` and `WEREWOLF_IPE_CRT` name its signer
+([design/implemented/ipe.md](design/implemented/ipe.md),
+[macos-builds.md](macos-builds.md)). CI runs them with disposable keys on both
+architectures. Private signers stay on the host and never enter a guest or a build
+VM.
 
 ## IPE
 
-`make IPE=1 check-ipe` boots the real image and tests global execution and
-executable mappings with Landlock, seccomp and noexec out of the way, and
-refuses missing, tampered, wrong-signer and wrong-root policies before
-handover. `make IPE=1 check-image-updater` runs signed HTTPS slot updates
-under IPE: rejection before any write, then reboot and commit
-([design/prebuilt-images.md](design/prebuilt-images.md)). On accelerated
-arm64, `make IPE=1 check-updater-uki` keeps one disk through firmware boot,
-signed UKI delivery, a verified slot b and its commit, with IPE still
-enforcing; it rejects unsigned, altered and wrong-key loaders and UKIs, an
-unexpected UKI path and a setup-mode boot, and unsigned loader options
-cannot change the slot or disable IPE.
+`make IPE=1 check-ipe` boots the real image and tests global execution and executable
+mappings with Landlock, seccomp and noexec out of the way, and refuses missing,
+tampered, wrong-signer and wrong-root policies before handover. `make IPE=1
+check-image-updater` runs signed HTTPS slot updates under IPE: rejection before any
+write, then reboot and commit
+([design/implemented/prebuilt-images.md](design/implemented/prebuilt-images.md)). On
+accelerated arm64, `make IPE=1 check-updater-uki` keeps one disk through firmware
+boot, signed UKI delivery, a verified slot b and its commit, with IPE still
+enforcing; it rejects unsigned, altered and wrong-key loaders and UKIs, an unexpected
+UKI path and a setup-mode boot, and unsigned loader options cannot change the slot or
+disable IPE.
 
 ## Secure Boot
 
@@ -56,7 +56,7 @@ SetupMode=0. Logs and `phases.json` are under `CHECK/provider-ab-PROVIDER`, and 
 what the test made is removed. `AB_FIXTURE` reuses a fixture of the same architecture
 and mode, `IPE_KERNEL` an existing kernel archive
 ([test/check-provider-ab.zig](../test/check-provider-ab.zig),
-[design/provider-ab-tests.md](design/provider-ab-tests.md)).
+[design/implemented/provider-ab-tests.md](design/implemented/provider-ab-tests.md)).
 
 | Target | Mode | Needs |
 |---|---|---|
@@ -87,7 +87,8 @@ targets make billable resources: use test credentials.
 ## TPM
 
 Each release channel has one TPM counter, its floor, and a release boots only if its
-index reaches it ([design/independent-updates.md](design/independent-updates.md)).
+index reaches it
+([design/implemented/independent-updates.md](design/implemented/independent-updates.md)).
 `make check-tpm-floor`, also part of `make test` as `_test/tpm-floor`, runs
 [test/check-tpm-floor.zig](../test/check-tpm-floor.zig) against swtpm with
 `build/host/tpm-floor`, which drives lib/tpm.zig's code as stage0 and the mount
@@ -103,8 +104,8 @@ different counter at the handle must be refused.
 
 `howl run --build` is the protected path: an arm64 Lima QEMU guest on macOS,
 protected QEMU on Linux
-([design/secure-local-deployment.md](design/secure-local-deployment.md)). `make
-check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
+([design/implemented/secure-local-deployment.md](design/implemented/secure-local-deployment.md)).
+`make check-independent-updates` (Lima on macOS, `PROVIDER=qemu` on Linux) runs
 [test/check-independent-updates.zig](../test/check-independent-updates.zig): `howl
 create --build` makes release A (index 1) of a channel the test serves as static
 HTTPS files under a private CA, and boots it under Secure Boot, IPE and a fresh TPM,
@@ -129,23 +130,25 @@ bounds, HTTPS bounds and redirects, torn heads, replay, equivocation), and
 tools/release's tests (`make _test/tools/release/release.zig`: signing custody,
 ordered uploads, interruption recovery, immutable collisions, release floors, an
 index that does not advance). Candidate CI has no publication permission
-([design/protected-downloads.md](design/protected-downloads.md)).
+([design/implemented/protected-downloads.md](design/implemented/protected-downloads.md)).
 
-To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make`
-with a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
-checks its configuration, and requires IPE explicitly disabled. For strict IPE testing,
-use `IPE=1` and its three signing inputs instead. JIT forms can thus exercise the same
-candidate kernel through their normal profile without changing strict IPE policy.
+To test an unpublished kernel, set `KERNEL_ROOTFS=/path/to/rootfs.tar` on `make` with
+a separate `BUILD` directory. This accepts the archive from `tools/test-kernel`,
+checks its configuration, and requires IPE explicitly disabled. For strict IPE
+testing, use `IPE=1` and its three signing inputs instead. JIT forms can thus
+exercise the same candidate kernel through their normal profile without changing
+strict IPE policy.
 
 ## Firecracker
 
 On a Linux/KVM host, `make check-firecracker-protected` builds a private playground
 guest using Firecracker's default IPE mode. It checks the limitation warning, active
-and locked IPE, guest reboot, stop/start, refusal of changed kernels, initrds and boot
-arguments, missing host trust, explicit protection downgrades, and delete. It needs
-Firecracker 1.17+, mtools, erofs-utils, passwordless sudo/doas and source-build tools,
-with TUN and NAT modules available for the running host kernel. x86_64 boots the
-original bzImage to retain kernel address randomization; extracting its ELF bypasses
-it. The first run builds the local IPE kernel. Logs stay under
+and locked IPE, guest reboot, stop/start, refusal of changed kernels, initrds and
+boot arguments, missing host trust, explicit protection downgrades, and delete. It
+needs Firecracker 1.17+, mtools, erofs-utils, passwordless sudo/doas and source-build
+tools, with TUN and NAT modules available for the running host kernel. x86_64 boots
+the original bzImage to retain kernel address randomization; extracting its ELF
+bypasses it. The first run builds the local IPE kernel. Logs stay under
 `build/check/fc-protected-PID`; failures stop the guest and retain its artifacts.
-Boot files are pinned on the host; this mode takes image changes through host rebuilds.
+Boot files are pinned on the host; this mode takes image changes through host
+rebuilds.

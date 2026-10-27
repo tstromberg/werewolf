@@ -79,7 +79,7 @@ const baseline = "uname -a; cat /proc/cmdline; " ++
 const setup = "umask 077; printf private > ~/private; " ++
     "mkdir -p ~/.ssh; printf 'id -u > ~/rc.uid\\n' > ~/.ssh/rc";
 
-// sshd runs no ~/.ssh/rc (PermitUserRC no, docs/design/ssh-hardening.md).
+// sshd runs no ~/.ssh/rc (PermitUserRC no, docs/design/implemented/ssh-hardening.md).
 const isolation = "test ! -e ~/rc.uid && " ++
     "! cat /data/home/{s}/private 2>~/denied && " ++
     "grep -q 'Permission denied' ~/denied";

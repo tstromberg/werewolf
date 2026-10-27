@@ -618,7 +618,7 @@ pub fn create(
     );
     if (term != .exited or term.exited != 0) {
         // Leave the disk copy, as create leaves what it made
-        // (docs/design/cli.md), but tell the user how to remove it.
+        // (docs/design/implemented/cli.md), but tell the user how to remove it.
         const said = Dir.cwd().readFileAlloc(io, err_path, gpa, .limited(64 << 10)) catch "";
         return why.refuse(
             "az vm: {s}; its disk {s} is left, which howl delete {s} --on azure removes",

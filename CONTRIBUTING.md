@@ -31,7 +31,8 @@ An unavailable package fails the build; forms do not rebuild it from source.
 
 Werewolf's own software and private development packages may keep recipes beside
 their source in a form's `melange/` directory. This is separate from consumption of
-published third-party packages. See [the design](docs/design/package-promotion.md).
+published third-party packages. See [the
+design](docs/design/implemented/package-promotion.md).
 
 ## Find your way around
 
@@ -67,7 +68,8 @@ commands. Python and Go appear only where a form runs them.
    compiles it to NetBSD-style mdoc and checks the result. The build installs manuals
    with their programs in `/usr/share/man`, including in APKs. Host tools keep
    READMEs. Put unit tests beside the code (`test "..." {}`).
-4. A larger change starts as a design doc in `docs/design/`, on the same template.
+4. A larger change starts as a design doc in `docs/design/pending/`, on the same
+   template. Update its status and directory as the design is implemented or retired.
 5. Service and application forms need at least five distinct integration cases
    covering useful behavior and refusals. Run `make form-coverage` to inspect
    coverage; [the testing guide](docs/testing.md#form-integration-coverage)

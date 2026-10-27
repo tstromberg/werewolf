@@ -49,8 +49,8 @@ release notes, rather than regenerating files under an immutable object identity
 Protected R2 heads keep their namespace, `boot/v1/FORM/PROVIDER/ARCH`, which also
 holds what installed machines' updaters fetch: each release, at its channel's next
 index, replaces `latest.json` and adds `BUILD/` ([independent
-updates](design/independent-updates.md)). Legacy objects and signed release floors
-live under `legacy-boot/FORM/ARCH`; they never write protected heads.
+updates](design/implemented/independent-updates.md)). Legacy objects and signed
+release floors live under `legacy-boot/FORM/ARCH`; they never write protected heads.
 `boot-profiles.json` is the signed inventory of both profiles; `index.json` remains
 the protected-only catalog. See [form images](form-images.md) for enrollment,
 provider runners, release notes and reproduction inputs.
@@ -74,7 +74,7 @@ installs missing Mac runtime packages.
 
 werewolf's programs and forms are also apk packages, at
 `https://dist.werewolf-linux.org/apk/ARCH/` in the R2 bucket `werewolf`
-([custom-updates.md](design/custom-updates.md)): `werewolf-PROGRAM` for
+([custom-updates.md](design/implemented/custom-updates.md)): `werewolf-PROGRAM` for
 each program, `werewolf-advisories`, and `NAME-form` for each form but
 those with melange recipes. When check passes on main, the packages
 workflow packs both arches twice, requires the copies to match, and

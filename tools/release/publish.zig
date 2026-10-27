@@ -68,7 +68,7 @@ pub fn publish(
     const descriptor = try json.text(plan, "descriptor");
     const namespace = try s.gpa.print(
         "{s}/{s}/{s}",
-        .{ form, try json.text(plan, "provider"), arch },
+        .{ try s.variantPath(form), try json.text(plan, "provider"), arch },
     );
     const request = try boot.request(s, try sys.resolve(s, trust_dir), form, arch, provider);
     const old = try sys.join(s, &.{ work, "previous" });

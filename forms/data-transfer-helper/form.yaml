@@ -1,0 +1,7 @@
+# Private storage appliance, launched by Howl with no NIC or host shares.
+# The transfer-helper build goal replaces /init; normal guest boot is unused.
+base: prod
+packages:
+  - postgresql~18 # pg_controldata verifies clean physical cluster shutdown
+programs: [data-transfer, data-transfer-helper, data-transfer-tool]
+updates: off

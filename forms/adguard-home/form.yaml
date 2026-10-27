@@ -6,7 +6,7 @@
 # never shows its setup wizard. Its upstreams and blocklists are settings;
 # the rest is its web UI's. It runs AdGuard Home's own image, its latest
 # release, pinned by digest when built, in a tree of its own
-# (docs/design/oci.md), and keeps its configuration, lists and counts in
+# (docs/design/implemented/oci.md), and keeps its configuration, lists and counts in
 # /data/svc/adguard-home. See forms/adguard-home/README.md.
 base: prod
 

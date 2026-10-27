@@ -5,6 +5,10 @@
 
 # Published forms. Build shard N of M takes every Mth form from the Nth.
 forms: [minimal, prod-ssh, playground, postdoc-server]
+catalog: all
+# Workload combinations; every listed combination also gets SSH automatically.
+variants:
+  postgresql: [vector]
 profiles: [secure-boot, legacy-boot]
 
 # Each architecture's build runner and the providers it has images for. A

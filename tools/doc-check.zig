@@ -457,9 +457,9 @@ test normalize {
 test limit {
     try testing.expectEqual(175, limit("docs/forms.md").?);
     try testing.expectEqual(175, limit("./docs/forms.md").?);
-    try testing.expectEqual(120, limit("./docs/design/cli.md").?);
+    try testing.expectEqual(120, limit("./docs/design/implemented/cli.md").?);
     try testing.expectEqual(null, limit("forms/demo/docs/notes.md"));
-    try testing.expectEqual(120, limit("docs/design/cli.md").?);
+    try testing.expectEqual(120, limit("docs/design/implemented/cli.md").?);
     try testing.expectEqual(100, limit("cmd/howl/README.md").?);
     try testing.expectEqual(100, limit("forms/demo/cmd/status-page/README.md").?);
     try testing.expectEqual(null, limit("forms/bastion/README.md"));

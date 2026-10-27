@@ -3,7 +3,7 @@
 //! boots with a fresh TPM that its first boot makes its own. It follows its
 //! image's update channel by itself: a download follows werewolf's public
 //! mirror; a --build follows the channel its builder names, if any, and
-//! otherwise takes changes by reinstalling (docs/design/independent-updates.md).
+//! otherwise takes changes by reinstalling (docs/design/implemented/independent-updates.md).
 const std = @import("std");
 const howl = @import("howl.zig");
 const lima = @import("lima.zig");
@@ -14,13 +14,12 @@ const qemu = @import("qemu.zig");
 const bhyve = @import("bhyve.zig");
 const swtpm = @import("swtpm.zig");
 const booting = @import("boot.zig");
-const import_disk = @import("import.zig");
 const bundle = @import("boot-image.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-const Profile = struct {
+pub const Profile = struct {
     spec: native.Spec,
     managed: bool,
     provider: howl.Platform = .lima,
@@ -91,7 +90,16 @@ pub fn restoreBhyveNetwork(io: Io, gpa: Allocator, o: *howl.Options, name: []con
 /// parseProfile reads a machine's profile.json. A profile is howl's own
 /// record, and an older howl wrote fields since dropped (spec.insecure,
 /// always false in a protected machine's), so unknown fields are ignored.
-fn parseProfile(gpa: Allocator, text: []const u8) !Profile {
+fn requireVariants(old: []const []const u8, wanted: []const []const u8) !void {
+    if (old.len != wanted.len) return error.VariantChangeRequiresNewMachine;
+    for (old, wanted) |a, b| if (!std.mem.eql(
+        u8,
+        a,
+        b,
+    )) return error.VariantChangeRequiresNewMachine;
+}
+
+pub fn parseProfile(gpa: Allocator, text: []const u8) !Profile {
     return std.json.parseFromSliceLeaky(Profile, gpa, text, .{ .ignore_unknown_fields = true });
 }
 
@@ -114,150 +122,6 @@ test parseProfile {
 
 pub const Reuse = enum { miss, running, configure };
 
-fn requireImport(
-    definition: @import("boot-config.zig").Definition,
-    mode: import_disk.Mode,
-    why: *howl.Why,
-) !void {
-    for (definition.imports) |allowed| {
-        if (std.mem.eql(u8, allowed, @tagName(mode))) return;
-    }
-    return why.refuse("{s} does not support {s} imports", .{ definition.form, @tagName(mode) });
-}
-
-test "sync and retained retry require the signed form's explicit support" {
-    const t = std.testing;
-    const io = t.io;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var nonce: [8]u8 = undefined;
-    try io.randomSecure(&nonce);
-    const name = try a.print("ww-import-mode-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
-    const dir = try howl.machineDir(a, name);
-    defer Dir.cwd().deleteTree(io, dir) catch {};
-    try Dir.cwd().createDirPath(io, try a.print("{s}/authority", .{dir}));
-    const profile: Profile = .{
-        .spec = .{ .form = "database", .arch = .aarch64 },
-        .managed = false,
-        .configuration = .{
-            .form = "database",
-            .interface = .{ .files = &.{}, .settings = &.{} },
-            .ports = &.{},
-            .dhcp = false,
-            .ssh = .disabled,
-            .lima_managed = false,
-            .imports = &.{"init"},
-        },
-    };
-    try Dir.cwd().writeFile(
-        io,
-        .{
-            .sub_path = try a.print("{s}/authority/profile.json", .{dir}),
-            .data = try std.json.Stringify.valueAlloc(a, profile, .{}),
-        },
-    );
-    var why: howl.Why = .{};
-    var closed = profile.configuration.?;
-    closed.imports = &.{};
-    try t.expectError(error.Refused, requireImport(closed, .init, &why));
-    try t.expectError(error.Refused, requireImport(closed, .sync, &why));
-    try t.expectError(
-        error.Refused,
-        importData(io, a, &.{ name, "nonexistent-source" }, .sync, &why),
-    );
-    const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const record: import_disk.Record = .{
-        .id = id,
-        .digest = id,
-        .mode = .sync,
-        .sha256 = id,
-        .bytes = 1,
-    };
-    const history = try a.print("{s}/imports/{s}", .{ dir, id });
-    try Dir.cwd().createDirPath(io, history);
-    try Dir.cwd().writeFile(
-        io,
-        .{
-            .sub_path = try a.print("{s}/record.json", .{history}),
-            .data = try std.json.Stringify.valueAlloc(a, record, .{}),
-        },
-    );
-    try t.expectError(error.Refused, importData(io, a, &.{ name, "--retry", id }, .init, &why));
-    try t.expectError(
-        error.Refused,
-        importData(io, a, &.{ name, "--retry", "../../escape" }, .init, &why),
-    );
-    try t.expectError(
-        error.FileNotFound,
-        Dir.cwd().access(io, try a.print("{s}/import.json", .{dir}), .{}),
-    );
-}
-
-/// Stage immutable data for the next cold start. A running VM retains its
-/// already-open disk; no guest disk, enrollment, or live service is modified.
-pub fn importData(
-    io: Io,
-    gpa: Allocator,
-    args: []const []const u8,
-    mode: import_disk.Mode,
-    why: *howl.Why,
-) !void {
-    const retry = args.len == 3 and std.mem.eql(u8, args[1], "--retry") and
-        @import("import-data").validId(args[2]);
-    if ((args.len != 2 and !retry) or !howl.isMachineName(args[0]))
-        return why.refuse(
-            "howl {s} NAME DIR; or howl import NAME --retry SNAPSHOT-ID",
-            .{if (mode == .sync) "sync" else "import"},
-        );
-    const name = args[0];
-    const dir = try howl.machineDir(gpa, name);
-    Dir.cwd().access(io, try gpa.print("{s}/authority/profile.json", .{dir}), .{}) catch
-        return why.refuse("{s} is not a protected local machine created by howl", .{name});
-    const lock = try Dir.cwd().createFile(
-        io,
-        try gpa.print("{s}/secure.lock", .{dir}),
-        .{ .truncate = false, .permissions = .fromMode(0o600) },
-    );
-    defer lock.close(io);
-    try lock.lock(io, .exclusive);
-    const profile = try parseProfile(
-        gpa,
-        try Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/authority/profile.json", .{dir}),
-            gpa,
-            .limited(64 << 10),
-        ),
-    );
-    const definition = profile.configuration orelse return error.MissingBootConfiguration;
-    try @import("boot-config.zig").check(definition, profile.spec.form);
-    const retained = if (retry)
-        try import_disk.recordAt(
-            io,
-            gpa,
-            try gpa.print("{s}/imports/{s}", .{ dir, args[2] }),
-            "record.json",
-        )
-    else
-        null;
-    if (retained) |record| if (!std.mem.eql(u8, record.id, args[2])) return error.ImportRecord;
-    const operation = if (retained) |record| record.mode else mode;
-    try requireImport(definition, operation, why);
-    const wanted = @tagName(operation);
-    if (profile.provider != .lima and profile.provider != .qemu)
-        return why.refuse("imports currently support protected Lima and QEMU machines", .{});
-    const record = retained orelse try import_disk.prepare(io, gpa, args[1], dir, mode, why);
-    try import_disk.activate(io, gpa, dir, record, true);
-    howl.say(
-        io,
-        "{s}: {s} staged ({s}); selected for the next full stop/start; previous snapshots are " ++
-            "retained",
-        .{ name, wanted, record.id },
-    );
-}
-
-/// Host enrollment files cannot establish whether a Lima instance still exists.
 pub fn reconcileLima(io: Io, gpa: Allocator, name: []const u8, why: *howl.Why) !void {
     if (howl.madeOn(io, gpa, name) != .lima) return;
     const dir = try howl.machineDir(gpa, name);
@@ -325,6 +189,7 @@ pub fn resumeDownload(
         else => return err,
     };
     const profile = try parseProfile(gpa, saved);
+    try requireVariants(profile.spec.variants, howl.variants);
     inheritBhyveNetwork(o, profile);
     if (profile.local != null or profile.imported == null) return why.refuse(
         "{s} was created with local signing keys; this command requests production-signed " ++
@@ -359,6 +224,75 @@ pub fn resumeDownload(
 
 /// Built is the image a --build made for its machine, and the stub it took.
 pub const Built = struct { spec: native.Spec, stub: []const u8 };
+
+/// Prepare an independently enrolled target; no application boot takes place.
+/// The caller holds its lifecycle lock and has validated the entire archive.
+pub fn transferTarget(
+    io: Io,
+    a: Allocator,
+    name: []const u8,
+    on: howl.Platform,
+    r: @import("data-image.zig").Record,
+    tar: []const u8,
+    why: *howl.Why,
+) !Profile {
+    _ = try admit(io, a, on, false, why);
+    const at = try std.fs.path.resolveAlloc(
+        a,
+        &.{ try std.process.currentPathAlloc(io, a), try howl.machineDir(a, name) },
+    );
+    const authority = try a.print("{s}/authority", .{at});
+    if (!try emptyAuthority(io, authority)) return error.TransferTargetExists;
+    const image = std.fmt.bytesToHex(r.verity.root, .lower);
+    const cache = try @import("data-image.zig").directory(io, a, &image);
+    var steps = try progress.Steps.init(io, a, why, .{
+        .command = "howl import",
+        .log = try a.print("{s}/create.log", .{at}),
+        .first = .{ .name = "Preparing stopped import destination", .short = "prepare" },
+    });
+    const disk = try a.print("{s}/disk.img", .{at});
+    if (r.disk_sha256) |expected| {
+        const base = try a.print("{s}/disk.raw", .{cache});
+        if (!std.mem.eql(u8, expected, (try @import("prebuilt").hashFile(io, a, base)).sha256))
+            return error.TransferImageCache;
+        try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "raw", "-O", "raw", base, disk });
+    } else if (r.profile.bundle) |request| {
+        try bundle.materialize(
+            io,
+            a,
+            &steps,
+            request,
+            try bundle.verify(io, a, request, r.profile.spec.arch),
+            disk,
+        );
+    } else return why.refuse(
+        "matching pristine image is unavailable; create an empty destination with the same " ++
+            "image first",
+        .{},
+    );
+    try Dir.cwd().setFilePermissions(io, disk, .fromMode(0o600), .{});
+    var profile = r.profile;
+    profile.provider = on;
+    profile.spec.disk_path = disk;
+    profile.spec.boot_cert = try a.print("{s}/boot.crt", .{at});
+    try Dir.cwd().createDir(io, authority, .fromMode(0o700));
+    try enroll(
+        io,
+        a,
+        &steps,
+        name,
+        at,
+        authority,
+        try a.print("{s}/boot.crt", .{cache}),
+        profile,
+        null,
+        tar,
+        why,
+    );
+    try bundle.durable(io, try a.print("{s}/engine", .{at}), @tagName(on));
+    _ = try steps.finish();
+    return profile;
+}
 
 /// localBundle builds o's form into a protected bundle in out, as
 /// `release build-protected` builds werewolf's: Secure Boot, the TPM floor and
@@ -434,6 +368,7 @@ fn localSpec(
     return .{
         .spec = .{
             .form = o.form,
+            .variants = howl.variants,
             .arch = arch,
             .published = !o.local,
             .app = (try howl.appBuild(io, gpa, o.form, arch, o.app, why)).root,
@@ -530,6 +465,7 @@ pub fn resumeLocal(
     };
     if (saved) |text| {
         const p = try parseProfile(gpa, text);
+        try requireVariants(p.spec.variants, howl.variants);
         inheritBhyveNetwork(o, p);
         const built = p.local orelse return why.refuse(
             "{s} was not built here with your keys: it runs werewolf's downloads, or an " ++
@@ -645,6 +581,7 @@ fn importImage(
         .configuration = m.configuration,
         .spec = .{
             .form = m.form,
+            .variants = m.variants,
             .arch = arch,
             .published = true,
             .disk_path = disk,
@@ -745,7 +682,7 @@ pub fn stop(
 
 /// Matching inputs keep the image and TPM; matching live guests need no work.
 pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []const u8) !Reuse {
-    if (!o.protected() or o.app != null or o.import_dir != null) return .miss;
+    if (!o.protected() or o.app != null) return .miss;
     const dir = try howl.machineDir(gpa, name);
     const authority = try gpa.print("{s}/authority", .{dir});
     const saved = Dir.cwd().readFileAlloc(
@@ -766,6 +703,7 @@ pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []c
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
     const profile = try parseProfile(gpa, saved);
+    try requireVariants(profile.spec.variants, howl.variants);
     if (profile.provider != o.on.?) return .miss;
     if (profile.local) |built| {
         if (!o.local or o.app != null or !std.mem.eql(u8, built.form, o.form)) return .miss;
@@ -880,6 +818,7 @@ test "unchanged live runs preserve state; changed inputs and config refuse reuse
             .{ .sub_path = try gpa.print("{s}/{s}", .{ root, file }), .data = file },
         );
     const spec: native.Spec = .{
+        .variants = howl.variants,
         .form = form,
         .arch = .aarch64,
         .ipe_kernel = try gpa.print("{s}/kernel", .{root}),
@@ -1036,21 +975,6 @@ pub fn create(
         );
         Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
     }
-    if (o.import_dir) |source| {
-        const definition = if (o.boot_image) |request|
-            (try bundle.admitHead(io, gpa, request, howl.hostArch() orelse
-                return error.UnsupportedHostArch)).configuration orelse
-                return error.MissingBootConfiguration
-        else
-            try @import("boot-config.zig").derive(io, gpa, o.form, std.fs.path.basename(
-                std.mem.trimEnd(u8, o.form, "/"),
-            ), why);
-        try requireImport(definition, .init, why);
-        // Validate and snapshot before enrolling a new guest. A repeat may
-        // reuse the same input, but never replace an existing import implicitly.
-        try import_disk.write(io, gpa, source, at, why);
-    }
-    _ = try import_disk.existing(io, gpa, at);
     var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
     Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority})) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -1078,9 +1002,7 @@ pub fn create(
             "the secured provider cannot change",
             .{},
         );
-        var changes = o;
-        changes.import_dir = null; // The immutable import was checked above.
-        try howl.reconfigurable(changes, name, profile.spec.form, provider, why);
+        try howl.reconfigurable(o, name, profile.spec.form, provider, why);
         const current = try Dir.cwd().readFileAlloc(
             io,
             try gpa.print("{s}/config.tar", .{at}),
@@ -1147,6 +1069,7 @@ pub fn create(
             why,
         );
     } else return error.MissingBootImage;
+    if (!kept) try @import("data-image.zig").remember(io, gpa, profile, why);
     try steps.enter(.{
         .name = if (on_lima)
             "Starting Lima VM and waiting for guest init"
@@ -1224,7 +1147,7 @@ test "early firmware failure can retry but any enrollment material refuses repla
 fn inputs(io: Io, gpa: Allocator, spec: native.Spec, stub: []const u8) ![64]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(&try @import("lock.zig").inputs(io, gpa, spec));
-    hash.update(&try programInputs(io, gpa, spec.form));
+    hash.update(&try programInputs(io, gpa, spec));
     for ([7][]const u8{
         spec.ipe_kernel.?,                            spec.ipe_cert.?,
         spec.ipe_key.?,                               spec.boot_cert.?,
@@ -1235,7 +1158,7 @@ fn inputs(io: Io, gpa: Allocator, spec: native.Spec, stub: []const u8) ![64]u8 {
 }
 
 /// Bind checkout sources used by the image, even when howl itself was not rebuilt.
-fn programInputs(io: Io, gpa: Allocator, form: []const u8) ![32]u8 {
+fn programInputs(io: Io, gpa: Allocator, spec: native.Spec) ![32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     for ([_][]const u8{ "Makefile", "files.zig" }) |file| {
         hash.update(file);
@@ -1252,7 +1175,15 @@ fn programInputs(io: Io, gpa: Allocator, form: []const u8) ![32]u8 {
     for ([_][]const u8{"init"} ++ native.every_program) |name|
         try sourceTree(io, gpa, &hash, try gpa.print("cmd/{s}", .{name}));
     var bad: @import("form").Failure = .{};
-    const chain = try @import("form").chain(io, gpa, Dir.cwd(), form, &bad);
+    const chain = try @import("form").chainSelectedIn(
+        io,
+        gpa,
+        Dir.cwd(),
+        "forms",
+        spec.form,
+        spec.selected(),
+        &bad,
+    );
     for (chain) |part| {
         for (try part.items(gpa, "programs")) |item| {
             var names = std.mem.tokenizeAny(u8, item, " \t");
@@ -1434,7 +1365,7 @@ fn startBhyve(
     const args = try bhyve.commandWith(gpa, name, try gpa.print(
         "{s}/disk.img",
         .{at},
-    ), config, network.backend(fwds), try import_disk.existing(io, gpa, at), .{
+    ), config, network.backend(fwds), null, .{
         .code = try gpa.print("{s}/code.fd", .{at}),
         .vars = try gpa.print("{s}/vars.fd", .{at}),
         .tpm_socket = try gpa.print("{s}/data.sock", .{(try tpm(io, gpa, at)).sockets}),
@@ -1525,7 +1456,6 @@ fn startQemu(
         .guest_web = guest_web,
         .tpm_socket = try gpa.print("{s}/tpm.sock", .{service.sockets}),
         .owner = true,
-        .import_disk = try import_disk.existing(io, gpa, at),
     }, qemu.accel(io));
     if (!(try steps.exec(&.{.{ .argv = args }}, .{})).ok)
         return steps.fail("secured QEMU did not start");
@@ -1602,17 +1532,6 @@ fn qemuWrapper(io: Io, gpa: Allocator, at: []const u8) ![]const u8 {
         "qemu-system-aarch64",                                                      "-drive",
         try gpa.print("if=pflash,format=raw,unit=1,readonly=on,file={s}", .{vars}),
     };
-    // Append after Lima's own disks so imports never renumber its boot disk.
-    const trailing = if (try import_disk.existing(io, gpa, at)) |disk| blk: {
-        const drive = try gpa.print(
-            "file={s},format=raw,if=virtio,readonly=on",
-            .{try std.mem.replaceOwned(u8, gpa, disk, ",", ",,")},
-        );
-        break :blk try gpa.print(
-            " -drive '{s}'",
-            .{try std.mem.replaceOwned(u8, gpa, drive, "'", "'\\''")},
-        );
-    } else "";
     var command: std.ArrayList(u8) = .empty;
     for (args, 0..) |arg, i| {
         if (i > 0) try command.append(gpa, ' ');
@@ -1627,7 +1546,7 @@ fn qemuWrapper(io: Io, gpa: Allocator, at: []const u8) ![]const u8 {
     defer file.close(io);
     try file.writeStreamingAll(
         io,
-        try gpa.print("#!/bin/sh\nexec {s} \"$@\"{s}\n", .{ command.items, trailing }),
+        try gpa.print("#!/bin/sh\nexec {s} \"$@\"\n", .{command.items}),
     );
     return gpa.print("'{s}'", .{try std.mem.replaceOwned(u8, gpa, wrapper, "'", "'\\''")});
 }

@@ -74,7 +74,21 @@ pub fn running(io: Io, gpa: Allocator, name: []const u8) !bool {
         io,
         .{ .argv = &.{ "limactl", "list", name, "--format", "{{.Status}}" } },
     );
-    return std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \n"), "Running");
+    if (!r.term.success()) return error.LimaListFailed;
+    return runningStatus(std.mem.trim(u8, r.stdout, " \r\n"));
+}
+
+fn runningStatus(status: []const u8) !bool {
+    if (std.mem.eql(u8, status, "Running")) return true;
+    if (std.mem.eql(u8, status, "Stopped")) return false;
+    return error.LimaUnknownState;
+}
+
+test "unknown Lima state never authorizes detached storage access" {
+    try std.testing.expect(try runningStatus("Running"));
+    try std.testing.expect(!try runningStatus("Stopped"));
+    try std.testing.expectError(error.LimaUnknownState, runningStatus(""));
+    try std.testing.expectError(error.LimaUnknownState, runningStatus("Broken"));
 }
 
 /// sshPort returns the port Lima forwards to a machine it manages's sshd,

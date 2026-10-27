@@ -190,10 +190,11 @@ pub fn applyReserved(
     }
 
     var made: std.ArrayList(u8) = .empty;
+    var administrators: std.ArrayList([]const u8) = .empty;
     var root_keys: std.ArrayList(u8) = .empty;
     for (wanted) |p| {
         const id = userId(p.name);
-        if (mem.eql(u8, p.name, "root") or
+        if (mem.eql(u8, p.name, "root") or mem.eql(u8, p.name, "wheel") or
             conflicts(records.items, .people, p.name, id) or
             hasEntry(passwd.items, p.name) or hasEntry(group.items, p.name) or
             hasEntry(shadow.items, p.name) or
@@ -209,6 +210,7 @@ pub fn applyReserved(
         try ensureRecord(gpa, &records, .people, p.name, id);
         try appendAccount(gpa, &passwd, &group, &shadow, p.name, id, shell, false);
         try made.print(gpa, "{s}\n", .{p.name});
+        if (p.admin) try administrators.append(gpa, p.name);
         var key_text: std.ArrayList(u8) = .empty;
         for (p.keys) |k| {
             try key_text.print(gpa, "{s}\n", .{k});
@@ -226,6 +228,7 @@ pub fn applyReserved(
     for (records.items) |r| if (r.source == .people and !hasLine(made.items, r.name)) {
         try removed.append(gpa, r.name);
     };
+    group = try adminGroup(gpa, group.items, administrators.items);
     return .{
         .passwd = passwd.items,
         .group = group.items,
@@ -238,6 +241,85 @@ pub fn applyReserved(
         .identities = records.items,
         .nocloud_name = active_nocloud,
     };
+}
+
+fn adminGroup(gpa: Allocator, text: []const u8, members: []const []const u8) !std.ArrayList(u8) {
+    var gid = userId("wheel");
+    var lines = mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!mem.startsWith(u8, line, "wheel:")) continue;
+        var fields = mem.splitScalar(u8, line, ':');
+        _ = fields.next();
+        _ = fields.next();
+        gid = std.fmt.parseInt(
+            u32,
+            fields.next() orelse return error.AccountConflict,
+            10,
+        ) catch return error.AccountConflict;
+    }
+    var out = try without(gpa, text, &.{"wheel"});
+    if (try idInUseNumber(gpa, out.items, gid)) return error.AccountConflict;
+    try out.print(gpa, "wheel:x:{d}:{s}\n", .{ gid, try mem.join(gpa, ",", members) });
+    return out;
+}
+
+/// Consult current account files, not a session's possibly stale groups.
+pub fn administrator(passwd: []const u8, group: []const u8, uid: u32) bool {
+    var name: ?[]const u8 = null;
+    var lines = mem.tokenizeScalar(u8, passwd, '\n');
+    while (lines.next()) |line| {
+        var fields = mem.splitScalar(u8, line, ':');
+        const user = fields.next() orelse continue;
+        _ = fields.next();
+        const id = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+        if (id == uid) {
+            name = user;
+            break;
+        }
+    }
+    const wanted = name orelse return false;
+    lines = mem.tokenizeScalar(u8, group, '\n');
+    while (lines.next()) |line| {
+        if (!mem.startsWith(u8, line, "wheel:")) continue;
+        var fields = mem.splitScalar(u8, line, ':');
+        for (0..3) |_| _ = fields.next() orelse return false;
+        var members = mem.splitScalar(u8, fields.next() orelse return false, ',');
+        while (members.next()) |member| if (mem.eql(u8, member, wanted)) return true;
+    }
+    return false;
+}
+
+test "wheel membership follows accepted admin declarations and revocation" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const first = try applyReserved(
+        gpa,
+        .{ .passwd = "root:x:0:0:root:/root:/bin/sh\n", .group = "root:x:0:\n", .shadow = "" },
+        &.{},
+        "alice admin ssh-ed25519 AAAA\nbob ssh-ed25519 BBBB\n",
+        "/bin/mksh",
+        null,
+        true,
+    );
+    try std.testing.expect(administrator(first.passwd, first.group, userId("alice")));
+    try std.testing.expect(!administrator(first.passwd, first.group, userId("bob")));
+    const next = try applyReserved(
+        gpa,
+        .{
+            .passwd = first.passwd,
+            .group = first.group,
+            .shadow = first.shadow,
+            .made = first.made,
+        },
+        first.identities,
+        "alice ssh-ed25519 AAAA\nbob ssh-ed25519 BBBB\n",
+        "/bin/mksh",
+        null,
+        false,
+    );
+    try std.testing.expect(!administrator(next.passwd, next.group, userId("alice")));
+    try std.testing.expectEqualStrings("", next.root_keys);
 }
 
 fn hasLine(lines: []const u8, name: []const u8) bool {

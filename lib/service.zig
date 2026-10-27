@@ -7,8 +7,8 @@ const settings = @import("settings");
 const Allocator = std.mem.Allocator;
 
 /// System identities are reserved for the machine's own programs. The
-/// highest is the updater's, _updater (77).
-pub const system_id_max: u32 = 77;
+/// highest is the data reader's, _transfer (78).
+pub const system_id_max: u32 = 78;
 
 pub const Service = struct {
     exec: []const []const u8 = &.{},
@@ -18,7 +18,7 @@ pub const Service = struct {
     shared_user: bool = false,
     listen: []const u16 = &.{},
     /// listen_udp are its UDP ports, which fence alone holds: Landlock
-    /// cannot restrict a UDP bind (docs/design/listen-udp.md).
+    /// cannot restrict a UDP bind (docs/design/implemented/listen-udp.md).
     listen_udp: []const u16 = &.{},
     connect: []const u16 = &.{},
     /// connect_any is a `connect any` line: every TCP port, for one
@@ -49,7 +49,7 @@ pub const Service = struct {
     nofile: ?u32 = null,
     memory: ?u32 = null,
     /// cpu is the service's cpu.weight, its share of contended CPUs; null
-    /// keeps the kernel's 100 (docs/design/cpu-and-first-run.md).
+    /// keeps the kernel's 100 (docs/design/implemented/cpu-and-first-run.md).
     cpu: ?u16 = null,
     share: Share = .strict,
     /// groups are other services' users whose groups it joins, to reach
@@ -65,7 +65,7 @@ pub const Service = struct {
 };
 
 /// Narrow is a program its service runs on a narrower leash, by the link
-/// /etc/sv/NAME/narrow/PROGRAM (docs/design/narrow.md): promises within the
+/// /etc/sv/NAME/narrow/PROGRAM (docs/design/implemented/narrow.md): promises within the
 /// service's, no network, and the paths beyond its floor that it may read
 /// and write, within the service's.
 pub const Narrow = struct {
@@ -104,7 +104,7 @@ pub const cap = struct {
     pub const net_raw: u32 = 1 << 13;
     pub const login: u32 = 1 << 31;
     /// login_set is sshd's and every root session's, which cannot regain
-    /// what sshd lacks (docs/design/ssh-hardening.md). sshd binds port 22,
+    /// what sshd lacks (docs/design/implemented/ssh-hardening.md). sshd binds port 22,
     /// chroots its pre-auth child, signals it, gives a pty to its user and
     /// becomes them; an operator also reads any file fence lets through,
     /// reboots and reads the kernel's log. Not kept: DAC_OVERRIDE, so root

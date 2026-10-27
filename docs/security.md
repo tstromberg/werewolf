@@ -6,7 +6,6 @@ kernel enforces them. A few boot helpers hold more authority and remain trusted 
 This page describes a machine with every protection ([a machine without
 some](#protections-a-machine-can-be-made-without)).
 ## From boot to a running service
-
 init (process 1) sets the kernel protections and installs the seal, a seccomp filter
 that refuses every system call no promise names ([lib/seal.zig](../lib/seal.zig)). It
 then starts fence, which sets the network and file-access rules, drops capabilities,
@@ -16,15 +15,14 @@ applied, init exits and the kernel panics.
 
 A service declares in its form the promises (named groups of system calls) it needs,
 its user, its files and its ports, and leash applies them
-([pledge.md](design/pledge.md)); a new system call stays refused until a promise
-names it. Seccomp decides whether a process may make a call, Landlock which files and
-TCP ports it may reach. Werewolf's own programs are privilege-separated
+([pledge.md](design/implemented/pledge.md)); a new system call stays refused until a
+promise names it. Seccomp decides whether a process may make a call, Landlock which
+files and TCP ports it may reach. Werewolf's own programs are privilege-separated
 ([programs.md](programs.md)).
 ## Keeping kernel protections set
-
 Some protections are not settings at all: werewolf's kernel has no module loader,
 `bpf` system call, io_uring, user namespaces, kexec or SysRq
-([custom-kernel.md](design/custom-kernel.md)), and forces lockdown to
+([custom-kernel.md](design/implemented/custom-kernel.md)), and forces lockdown to
 confidentiality. `kernel.yama.ptrace_scope=3` is one-way for the boot: it cannot be
 lowered, by root either. The rest would stay writable by root, so fence closes the
 route: under its Landlock rules no process can open a file in `/proc/sys` for
@@ -41,7 +39,7 @@ x86_64, 32-bit emulation are not built; the command line disables forced writes
 through `/proc/self/mem`, and KVM unless the form allows it. An oops, or a warning
 once the limit is set, panics and reboots: a damaged kernel does not run on, at the
 price of a denial of service. [cmd/init/kernel.zig](../cmd/init/kernel.zig) holds
-every setting, [lockdown.md](design/lockdown.md) the reasoning, and the
+every setting, [lockdown.md](design/implemented/lockdown.md) the reasoning, and the
 [survey](cve-mitigation-survey.md) what each stops.
 
 The kernel logs refused execs, file access and service system calls. The audit
@@ -66,18 +64,18 @@ seal, so init empties `kernel.modprobe` and `kernel.hotplug` and limits them to
 
 The root is EROFS, read-only, with no writable layer, and dm-verity checks each block
 as it is read; the expected hash comes from stage0, so this rests on the boot chain
-([verified-boot.md](design/verified-boot.md)). Writable mounts refuse execution,
-setuid bits and, outside device filesystems, device files. Fence permits execution
-beneath `/usr` and `/oci`; leash narrows each service further. The image has no
-setuid or setgid file, as the build and the updater clear those bits whatever a
-package ships, and init drops the capabilities for loading kernel code, reaching
+([verified-boot.md](design/implemented/verified-boot.md)). Writable mounts refuse
+execution, setuid bits and, outside device filesystems, device files. Fence permits
+execution beneath `/usr` and `/oci`; leash narrows each service further. The image
+has no setuid or setgid file, as the build and the updater clear those bits whatever
+a package ships, and init drops the capabilities for loading kernel code, reaching
 hardware, tracing and making device nodes. Memory-Deny-Write-Execute refuses a
 mapping both writable and executable in every process, unless the form allows `jit`;
 a memory file (`memfd`) escapes it and the mount flags once mapped, so only such a
 form may promise it. None of this makes an interpreter's input trustworthy: a runtime
-can run a script from writable storage. Images built with [IPE](design/ipe.md) hold
-native executables and mappings to one verified filesystem named by a signed policy;
-IPE does not authenticate scripts either.
+can run a script from writable storage. Images built with
+[IPE](design/implemented/ipe.md) hold native executables and mappings to one verified
+filesystem named by a signed policy; IPE does not authenticate scripts either.
 
 Address randomization covers the kernel and every program's code, data, stack and
 heap. werewolf's programs are static PIEs; the build refuses an executable stack, or
@@ -101,27 +99,27 @@ the data key is removed once the volume is open.
 Each form declares the ports its services listen on and the traffic they send; fence
 drops the rest both ways, and Landlock restricts TCP ports too. The policy does not
 track connections and names ports rather than hosts: leave to connect to HTTPS does
-not confine a process to one server ([fence.md](design/fence.md)). Fence drops
-`CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and `CAP_NET_RAW`; a form that keeps the network
-capabilities can send below fence's rules. `minimal` and `prod` listen on nothing.
-Where sshd runs, it takes security keys with a touch, no passwords, no forwarding;
-`playground` accepts ordinary keys too.
+not confine a process to one server ([fence.md](design/implemented/fence.md)). Fence
+drops `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and `CAP_NET_RAW`; a form that keeps the
+network capabilities can send below fence's rules. `minimal` and `prod` listen on
+nothing. Where sshd runs, it takes security keys with a touch, no passwords, no
+forwarding; `playground` accepts ordinary keys too.
 
 ## Updates and the next boot
 
 The updater verifies repository signatures before composing an image; releases carry
 signed manifests; IPE machines trusting a signed channel install complete [signed
-images](design/prebuilt-images.md), the keys kept off the guest. Two slots each hold
-an image. A new one gets one boot; committing marks it healthy, and a panic, a failed
-boot or deadman's timeout returns to the previous slot. That recovers the image, not
-`/data` ([updater.md](updater.md), [releases.md](releases.md)). To protect the next
-boot, firmware must verify the signed unified kernel image (loader, kernel, stage0,
-command line): an unchecked one defeats the rest even with a signed root. A changed
-boot configuration could select an older signed image, so a protected machine's first
-boot takes its TPM, and stage0 refuses any release below its channel's floor, which
-rises to the running release before a slot is replaced
-([independent-updates.md](design/independent-updates.md)). All of this runs inside
-the guest, so the hypervisor must be trusted.
+images](design/implemented/prebuilt-images.md), the keys kept off the guest. Two
+slots each hold an image. A new one gets one boot; committing marks it healthy, and a
+panic, a failed boot or deadman's timeout returns to the previous slot. That recovers
+the image, not `/data` ([updater.md](updater.md), [releases.md](releases.md)). To
+protect the next boot, firmware must verify the signed unified kernel image (loader,
+kernel, stage0, command line): an unchecked one defeats the rest even with a signed
+root. A changed boot configuration could select an older signed image, so a protected
+machine's first boot takes its TPM, and stage0 refuses any release below its
+channel's floor, which rises to the running release before a slot is replaced
+([independent-updates.md](design/implemented/independent-updates.md)). All of this
+runs inside the guest, so the hypervisor must be trusted.
 
 ## Protections a machine can be made without
 
@@ -130,14 +128,14 @@ records which releases may boot, and IPE runs only native code from the verified
 root. `howl
 --disable=secureboot,tpm,ipe` makes a machine without them, which every provider but
 Lima, QEMU, Firecracker, x86_64 bhyve and, for `--build` images, GCP, AWS and Azure
-needs for now ([cli](design/cli.md)). Firecracker defaults to IPE with host-pinned
-boot files and warns that Secure Boot and TPM rollback protection are unavailable.
-Other providers disable nothing by default. A build refuses an image that would lack
-a protection `--disable` does not name, and says how to give it. Make builds also
-default to no disabled protections; legacy test images require an explicit
-command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment value is
-refused. The command line names what the machine lacks (`werewolf.disable`), and
-posture and the login message say so. The keys a build signs with live in
+needs for now ([cli](design/implemented/cli.md)). Firecracker defaults to IPE with
+host-pinned boot files and warns that Secure Boot and TPM rollback protection are
+unavailable. Other providers disable nothing by default. A build refuses an image
+that would lack a protection `--disable` does not name, and says how to give it. Make
+builds also default to no disabled protections; legacy test images require an
+explicit command-line `DISABLE=secureboot,tpm,ipe`, and an inherited environment
+value is refused. The command line names what the machine lacks (`werewolf.disable`),
+and posture and the login message say so. The keys a build signs with live in
 `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`: a machine takes
 only updates signed with them, so back that directory up.
 
@@ -147,25 +145,26 @@ only updates signed with them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-Firecracker's [host-pinned boot files](design/firecracker-boot.md) retain IPE,
-dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a TPM
-release floor: the trusted host can replace the record or restore older vulnerable
-state. Keep it outside guest access. Changed boot files fail closed; legacy mode keeps
-guest-controlled A/B updates without pinning those files.
+Firecracker's [host-pinned boot files](design/implemented/firecracker-boot.md) retain
+IPE, dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a
+TPM release floor: the trusted host can replace the record or restore older
+vulnerable state. Keep it outside guest access. Changed boot files fail closed;
+legacy mode keeps guest-controlled A/B updates without pinning those files.
 
-Other providers currently provide all three protections together. Without them a running
-machine keeps its seal, fence and verified root: root still cannot run a program the
-image lacks, but can choose what boots next. `--dev` makes a local development image:
-mksh, BusyBox tools, root SSH through a Howl-managed Ed25519 key, optional seal learning
-(refused calls logged, not blocked) and, with `werewolf.debug=1`, a root console shell
-without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/` and is passed by
-`howl ssh root@NAME`; it is separate from the keys used by playground. With both the
-checked debug command line and Howl's dev config marker, init mounts `/run/howl-dev` as
-executable RAM for developer SSH uploads. [Test
-iteration](design/local-test-iteration.md) uses SSH and `sh-shim`, without BusyBox or
-a console shell, and confines a selected driver with its declared leash policy. Dev
-images require protections off: `--disable=secureboot,tpm,ipe`, and are never
-published. A root console fails posture.
+Other providers currently provide all three protections together. Without them a
+running machine keeps its seal, fence and verified root: root still cannot run a
+program the image lacks, but can choose what boots next. `--dev` makes a local
+development image: mksh, BusyBox tools, root SSH through a Howl-managed Ed25519 key,
+optional seal learning (refused calls logged, not blocked) and, with
+`werewolf.debug=1`, a root console shell without a password. The key lives under
+`$XDG_DATA_HOME/howl/keys/dev/` and is passed by `howl ssh root@NAME`; it is separate
+from the keys used by playground. With both the checked debug command line and Howl's
+dev config marker, init mounts `/run/howl-dev` as executable RAM for developer SSH
+uploads. [Test iteration](design/implemented/local-test-iteration.md) uses SSH and
+`sh-shim`, without BusyBox or a console shell, and confines a selected driver with
+its declared leash policy. Dev images require protections off:
+`--disable=secureboot,tpm,ipe`, and are never published. A root console fails
+posture.
 
 ## Not done, by choice
 

@@ -23,6 +23,37 @@ pub const Sys = struct {
     fake: ?Fake = null,
     /// log, when set, takes children's output: a form's own log file.
     log: ?File = null,
+    /// One canonical selection per pipeline invocation; artifacts record it.
+    variants: []const u8 = "",
+    collect_outputs: bool = false,
+    outputs: std.array_hash_map.String([]const u8) = .empty,
+
+    pub fn variantNames(s: *Sys) ![]const []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        if (s.variants.len > 0) {
+            if (!prebuilt.variantSelection(s.variants)) return s.refuse(
+                "invalid variant selection",
+                .{},
+            );
+            var it = mem.splitScalar(u8, s.variants, ',');
+            while (it.next()) |name| try names.append(s.gpa, name);
+        }
+        return names.items;
+    }
+
+    pub fn variantKey(s: *Sys, name: []const u8) ![]const u8 {
+        if (s.variants.len == 0) return name;
+        return s.gpa.print("{s}-variants-{s}", .{ name, s.variants });
+    }
+
+    pub fn variantPath(s: *Sys, name: []const u8) ![]const u8 {
+        if (s.variants.len == 0) return name;
+        return s.gpa.print("{s}/variants/{s}", .{ name, s.variants });
+    }
+
+    pub fn matchesVariants(s: *Sys, target: Json) bool {
+        return selectionMatches(target, s.variants);
+    }
 
     /// refuse fails with a reason, which reason gives back.
     pub fn refuse(s: *Sys, comptime fmt: []const u8, args: anytype) error{Refused} {
@@ -97,7 +128,16 @@ pub const Options = struct {
 };
 
 /// exec runs argv and says how it ended, with its output if captured.
-pub fn exec(s: *Sys, argv: []const []const u8, o: Options) !Result {
+pub fn exec(s: *Sys, arguments: []const []const u8, o: Options) !Result {
+    var argv = arguments;
+    if (s.variants.len > 0 and argv.len > 1) {
+        const program = std.fs.path.basename(argv[0]);
+        const selected = mem.eql(u8, program, "form") or (mem.eql(u8, program, "howl") and
+            (mem.eql(u8, argv[1], "_build") or mem.eql(u8, argv[1], "test") or
+                mem.eql(u8, argv[1], "_boot-image")));
+        if (selected and !hasVariantFlag(argv))
+            argv = try mem.concat(s.gpa, []const u8, &.{ argv, &.{ "--variant", s.variants } });
+    }
     if (s.fake) |f| if (try f.run(f.ctx, s, argv)) |r| return r;
     const env = o.env orelse s.env;
     switch (o.capture) {
@@ -130,6 +170,34 @@ pub fn exec(s: *Sys, argv: []const []const u8, o: Options) !Result {
             return .{ .term = try child.wait(s.io) };
         },
     }
+}
+
+pub fn selection(s: *Sys, target: Json) ![]const u8 {
+    const value = json.get(target, "variants") orelse return "";
+    if (value == .string) {
+        if (value.string.len > 0 and
+            !prebuilt.variantSelection(value.string)) return error.InvalidVariants;
+        return value.string;
+    }
+    var names: std.ArrayList([]const u8) = .empty;
+    for (try json.items(value)) |name| {
+        if (name != .string) return error.InvalidVariants;
+        try names.append(s.gpa, name.string);
+    }
+    const text = try mem.join(s.gpa, ",", names.items);
+    if (text.len > 0 and !prebuilt.variantSelection(text)) return error.InvalidVariants;
+    return text;
+}
+
+pub fn selectionMatches(target: Json, text: []const u8) bool {
+    const value = json.get(target, "variants") orelse return text.len == 0;
+    if (value == .string) return mem.eql(u8, value.string, text);
+    const names = json.items(value) catch return false;
+    if (names.len == 0) return text.len == 0;
+    var it = mem.splitScalar(u8, text, ',');
+    for (names) |name| if (name != .string or
+        !mem.eql(u8, name.string, it.next() orelse return false)) return false;
+    return it.next() == null;
 }
 
 /// run runs argv and refuses unless it exits 0.
@@ -538,4 +606,10 @@ test "paths sort by component, as Python's do" {
     mem.sort([]const u8, &names, {}, pathLess);
     const want = [_][]const u8{ "a", "a/b", "a/b/c", "a-b", "a.b", "b" };
     for (want, names) |w, n| try testing.expectEqualStrings(w, n);
+}
+
+fn hasVariantFlag(argv: []const []const u8) bool {
+    for (argv) |arg| if (mem.eql(u8, arg, "--variant") or
+        mem.startsWith(u8, arg, "--variant=")) return true;
+    return false;
 }

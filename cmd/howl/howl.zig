@@ -1,6 +1,6 @@
 //! howl is werewolf's command-line tool. It builds forms, packs config tars,
 //! and creates, reaches and deletes machines, here or in a cloud. It runs on
-//! the build host, not in the image. See README.md and docs/design/cli.md.
+//! the build host, not in the image. See README.md and docs/design/implemented/cli.md.
 
 const std = @import("std");
 const settings = @import("settings");
@@ -43,9 +43,8 @@ pub const usage =
     \\       howl ssh [[USER@]NAME] [--identity KEY | --no-agent] [-- COMMAND...]
     \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
-    \\       howl import NAME DIR   stage initial data for a protected VM’s next cold start; destination must be empty
-    \\       howl sync NAME DIR     stage added/changed files for a protected VM’s next cold start; keep destination-only files
-    \\       howl import NAME --retry SNAPSHOT-ID   reselect a retained snapshot for recovery
+    \\       howl export NAME [--service NAME] [--output FILE]   export a consistent data archive
+    \\       howl import NAME ARCHIVE [--service NAME] [--on TARGET] [--config DIR]   restore data; leave the target stopped
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
     "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev=ssh] [--build] [--yes] [--arch " ++
@@ -53,10 +52,11 @@ pub const usage =
     "[--size TYPE] " ++
     "[--allow-from me|CIDR] [--add-current-user auto|yes|no] " ++
     "[--network tap|slirp] [--bridge NAME] " ++
-    "[--import DIR] [CONFIG...]\n" ++
+    "[CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
+    \\       --variant NAME[,NAME...] and --ssh select image variants for build, pack, test, run and create
     \\       howl build-apk RECIPE [--arch ARCH] [--verbose]   a form's own package, from a melange recipe
     \\       howl apply FILE [--name NAME] [--app DIR] [--to ssh://HOST/PATH] [-n]   publish an enrolled machine's declaration
     \\       howl form [-f FILE] --with FORM,... --packages PKG,... --KEY LINE --KEY.SUB VALUE --services.NAME.KEY LINE -o DIR   a form from a manifest and the line, kept;
@@ -77,11 +77,46 @@ const max_name = 100;
 /// terminal (progress.zig).
 pub var environ: *const std.process.Environ.Map = undefined;
 
+/// The canonical variant selection for this command.
+pub var variants: []const []const u8 = &.{};
+
+pub fn variantArgs(
+    gpa: Allocator,
+    args: []const []const u8,
+    why: *Why,
+) !struct { names: []const []const u8, args: []const []const u8 } {
+    var names: std.ArrayList([]const u8) = .empty;
+    var rest: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--ssh")) {
+            try names.append(gpa, "ssh");
+        } else if (std.mem.eql(u8, arg, "--variant") or std.mem.startsWith(u8, arg, "--variant=")) {
+            _, const value = try flagValue(args, &i, why);
+            try names.append(gpa, value);
+        } else {
+            try rest.append(gpa, arg);
+            if (std.mem.eql(u8, arg, "--")) {
+                try rest.appendSlice(gpa, args[i + 1 ..]);
+                break;
+            }
+        }
+    }
+    var failure: forms.Failure = .{};
+    return .{ .names = forms.variantNames(gpa, names.items, &failure) catch
+        return why.refuse("{s}", .{failure.text}), .args = rest.items };
+}
+
 pub fn main(init: std.process.Init) void {
     const io = init.io;
     const gpa = init.arena.allocator();
     environ = init.environ_map;
-    const args = init.minimal.args.toSlice(gpa) catch fatal(io, "out of memory", .{});
+    var args: []const []const u8 = init.minimal.args.toSlice(gpa) catch fatal(
+        io,
+        "out of memory",
+        .{},
+    );
     if (args.len < 2) fatal(io, "{s}", .{usage});
     const verb = std.meta.stringToEnum(
         enum {
@@ -91,6 +126,7 @@ pub fn main(init: std.process.Init) void {
             run,
             create,
             import,
+            @"export",
             sync,
             apply,
             delete,
@@ -117,16 +153,42 @@ pub fn main(init: std.process.Init) void {
         args[1],
     ) orelse
         fatal(io, "no verb {s}\n{s}", .{ args[1], usage });
-    published.choose(args[1], args[2..]);
     var why: Why = .{};
+    switch (verb) {
+        .build,
+        .@"test",
+        .pack,
+        .run,
+        .create,
+        .form,
+        .forms,
+        .versions,
+        ._build,
+        .@"_boot-image",
+        => {
+            const selected = variantArgs(gpa, args[2..], &why) catch fatal(io, "{s}", .{why.text});
+            variants = selected.names;
+            args = std.mem.concat(
+                gpa,
+                []const u8,
+                &.{ args[0..2], selected.args },
+            ) catch fatal(io, "out of memory", .{});
+        },
+        else => {},
+    }
+    published.choose(args[1], args[2..]);
     const done = switch (verb) {
         .build => native.build(io, gpa, args[2..], &why),
         .@"test" => @import("test.zig").command(io, gpa, args[2..], &why),
         .pack => pack(io, gpa, args[2..], &why),
         .run => runForm(io, gpa, args[2..], &why),
         .create => create(io, gpa, args[2..], &why),
-        .import => @import("local-secure.zig").importData(io, gpa, args[2..], .init, &why),
-        .sync => @import("local-secure.zig").importData(io, gpa, args[2..], .sync, &why),
+        .import => @import("data.zig").command(io, gpa, .import, args[2..], &why),
+        .@"export" => @import("data.zig").command(io, gpa, .@"export", args[2..], &why),
+        .sync => why.refuse(
+            "sync was replaced by howl import NAME ARCHIVE; restore into empty data",
+            .{},
+        ),
         .apply => @import("apply.zig").apply(io, gpa, args[2..], &why),
         .delete => verbs.delete(io, gpa, args[2..], &why),
         .console => verbs.console(io, gpa, args[2..], &why),
@@ -171,6 +233,9 @@ pub fn main(init: std.process.Init) void {
             std.process.exit(1)
         else
             fatal(io, "{s}", .{why.text}),
+        error.VariantChangeRequiresNewMachine => fatal(io, "variants cannot change on an " ++
+            "enrolled machine; keep its selection or create a new " ++
+            "machine", .{}),
         else => fatal(io, "{s}", .{@errorName(err)}),
     };
 }
@@ -319,7 +384,15 @@ pub fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms
     if (std.mem.eql(u8, names, "forms")) Dir.cwd().access(io, "forms", .{}) catch
         return why.refuse("no ./forms: --build builds from a werewolf checkout", .{});
     var f: forms.Failure = .{};
-    return forms.chainIn(io, gpa, Dir.cwd(), names, form, &f) catch |err| switch (err) {
+    return forms.chainSelectedIn(
+        io,
+        gpa,
+        Dir.cwd(),
+        names,
+        form,
+        variants,
+        &f,
+    ) catch |err| switch (err) {
         error.Form => why.refuse("{s}", .{f.text}),
         error.OutOfMemory => error.OutOfMemory,
     };
@@ -602,9 +675,6 @@ pub const Options = struct {
     /// app is a directory to lay where the form keeps its application
     /// (app.zig). build, run and create take it.
     app: ?[]const u8 = null,
-    /// import_dir is files on a read-only disk, for the form to import
-    /// once while it first makes its data (import.zig). run and create.
-    import_dir: ?[]const u8 = null,
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository, so the machine does not update them.
     local: bool = false,
@@ -685,12 +755,15 @@ pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.size
         else if (std.mem.eql(u8, flag, "app"))
             &o.app
-        else if (std.mem.eql(u8, flag, "import"))
-            &o.import_dir
         else if (std.mem.eql(u8, flag, "allow-from"))
             &o.allow_from
         else
             null;
+        if (std.mem.eql(
+            u8,
+            flag,
+            "import",
+        )) return why.refuse("--import was replaced by howl import NAME ARCHIVE", .{});
         if (slot) |s| {
             if (s.* != null) return why.refuse("--{s} given twice", .{flag});
             s.* = v;
@@ -1164,10 +1237,6 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
         "--app is build's, run's and create's: an application is in the image",
         .{},
     );
-    if (o.import_dir != null) return why.refuse(
-        "--import is run's and create's: it attaches a disk to a machine",
-        .{},
-    );
     const iface = try formInterface(io, gpa, o.form, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     const w = &out.interface;
@@ -1268,11 +1337,6 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
             "install a protected GitHub release; updates follow the latest channel",
         );
         try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");
-        try row(
-            w,
-            "--import DIR",
-            "files on a read-only disk, imported once as the data is first made",
-        );
     }
     for (iface.files) |f| try row(
         w,
@@ -1733,7 +1797,7 @@ fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
     if (!launch.protected()) return;
     if (securedHere(on)) return;
     // A cloud's firmware enrolls the image's own boot key; its first boot
-    // takes the TPM (docs/design/independent-updates.md).
+    // takes the TPM (docs/design/implemented/independent-updates.md).
     if (on.is(.cloud)) {
         if (launch.local) return;
         return why.refuse(
@@ -1987,10 +2051,6 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         "--on disk is pack's: howl build and howl pack make a disk and its tar",
         .{},
     );
-    if (o.import_dir != null and !on.here()) return why.refuse(
-        "--import attaches a read-only disk; {t} cannot",
-        .{on},
-    );
     if (dev and !on.here()) return why.refuse(
         "--dev=ssh is for machines here, not {t}: developer SSH is never released",
         .{on},
@@ -2238,7 +2298,7 @@ pub fn notMade(name: []const u8, on: Platform, why: *Why) error{Refused} {
 
 /// reconfigurable refuses a new config for an existing machine made of the
 /// form was ("" if create did not make it) unless the form is the same and
-/// there is no --app, since an application is in the image. --import runs
+/// there is no --app, since an application is in the image.
 /// only while the data is first made, so an existing machine refuses it too.
 pub fn reconfigurable(
     o: Options,
@@ -2249,11 +2309,6 @@ pub fn reconfigurable(
 ) !void {
     if (o.app != null) return why.refuse(
         "{s} exists, and an application is in the image: howl delete {s} --on {t}, then create",
-        .{ name, name, on },
-    );
-    if (o.import_dir != null) return why.refuse(
-        "{s} exists, and an import runs only while its data is first made: howl delete {s} --on " ++
-            "{t}, then create",
         .{ name, name, on },
     );
     if (was.len == 0) return notMade(name, on, why);
@@ -2272,8 +2327,6 @@ test "reconfigure accepts a cloud form label for a local manifest path" {
     var why: Why = .{};
     const o: Options = .{ .form = "build/adhoc/web/" };
     try reconfigurable(o, "web-vm", "web", .gcp, &why);
-    const again: Options = .{ .form = "build/adhoc/web/", .import_dir = "dump" };
-    try testing.expectError(error.Refused, reconfigurable(again, "web-vm", "web", .qemu, &why));
     try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "other", .gcp, &why));
     try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "", .gcp, &why));
 }
@@ -2345,6 +2398,7 @@ pub fn releaseDiskAt(
     }
     const p = try buildHere(io, gpa, &steps, .{
         .form = o.form,
+        .variants = variants,
         .arch = arch,
         .disabled = disabled,
         .disk = .{ .args = words.items },

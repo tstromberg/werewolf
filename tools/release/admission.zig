@@ -124,7 +124,7 @@ pub fn checkMirror(
     ))
         return s.refuse("public mirror serves a different signed release", .{});
     const assets = try sys.resolve(s, assets_dir);
-    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ form, provider, arch });
+    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ try s.variantKey(form), provider, arch });
     const report = try sys.readJson(
         s,
         try sys.join(s, &.{ assets, try s.gpa.print("{s}-gates.json", .{prefix}) }),
@@ -135,7 +135,7 @@ pub fn checkMirror(
         "{s}/{s}/{s}/{s}/objects/{s}",
         .{
             mem.trimEnd(u8, request.source, "/"),
-            form,
+            try s.variantPath(form),
             provider,
             arch,
             try json.text(signed, "descriptor"),

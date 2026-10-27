@@ -25,7 +25,7 @@ loopback port 49999 and to outbound connections. The root is read-only.
   Memory-Deny-Write-Execute, drops network access and further execution, and limits
   writable files to `/data/svc/postdoc`. This confines the helper processes;
   postdoc itself retains its JIT permission and can still invoke a tool directly.
-  See [narrowed programs](../../docs/design/narrow.md).
+  See [narrowed programs](../../docs/design/implemented/narrow.md).
 
 ### Weaknesses
 
@@ -75,7 +75,7 @@ installs it in the inactive slot and boots it on probation. The slot commits onl
 after service, data, updater and posture checks pass; a failed trial falls back to
 the previous slot. These checks establish service uptime, rather than an end-to-end
 API or tunnel health check. See [the updater](../../docs/updater.md) and [independent
-updates](../../docs/design/independent-updates.md).
+updates](../../docs/design/implemented/independent-updates.md).
 
 The publication gate exercises this form through signed upgrades, operator rollback,
 TPM retirement power cuts and failed-trial recovery on disposable signing keys. It
@@ -90,7 +90,7 @@ updates. To get automatic A/B updates for a local build, its builder must serve 
 dedicated `IPE_UPDATES` channel and publish later releases with the same keys and
 increasing `IMAGE_INDEX` values. Without that channel, image changes require a
 reinstall. See [secured local
-deployment](../../docs/design/secure-local-deployment.md).
+deployment](../../docs/design/implemented/secure-local-deployment.md).
 
 ### Cloud production deployment
 

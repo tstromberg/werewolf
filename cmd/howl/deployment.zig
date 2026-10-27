@@ -1,6 +1,6 @@
 //! deployment packs the caller's image declaration as local-NAME. Its
 //! repository is signed with packages.rsa in howl's data directory; only its public key
-//! reaches the image. See docs/design/manifest.md.
+//! reaches the image. See docs/design/implemented/manifest.md.
 const std = @import("std");
 const forms = @import("form");
 const compose = @import("compose");

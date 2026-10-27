@@ -444,7 +444,7 @@ fn apkOf(line: []const u8, arch: []const u8) ?[]const u8 {
 
 // --- kernel -----------------------------------------------------------------------------
 
-/// kernel installs linux-werewolf (docs/design/custom-kernel.md), unpacks
+/// kernel installs linux-werewolf (docs/design/implemented/custom-kernel.md), unpacks
 /// its kernel and config into BUILD/kernel/x, checks the config for what
 /// werewolf relies on it to hold (ipe.checkConfig, image.configMisses), and
 /// writes BUILD/vmlinuz.
