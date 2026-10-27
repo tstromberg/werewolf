@@ -159,7 +159,7 @@ suites:
               exit:
                 not_equals: 0
               stderr:
-                contains: Permission denied
+                matches: 'Permission denied|Error number -13 occurred'
       - name: plex-h264-output-readable-by-server
         steps:
           - exec:
@@ -189,7 +189,7 @@ suites:
               exit:
                 not_equals: 0
               stderr:
-                contains: Permission denied
+                matches: 'Permission denied|Error number -13 occurred'
       - name: plex-transcoder-codecs-readonly
         steps:
           - exec:
