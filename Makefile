@@ -778,12 +778,22 @@ endef
 # test image with VARIABLES.
 define native_check
 $(call native_image,$(1),$(2),$(4),$(5))
+$(call native_boot,$(1),$(2),$(3),$(4),$(5))
+endef
+# Compare and boot an already prepared native image.
+define native_boot
 	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
 		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
 	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
 endef
-$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
-	$(call native_check,$*,$(call native_ref,$*))
+# Slot, deadman and the ordinary minimal check share the generated image.
+# One prerequisite prepares it once before any of those parallel boots read it.
+NATIVE_IMAGES := $(addprefix _check-native-image-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES))
+.PHONY: $(NATIVE_IMAGES)
+$(NATIVE_IMAGES): _check-native-image-%: $(HOWL) $(NATIVE_TESTS)
+	$(call native_image,$*,$(call native_ref,$*))
+$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: _check-native-image-%
+	$(call native_boot,$*,$(call native_ref,$*))
 # A scenario (test/scenarios/NAME, docs/testing-scenarios.md) boots a stock form
 # some other way, built from that form's own production image. metadata's boots
 # are check-metadata's, and people-persist's check-people-persist's.
@@ -1004,13 +1014,11 @@ check-verity: $(HOWL) $(CONSOLE_CHECK)
 	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) _check-verity
 # check-slot boots minimal's native test image from a slot (test/check-slot).
-check-slot: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
-	$(call native_image,minimal,minimal)
+check-slot: _check-native-image-minimal $(CONSOLE_CHECK)
 	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
 # check-deadman boots minimal's native test image, from which alone stage0
 # takes a shorter deadman.
-check-deadman: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
-	$(call native_image,minimal,minimal)
+check-deadman: _check-native-image-minimal $(CONSOLE_CHECK)
 	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
