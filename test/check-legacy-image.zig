@@ -52,7 +52,11 @@ fn run(c: *host.Check) !void {
         error.PathAlreadyExists => return c.fail("{s} exists already", .{output}),
         else => |e| return e,
     };
-    const excuses = try c.must(&.{ "build/host/form", "excuses", form }, "", .{});
+    var form_args: std.ArrayList([]const u8) = .empty;
+    try form_args.appendSlice(gpa, &.{ "build/host/form", "excuses", form });
+    for (try published.variants(gpa, manifest)) |variant|
+        try form_args.appendSlice(gpa, &.{ "--variant", variant });
+    const excuses = try c.must(form_args.items, "", .{});
     try c.env.put("POSTURE_KNOWN", try known(gpa, excuses.stdout));
 
     const host_arch = if (builtin.cpu.arch == .aarch64) "aarch64" else "x86_64";
