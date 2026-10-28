@@ -139,7 +139,7 @@ pub fn build(
     const trust = try sys.readJson(s, try sys.join(s, &.{ tree.trust, "trust.json" }), 4096);
     const channel = try s.gpa.print(
         "{s}/{s}/{s}",
-        .{ try json.text(trust, "source"), form, provider },
+        .{ try json.text(trust, "source"), try s.variantPath(form), provider },
     );
     const work = try sys.join(
         s,
