@@ -11,20 +11,44 @@ pub fn main(init: std.process.Init) !void {
     const alice = try driver.system.account(init.io, a, "alice");
     const other = try driver.system.account(init.io, a, if (seed) "bob" else "carol");
     const database = try driver.system.read(init.io, a, "/run/svc/samba/private/smbpasswd");
-    const removed = if (seed) true else absent: {
-        _ = driver.system.account(init.io, a, "bob") catch |err| switch (err) {
-            error.UnknownAccount => break :absent !containsUser(database, "bob"),
-            else => return err,
-        };
-        break :absent false;
+    const retired = if (seed) true else locked: {
+        // Retired people retain locked UNIX identities so ownership never moves.
+        const bob = try driver.system.account(init.io, a, "bob");
+        const passwd = try driver.system.read(init.io, a, "/run/werewolf/passwd");
+        break :locked !containsUser(database, "bob") and personId(bob) and
+            bob != alice and bob != other and retiredAccount(passwd, "bob", bob);
     };
     try ctx.result(init.io, args[1], if (seed)
         "samba-unix-users"
     else
-        "samba-new-account", removed and alice >= 536870912 and other >= 536870912 and
+        "samba-new-account", retired and personId(alice) and personId(other) and
         alice != other and
         hasUser(database, "alice", alice) and
         hasUser(database, if (seed) "bob" else "carol", other));
+}
+
+fn personId(uid: u32) bool {
+    // lib/people.zig reserves [2^16, 2^30) for config-created people.
+    return uid >= 1 << 16 and uid < 1 << 30;
+}
+
+fn retiredAccount(passwd: []const u8, name: []const u8, uid: u32) bool {
+    var lines = std.mem.tokenizeAny(u8, passwd, "\r\n");
+    while (lines.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, ':');
+        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
+        _ = fields.next() orelse return false;
+        const found = std.fmt.parseInt(u32, fields.next() orelse return false, 10) catch
+            return false;
+        const group = std.fmt.parseInt(u32, fields.next() orelse return false, 10) catch
+            return false;
+        _ = fields.next() orelse return false;
+        _ = fields.next() orelse return false;
+        return found == uid and group == uid and
+            std.mem.eql(u8, fields.next() orelse return false, "/sbin/nologin") and
+            fields.next() == null;
+    }
+    return false;
 }
 
 fn containsUser(database: []const u8, name: []const u8) bool {
@@ -57,4 +81,19 @@ test "Samba's account IDs must match, without accepting a name suffix or stale I
     try std.testing.expect(containsUser(database, "bob"));
     try std.testing.expect(!containsUser(database, "carol"));
     try std.testing.expect(!containsUser("bobby:600000003:hash\n", "bob"));
+}
+
+test "retired Samba people keep the same locked UNIX identity" {
+    try std.testing.expect(personId(432192699));
+    try std.testing.expect(!personId((1 << 16) - 1));
+    try std.testing.expect(!personId(1 << 30));
+    const retired = "bob:x:600000003:600000003::/data/home/bob:/sbin/nologin\n";
+    try std.testing.expect(retiredAccount(retired, "bob", 600000003));
+    try std.testing.expect(!retiredAccount(retired, "bob", 600000004));
+    try std.testing.expect(!retiredAccount(retired, "bobby", 600000003));
+    try std.testing.expect(!retiredAccount(
+        "bob:x:600000003:600000003::/data/home/bob:/bin/sh\n",
+        "bob",
+        600000003,
+    ));
 }

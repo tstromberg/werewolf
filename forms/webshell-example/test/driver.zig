@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(60));
     while (true) {
         page = request(&client, gpa, "/", "GET", null) catch |err| {
-            if (err != error.ConnectionRefused or
+            if ((err != error.ConnectionRefused and err != error.Timeout) or
                 std.Io.Clock.awake.now(io).compare(.gte, deadline)) return err;
             try io.sleep(.fromMilliseconds(100), .awake);
             continue;

@@ -400,6 +400,7 @@ _test/probes:
 	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/nats/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/zeek/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/solr/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/suricata/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test test/native/bson.zig
 	zig test test/native/amqp.zig
@@ -467,6 +468,7 @@ _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/preb
 _test/lib/boot-download.zig: ; zig test --dep prebuilt --dep update-policy --dep host -Mroot=lib/boot-download.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mhost=test/host/host.zig
+_test/cmd/howl/howl.zig _test/cmd/howl/import.zig _test/cmd/howl/test.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig
@@ -800,12 +802,22 @@ endef
 # test image with VARIABLES.
 define native_check
 $(call native_image,$(1),$(2),$(4),$(5))
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) \
-		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
+$(call native_boot,$(1),$(2),$(3),$(4),$(5))
 endef
-$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: $(HOWL) $(NATIVE_TESTS)
-	$(call native_check,$*,$(call native_ref,$*))
+# Compare and boot an already prepared native image.
+define native_boot
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
+endef
+# Slot, deadman and the ordinary minimal check share the generated image.
+# One prerequisite prepares it once before any of those parallel boots read it.
+NATIVE_IMAGES := $(addprefix _check-native-image-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES))
+.PHONY: $(NATIVE_IMAGES)
+$(NATIVE_IMAGES): _check-native-image-%: $(HOWL) $(NATIVE_TESTS)
+	$(call native_image,$*,$(call native_ref,$*))
+$(addprefix check-native-tests-,$(NATIVE_TEST_FORMS) $(NATIVE_TEST_EXAMPLES)): check-native-tests-%: _check-native-image-%
+	$(call native_boot,$*,$(call native_ref,$*))
 # A scenario (test/scenarios/NAME, docs/testing-scenarios.md) boots a stock form
 # some other way, built from that form's own production image. metadata's boots
 # are check-metadata's, and people-persist's check-people-persist's.
@@ -1025,14 +1037,12 @@ check-verity: $(HOWL) $(CONSOLE_CHECK)
 	@$(call built,minimal-baseline,$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) _check-verity
 # check-slot boots minimal's native test image from a slot (test/check-slot).
-check-slot: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
-	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
+check-slot: _check-native-image-minimal $(CONSOLE_CHECK)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
 # check-deadman boots minimal's native test image, from which alone stage0
 # takes a shorter deadman.
-check-deadman: $(HOWL) $(NATIVE_TESTS) $(CONSOLE_CHECK)
-	$(call native_image,minimal,minimal)
-	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
+check-deadman: _check-native-image-minimal $(CONSOLE_CHECK)
+	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -1237,10 +1247,13 @@ fix:
 # other Python or Go file, Python script, or Python a build step writes inline.
 # Each needs its language: the example apps; onnx's checks drive Python's own
 # onnxruntime and ctypes, which nothing but Python can; opencanary's and
-# paperless's sitecustomize patch those apps' interpreters as they start; and
+# paperless's sitecustomize patch those apps' interpreters as they start;
+# webshell's launcher loads its packaged pure Python framework with the
+# hardened interpreter; and
 # vuln-console is the vuln-demo form's Go helper.
 WORKLOAD_CODE = examples/go/main.go forms/python-example/rootfs/usr/lib/app/main.py \
 	forms/webshell-example/rootfs/usr/lib/app/webshell.py forms/onnx/rootfs/usr/lib/onnx/check.py \
+	forms/webshell-example/rootfs/usr/lib/app/serve.py \
 	forms/onnx/rootfs/usr/lib/libffi-static/check.py \
 	forms/opencanary/rootfs/oci/opencanary/opencanary/sitecustomize.py \
 	forms/paperless/rootfs/usr/lib/paperless/lib/python3.13/site-packages/sitecustomize.py \

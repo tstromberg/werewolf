@@ -1,4 +1,5 @@
 """Fixed CPU inference checks; no downloaded model, provider, or executable."""
+import importlib.metadata
 import sys
 import numpy as np
 import onnxruntime as ort
@@ -6,7 +7,7 @@ import onnxruntime as ort
 case = sys.argv[1]
 if case == "version":
     assert sys.version_info[:2] == (3, 15)
-    assert ort.__version__ == "1.31.0"
+    assert ort.__version__ == importlib.metadata.version("onnxruntime")
 elif case == "providers":
     assert "CPUExecutionProvider" in ort.get_available_providers()
 else:

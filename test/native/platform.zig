@@ -165,7 +165,7 @@ fn run(io: Io, a: Allocator, ctx: driver.Run, check: Check) !void {
         .cgrouped => {
             if (!try exists(io, "/run/cgroup/svc")) return;
             for (try leashed(io, a)) |name| {
-                const status = try system.service(io, a, name);
+                const status = try stableService(io, a, name);
                 if (!std.mem.eql(
                     u8,
                     status.object.get("pids_max").?.string,
@@ -468,6 +468,19 @@ fn command(io: Io, a: Allocator, argv: []const []const u8) !std.process.RunResul
         io,
         60,
     ) });
+}
+fn stableService(io: Io, a: Allocator, name: []const u8) !Json {
+    // A worker can exit between the two cgroup reads. Require a complete
+    // observation; only process churn gets a bounded retry.
+    const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+    while (true) {
+        return system.service(io, a, name) catch |err| {
+            if (err != error.ProcessSetChanged or
+                Io.Clock.awake.now(io).compare(.gte, deadline)) return err;
+            try io.sleep(.fromMilliseconds(100), .awake);
+            continue;
+        };
+    }
 }
 fn reaped(io: Io, a: Allocator) !void {
     if (!try exists(io, "/run/cgroup/svc")) return;

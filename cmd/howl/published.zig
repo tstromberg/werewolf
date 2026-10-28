@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const apk = @import("apk");
+const bd = @import("boot-download");
 const compose = @import("compose");
 const forms = @import("form");
 const package = @import("package");
@@ -303,25 +304,133 @@ fn clean(rel: []const u8) bool {
 
 /// get fetches url, of at most limit bytes.
 fn get(io: Io, gpa: Allocator, url: []const u8, limit: usize, why: *Why) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
+    const Event = union(enum) { done: anyerror![]const u8, timeout: Io.Cancelable!void };
+    var buffer: [2]Event = undefined;
+    var events: Io.Select(Event) = .init(io, &buffer);
+    defer events.cancelDiscard();
+    try events.concurrent(.done, fetchBytes, .{ io, gpa, url, limit, why });
+    try events.concurrent(.timeout, Io.sleep, .{ io, bd.Https.time_limit, .awake });
+    return switch (try events.await()) {
+        .done => |result| result,
+        .timeout => |result| {
+            try result;
+            return error.DownloadTimeout;
+        },
+    };
+}
+
+fn fetchBytes(io: Io, gpa: Allocator, url: []const u8, limit: usize, why: *Why) ![]const u8 {
     // Read at most a byte past limit, so a server cannot make howl hold more.
     const buf = try gpa.alloc(u8, limit + 1);
-    var body: Io.Writer = .fixed(buf);
-    const res = client.fetch(.{
-        .location = .{ .url = url },
-        .response_writer = &body,
-    }) catch |err| {
-        if (body.end == buf.len) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
-        return why.refuse("{s}: {t}; --build takes this checkout's forms instead", .{ url, err });
-    };
-    if (res.status != .ok)
-        return why.refuse("{s}: HTTP {d}", .{ url, @backingInt(res.status) });
-    if (body.end > limit) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
-    return buf[0..body.end];
+    for (0..bd.fetch_attempts) |attempt| {
+        return fetchOnce(io, gpa, url, buf, why) catch |err| {
+            if (err == error.Refused) return err;
+            if (attempt + 1 < bd.fetch_attempts and bd.retryable(err)) {
+                try Io.sleep(io, .fromSeconds(@intCast(attempt + 1)), .awake);
+                continue;
+            }
+            return why.refuse(
+                "{s}: {t}; --build takes this checkout's forms instead",
+                .{ url, err },
+            );
+        };
+    }
+    unreachable;
+}
+
+fn fetchOnce(io: Io, gpa: Allocator, url: []const u8, buf: []u8, why: *Why) ![]const u8 {
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var request = try client.request(.GET, try std.Uri.parse(url), .{
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
+    });
+    defer request.deinit();
+    try request.sendBodiless();
+    var head_buffer: [8192]u8 = undefined;
+    var response = try request.receiveHead(&head_buffer);
+    if (response.head.status != .ok)
+        return why.refuse("{s}: HTTP {d}", .{ url, @backingInt(response.head.status) });
+    if (response.head.content_encoding != .identity)
+        return why.refuse("{s}: unexpected content encoding", .{url});
+    const limit = buf.len - 1;
+    if (response.head.content_length) |length| if (length > limit)
+        return why.refuse("{s}: more than {d} bytes", .{ url, limit });
+    var transfer: [16 << 10]u8 = undefined;
+    const body = response.reader(&transfer);
+    var total: usize = 0;
+    while (true) {
+        const n = body.readSliceShort(buf[total..]) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr() orelse err,
+        };
+        total += n;
+        if (total > limit) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
+        if (n == 0) break;
+    }
+    if (response.head.content_length) |length| if (length != total)
+        return error.HttpBodyTruncated;
+    return buf[0..total];
 }
 
 const testing = std.testing;
+
+test "index downloads retry interrupted bodies without retaining partial bytes" {
+    const host = @import("host");
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const Source = struct {
+        io: Io,
+        mutex: Io.Mutex = .init,
+        calls: [4]usize = @splat(0),
+        const paths = [_][]const u8{ "/interrupted", "/broken", "/denied", "/large" };
+
+        fn serve(
+            context: *anyopaque,
+            _: Allocator,
+            req: *const host.http.Request,
+            response: *host.http.Response,
+        ) !void {
+            const source: *@This() = @ptrCast(@alignCast(context));
+            var index_: usize = 0;
+            while (!mem.eql(u8, paths[index_], req.path())) : (index_ += 1) {}
+            const attempt = count: {
+                source.mutex.lockUncancelable(source.io);
+                defer source.mutex.unlock(source.io);
+                source.calls[index_] += 1;
+                break :count source.calls[index_];
+            };
+            if (index_ == 2) return response.send(403, &.{}, "");
+            if (index_ == 3) return response.send(200, &.{}, "1234567");
+            if (index_ == 0 and attempt == 2) return response.send(200, &.{}, "index");
+            response.close = true;
+            return response.send(200, &.{.{ .name = "Content-Length", .value = "5" }}, "part");
+        }
+    };
+    var source: Source = .{ .io = io };
+    var server: host.http.Server = undefined;
+    try server.start(io, testing.allocator, .{
+        .handler = .{ .context = &source, .serve = Source.serve },
+    });
+    defer server.stop();
+    var why: Why = .{};
+    for (Source.paths, 0..) |path, i| {
+        const result = get(
+            io,
+            gpa,
+            try gpa.print("http://127.0.0.1:{d}{s}", .{ server.port(), path }),
+            5,
+            &why,
+        );
+        if (i == 0)
+            try testing.expectEqualStrings("index", try result)
+        else
+            try testing.expectError(error.Refused, result);
+    }
+    source.mutex.lockUncancelable(io);
+    defer source.mutex.unlock(io);
+    try testing.expectEqualSlices(usize, &.{ 2, bd.fetch_attempts, 1, 1 }, &source.calls);
+}
 
 test pick {
     const sha: [20]u8 = @splat(0);

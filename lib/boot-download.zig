@@ -22,6 +22,25 @@ pub const cache_seconds = 300;
 pub const user_agent = "Werewolf-howl/1 (+https://github.com/werewolf-linux/werewolf)";
 const releases = "https://github.com/werewolf-linux/werewolf/releases/download/";
 const github = "https://api.github.com/repos/werewolf-linux/werewolf/releases";
+pub const fetch_attempts = 3;
+
+/// retryable names interrupted transport, never authentication or content failures.
+pub fn retryable(err: anyerror) bool {
+    return switch (err) {
+        error.ReadFailed,
+        error.ConnectionResetByPeer,
+        error.ConnectionTimedOut,
+        error.ConnectionRefused,
+        error.NetworkUnreachable,
+        error.UnknownHostName,
+        error.HttpHeadTruncated,
+        error.HttpBodyTruncated,
+        error.HttpConnectionClosing,
+        error.TlsConnectionTruncated,
+        => true,
+        else => false,
+    };
+}
 
 /// Request names a download. The certificates are paths; channel is
 /// werewolf's published channel for the form and provider, which a mirror,
@@ -712,7 +731,7 @@ pub const Https = struct {
         var buffer: [2]Event = undefined;
         var events: Io.Select(Event) = .init(h.io, &buffer);
         defer events.cancelDiscard();
-        try events.concurrent(.done, get, .{ h, url, path, limit, expected });
+        try events.concurrent(.done, repeated, .{ h, url, path, limit, expected });
         try events.concurrent(.timeout, Io.sleep, .{ h.io, time_limit, .awake });
         return switch (try events.await()) {
             .done => |result| result,
@@ -721,6 +740,24 @@ pub const Https = struct {
                 return error.DownloadTimeout;
             },
         };
+    }
+
+    fn repeated(
+        h: *Https,
+        url: []const u8,
+        path: []const u8,
+        limit: u64,
+        expected: ?prebuilt.Artifact,
+    ) anyerror!void {
+        for (0..fetch_attempts) |attempt| {
+            h.get(url, path, limit, expected) catch |err| {
+                if (attempt + 1 == fetch_attempts or !retryable(err)) return err;
+                try Io.sleep(h.io, .fromSeconds(@intCast(attempt + 1)), .awake);
+                continue;
+            };
+            return;
+        }
+        unreachable;
     }
 
     fn get(
@@ -799,6 +836,7 @@ fn save(
         .permissions = .fromMode(0o600),
     });
     defer file.close(io);
+    errdefer Dir.cwd().deleteFile(io, path) catch {};
     var transfer: [64 << 10]u8 = undefined;
     const body = response.reader(&transfer);
     var digest = Sha256.init(.{});
@@ -813,8 +851,9 @@ fn save(
         if (total > limit) return error.TooLarge;
         digest.update(buf[0..n]);
         try file.writeStreamingAll(io, buf[0..n]);
-        if (n < buf.len) break;
     }
+    if (response.head.content_length) |length| if (total != length)
+        return error.HttpBodyTruncated;
     if (expected) |e| if (total != e.size or
         !mem.eql(u8, &std.fmt.bytesToHex(digest.finalResult(), .lower), e.sha256))
         return error.ArtifactMismatch;
@@ -1059,6 +1098,8 @@ const Mirror = struct {
     mutex: Io.Mutex = .init,
     gpa: Allocator,
     agents: std.ArrayList([]const u8) = .empty,
+    interrupted: usize = 0,
+    broken: usize = 0,
 
     const http = @import("host").http;
 
@@ -1069,6 +1110,8 @@ const Mirror = struct {
         response: *http.Response,
     ) !void {
         const m: *Mirror = @ptrCast(@alignCast(context));
+        const path = request.path();
+        var attempt: usize = 0;
         {
             m.mutex.lockUncancelable(m.io);
             defer m.mutex.unlock(m.io);
@@ -1077,10 +1120,19 @@ const Mirror = struct {
                 request.header("user-agent") orelse "-",
                 request.header("accept-encoding") orelse "-",
             }));
+            if (mem.eql(u8, path, "/interrupted")) {
+                m.interrupted += 1;
+                attempt = m.interrupted;
+            }
+            if (mem.eql(u8, path, "/broken")) m.broken += 1;
         }
-        const path = request.path();
         const here = try gpa.print("https://127.0.0.1:{d}", .{m.port});
         if (mem.eql(u8, path, "/object")) return response.send(200, &.{}, "ab");
+        if (mem.eql(u8, path, "/interrupted") or mem.eql(u8, path, "/broken")) {
+            if (attempt == 2) return response.send(200, &.{}, "ab");
+            response.close = true;
+            return response.send(200, &.{.{ .name = "Content-Length", .value = "2" }}, "a");
+        }
         if (mem.eql(u8, path, "/redirect")) return response.send(302, &.{
             .{ .name = "Location", .value = try gpa.print("{s}/object", .{here}) },
         }, "");
@@ -1171,6 +1223,8 @@ test "HTTPS fetches identify howl, follow only HTTPS and keep their bounds" {
         .{ "/downgrade", 2, null, error.RedirectChangesTransport },
         .{ "/credentials", 2, null, error.RedirectChangesTransport },
         .{ "/loop", 2, null, error.BadRedirect },
+        .{ "/interrupted", 2, ab, null },
+        .{ "/broken", 2, ab, error.HttpBodyTruncated },
         .{ "/missing", 2, null, error.NotPublished },
         .{ "/denied", 2, null, error.MirrorRefused },
     }) |case| {
@@ -1189,14 +1243,34 @@ test "HTTPS fetches identify howl, follow only HTTPS and keep their bounds" {
             try result;
             try testing.expectEqualStrings("ab", try read(io, gpa, out, 2));
         }
-        // A refused response before its body creates no file.
-        if (failure != null and (failure.? == error.NotPublished or
-            failure.? == error.MirrorRefused))
+        // Interrupted and rejected bodies leave no partial file behind.
+        if (failure != null)
             try testing.expectError(error.FileNotFound, Dir.cwd().access(io, out, .{}));
     }
     try testing.expectEqual(403, https.status);
+    const existing = try gpa.print("{s}/existing", .{root});
+    try Dir.cwd().writeFile(io, .{ .sub_path = existing, .data = "kept" });
+    try testing.expectError(error.PathAlreadyExists, https.fetch(
+        try gpa.print("https://127.0.0.1:{d}/object", .{mirror.port}),
+        existing,
+        2,
+        ab,
+    ));
+    try testing.expectEqualStrings("kept", try read(io, gpa, existing, 4));
+    for ([_]anyerror{
+        error.ArtifactMismatch,
+        error.SizeMismatch,
+        error.TooLarge,
+        error.NotPublished,
+        error.MirrorRefused,
+        error.RedirectChangesTransport,
+        error.DownloadTimeout,
+        error.CertificateHostMismatch,
+    }) |err| try testing.expect(!retryable(err));
     mirror.mutex.lockUncancelable(io);
     defer mirror.mutex.unlock(io);
+    try testing.expectEqual(2, mirror.interrupted);
+    try testing.expectEqual(fetch_attempts, mirror.broken);
     for (mirror.agents.items) |line| try testing.expect(mem.endsWith(
         u8,
         line,

@@ -145,26 +145,24 @@ only updates signed with them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-Firecracker's [host-pinned boot files](design/implemented/firecracker-boot.md) retain
-IPE, dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a
-TPM release floor: the trusted host can replace the record or restore older
-vulnerable state. Keep it outside guest access. Changed boot files fail closed;
-legacy mode keeps guest-controlled A/B updates without pinning those files.
+Firecracker's [host-pinned boot files](design/firecracker-boot.md) retain IPE,
+dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a TPM
+release floor: the trusted host can replace the record or restore older vulnerable
+state. Keep it outside guest access. Changed boot files fail closed; legacy mode
+keeps guest-controlled A/B updates without pinning those files.
 
-Other providers currently provide all three protections together. Without them a
-running machine keeps its seal, fence and verified root: root still cannot run a
-program the image lacks, but can choose what boots next. `--dev` makes a local
-development image: mksh, BusyBox tools, root SSH through a Howl-managed Ed25519 key,
-optional seal learning (refused calls logged, not blocked) and, with
-`werewolf.debug=1`, a root console shell without a password. The key lives under
-`$XDG_DATA_HOME/howl/keys/dev/` and is passed by `howl ssh root@NAME`; it is separate
-from the keys used by playground. With both the checked debug command line and Howl's
-dev config marker, init mounts `/run/howl-dev` as executable RAM for developer SSH
-uploads. [Test iteration](design/implemented/local-test-iteration.md) uses SSH and
-`sh-shim`, without BusyBox or a console shell, and confines a selected driver with
-its declared leash policy. Dev images require protections off:
-`--disable=secureboot,tpm,ipe`, and are never published. A root console fails
-posture.
+Other providers supply all three protections. Without them a running machine keeps
+its seal, fence and verified root: root still cannot run a program the image lacks,
+but can choose what boots next. `--dev` makes a local development image: mksh,
+BusyBox tools, root SSH through a Howl-managed Ed25519 key, optional seal learning
+(refused calls logged, not blocked) and, with `werewolf.debug=1`, a passwordless root
+console. The key lives under `$XDG_DATA_HOME/howl/keys/dev/`; `howl ssh root@NAME`
+uses it. Playground's keys are separate. With the checked debug command line and
+Howl's dev config marker, init mounts `/run/howl-dev` as executable RAM for SSH
+uploads. [Test iteration](design/local-test-iteration.md) uses SSH and `sh-shim`,
+without BusyBox or a console shell, and confines a selected driver with its declared
+leash policy. Dev images require protections off: `--disable=secureboot,tpm,ipe`, and
+are never published. A root console fails posture.
 
 ## Not done, by choice
 

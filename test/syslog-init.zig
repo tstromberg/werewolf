@@ -336,11 +336,15 @@ fn waitSender(pid: i32) !void {
 }
 
 fn flooding(io: Io, gpa: mem.Allocator) !void {
-    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid, 32);
+    // Timer coalescing and VM scheduling must not spread this burst below
+    // the 1,000/second limit. The sibling senders remain deliberately paced.
+    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid, 128);
     try waitSender(noisy);
+    try drainFlood(io, gpa);
     // These share the noisy process's UID but each stays below the PID limit.
     try waitSender(try logAs(65537, "pid-sibling-one", 600, 4));
     try waitSender(try logAs(65537, "pid-sibling-two", 600, 4));
+    var last: [3]usize = @splat(0);
     for (0..500) |_| {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
@@ -371,6 +375,7 @@ fn flooding(io: Io, gpa: mem.Allocator) !void {
             notices += 1;
         }
         if (notices > 1) return error.FloodNoticeFlood;
+        last = .{ notices, one, two };
         if (notices == 1 and one == 600 and two == 600) {
             std.debug.print(
                 "syslog-check: PID flooding notice and independent same-UID senders verified\n",
@@ -380,7 +385,29 @@ fn flooding(io: Io, gpa: mem.Allocator) !void {
         }
         try io.sleep(.fromMilliseconds(10), .awake);
     }
+    std.debug.print("syslog-check: flood evidence: notices={d} sibling-one={d} " ++
+        "sibling-two={d}\n", .{ last[0], last[1], last[2] });
     return error.FloodChecksFailed;
+}
+
+fn drainFlood(io: Io, gpa: mem.Allocator) !void {
+    // The burst may fill the nonblocking file-worker queue. A persisted
+    // marker proves that backlog has drained before exact sibling counts.
+    // Keep the same daemon and its PID quota table throughout the test.
+    for (0..500) |_| {
+        try send("pid-flood-drained");
+        try io.sleep(.fromMilliseconds(10), .awake);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const text = try Dir.cwd().readFileAlloc(
+            io,
+            "/data/log/messages",
+            arena.allocator(),
+            .limited(4 << 20),
+        );
+        if (mem.find(u8, text, "\"message\":\"pid-flood-drained\"") != null) return;
+    }
+    return error.FloodDrainTimeout;
 }
 
 fn fixture(io: Io, gpa: mem.Allocator, name: []const u8, text: []const u8) !void {

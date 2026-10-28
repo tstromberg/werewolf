@@ -18,7 +18,7 @@ out=$("$howl" create version-check --with playground --version ../image 2>&1)
 "$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
 "$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"
 "$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
-"$howl" run --build --disable=secureboot,tpm,ipe --dev=ssh -h >/dev/null 2>&1 || fail "explicit unprotected development help"
+"$howl" run --build --disable=secureboot,tpm,ipe --dev=ssh -h >/dev/null 2>&1 || fail "explicit unprotected developer SSH help"
 "$howl" create --build smoke --with playground --on firecracker -n 2>&1 | grep -q 'as it is' ||
 	fail "Firecracker's default build plan failed"
 out=$("$howl" create --build smoke --with playground --dev 2>&1)

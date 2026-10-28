@@ -2,6 +2,25 @@ version: 1
 packages:
   - mariadb-client
 suites:
+  # Both server forms must be SQL-ready before the shared restart probe.
+  - name: mariadb-ready
+    readiness: true
+    policy:
+      run: [/usr/bin/mariadb]
+    cases:
+      - name: mariadb-ready
+        steps:
+          - exec:
+              argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root,
+                     '--execute=SELECT 1']
+              env:
+                LC_ALL: C
+              readonly: true
+            expect:
+              exit: 0
+              stdout: "1\n"
+            await: 60s
   - name: mariadb-admin
     policy:
       run:

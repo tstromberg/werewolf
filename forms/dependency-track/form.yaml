@@ -7,8 +7,8 @@ base: jre
 
 with: [postgresql, caddy]
 
-# LOCAL-PACKAGE-REVERT: use the published package once its version 5 build is available.
-# Until then, melange/dependency-track.yaml supplies the complete local recipe.
+packages:
+  - dependency-track>=5.2.1-r0
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
