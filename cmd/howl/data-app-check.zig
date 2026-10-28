@@ -102,7 +102,8 @@ const Test = struct {
         });
         const source_config = try t.configuration("source");
         const target_config = try t.configuration("target");
-        const source = try t.own(try c.gpa.print("transfer-src-{s}", .{suffix}));
+        // Keep Unix socket paths below the limit in long runner checkouts.
+        const source = try t.own(try c.gpa.print("dts{s}", .{suffix}));
         try t.create(source, source_config, "source-create");
         try t.pin(source);
         const denied_key = try c.path("unauthorized.key");
@@ -166,8 +167,8 @@ const Test = struct {
             );
             for (0..3) |which| {
                 const name = try t.own(try c.gpa.print(
-                    "transfer-{s}-{d}-{s}",
-                    .{ prefix, which, suffix[0..8] },
+                    "dt{s}{d}{s}",
+                    .{ if (online) "n" else "f", which, suffix },
                 ));
                 var args: std.ArrayList([]const u8) = .empty;
                 try args.appendSlice(
@@ -313,7 +314,10 @@ const Test = struct {
         for (0..seconds) |_| {
             const raw = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
             const text = try host.qemu.clean(c.gpa, raw);
-            if (mem.find(u8, text, needle) != null) return text;
+            // A serial read can end halfway through a marker or host key.
+            if (mem.find(u8, text, needle)) |start| {
+                if (mem.findScalarPos(u8, text, start + needle.len, '\n') != null) return text;
+            }
             if (mem.find(u8, text, "transfer-fixture: Sql") != null or
                 mem.find(u8, text, "transfer-fixture: Rows") != null)
                 return c.fail("database fixture failed; see {s}", .{file});
