@@ -29,7 +29,8 @@ pub const limits = struct {
 /// These are machine authority or filesystem bookkeeping, never application
 /// input. The installer enforces these independently of the manifest's claims.
 pub const exclusions = [_][]const u8{
-    ".werewolf", "lost+found", "log", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
+    ".werewolf",      "lost+found",      "log", "svc/sshd", "svc/sshd-dev",
+    "svc/autoupdate", "svc/unwound-age",
 };
 
 pub const Identity = struct { name: []const u8, id: u32 };
@@ -107,7 +108,8 @@ pub fn validIdentity(name: []const u8) bool {
 }
 
 pub fn validPath(path: []const u8) bool {
-    if (path.len == 0 or path.len > limits.path or !std.unicode.utf8ValidateSlice(path)) return false;
+    if (path.len == 0 or path.len > limits.path or
+        !std.unicode.utf8ValidateSlice(path)) return false;
     var parts = mem.splitScalar(u8, path, '/');
     var depth: usize = 0;
     while (parts.next()) |p| {
@@ -151,9 +153,11 @@ fn hashId(value: []const u8) bool {
 
 /// Validate all inventory and source scope before any staging callback runs.
 pub fn check(a: Allocator, m: Manifest, policy: Policy, service: ?[]const u8) !void {
-    if (!mem.eql(u8, m.format, format) or !m.clean or !hashId(m.image)) return error.TransferManifest;
+    if (!mem.eql(u8, m.format, format) or !m.clean or
+        !hashId(m.image)) return error.TransferManifest;
     if (!mem.eql(u8, m.image, policy.image) or m.arch != policy.arch) return error.TransferImage;
-    if (m.entries.len > limits.entries or m.excluded.len != exclusions.len) return error.TransferLimit;
+    if (m.entries.len > limits.entries or
+        m.excluded.len != exclusions.len) return error.TransferLimit;
     for (m.excluded, exclusions) |given, required|
         if (!mem.eql(u8, given, required)) return error.TransferExclusions;
     if (m.service) |s| if (!policy.serviceAllowed(s)) return error.TransferService;
@@ -197,12 +201,19 @@ pub fn check(a: Allocator, m: Manifest, policy: Policy, service: ?[]const u8) !v
     if (!found) return error.TransferService;
     if (m.service) |s| {
         var buf: [68]u8 = undefined;
-        const root = try std.fmt.bufPrint(&buf, "svc/{s}", .{s});
+        const root = try std.mem.print(&buf, "svc/{s}", .{s});
         if (seen.get(root) != .directory) return error.TransferService;
     }
 }
 
-pub fn scan(io: Io, a: Allocator, root: Dir, policy: Policy, service: ?[]const u8, owners: Ownership) !Manifest {
+pub fn scan(
+    io: Io,
+    a: Allocator,
+    root: Dir,
+    policy: Policy,
+    service: ?[]const u8,
+    owners: Ownership,
+) !Manifest {
     if (service) |s| if (!policy.serviceAllowed(s)) return error.TransferService;
     var list: std.ArrayList(Entry) = .empty;
     errdefer list.deinit(a);
@@ -221,7 +232,16 @@ pub fn scan(io: Io, a: Allocator, root: Dir, policy: Policy, service: ?[]const u
     return m;
 }
 
-fn scanTree(io: Io, a: Allocator, dir: Dir, prefix: []const u8, p: Policy, o: Ownership, list: *std.ArrayList(Entry), depth: usize) anyerror!void {
+fn scanTree(
+    io: Io,
+    a: Allocator,
+    dir: Dir,
+    prefix: []const u8,
+    p: Policy,
+    o: Ownership,
+    list: *std.ArrayList(Entry),
+    depth: usize,
+) anyerror!void {
     if (depth > limits.depth) return error.TransferLimit;
     const before = try dir.stat(io);
     var names: std.ArrayList([]const u8) = .empty;
@@ -240,7 +260,10 @@ fn scanTree(io: Io, a: Allocator, dir: Dir, prefix: []const u8, p: Policy, o: Ow
         }
     }.less);
     for (names.items) |name| {
-        const path = if (prefix.len == 0) try a.dupe(u8, name) else try a.print("{s}/{s}", .{ prefix, name });
+        const path = if (prefix.len == 0)
+            try a.dupe(u8, name)
+        else
+            try a.print("{s}/{s}", .{ prefix, name });
         if (excluded(path)) {
             a.free(path);
             continue;
@@ -250,7 +273,17 @@ fn scanTree(io: Io, a: Allocator, dir: Dir, prefix: []const u8, p: Policy, o: Ow
     if (!unchanged(before, try dir.stat(io))) return error.TransferChanged;
 }
 
-fn scanEntry(io: Io, a: Allocator, dir: Dir, name: []const u8, path: []const u8, p: Policy, o: Ownership, list: *std.ArrayList(Entry), depth: usize) !void {
+fn scanEntry(
+    io: Io,
+    a: Allocator,
+    dir: Dir,
+    name: []const u8,
+    path: []const u8,
+    p: Policy,
+    o: Ownership,
+    list: *std.ArrayList(Entry),
+    depth: usize,
+) !void {
     if (!validPath(path) or list.items.len >= limits.entries) return error.TransferLimit;
     const st = try dir.statFile(io, name, .{ .follow_symlinks = false });
     if (st.kind == .directory) {
@@ -258,7 +291,10 @@ fn scanEntry(io: Io, a: Allocator, dir: Dir, name: []const u8, path: []const u8,
         defer child.close(io);
         const pinned = try child.stat(io);
         if (!unchanged(st, pinned)) return error.TransferChanged;
-        const owner = try o.get(o.context, .{ .handle = child.handle, .flags = .{ .nonblocking = false } });
+        const owner = try o.get(
+            o.context,
+            .{ .handle = child.handle, .flags = .{ .nonblocking = false } },
+        );
         try list.append(a, try entryFor(path, pinned, owner, p));
         try scanTree(io, a, child, path, p, o, list, depth + 1);
     } else {
@@ -356,7 +392,14 @@ fn octal(buf: []u8, value: u64) !void {
     }
 }
 
-fn header(name: []const u8, kind: u8, size: u64, mode: u32, owner: []const u8, group: []const u8) ![512]u8 {
+fn header(
+    name: []const u8,
+    kind: u8,
+    size: u64,
+    mode: u32,
+    owner: []const u8,
+    group: []const u8,
+) ![512]u8 {
     if (name.len > 100 or owner.len > 31 or group.len > 31) return error.TransferLimit;
     var h: [512]u8 = @splat(0);
     @memcpy(h[0..name.len], name);
@@ -393,7 +436,10 @@ fn pax(a: Allocator, e: Entry) ![]const u8 {
     defer a.free(size);
     const ns: i128 = e.mtime_ns;
     const abs = @abs(ns);
-    const time = try a.print("{s}{d}.{d:0>9}", .{ if (ns < 0) "-" else "", abs / 1_000_000_000, abs % 1_000_000_000 });
+    const time = try a.print(
+        "{s}{d}.{d:0>9}",
+        .{ if (ns < 0) "-" else "", abs / 1_000_000_000, abs % 1_000_000_000 },
+    );
     defer a.free(time);
     const p = try paxRecord(a, "path", path);
     defer a.free(p);
@@ -406,7 +452,15 @@ fn pax(a: Allocator, e: Entry) ![]const u8 {
 
 /// Produces uncompressed tar; the caller connects its writer to pinned Zstd.
 /// Reader ownership and source metadata are rechecked during emission.
-pub fn emit(io: Io, a: Allocator, root: Dir, m: Manifest, p: Policy, owners: Ownership, writer: *Io.Writer) ![64]u8 {
+pub fn emit(
+    io: Io,
+    a: Allocator,
+    root: Dir,
+    m: Manifest,
+    p: Policy,
+    owners: Ownership,
+    writer: *Io.Writer,
+) ![64]u8 {
     try check(a, m, p, m.service);
     const json = try std.json.Stringify.valueAlloc(a, m, .{});
     defer a.free(json);
@@ -432,11 +486,22 @@ pub fn emit(io: Io, a: Allocator, root: Dir, m: Manifest, p: Policy, owners: Own
         try out.put(&try header("PaxHeaders/entry", 'x', extended.len, 0o600, "root", "root"));
         try out.put(extended);
         try out.pad(extended.len);
-        try out.put(&try header("entry", if (e.kind == .file) '0' else '5', 0, e.mode, e.owner, e.group));
+        try out.put(&try header(
+            "entry",
+            if (e.kind == .file) '0' else '5',
+            0,
+            e.mode,
+            e.owner,
+            e.group,
+        ));
         var offset: u64 = 0;
         var buffer: [64 << 10]u8 = undefined;
         while (offset < e.size) {
-            const n = try file.readPositional(io, &.{buffer[0..@min(buffer.len, e.size - offset)]}, offset);
+            const n = try file.readPositional(
+                io,
+                &.{buffer[0..@min(buffer.len, e.size - offset)]},
+                offset,
+            );
             if (n == 0) return error.TransferChanged;
             try out.put(buffer[0..n]);
             offset += n;
@@ -454,8 +519,10 @@ pub fn emit(io: Io, a: Allocator, root: Dir, m: Manifest, p: Policy, owners: Own
 }
 
 fn entryEqual(a: Entry, b: Entry) bool {
-    return a.kind == b.kind and a.size == b.size and a.mode == b.mode and a.mtime_ns == b.mtime_ns and
-        mem.eql(u8, a.path, b.path) and mem.eql(u8, a.owner, b.owner) and mem.eql(u8, a.group, b.group) and
+    return a.kind == b.kind and a.size == b.size and a.mode == b.mode and
+        a.mtime_ns == b.mtime_ns and
+        mem.eql(u8, a.path, b.path) and mem.eql(u8, a.owner, b.owner) and
+        mem.eql(u8, a.group, b.group) and
         std.meta.eql(a.default_acl, b.default_acl);
 }
 
@@ -501,13 +568,31 @@ fn number(b: []const u8) !u64 {
 
 /// Match the exact header dialect we emit. Reject unused fields rather than
 /// accepting alternate extraction semantics (links, prefixes or numeric owners).
-fn matchHeader(h: [512]u8, name: []const u8, kind: u8, size: u64, mode: u32, owner: []const u8, group: []const u8) !void {
-    if (!mem.eql(u8, &h, &try header(name, kind, size, mode, owner, group))) return error.TransferHeader;
+fn matchHeader(
+    h: [512]u8,
+    name: []const u8,
+    kind: u8,
+    size: u64,
+    mode: u32,
+    owner: []const u8,
+    group: []const u8,
+) !void {
+    if (!mem.eql(
+        u8,
+        &h,
+        &try header(name, kind, size, mode, owner, group),
+    )) return error.TransferHeader;
 }
 
 /// The sink must be private, disposable staging. Completion of callbacks is
 /// deliberately not authorization to publish: the final digest/EOF can still fail.
-pub fn validate(a: Allocator, reader: *Io.Reader, p: Policy, service: ?[]const u8, sink: ?Sink) !Result {
+pub fn validate(
+    a: Allocator,
+    reader: *Io.Reader,
+    p: Policy,
+    service: ?[]const u8,
+    sink: ?Sink,
+) !Result {
     return validateChecksummed(a, reader, p, service, sink, null);
 }
 
@@ -530,7 +615,14 @@ pub fn manifest(a: Allocator, reader: *Io.Reader) !Manifest {
 }
 
 /// Internal hook: the frame checksum covers all tar bytes, including completion.
-pub fn validateChecksummed(a: Allocator, reader: *Io.Reader, p: Policy, service: ?[]const u8, sink: ?Sink, checksum: ?*std.hash.XxHash64) !Result {
+pub fn validateChecksummed(
+    a: Allocator,
+    reader: *Io.Reader,
+    p: Policy,
+    service: ?[]const u8,
+    sink: ?Sink,
+    checksum: ?*std.hash.XxHash64,
+) !Result {
     var in: Input = .{ .reader = reader, .checksum = checksum };
     var h: [512]u8 = undefined;
     try in.take(&h);
@@ -573,13 +665,21 @@ pub fn validateChecksummed(a: Allocator, reader: *Io.Reader, p: Policy, service:
     try matchHeader(h, "complete.json", '0', complete_size, 0o600, "root", "root");
     const complete = try in.body(a, complete_size, 1024);
     defer a.free(complete);
-    const record = try std.json.parseFromSliceLeaky(struct { sha256: []const u8 }, a, complete, .{});
+    const record = try std.json.parseFromSliceLeaky(
+        struct { sha256: []const u8 },
+        a,
+        complete,
+        .{},
+    );
     if (!mem.eql(u8, record.sha256, &digest)) return error.TransferChecksum;
     var end: [1024]u8 = undefined;
     try reader.readSliceAll(&end);
     if (checksum) |c| c.update(&end);
     if (!allZero(&end)) return error.TransferHeader;
-    if (reader.takeByte()) |_| return error.TransferTrailing else |err| if (err != error.EndOfStream) return err;
+    if (reader.takeByte()) |_|
+        return error.TransferTrailing
+    else |err| if (err != error.EndOfStream)
+        return err;
     return .{ .manifest = m, .sha256 = digest, .bytes = total };
 }
 
@@ -615,7 +715,15 @@ test "inventory cannot authorize machine state, unknown owners or ambiguous path
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const directory: Entry = .{ .path = "svc", .kind = .directory, .size = 0, .mode = 0o755, .mtime_ns = 0, .owner = "root", .group = "root" };
+    const directory: Entry = .{
+        .path = "svc",
+        .kind = .directory,
+        .size = 0,
+        .mode = 0o755,
+        .mtime_ns = 0,
+        .owner = "root",
+        .group = "root",
+    };
     var entry = directory;
     var m: Manifest = .{ .image = test_image, .arch = .aarch64, .entries = &.{directory} };
     try check(a, m, test_policy, null);
@@ -652,7 +760,15 @@ test "service selection needs no destination authority for discarded owners" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const directory: Entry = .{ .path = "svc", .kind = .directory, .size = 0, .mode = 0o755, .mtime_ns = 0, .owner = "root", .group = "root" };
+    const directory: Entry = .{
+        .path = "svc",
+        .kind = .directory,
+        .size = 0,
+        .mode = 0o755,
+        .mtime_ns = 0,
+        .owner = "root",
+        .group = "root",
+    };
     var entries = [_]Entry{ directory, directory, directory };
     entries[1].path = "svc/plex";
     entries[2].path = "foreign";

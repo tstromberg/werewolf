@@ -116,7 +116,11 @@ account registration, library management, metadata fetching or client playback. 
 need a real account test, deferred for now. The exploratory namespace playback
 fixture is compatibility evidence only. Data transfer uses `howl export` and
 `howl import`; `--service plex` selects server state, while `--service plex-media`
-selects media. The archive does not expand dependencies. See [data storage](../../docs/data.md) for current support and [application transfer tests](../../docs/design/pending/data-import-application.md) for the remaining release gate.
+selects media. The archive does not expand dependencies. See
+[data storage](../../docs/data.md) for current support and
+[application transfer
+tests](../../docs/design/pending/data-import-application.md) for
+the remaining release gate.
 Production IPE/verified-boot client
 playback remains unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can
 be exercised with `IPE=1` and the signed kernel inputs described in the testing

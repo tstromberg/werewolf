@@ -19,12 +19,38 @@ pub fn build(b: *native.B, rootfs: []const u8, overlay: []const u8) !void {
     if (b.spec.published) {
         const file = try Dir.cwd().createFile(b.io, init, .{ .permissions = .fromMode(0o755) });
         defer file.close(b.io);
-        try b.run(&.{ "bsdtar", "-xOf", rootfs, "usr/lib/werewolf/data-transfer-helper" }, .{ .stdout = file });
-    } else try b.copy(try b.path("{s}/data-transfer-helper/usr/lib/werewolf/data-transfer-helper", .{b.p.programs}), init);
+        try b.run(
+            &.{ "bsdtar", "-xOf", rootfs, "usr/lib/werewolf/data-transfer-helper" },
+            .{ .stdout = file },
+        );
+    } else try b.copy(
+        try b.path(
+            "{s}/data-transfer-helper/usr/lib/werewolf/data-transfer-helper",
+            .{b.p.programs},
+        ),
+        init,
+    );
     const init_tar = try b.path("{s}/init.tar", .{b.p.out});
     try b.run(&.{ "bsdtar", "-cf", init_tar, "-C", work, "init" }, .{});
     const cpio = try b.path("{s}/helper.cpio", .{b.p.out});
-    try b.run(&.{ "bsdtar", "-cf", cpio, "--format", "newc", "--uid", "0", "--gid", "0", "--numeric-owner", try b.path("@{s}", .{rootfs}), try b.path("@{s}", .{overlay}), try b.path("@{s}", .{init_tar}) }, .{});
+    try b.run(
+        &.{
+            "bsdtar",
+            "-cf",
+            cpio,
+            "--format",
+            "newc",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+            "--numeric-owner",
+            try b.path("@{s}", .{rootfs}),
+            try b.path("@{s}", .{overlay}),
+            try b.path("@{s}", .{init_tar}),
+        },
+        .{},
+    );
     const temp = try b.tmp(out);
     try b.run(&.{ "zstd", "-1", "-q", "-T1", "-f", cpio, "-o", temp }, .{});
     try b.rename(temp, out);
@@ -39,14 +65,23 @@ pub const Guest = struct {
     image: []const u8,
     verity: @import("verity").Params,
 };
-pub const Devices = struct { data: []const u8, control: []const u8, writable: bool = false, guard: ?Io.File = null };
+pub const Devices = struct {
+    data: []const u8,
+    control: []const u8,
+    writable: bool = false,
+    guard: ?Io.File = null,
+};
 
 pub fn run(io: Io, a: Allocator, g: Guest, d: Devices, work: []const u8) !data.Policy {
     const console = try a.print("{s}/console.log", .{work});
     const output = try a.print("{s}/archive.tar.zst", .{work});
     const status = try a.print("{s}.status", .{console});
     for ([_][]const u8{ console, output, status }) |path| {
-        const f = try Dir.cwd().createFile(io, path, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        const f = try Dir.cwd().createFile(
+            io,
+            path,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
         f.close(io);
     }
     try executeLocked(io, try argv(a, g, d, console, output), .fromSeconds(12 * 3600), d.guard);
@@ -70,7 +105,10 @@ fn executeLocked(io: Io, args: []const []const u8, timeout: Io.Duration, guard: 
         .inherit_files = if (guard) |file| &.{file} else &.{},
     });
     defer child.kill(io);
-    const Event = union(enum) { process: std.process.Child.WaitError!std.process.Child.Term, timeout: Io.Cancelable!void };
+    const Event = union(enum) {
+        process: std.process.Child.WaitError!std.process.Child.Term,
+        timeout: Io.Cancelable!void,
+    };
     var events: [2]Event = undefined;
     var select = Io.Select(Event).init(io, &events);
     defer select.cancelDiscard();
@@ -84,10 +122,22 @@ fn executeLocked(io: Io, args: []const []const u8, timeout: Io.Duration, guard: 
 
 /// The disk is private and immutable for the helper's lifetime. mke2fs copies
 /// only our staging tree, never an arbitrary archive or guest filesystem.
-pub fn controlDisk(io: Io, a: Allocator, work: []const u8, request: anytype, archive: ?[]const u8, key: ?[]const u8, why: *howl.Why) ![]const u8 {
+pub fn controlDisk(
+    io: Io,
+    a: Allocator,
+    work: []const u8,
+    request: anytype,
+    archive: ?[]const u8,
+    key: ?[]const u8,
+    why: *howl.Why,
+) ![]const u8 {
     const files = try a.print("{s}/control", .{work});
     try Dir.cwd().createDir(io, files, .fromMode(0o700));
-    try @import("boot-image.zig").durable(io, try a.print("{s}/request.json", .{files}), try std.json.Stringify.valueAlloc(a, request, .{}));
+    try @import("boot-image.zig").durable(
+        io,
+        try a.print("{s}/request.json", .{files}),
+        try std.json.Stringify.valueAlloc(a, request, .{}),
+    );
     var size: u64 = 32 << 20;
     if (archive) |path| {
         const input = try Dir.cwd().openFile(io, path, .{});
@@ -103,17 +153,45 @@ pub fn controlDisk(io: Io, a: Allocator, work: []const u8, request: anytype, arc
         try @import("boot-image.zig").durable(io, try a.print("{s}/key", .{files}), contents);
     }
     const disk = try a.print("{s}/control.img", .{work});
-    const f = try Dir.cwd().createFile(io, disk, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const f = try Dir.cwd().createFile(
+        io,
+        disk,
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
     defer f.close(io);
     try f.setLength(io, size);
-    const mk = @import("ext4.zig").findMke2fs(io, a) orelse return why.refuse("no mke2fs; install e2fsprogs", .{});
-    try howl.run(io, why, &.{ mk, "-q", "-F", "-t", "ext4", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", "-d", files, disk });
+    const mk = @import("ext4.zig").findMke2fs(
+        io,
+        a,
+    ) orelse return why.refuse("no mke2fs; install e2fsprogs", .{});
+    try howl.run(
+        io,
+        why,
+        &.{
+            mk,
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-m",
+            "0",
+            "-E",
+            "lazy_itable_init=0,lazy_journal_init=0",
+            "-d",
+            files,
+            disk,
+        },
+    );
     try f.sync(io);
     return disk;
 }
 
 fn copy(io: Io, source: Io.File, destination: []const u8) !void {
-    const out = try Dir.cwd().createFile(io, destination, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const out = try Dir.cwd().createFile(
+        io,
+        destination,
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
     defer out.close(io);
     var buf: [128 << 10]u8 = undefined;
     while (true) {
@@ -134,19 +212,91 @@ fn escaped(a: Allocator, text: []const u8) ![]const u8 {
 }
 
 /// Fixed device roles; no user-supplied QEMU options, network or host shares.
-pub fn argv(a: Allocator, g: Guest, d: Devices, console: []const u8, output: []const u8) ![]const []const u8 {
+pub fn argv(
+    a: Allocator,
+    g: Guest,
+    d: Devices,
+    console: []const u8,
+    output: []const u8,
+) ![]const []const u8 {
     const host = howl.hostArch() orelse return error.UnsupportedHostArch;
     if (g.arch != host) return error.TransferArchitecture;
     const mac = @import("builtin").os.tag == .macos;
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ if (g.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64", "-M", if (g.arch == .aarch64) "virt,gic-version=3" else "q35", "-accel", if (mac) "hvf" else "kvm", "-cpu", "host", "-smp", "2", "-m", "2048", "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none", "-nic", "none", "-serial", try a.print("file:{s}", .{try escaped(a, console)}), "-kernel", g.kernel, "-initrd", g.initramfs, "-append", if (g.arch == .aarch64) "console=ttyAMA0 panic=-1 rdinit=/init" else "console=ttyS0 panic=-1 rdinit=/init" });
+    try args.appendSlice(
+        a,
+        &.{
+            if (g.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64",
+            "-M",
+            if (g.arch == .aarch64) "virt,gic-version=3" else "q35",
+            "-accel",
+            if (mac) "hvf" else "kvm",
+            "-cpu",
+            "host",
+            "-smp",
+            "2",
+            "-m",
+            "2048",
+            "-nodefaults",
+            "-no-reboot",
+            "-display",
+            "none",
+            "-monitor",
+            "none",
+            "-nic",
+            "none",
+            "-serial",
+            try a.print("file:{s}", .{try escaped(a, console)}),
+            "-kernel",
+            g.kernel,
+            "-initrd",
+            g.initramfs,
+            "-append",
+            if (g.arch == .aarch64)
+                "console=ttyAMA0 panic=-1 rdinit=/init"
+            else
+                "console=ttyS0 panic=-1 rdinit=/init",
+        },
+    );
     for ([_][]const u8{ d.data, d.control, g.image }, 0..) |path, i| {
-        try args.appendSlice(a, &.{ "-drive", try a.print("if=none,id=d{d},format=raw,readonly={s},file={s}", .{ i, if (i == 0 and d.writable) "off" else "on", try escaped(a, path) }), "-device", try a.print("virtio-blk-pci,drive=d{d}", .{i}) });
+        try args.appendSlice(
+            a,
+            &.{
+                "-drive",
+                try a.print(
+                    "if=none,id=d{d},format=raw,readonly={s},file={s}",
+                    .{ i, if (i == 0 and d.writable) "off" else "on", try escaped(a, path) },
+                ),
+                "-device",
+                try a.print("virtio-blk-pci,drive=d{d}", .{i}),
+            },
+        );
     }
-    try args.appendSlice(a, &.{ "-device", "virtio-serial-pci", "-chardev", try a.print("file,id=transfer,path={s}", .{try escaped(a, output)}), "-device", "virtserialport,chardev=transfer,name=werewolf.transfer", "-chardev", try a.print("file,id=status,path={s}.status", .{try escaped(a, console)}), "-device", "virtserialport,chardev=status,name=werewolf.transfer.status", "-object", "rng-random,id=rng0,filename=/dev/urandom", "-device", "virtio-rng-pci,rng=rng0" });
+    try args.appendSlice(
+        a,
+        &.{
+            "-device",
+            "virtio-serial-pci",
+            "-chardev",
+            try a.print("file,id=transfer,path={s}", .{try escaped(a, output)}),
+            "-device",
+            "virtserialport,chardev=transfer,name=werewolf.transfer",
+            "-chardev",
+            try a.print("file,id=status,path={s}.status", .{try escaped(a, console)}),
+            "-device",
+            "virtserialport,chardev=status,name=werewolf.transfer.status",
+            "-object",
+            "rng-random,id=rng0,filename=/dev/urandom",
+            "-device",
+            "virtio-rng-pci,rng=rng0",
+        },
+    );
     // Retain the already-held flock in QEMU's private descriptor set. If Howl
     // dies, another lifecycle operation still waits until this helper exits.
-    if (d.guard) |file| try args.appendSlice(a, &.{ "-add-fd", try a.print("fd={d},set=9,opaque=transfer-lifecycle", .{file.handle}) });
+    if (d.guard) |file| try args.appendSlice(
+        a,
+        &.{ "-add-fd", try a.print("fd={d},set=9,opaque=transfer-lifecycle", .{file.handle}) },
+    );
     return args.toOwnedSlice(a);
 }
 
@@ -165,7 +315,19 @@ pub fn policy(a: Allocator, console: []const u8) !data.Policy {
             completed = true;
         } else if (mem.startsWith(u8, line, "werewolf-transfer-error:")) {
             // Report fixed failure codes, never guest-controlled text or paths.
-            inline for (.{ error.TransferUnclean, error.TransferKey, error.TransferImage, error.TransferImageUnrecorded, error.TransferPostgresUnclean, error.TransferPostgresVersion, error.TransferPostgresControl, error.TransferFilesystem, error.TransferRead, error.TransferInstall, error.TransferHelperUnmount }) |err| {
+            inline for (.{
+                error.TransferUnclean,
+                error.TransferKey,
+                error.TransferImage,
+                error.TransferImageUnrecorded,
+                error.TransferPostgresUnclean,
+                error.TransferPostgresVersion,
+                error.TransferPostgresControl,
+                error.TransferFilesystem,
+                error.TransferRead,
+                error.TransferInstall,
+                error.TransferHelperUnmount,
+            }) |err| {
                 if (mem.eql(u8, line, "werewolf-transfer-error: " ++ @errorName(err))) return err;
             }
             return error.TransferHelper;
@@ -180,7 +342,19 @@ test "helper command attaches only explicit storage with no network or shares" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const args = try argv(a, .{ .arch = howl.hostArch().?, .kernel = "/kernel", .initramfs = "/init", .image = "/image", .verity = .{ .data_blocks = 1, .hash_start = 1, .salt = @splat(0), .root = @splat(0) } }, .{ .data = "/a,b/data", .control = "/control" }, "/console", "/output");
+    const args = try argv(
+        a,
+        .{
+            .arch = howl.hostArch().?,
+            .kernel = "/kernel",
+            .initramfs = "/init",
+            .image = "/image",
+            .verity = .{ .data_blocks = 1, .hash_start = 1, .salt = @splat(0), .root = @splat(0) },
+        },
+        .{ .data = "/a,b/data", .control = "/control" },
+        "/console",
+        "/output",
+    );
     var disks: usize = 0;
     for (args, 0..) |arg, i| {
         try t.expect(!mem.eql(u8, arg, "-netdev") and !mem.eql(u8, arg, "-virtfs"));
@@ -200,12 +374,26 @@ test "helper success requires one policy and explicit terminal completion" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const line = "werewolf-transfer-policy: {\"image\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"arch\":\"aarch64\",\"services\":[],\"users\":[],\"groups\":[]}\n";
+    const line = "werewolf-transfer-policy: {\"image\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+        "aaaaaaaaaaaaaaaaaaaaaaaaa\",\"arch\":\"aarch64\",\"services\":[],\"users\":[],\"groups" ++
+        "\":[]}\n";
     try t.expectError(error.TransferIncomplete, policy(a, line));
     _ = try policy(a, line ++ "werewolf-transfer-complete\r\n");
-    try t.expectError(error.TransferConsole, policy(a, line ++ line ++ "werewolf-transfer-complete\n"));
-    try t.expectError(error.TransferKey, policy(a, line ++ "werewolf-transfer-error: TransferKey\n"));
-    try t.expectError(error.TransferUnclean, policy(a, "werewolf-transfer-error: TransferUnclean\n"));
-    try t.expectError(error.TransferHelper, policy(a, "werewolf-transfer-error: untrusted diagnostic\n"));
+    try t.expectError(
+        error.TransferConsole,
+        policy(a, line ++ line ++ "werewolf-transfer-complete\n"),
+    );
+    try t.expectError(
+        error.TransferKey,
+        policy(a, line ++ "werewolf-transfer-error: TransferKey\n"),
+    );
+    try t.expectError(
+        error.TransferUnclean,
+        policy(a, "werewolf-transfer-error: TransferUnclean\n"),
+    );
+    try t.expectError(
+        error.TransferHelper,
+        policy(a, "werewolf-transfer-error: untrusted diagnostic\n"),
+    );
     try t.expectError(error.TransferConsole, policy(a, "werewolf-transfer-complete\n"));
 }

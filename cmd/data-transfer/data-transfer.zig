@@ -51,25 +51,60 @@ fn run(init: std.process.Init) !void {
     switch (mode) {
         .read => {
             control.close(init.io);
-            const confined_root = try @import("data-read").confine(init.io, root, request.service, .{});
+            const confined_root = try @import("data-read").confine(
+                init.io,
+                root,
+                request.service,
+                .{},
+            );
             const owners: data.Ownership = .{ .get = data.metadata.owner };
-            const manifest = try data.scan(init.io, a, confined_root, request.policy, request.service, owners);
+            const manifest = try data.scan(
+                init.io,
+                a,
+                confined_root,
+                request.policy,
+                request.service,
+                owners,
+            );
             var output_buffer: [64 << 10]u8 = undefined;
             var output = File.stdout().writerStreaming(init.io, &output_buffer);
-            _ = try data.emit(init.io, a, confined_root, manifest, request.policy, owners, &output.interface);
+            _ = try data.emit(
+                init.io,
+                a,
+                confined_root,
+                manifest,
+                request.policy,
+                owners,
+                &output.interface,
+            );
             try output.interface.flush();
         },
         .install => {
             var session = try data.install.Session.init(init.io, root);
             defer session.deinit(init.io);
-            try (File{ .handle = session.stage.handle, .flags = .{ .nonblocking = false } }).setOwner(init.io, reader_id, reader_id);
-            session.state.deleteFile(init.io, "decoded") catch |err| if (err != error.FileNotFound) return err;
-            const decoded = try session.state.createFile(init.io, "decoded", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+            try (File{
+                .handle = session.stage.handle,
+                .flags = .{ .nonblocking = false },
+            }).setOwner(init.io, reader_id, reader_id);
+            session.state.deleteFile(
+                init.io,
+                "decoded",
+            ) catch |err| if (err != error.FileNotFound) return err;
+            const decoded = try session.state.createFile(
+                init.io,
+                "decoded",
+                .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) },
+            );
             defer decoded.close(init.io);
             defer session.state.deleteFile(init.io, "decoded") catch {};
             var env: std.process.Environ.Map = .init(a);
             var child = try std.process.spawn(init.io, .{
-                .argv = &.{ "/usr/lib/werewolf/data-transfer", "decode", try a.print("{d}", .{control.handle}), try a.print("{d}", .{session.stage.handle}) },
+                .argv = &.{
+                    "/usr/lib/werewolf/data-transfer",
+                    "decode",
+                    try a.print("{d}", .{control.handle}),
+                    try a.print("{d}", .{session.stage.handle}),
+                },
                 .environ_map = &env,
                 .stdin = .{ .file = File.stdin() },
                 .stdout = .pipe,
@@ -82,17 +117,36 @@ fn run(init: std.process.Init) !void {
             child.stdout = null;
             defer pipe.close(init.io);
             control.close(init.io);
-            try sandbox.closeExcept(&.{ root.handle, session.machine.handle, session.state.handle, session.lock.handle, session.stage.handle, decoded.handle, pipe.handle });
-            try sandbox.keepOnly((1 << linux.CAP.CHOWN) | (1 << linux.CAP.DAC_OVERRIDE) | (1 << linux.CAP.FOWNER));
-            try sandbox.landlock(&.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }}, &.{});
+            try sandbox.closeExcept(&.{
+                root.handle,
+                session.machine.handle,
+                session.state.handle,
+                session.lock.handle,
+                session.stage.handle,
+                decoded.handle,
+                pipe.handle,
+            });
+            try sandbox.keepOnly(
+                (1 << linux.CAP.CHOWN) | (1 << linux.CAP.DAC_OVERRIDE) | (1 << linux.CAP.FOWNER),
+            );
+            try sandbox.landlock(
+                &.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }},
+                &.{},
+            );
             var filter: [seal.max_filter]seal.Filter = undefined;
-            _ = try seal.install(seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .wpath, .proc }), true), false);
+            _ = try seal.install(
+                seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .wpath, .proc }), true),
+                false,
+            );
             // The decoder never receives a machine-state file descriptor.
             // Drain its pipe with a hard byte limit before parsing records.
             var transfer_buffer: [64 << 10]u8 = undefined;
             var count: usize = 0;
             while (true) {
-                const n = pipe.readStreaming(init.io, &.{&transfer_buffer}) catch |err| switch (err) {
+                const n = pipe.readStreaming(
+                    init.io,
+                    &.{&transfer_buffer},
+                ) catch |err| switch (err) {
                     error.EndOfStream => break,
                     else => return err,
                 };
@@ -105,15 +159,33 @@ fn run(init: std.process.Init) !void {
             if (!status.success()) return error.TransferDecode;
             var input_buffer: [4096]u8 = undefined;
             var input = decoded.reader(init.io, &input_buffer);
-            const result = try data.protocol.read(a, &input.interface, request.policy, request.service);
-            try session.publish(init.io, a, result, request.policy, .{ .target = request.target, .service = request.service });
+            const result = try data.protocol.read(
+                a,
+                &input.interface,
+                request.policy,
+                request.service,
+            );
+            try session.publish(
+                init.io,
+                a,
+                result,
+                request.policy,
+                .{ .target = request.target, .service = request.service },
+            );
         },
         .decode => {
             control.close(init.io);
             try confineDecoder(root);
             var input_buffer: [64 << 10]u8 = undefined;
             var input = File.stdin().readerStreaming(init.io, &input_buffer);
-            const result = try data.install.decode(init.io, a, &input.interface, root, request.policy, request.service);
+            const result = try data.install.decode(
+                init.io,
+                a,
+                &input.interface,
+                root,
+                request.policy,
+                request.service,
+            );
             var output_buffer: [4096]u8 = undefined;
             var output = File.stdout().writerStreaming(init.io, &output_buffer);
             try data.protocol.write(&output.interface, result);
@@ -149,7 +221,12 @@ pub fn parse(a: Allocator, bytes: []const u8) !Request {
         }
     }
     // check also validates image, architecture and exclusions without reading data.
-    try data.check(a, .{ .image = r.policy.image, .arch = r.policy.arch, .entries = &.{} }, r.policy, null);
+    try data.check(
+        a,
+        .{ .image = r.policy.image, .arch = r.policy.arch, .entries = &.{} },
+        r.policy,
+        null,
+    );
     return r;
 }
 
@@ -158,10 +235,16 @@ fn confineDecoder(root: Dir) !void {
     try sandbox.limit(.FSIZE, data.limits.file_bytes);
     try sandbox.limit(.AS, 1 << 30);
     try sandbox.dropTo(reader_id, null);
-    try sandbox.landlock(&.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }}, &.{});
+    try sandbox.landlock(
+        &.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }},
+        &.{},
+    );
     try @import("data-read").restrictPathMetadata();
     var filter: [seal.max_filter]seal.Filter = undefined;
-    _ = try seal.install(seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .wpath }), true), false);
+    _ = try seal.install(
+        seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .wpath }), true),
+        false,
+    );
 }
 
 test "worker control policy cannot hide duplicate identities or widen scope" {
@@ -181,7 +264,10 @@ test "worker control policy cannot hide duplicate identities or widen scope" {
     };
     _ = try parse(a, try std.json.Stringify.valueAlloc(a, r, .{}));
     r.service = "../sshd";
-    try t.expectError(error.TransferService, parse(a, try std.json.Stringify.valueAlloc(a, r, .{})));
+    try t.expectError(
+        error.TransferService,
+        parse(a, try std.json.Stringify.valueAlloc(a, r, .{})),
+    );
     r.service = "plex";
     r.policy.users = &.{ .{ .name = "root", .id = 0 }, .{ .name = "other", .id = 0 } };
     try t.expectError(error.TransferOwner, parse(a, try std.json.Stringify.valueAlloc(a, r, .{})));
@@ -199,11 +285,23 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
     try tmp.dir.createDirPath(io, ".werewolf");
     try tmp.dir.createDirPath(io, "log");
     try tmp.dir.createDir(io, "stage", .fromMode(0o700));
-    for ([_][]const u8{ "svc/plex/content", "svc/plex-media/secret", ".werewolf/secret", "log/secret", "public" }) |path|
-        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "x", .flags = .{ .permissions = .fromMode(0o666) } });
+    for ([_][]const u8{
+        "svc/plex/content",
+        "svc/plex-media/secret",
+        ".werewolf/secret",
+        "log/secret",
+        "public",
+    }) |path|
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = path, .data = "x", .flags = .{ .permissions = .fromMode(0o666) } },
+        );
     var stage = try tmp.dir.openDir(io, "stage", .{ .iterate = true });
     defer stage.close(io);
-    try (File{ .handle = stage.handle, .flags = .{ .nonblocking = false } }).setOwner(io, reader_id, reader_id);
+    try (File{
+        .handle = stage.handle,
+        .flags = .{ .nonblocking = false },
+    }).setOwner(io, reader_id, reader_id);
     for (0..5) |mode| {
         const pid = try sandbox.sys(linux.fork(), "fork boundary test");
         if (pid == 0) {
@@ -242,25 +340,46 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
     const view = if (mode == 0) blk: {
         try confineDecoder(stage);
         break :blk stage;
-    } else try @import("data-read").confine(io, root, if (mode == 1) "plex" else null, .{ .session = mode == 3 });
+    } else try @import("data-read").confine(
+        io,
+        root,
+        if (mode == 1) "plex" else null,
+        .{ .session = mode == 3 },
+    );
     var header: extern struct { version: u32 = 0x20080522, pid: i32 = 0 } = .{};
     var caps: [2]extern struct { effective: u32, permitted: u32, inheritable: u32 } = undefined;
-    _ = try sandbox.sys(linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps)), "capget boundary test");
+    _ = try sandbox.sys(
+        linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps)),
+        "capget boundary test",
+    );
     const permitted: u32 = if (mode == 0) 0 else 1 << linux.CAP.DAC_READ_SEARCH;
-    if (linux.geteuid() != reader_id or caps[0].effective != permitted or caps[0].permitted != permitted or
-        caps[0].inheritable != 0 or caps[1].effective != 0 or caps[1].permitted != 0) return error.Boundary;
+    if (linux.geteuid() != reader_id or caps[0].effective != permitted or
+        caps[0].permitted != permitted or
+        caps[0].inheritable != 0 or caps[1].effective != 0 or
+        caps[1].permitted != 0) return error.Boundary;
     if (mode == 0) {
-        const fd = try sandbox.sys(linux.openat(view.handle, "allowed", .{ .ACCMODE = .RDWR, .CREAT = true }, 0o600), "stage write");
+        const fd = try sandbox.sys(
+            linux.openat(view.handle, "allowed", .{ .ACCMODE = .RDWR, .CREAT = true }, 0o600),
+            "stage write",
+        );
         _ = try sandbox.sys(linux.write(@intCast(fd), "x", 1), "stage write");
         _ = linux.close(@intCast(fd));
         try denied(linux.openat(view.handle, "../public", .{ .ACCMODE = .RDWR }, 0));
     } else {
-        const fd = try sandbox.sys(linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDONLY }, 0), "source read");
+        const fd = try sandbox.sys(
+            linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDONLY }, 0),
+            "source read",
+        );
         _ = linux.close(@intCast(fd));
         try denied(linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDWR }, 0));
         try denied(linux.openat(view.handle, ".werewolf/secret", .{ .ACCMODE = .RDONLY }, 0));
         try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0));
-        if (mode == 1) try denied(linux.openat(view.handle, "svc/plex-media/secret", .{ .ACCMODE = .RDONLY }, 0));
+        if (mode == 1) try denied(linux.openat(
+            view.handle,
+            "svc/plex-media/secret",
+            .{ .ACCMODE = .RDONLY },
+            0,
+        ));
     }
     try denied(linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0));
     var bytes: [128]u8 = undefined;

@@ -8,9 +8,25 @@ const Dir = Io.Dir;
 const A = std.mem.Allocator;
 pub const Endpoint = struct { host: []const u8, port: u16 = 22 };
 
-pub fn capture(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform, service: ?[]const u8, identity: ?[]const u8, endpoint: ?Endpoint, work: []const u8, why: *howl.Why) !data.Policy {
+pub fn capture(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    service: ?[]const u8,
+    identity: ?[]const u8,
+    endpoint: ?Endpoint,
+    work: []const u8,
+    why: *howl.Why,
+) !data.Policy {
     const port = if (endpoint) |e| try a.print("{d}", .{e.port}) else switch (on) {
-        .qemu => @import("qemu.zig").record(io, a, at, "ssh") orelse return error.TransferSshAddress,
+        .qemu => @import("qemu.zig").record(
+            io,
+            a,
+            at,
+            "ssh",
+        ) orelse return error.TransferSshAddress,
         .lima => @import("lima.zig").sshPort(io, a, name) orelse return error.TransferSshAddress,
         else => return error.TransferProvider,
     };
@@ -26,16 +42,61 @@ pub fn capture(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform
         .{ name, known },
     );
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ "ssh", "-F", "/dev/null", "-S", "none", "-T", "-a", "-p", port, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "GlobalKnownHostsFile=/dev/null", "-o", try a.print("UserKnownHostsFile={s}", .{known}), "-o", try a.print("HostKeyAlias={s}", .{name}), "-o", "Compression=no", "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR" });
+    try args.appendSlice(
+        a,
+        &.{
+            "ssh",
+            "-F",
+            "/dev/null",
+            "-S",
+            "none",
+            "-T",
+            "-a",
+            "-p",
+            port,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "GlobalKnownHostsFile=/dev/null",
+            "-o",
+            try a.print("UserKnownHostsFile={s}", .{known}),
+            "-o",
+            try a.print("HostKeyAlias={s}", .{name}),
+            "-o",
+            "Compression=no",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "LogLevel=ERROR",
+        },
+    );
     if (identity) |path| {
         try args.appendSlice(a, &.{ "-i", path, "-o", "IdentitiesOnly=yes" });
     } else if (howl.environ.get("HOME")) |home| {
-        for (try @import("keys.zig").securityIdentities(io, a, try a.print("{s}/.ssh", .{home}))) |path|
+        for (try @import("keys.zig").securityIdentities(
+            io,
+            a,
+            try a.print("{s}/.ssh", .{home}),
+        )) |path|
             try args.appendSlice(a, &.{ "-i", path });
     }
-    try args.appendSlice(a, &.{ try a.print("root@{s}", .{if (endpoint) |e| e.host else "127.0.0.1"}), "export-v1" });
+    try args.appendSlice(
+        a,
+        &.{ try a.print("root@{s}", .{if (endpoint) |e| e.host else "127.0.0.1"}), "export-v1" },
+    );
     if (service) |name_of_service| try args.append(a, name_of_service);
-    var child = try std.process.spawn(io, .{ .argv = args.items, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit });
+    var child = try std.process.spawn(
+        io,
+        .{ .argv = args.items, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit },
+    );
     defer child.kill(io);
     const output = try Dir.cwd().createFile(io, try a.print("{s}/archive.tar.zst", .{work}), .{
         .exclusive = true,
@@ -70,10 +131,20 @@ fn receive(io: Io, a: A, child: *std.process.Child, output: Io.File) !data.Polic
     const text = try a.alloc(u8, size);
     defer a.free(text);
     try input.interface.readSliceAll(text);
-    const policy = try std.json.parseFromSliceLeaky(data.Policy, a, text, .{ .allocate = .alloc_always });
+    const policy = try std.json.parseFromSliceLeaky(
+        data.Policy,
+        a,
+        text,
+        .{ .allocate = .alloc_always },
+    );
     if (policy.services.len > 4096 or policy.users.len > 8192 or policy.groups.len > 8192)
         return error.TransferSshProtocol;
-    try data.check(a, .{ .image = policy.image, .arch = policy.arch, .entries = &.{} }, policy, null);
+    try data.check(
+        a,
+        .{ .image = policy.image, .arch = policy.arch, .entries = &.{} },
+        policy,
+        null,
+    );
     var bytes: [64 << 10]u8 = undefined;
     while (true) {
         const n = try input.interface.readSliceShort(&bytes);

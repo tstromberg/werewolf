@@ -32,7 +32,14 @@ fn cgroupCheck(io: std.Io, a: std.mem.Allocator) !void {
     try Dir.cwd().createDirPath(io, "/transfer-supervise/supervise.app");
     var status: [20]u8 = @splat(0);
     status[17] = 'd';
-    try Dir.cwd().writeFile(io, .{ .sub_path = "/transfer-supervise/supervise.app/status", .data = &status, .flags = .{ .permissions = .fromMode(0o600) } });
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = "/transfer-supervise/supervise.app/status",
+            .data = &status,
+            .flags = .{ .permissions = .fromMode(0o600) },
+        },
+    );
     var supervision = try Dir.cwd().openDir(io, "/transfer-supervise", .{});
     defer supervision.close(io);
     var cgroups = try Dir.cwd().openDir(io, "/transfer-cgroups", .{});
@@ -51,7 +58,10 @@ fn cgroupCheck(io: std.Io, a: std.mem.Allocator) !void {
     try std.Io.File.stdout().writeStreamingAll(io, "transfer-cgroup-stream-passed\n");
 }
 fn check(io: std.Io) !void {
-    var child = try std.process.spawn(io, .{ .argv = &.{"/checks"}, .stdin = .ignore, .stdout = .inherit, .stderr = .inherit });
+    var child = try std.process.spawn(
+        io,
+        .{ .argv = &.{"/checks"}, .stdin = .ignore, .stdout = .inherit, .stderr = .inherit },
+    );
     defer child.kill(io);
     if (!(try child.wait(io)).success()) return error.Failed;
 }

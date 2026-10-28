@@ -29,13 +29,19 @@ pub fn owner(_: ?*anyopaque, file: std.Io.File) !data.Owner {
         const is_access = mem.eql(u8, name, "system.posix_acl_access");
         if (!is_default and !is_access) return error.TransferMetadata;
         var acl_bytes: [28]u8 = undefined;
-        const got = linux.fgetxattr(file.handle, if (is_default) "system.posix_acl_default" else "system.posix_acl_access", &acl_bytes, acl_bytes.len);
+        const got = linux.fgetxattr(
+            file.handle,
+            if (is_default) "system.posix_acl_default" else "system.posix_acl_access",
+            &acl_bytes,
+            acl_bytes.len,
+        );
         if (linux.errno(got) != .SUCCESS or got != acl_bytes.len) return error.TransferMetadata;
         const acl = try decode(&acl_bytes);
         if (is_default) {
             if (st.mode & linux.S.IFMT != linux.S.IFDIR) return error.TransferMetadata;
             result.default_acl = acl;
-        } else if (acl.user != (st.mode >> 6) & 7 or acl.group != (st.mode >> 3) & 7 or acl.other != st.mode & 7)
+        } else if (acl.user != (st.mode >> 6) & 7 or acl.group != (st.mode >> 3) & 7 or
+            acl.other != st.mode & 7)
             return error.TransferMetadata;
         at = end + 1;
     }
@@ -45,7 +51,13 @@ pub fn owner(_: ?*anyopaque, file: std.Io.File) !data.Owner {
 pub fn setDefault(file: std.Io.File, acl: data.DefaultAcl) !void {
     if (@import("builtin").os.tag != .linux) return error.TransferLinuxMetadata;
     const bytes = encode(acl);
-    if (linux.errno(linux.fsetxattr(file.handle, "system.posix_acl_default", &bytes, bytes.len, 0)) != .SUCCESS)
+    if (linux.errno(linux.fsetxattr(
+        file.handle,
+        "system.posix_acl_default",
+        &bytes,
+        bytes.len,
+        0,
+    )) != .SUCCESS)
         return error.TransferMetadata;
 }
 
@@ -76,7 +88,11 @@ pub fn decode(bytes: *const [28]u8) !data.DefaultAcl {
     for ([_]u16{ 1, 4, 32 }, 0..) |tag, i| {
         const offset = 4 + i * 8;
         if (mem.readInt(u16, bytes[offset..][0..2], .little) != tag or
-            mem.readInt(u32, bytes[offset + 4 ..][0..4], .little) != 0xffffffff) return error.TransferMetadata;
+            mem.readInt(
+                u32,
+                bytes[offset + 4 ..][0..4],
+                .little,
+            ) != 0xffffffff) return error.TransferMetadata;
         const perm = mem.readInt(u16, bytes[offset + 2 ..][0..2], .little);
         if (perm > 7) return error.TransferMetadata;
         permissions[i] = @intCast(perm);

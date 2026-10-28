@@ -61,15 +61,16 @@ dump the reader already has. A stand-in may live in `forms/NAME/example/`. When 
 client can load the fixture, add `forms/NAME/test/probe` to load it and read one row
 back.
 
-When the host cannot reach the service, the block is `--import`. It attaches a
-read-only disk labelled `werewolf-import`, mounted at `/run/werewolf/import`. The
-form reads it once, while it first makes its data, and streams it into that data.
-MariaDB and PostgreSQL read `*.sql`. Valkey reads one `dump.rdb`. A cloud cannot
-attach the disk. A machine that already exists refuses `--import`: delete it, then
-create. There is no copy into the machine from outside.
+For a supported physical transfer adapter, use `howl export` to make an archive
+and `howl import` to restore it into an empty, stopped destination. The source and
+destination must use matching image and architecture identities. The fixed native
+export endpoint requires the selected services to be stopped; the private helper
+validates and installs the archive. See [data storage](../docs/data.md) for adapters
+and refusals. SQL dumps and arbitrary host directories are not transfer archives.
 
 ```sh
-howl create NAME --with NAME --import ./dump
+howl export source --output backup.tar.zst
+howl create NAME --with NAME --import backup.tar.zst
 ```
 
 ### Known Quirks

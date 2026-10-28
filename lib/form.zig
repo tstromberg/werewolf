@@ -3039,10 +3039,17 @@ test "fixed data export endpoint accepts SSH policy without a shell form" {
     const a = arena.allocator();
     const io = testing.io;
     try tmp.dir.createDirPath(io, "forms/data-export");
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/form.yaml", .data = "sshd:\n  log-level: VERBOSE\n" });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "forms/data-export/form.yaml", .data = "sshd:\n  log-level: VERBOSE\n" },
+    );
     var failure: Failure = .{};
     const forms = try chain(io, a, tmp.dir, "data-export", &failure);
     try testing.expect(runsSshd(forms));
     try testing.expect(!try takesKeyFiles(a, forms));
-    try testing.expect(mem.find(u8, try sshdConfig(a, forms, &failure), "LogLevel VERBOSE\n") != null);
+    try testing.expect(mem.find(
+        u8,
+        try sshdConfig(a, forms, &failure),
+        "LogLevel VERBOSE\n",
+    ) != null);
 }

@@ -177,7 +177,6 @@ services:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim
       - /usr/bin/locale
-    read: /run/werewolf/import
     share: shared
 
   # Valkey, on loopback, for the scanner's knowledge base. No password:
@@ -189,7 +188,7 @@ services:
     user: valkey
     pledge: stdio rpath wpath inet unix listen proc
     listen: tcp/6379 loopback
-    read: /etc/valkey /run/werewolf/import
+    read: /etc/valkey
     share: shared
     memory: 256
     nofile: 10240

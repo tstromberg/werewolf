@@ -10,7 +10,10 @@ pub fn main(init: std.process.Init) !void {
     sandbox.tieTo(linux.getppid());
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 2) return error.TransferInvocation;
-    const mode = std.meta.stringToEnum(enum { compress, postgres, @"compress-session", @"postgres-session" }, args[1]) orelse return error.TransferInvocation;
+    const mode = std.meta.stringToEnum(
+        enum { compress, postgres, @"compress-session", @"postgres-session" },
+        args[1],
+    ) orelse return error.TransferInvocation;
     const compress = mode == .compress or mode == .@"compress-session";
     const session = mode == .@"compress-session" or mode == .@"postgres-session";
     const program: []const u8 = if (compress) "/usr/bin/zstd" else "/usr/bin/pg_controldata";
@@ -40,7 +43,10 @@ pub fn main(init: std.process.Init) !void {
     try rules.restrict();
     _ = linux.close(rules.fd);
     var filter: [seal.max_filter]seal.Filter = undefined;
-    _ = try seal.install(seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .exec }), true), false);
+    _ = try seal.install(
+        seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .exec }), true),
+        false,
+    );
     var env: std.process.Environ.Map = .init(init.arena.allocator());
     try env.put("LC_ALL", "C");
     return std.process.replace(io, .{ .argv = if (compress)
