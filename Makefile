@@ -1331,6 +1331,9 @@ DATA_TRANSFER_VERITY ?= build/$(ARCH)/postgresql/verity/verity
 DATA_TRANSFER_KERNEL ?= build/$(ARCH)/postgresql/slot/vmlinuz
 .PHONY: check-data-transfer-helper
 .PHONY: check-data-transfer
+.PHONY: check-data-export
+check-data-export: check-data-transfer
+
 build/host/data-app-check: cmd/howl/data-app-check.zig $(wildcard cmd/howl/*.zig) $(wildcard lib/data-transfer*.zig)
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$@
