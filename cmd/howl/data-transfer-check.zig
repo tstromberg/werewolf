@@ -208,12 +208,13 @@ const Check = struct {
             "-m",
             "0",
             "-E",
-            "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0",
+            "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0,no_copy_xattrs",
             "-d",
             tree,
             disk,
         });
-        // mke2fs preserves host ownership. Normalize this disposable fixture
+        // Host SELinux labels are not guest fixture metadata. mke2fs omits
+        // those xattrs above, but preserves ownership. Normalize this fixture
         // to the image's approved root identity, never change source VMs.
         var dir = try Dir.cwd().openDir(c.io, tree, .{ .iterate = true });
         defer dir.close(c.io);
@@ -447,7 +448,8 @@ const Check = struct {
             "0",
             "-E",
             try c.a.print(
-                "offset={d},lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0",
+                "offset={d},lazy_itable_init=0,lazy_journal_init=0," ++
+                    "root_owner=0:0,no_copy_xattrs",
                 .{layout.root_first * 512},
             ),
             "-d",

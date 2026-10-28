@@ -70,7 +70,7 @@ and refusals. SQL dumps and arbitrary host directories are not transfer archives
 
 ```sh
 howl export source --output backup.tar.zst
-howl create NAME --with NAME --import backup.tar.zst
+howl import NAME backup.tar.zst --with NAME
 ```
 
 ### Known Quirks
