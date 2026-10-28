@@ -28,6 +28,10 @@ case $(uname -sm) in
 esac
 dir=$HOME/.cache/werewolf-compilers
 mkdir -p "$dir"
+# Runner processes on one host share these archives and rustup settings.
+# Keep installation and configuration atomic with respect to other jobs.
+exec 9>"$dir/install.lock"
+flock -x 9
 
 # fetch URL SUM sha256|sha512 unpacks a checked archive into $dir/NAME.
 fetch() {

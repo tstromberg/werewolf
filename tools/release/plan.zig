@@ -12,6 +12,7 @@ const images = @import("images.zig");
 const catalog = @import("catalog.zig");
 const inputs = @import("inputs.zig");
 const legacy = @import("legacy.zig");
+const boot = @import("boot.zig");
 
 /// Tree is where form-images finds its tools, trust and working state,
 /// all relative to the checkout it runs in. Tests move it.
@@ -530,6 +531,7 @@ fn resolveOne(
         )) |latest| if (json.get(latest, "index")) |i| if (i == .integer) {
             index = @max(index, i.integer);
         };
+        index = @max(index, try acceptedIndex(s, tree, name, provider, arch));
     }
     // Each release takes the next index of its channel, never one used: the TPM
     // floor of every machine on it rises by these (docs/design/implemented/independent-updates.md).
@@ -545,6 +547,64 @@ fn resolveOne(
         .serial = serial,
         .index = index + 1,
     }));
+}
+
+/// A cut after publishing a channel head can leave the catalog behind it.
+/// Reserve the next index above the authenticated publication intent too.
+fn acceptedIndex(
+    s: *Sys,
+    tree: Tree,
+    name: []const u8,
+    provider: []const u8,
+    arch: []const u8,
+) !i64 {
+    const prefix = try s.gpa.print("{s}/{s}/{s}/{s}/latest", .{
+        try catalog.public(s), try s.variantPath(name), provider, arch,
+    });
+    const receipt = try sys.get(s, try s.gpa.print("{s}/accepted-head.json", .{prefix}), 3 << 20);
+    const work = try sys.scratch(s, null, "ww-channel-index-");
+    defer sys.remove(s, work);
+    const head_path = try sys.join(s, &.{ work, "boot.json" });
+    const signature_path = try sys.join(s, &.{ work, "boot.json.sig" });
+    switch (receipt) {
+        .body => |raw| {
+            const document = try json.parse(s.gpa, raw);
+            if (!json.hasKeys(document, &.{ "head", "signature" }))
+                return s.refuse("invalid protected publication receipt", .{});
+            try sys.write(s, head_path, try json.text(document, "head"));
+            try sys.write(
+                s,
+                signature_path,
+                try catalog.unhex(s, try json.text(document, "signature")),
+            );
+        },
+        .missing => {
+            const head = try sys.get(
+                s,
+                try s.gpa.print("{s}/boot.json", .{prefix}),
+                boot.head_limit,
+            );
+            if (head == .missing) return 0;
+            const signature = try sys.get(
+                s,
+                try s.gpa.print("{s}/boot.json.sig", .{prefix}),
+                boot.signature_limit,
+            );
+            if (signature == .missing) return s.refuse(
+                "published boot head is missing its signature",
+                .{},
+            );
+            try sys.write(s, head_path, head.body);
+            try sys.write(s, signature_path, signature.body);
+        },
+    }
+    const request = try boot.request(s, tree.trust, name, arch, provider);
+    const previous = try boot.previous(s, try sys.resolve(s, tree.howl), work, request);
+    const image = try json.field(previous, "image");
+    const index = json.get(image, "index") orelse return 0;
+    if (index != .integer or index.integer < 1 or index.integer == std.math.maxInt(i64))
+        return s.refuse("invalid published channel index", .{});
+    return index.integer;
 }
 
 /// Bundle is one bundle a target builds: each provider's, at the target's
@@ -804,6 +864,7 @@ test "a recipe's context identity binds bytes, modes and removals" {
 const head_commit = fixture.rep('b', 40) ++ "\n";
 
 fn resolution(f: *fixture.Fixture, argv: []const []const u8) anyerror!?sys.Result {
+    if (try fixture.admit(f, argv)) |result| return result;
     const s = &f.s;
     if (mem.endsWith(u8, argv[0], "form-tool")) {
         const out = if (mem.eql(u8, argv[1], "archs"))
@@ -874,16 +935,32 @@ test "focused resolution locks only playground, at its channel's next index" {
     f.answer = resolution;
     // No published index, and then one whose playground release is index 4.
     var index_body: []const u8 = "";
+    var receipt_body: []const u8 = "";
+    var head_body: []const u8 = "";
+    var head_signature: []const u8 = "";
     const Get = struct {
         var body: *[]const u8 = undefined;
+        var receipt: *[]const u8 = undefined;
+        var head: *[]const u8 = undefined;
+        var signature: *[]const u8 = undefined;
         fn get(fx: *fixture.Fixture, url: []const u8, limit: usize) anyerror!?sys.Got {
-            _ = fx;
             _ = limit;
             if (mem.endsWith(u8, url, "/index.json") and body.len > 0) return .{ .body = body.* };
+            if (mem.endsWith(u8, url, "/playground/qemu/x86_64/latest/accepted-head.json")) {
+                if (fx.state == 1) return error.ConnectionRefused;
+                if (receipt.len > 0) return .{ .body = receipt.* };
+            }
+            if (mem.endsWith(u8, url, "/playground/qemu/x86_64/latest/boot.json") and head.len > 0)
+                return .{ .body = head.* };
+            if (mem.endsWith(u8, url, "/playground/qemu/x86_64/latest/boot.json.sig") and
+                signature.len > 0) return .{ .body = signature.* };
             return .missing;
         }
     };
     Get.body = &index_body;
+    Get.receipt = &receipt_body;
+    Get.head = &head_body;
+    Get.signature = &head_signature;
     f.get_answer = Get.get;
     try resolve(s, t, tree, "x86_64", 1, 1, f.path("snapshot"), true);
     const latest = try json.from(s.gpa, .{
@@ -939,6 +1016,47 @@ test "focused resolution locks only playground, at its channel's next index" {
     try testing.expectEqual(@as(i64, 5), try json.int(next[0], "index"));
     // One release lock for each plan.
     try testing.expectEqual(@as(usize, 2), f.called(&.{ "", "_build" }));
+    // A prior publication advanced the channel to 7, then failed before the
+    // catalog could record it. Its signed receipt must make this build 8.
+    try sys.copy(s, k.crt, f.path("trust/boot.crt"));
+    try sys.copy(s, "release/protected/trust.json", f.path("trust/trust.json"));
+    head_body = "{\"format\":\"werewolf-boot/2\",\"form\":\"playground\"," ++
+        "\"image\":{\"index\":7,\"arch\":\"x86_64\"}}";
+    head_signature = try catalog.sign(s, head_body, k.key);
+    receipt_body = try json.encode(s.gpa, try json.from(s.gpa, .{
+        .head = head_body,
+        .signature = try sys.hexAlloc(s.gpa, head_signature),
+    }));
+    try resolve(s, t, tree, "x86_64", 1, 1, f.path("after-cut"), true);
+    try testing.expectEqual(@as(i64, 8), try json.int(
+        try sys.readJson(s, f.path("after-cut/playground/input.json"), 4096),
+        "index",
+    ));
+    // Missing receipts on older channels use the authenticated public head.
+    const valid_receipt = receipt_body;
+    receipt_body = "";
+    try testing.expectEqual(
+        @as(i64, 7),
+        try acceptedIndex(s, tree, "playground", "qemu", "x86_64"),
+    );
+    head_signature = "";
+    try testing.expectError(error.Refused, acceptedIndex(s, tree, "playground", "qemu", "x86_64"));
+    // Neither failed reads nor forged receipts may silently choose index 1.
+    receipt_body = try mem.replaceOwned(u8, s.gpa, valid_receipt, "index\\\":7", "index\\\":9");
+    try testing.expectError(error.Refused, acceptedIndex(s, tree, "playground", "qemu", "x86_64"));
+    receipt_body = valid_receipt;
+    f.state = 1;
+    try testing.expectError(
+        error.ConnectionRefused,
+        acceptedIndex(s, tree, "playground", "qemu", "x86_64"),
+    );
+    f.state = 0;
+    s.variants = "ssh";
+    try testing.expectEqual(
+        @as(i64, 0),
+        try acceptedIndex(s, tree, "playground", "qemu", "x86_64"),
+    );
+    s.variants = "";
     for ([_]struct { []const u8, i64, i64 }{ .{ "aarch64", 1, 1 }, .{ "x86_64", 1, 8 } }) |c| {
         try testing.expectError(
             error.Refused,
