@@ -363,6 +363,8 @@ fn apko(b: *B, config: []const u8, args: []const []const u8, after: []const []co
 /// unreachableServer reports whether apko's output says it could not
 /// reach the package server (Makefile, APKO_NETWORK).
 fn unreachableServer(output: []const u8) bool {
+    if (mem.find(u8, output, "stream error: stream ID ") != null and
+        mem.find(u8, output, "INTERNAL_ERROR; received from peer") != null) return true;
     for ([_][]const u8{
         "connection reset", "i/o timeout",     "TLS handshake",   "deadline exceeded",
         "unexpected EOF",   "failed to fetch", "status code 403", "status code 408",
@@ -588,6 +590,11 @@ test unreachableServer {
         unreachableServer("GET https://x: unexpected status code 503 Service Unavailable"),
     );
     try testing.expect(unreachableServer("read tcp: connection reset by peer"));
+    try testing.expect(unreachableServer("unable to write to cache file: " ++
+        "stream error: stream ID 15; INTERNAL_ERROR; received from peer"));
+    try testing.expect(!unreachableServer("stream error: malformed package"));
+    try testing.expect(!unreachableServer("package signature verification failed"));
+    try testing.expect(!unreachableServer("package digest mismatch"));
     try testing.expect(!unreachableServer("unexpected status code 404 Not Found"));
     try testing.expect(!unreachableServer("solving \"foo\": nothing provides foo"));
 }

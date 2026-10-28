@@ -39,7 +39,9 @@ input refused whole at the first thing not understood; no knobs) and Unix
 REF@sha256:…` verifies every blob and flattens the layers into one tar; `howl
 _unpack` writes it to `rootfs/oci/NAME` with no environment, confined on Linux by
 Landlock to that directory. It refuses the whole image at the first entry it does not
-accept, and keeps no setuid bit or file capability. The image's config becomes a
+accept, and keeps no setuid bit or file capability. After the tar's end marker it
+drains at most 1 MiB of zero padding through EOF, so the exporter can finish;
+nonzero trailing data is refused. The image's config becomes a
 service file (cmd/howl/adhoc.zig) whose entrypoint must be ELF: a `#!` script's
 interpreter would have to run too. The refusals, limits, mapping and the root's
 contents are in [applications.md](../applications.md#forms-from-the-command-line). At
