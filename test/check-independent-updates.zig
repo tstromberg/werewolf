@@ -417,7 +417,7 @@ const Test = struct {
         const proxy = t.proxy.?;
         proxy.arm(cut);
         var checking: Machine = undefined;
-        try checking.start(c.io, c.gpa, try t.sshArgv("/usr/lib/werewolf/slot-update check"), .{
+        try checking.start(c.io, c.gpa, try t.sshArgv(manual_check), .{
             .log = try c.path(try c.gpa.print("{s}.log", .{label})),
             .environ_map = &c.env,
         });
@@ -659,7 +659,7 @@ const Test = struct {
         committed: bool,
     ) !Status {
         const c = t.c;
-        const check = "/usr/lib/werewolf/slot-update check";
+        const check = manual_check;
         // SSH can drop a connection before the idempotent check reaches
         // the guest. Retry transport failures, never an updater rejection.
         var checked = try t.ssh(check, try c.gpa.print("check-{s}", .{label}), 900);
@@ -779,6 +779,10 @@ const Test = struct {
         if (t.proxy_dir.len > 0) Io.Dir.cwd().deleteTree(c.io, t.proxy_dir) catch {};
     }
 };
+
+// waitBoot pauses the supervised updater between steps. The local check
+// client submits to that coordinator, so let it run after arming any cut.
+const manual_check = "sv cont /etc/sv/autoupdate && exec /usr/lib/werewolf/slot-update check";
 
 /// Extra changes a release's rootfs before it is built.
 const Extra = fn (Io, Allocator, []const u8) anyerror!void;
