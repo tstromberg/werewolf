@@ -311,14 +311,18 @@ const Test = struct {
             .{ try t.instance(name), if (t.on == .lima) "serial.log" else "console.log" },
         );
         for (0..seconds) |_| {
-            const text = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+            const raw = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+            const text = try host.qemu.clean(c.gpa, raw);
             if (mem.find(u8, text, needle) != null) return text;
             if (mem.find(u8, text, "transfer-fixture: Sql") != null or
                 mem.find(u8, text, "transfer-fixture: Rows") != null)
                 return c.fail("database fixture failed; see {s}", .{file});
             try c.io.sleep(.fromSeconds(1), .awake);
         }
-        return c.fail("missing {s}; see {s}", .{ needle, file });
+        const text = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+        return c.fail("missing {s}; see {s}\n{s}", .{
+            needle, file, text[text.len -| (16 << 10)..],
+        });
     }
 
     fn pin(t: *Test, name: []const u8) !void {
@@ -567,6 +571,13 @@ const Test = struct {
                     .{name},
                 ) catch continue) catch continue;
                 Dir.cwd().copyFile(file, .cwd(), kept, c.io, .{}) catch {};
+                // The catalog uploader collects architecture-specific check
+                // logs; keep the console before delete removes the machine.
+                const catalog = c.gpa.print("build/{s}/check/data-transfer-{s}.log", .{
+                    @tagName(@import("builtin").cpu.arch), name,
+                }) catch continue;
+                Dir.cwd().createDirPath(c.io, std.fs.path.dirname(catalog).?) catch {};
+                Dir.cwd().copyFile(file, .cwd(), catalog, c.io, .{}) catch {};
             } else |_| {}
             _ = c.run(
                 &.{ t.binary, "delete", name, "--on", @tagName(t.on) },
