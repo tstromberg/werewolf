@@ -1119,7 +1119,7 @@ pub const Update = struct {
     /// record appends one JSON line to the log, fsyncs it, and prints it on
     /// the console. Each line has seq, one more than the last, and prev, the
     /// first 16 hex digits of the last line's SHA-256
-    /// (docs/design/update-policy.md, The audit log).
+    /// (docs/design/implemented/update-policy.md, The audit log).
     pub fn record(u: *Update, fields: anytype) !void {
         // Lock from reading the tail to appending. A check run by hand logs
         // beside the daemon, and two writers reading the same tail would
@@ -1361,7 +1361,7 @@ const Report = struct {
     host: []const u8,
     build: []const u8,
     /// tier and why explain when the update boots
-    /// (docs/design/update-policy.md).
+    /// (docs/design/implemented/update-policy.md).
     tier: []const u8,
     why: []const u8,
     from: struct { slot: []const u8, release: []const u8, kernel: []const u8 },

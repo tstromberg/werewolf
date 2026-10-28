@@ -38,7 +38,18 @@ pub fn command(
     defer env.deinit();
     for (inherited) |key| _ = env.swapRemove(key);
     howl.say(io, "{s}", .{step.note});
-    const err = std.process.replace(io, .{ .argv = step.argv, .environ_map = &env });
+    const argv = if (howl.variants.len == 0)
+        step.argv
+    else
+        try mem.concat(
+            gpa,
+            []const u8,
+            &.{
+                step.argv,
+                &.{try gpa.print("VARIANTS={s}", .{try mem.join(gpa, ",", howl.variants)})},
+            },
+        );
+    const err = std.process.replace(io, .{ .argv = argv, .environ_map = &env });
     return why.refuse("{s}: {s}", .{ howl.make_cmd, @errorName(err) });
 }
 

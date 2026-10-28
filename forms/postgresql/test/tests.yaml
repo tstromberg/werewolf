@@ -195,14 +195,16 @@ suites:
   - name: test-postgres-policy
     user: postgres
     policy:
-      pledge: stdio rpath wpath inet proc exec
+      pledge: stdio rpath wpath inet unix connect proc exec
       read:
         - /etc/sv/postgres/service
         - /run/svc/postgres
-      connect: []
+      connect:
+        - /run/svc/postgres/.s.PGSQL.5432
       run:
         - /usr/lib/werewolf/sh-shim
         - /usr/lib/werewolf/test-postgres-policy
+        - /usr/bin/psql
     source: driver.zig
     mode: policy
     cases:
@@ -212,9 +214,11 @@ suites:
         - shim-discard
         - shim-file-refused
         - no-tcp-listener
+        - vector-selection
       verify:
         - shim-policy
         - shim-output
         - shim-discard
         - shim-file-refused
         - no-tcp-listener
+        - vector-selection

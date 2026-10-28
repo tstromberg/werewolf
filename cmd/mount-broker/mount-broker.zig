@@ -1315,6 +1315,7 @@ test "each broker operation belongs to one socketpair role" {
 /// read-only, which writes its journal in place, then tries to unmount it.
 /// Each step runs whatever the last one did.
 fn shutdown(log: *Log) void {
+    stopAge(log);
     linux.sync();
     _ = linux.umount2(installer_host, 0);
     _ = linux.umount2(installer_usr, 0);
@@ -1323,10 +1324,13 @@ fn shutdown(log: *Log) void {
     if (isMounted(mounts, "/data")) {
         if (linux.errno(linux.umount2("/data", 0)) == .SUCCESS) {
             log.event("shutdown", .{ .data = "unmounted" });
-        } else if (remountReadOnly("/data")) {
-            log.event("shutdown", .{ .data = "busy; read-only" });
         } else {
-            log.event("shutdown", .{ .data = "busy; still writable" });
+            const result = remountReadOnly("/data");
+            if (result == .SUCCESS) {
+                log.event("shutdown", .{ .data = "busy; read-only" });
+            } else {
+                log.event("shutdown", .{ .data = "busy; still writable", .errno = @tagName(result) });
+            }
         }
     }
     if (dm.remove("data")) {
@@ -1335,22 +1339,64 @@ fn shutdown(log: *Log) void {
         log.event("shutdown", .{ .luks = "not closed" });
     }
     if (isMounted(mounts, "/boot")) {
-        const journal = remountReadOnly("/boot");
+        const result = remountReadOnly("/boot");
         const unmounted = linux.errno(linux.umount2("/boot", 0)) == .SUCCESS;
-        log.event("shutdown", .{ .boot_read_only = journal, .boot_unmounted = unmounted });
+        log.event("shutdown", .{ .boot_read_only = result == .SUCCESS, .boot_unmounted = unmounted, .errno = @tagName(result) });
     }
+}
+
+/// The early age authority has a private writable view and cannot receive
+/// signals from fenced runit. Its entire disposable cache tree belongs to this
+/// root-owned cgroup; no application data or arbitrary process is targeted.
+fn stopAge(log: *Log) void {
+    const fd = linux.openat(linux.AT.FDCWD, "/run/cgroup/unwound-age/cgroup.kill", .{
+        .ACCMODE = .WRONLY,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    if (linux.errno(fd) != .SUCCESS) {
+        if (linux.errno(fd) != .NOENT) log.event("shutdown-age", .{ .errno = @tagName(linux.errno(fd)) });
+        return;
+    }
+    const written = linux.write(@intCast(fd), "1", 1);
+    _ = linux.close(@intCast(fd));
+    if (written != 1) {
+        log.event("shutdown-age", .{ .stopped = false });
+        return;
+    }
+    for (0..200) |_| {
+        const procs = linux.openat(linux.AT.FDCWD, "/run/cgroup/unwound-age/cgroup.procs", .{ .NOFOLLOW = true, .CLOEXEC = true }, 0);
+        if (linux.errno(procs) != .SUCCESS) break;
+        var buffer: [128]u8 = undefined;
+        const n = linux.read(@intCast(procs), &buffer, buffer.len);
+        _ = linux.close(@intCast(procs));
+        if (n == 0) {
+            log.event("shutdown-age", .{ .stopped = true });
+            return;
+        }
+        if (linux.errno(n) != .SUCCESS) break;
+        _ = linux.nanosleep(&.{ .sec = 0, .nsec = 10 * std.time.ns_per_ms }, null);
+    }
+    log.event("shutdown-age", .{ .stopped = false });
 }
 
 /// remountReadOnly makes the filesystem under dir read-only. A classic
 /// remount changes the filesystem itself, so it writes its journal in place.
-fn remountReadOnly(dir: [*:0]const u8) bool {
-    return linux.errno(linux.mount(
-        null,
-        dir,
-        null,
-        linux.MS.REMOUNT | linux.MS.RDONLY,
-        0,
-    )) == .SUCCESS;
+fn remountReadOnly(dir: [*:0]const u8) linux.E {
+    for (0..101) |attempt| {
+        const result = linux.errno(linux.mount(
+            null,
+            dir,
+            null,
+            linux.MS.REMOUNT | linux.MS.RDONLY,
+            0,
+        ));
+        if (result != .BUSY or attempt == 100) return result;
+        // Process exit and the release of its writable file references can
+        // finish after supervision reports down. Retry only BUSY, bounded.
+        _ = linux.nanosleep(&.{ .sec = 0, .nsec = 20 * std.time.ns_per_ms }, null);
+    }
+    unreachable;
 }
 
 fn isMounted(mounts: []const u8, dir: []const u8) bool {

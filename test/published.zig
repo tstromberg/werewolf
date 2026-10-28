@@ -92,6 +92,30 @@ fn contains(list: []const []const u8, want: []const u8) bool {
     return false;
 }
 
+/// Older signed records describe the empty selection.
+pub fn variants(gpa: Allocator, value: json.Value) ![]const []const u8 {
+    const list = field(value, "variants") orelse return &.{};
+    if (list != .array) return error.BadVariants;
+    var names: std.ArrayList([]const u8) = .empty;
+    for (list.array.items) |item| {
+        if (item != .string) return error.BadVariants;
+        try names.append(gpa, item.string);
+    }
+    var failure: form.Failure = .{};
+    const canonical = try form.variantNames(gpa, names.items, &failure);
+    if (canonical.len != names.items.len) return error.BadVariants;
+    for (canonical, names.items) |a, b| if (!mem.eql(u8, a, b)) return error.BadVariants;
+    return names.items;
+}
+
+pub fn sameVariants(value: json.Value, wanted: []const []const u8) bool {
+    const list = field(value, "variants") orelse return wanted.len == 0;
+    if (list != .array or list.array.items.len != wanted.len) return false;
+    for (list.array.items, wanted) |a, b| if (a != .string or
+        !mem.eql(u8, a.string, b)) return false;
+    return true;
+}
+
 /// Mirror serves a directory over HTTPS on loopback, as the public mirror
 /// serves its tree, with a certificate of an authority made for the run.
 pub const Mirror = struct {

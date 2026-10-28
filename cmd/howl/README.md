@@ -2,7 +2,7 @@
 
 ## Summary
 
-Howl builds and runs machines ([design](../../docs/design/cli.md)).
+Howl builds and runs machines ([design](../../docs/design/implemented/cli.md)).
 Each combines a [form](../../docs/forms.md), image and init configuration.
 
 ## Background
@@ -11,18 +11,18 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 | --- | --- |
 | `forms [FORM\|SEARCH]` | lists forms or shows setup and run/test commands; uses the checkout when present, `--published` checks signed image availability, `--arch ARCH` filters and `--json` emits records |
 | `versions [--with FORM]` | lists published base image tags from GitHub; filters by `--on` and `--arch`, with `--json` for scripts |
-| `build --with FORM` | builds what `create` deploys: with every protection a bundle, `FORM-PROVIDER-ARCH` in `dist` (`--on lima\|qemu`), signed with your keys as CI signs werewolf's, following the channel `--ipe-updates URL` names at `--image-index N`; with `--disable=…` the disk and manifest `FORM-ARCH.json` byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)), `--format raw\|vhd\|vmdk` converting with qemu-img |
+| `build --with FORM` | builds what `create` deploys: with every protection a bundle, `FORM-PROVIDER-ARCH` in `dist` (`--on lima\|qemu`), signed with your keys as CI signs werewolf's, following the channel `--ipe-updates URL` names at `--image-index N`; with `--disable=…` the disk and manifest `FORM-ARCH.json` byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/implemented/howl-build.md)), `--format raw\|vhd\|vmdk` converting with qemu-img |
 | `test --with FORM [--arch ARCH]` | runs declared native clients without DEV, or a runtime's hello-world application, plus production boot; logs in `build/ARCH/check/`; either suite failing returns failure; `--iterate` reuses a disposable SSH VM for development |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
-| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--version SERIAL\|TAG` selects the initial download; `--build` builds this checkout's bundle with your keys and enrolls it as a download; it follows a channel only if `IPE_UPDATES` names one (with `IMAGE_INDEX`; `IPE_UPDATES_CA` on Lima and QEMU), else changes take a reinstall ([design](../../docs/design/secure-local-deployment.md)) |
-| `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
+| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--version SERIAL\|TAG` selects the initial download; `--build` builds this checkout's bundle with your keys and enrolls it as a download; it follows a channel only if `IPE_UPDATES` names one (with `IMAGE_INDEX`; `IPE_UPDATES_CA` on Lima and QEMU), else changes take a reinstall ([design](../../docs/design/implemented/secure-local-deployment.md)) |
+| `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/implemented/manifest.md)) |
 | `run` | secure `create` of `werewolf-run`, reusing an unchanged protected VM and resuming a stopped one; default playground downloads a protected image; `--build` uses local sources, reinstalling the VM when they change |
 | `owner [NAME] status\|check\|try\|outcome\|pause\|resume` | fixed host-private QEMU operations without guest SSH; [details](../../docs/owner-control.md) |
 | `ssh`, `console`, `stop`, `delete` | reach or read a machine; stop keeps protected local state, delete removes it; without NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
-| `form [-f FILE] ... -o DIR` | writes a form from a manifest and the line, whose flags are form.yaml's keys ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same |
-| `_build`, `_bhyve`, `_firecracker`, `_tpm`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); `--boot-native --tpm`, `--image-index` and `--update-ca` make a protected slot; three supervisors, the last a protected machine's swtpm (`swtpm.zig`); the OCI unpacker ([oci.md](../../docs/design/oci.md)); `_build-helper` and `_native-firmware` serve tools/enroll-boot ([macOS builds](../../docs/macos-builds.md)) |
+| `form [-f FILE] ... -o DIR` | writes a form from a manifest and the line, whose flags are form.yaml's keys ([docs/design/implemented/adhoc.md](../../docs/design/implemented/adhoc.md)); build, run, create and pack take the same |
+| `_build`, `_bhyve`, `_firecracker`, `_tpm`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); `--boot-native --tpm`, `--image-index` and `--update-ca` make a protected slot; three supervisors, the last a protected machine's swtpm (`swtpm.zig`); the OCI unpacker ([oci.md](../../docs/design/implemented/oci.md)); `_build-helper` and `_native-firmware` serve tools/enroll-boot ([macOS builds](../../docs/macos-builds.md)) |
 
 ## Goals
 
@@ -37,6 +37,9 @@ Each combines a [form](../../docs/forms.md), image and init configuration.
 
 ## Detailed design
 
+Run/create, build, pack and test accept repeated or comma-separated `--variant NAME`.
+Every form offers `--ssh`; see [variants](../../docs/variants.md).
+
 **Forms.** Names use the signed index, falling back to `./forms/NAME` with a warning.
 Path forms are never updated. Progress goes to stderr, the machine record to stdout.
 
@@ -46,9 +49,9 @@ is sorted root-owned ustar, 0600, dated 1970, within init and metadata limits.
 
 **Engines.** Protected defaults are Lima (macOS), QEMU (Linux) and x86_64 bhyve
 (FreeBSD), which download a [protected
-image](../../docs/design/published-secure-boot.md). Clouds take protected `--build`
-images: werewolf publishes none yet. Firecracker builds an IPE image with host-pinned
-boot files, warning that UEFI Secure Boot and TPM rollback protection are
+image](../../docs/design/implemented/published-secure-boot.md). Clouds take protected
+`--build` images: werewolf publishes none yet. Firecracker builds an IPE image with
+host-pinned boot files, warning that UEFI Secure Boot and TPM rollback protection are
 unavailable. Other providers and `--dev=ssh` require [disabling
 protections](../../docs/security.md#protections-a-machine-can-be-made-without).
 Missing tools fail. Local VMs use the host architecture, 4 GiB and 2 CPUs (4 under
@@ -70,15 +73,15 @@ a `werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once an
 delete keeps. Cloud ports start closed; create's `--allow-from me|CIDR` opens the
 form's.
 
-**SSH.** See [Howl SSH connections](../../docs/design/howl-ssh.md) for account
-defaults, developer access, forwarded agents and cloud firewall behavior.
+**SSH.** See [Howl SSH connections](../../docs/design/implemented/howl-ssh.md) for
+account defaults, developer access, forwarded agents and cloud firewall behavior.
 
-**Second create.** The machine keeps its disk and takes the new config. On protected
-Lima and QEMU machines ([data import](../../docs/design/data-import.md)), a repeated
-`--import DIR` must match the init snapshot; `howl import NAME DIR` gives an empty
-destination new initial data, `howl sync NAME DIR` adds and replaces files, as the
-form allows. Both stage while the VM runs and apply only at its next howl stop and
-start.
+**Second create.** The machine keeps its disk and takes the new config.
+`howl export NAME [--service NAME] [--output FILE]` writes a private data archive.
+`howl import NAME ARCHIVE [--service NAME]` restores empty data and leaves the
+machine stopped. See [data storage](../../docs/data.md) for supported adapters,
+image requirements and exclusions. `howl start NAME` boots its enrolled image and
+saved configuration. `create --import`, directory seeds and `sync` are unsupported.
 
 ## Drawbacks
 

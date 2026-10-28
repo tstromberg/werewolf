@@ -10,6 +10,7 @@ const Json = json.Json;
 const sys = @import("sys.zig");
 const Sys = sys.Sys;
 const images = @import("images.zig");
+const form_lib = @import("form");
 
 pub const format = "werewolf-form-catalog/1";
 pub const published = "published";
@@ -40,7 +41,7 @@ pub fn namespace(
 ) ![]const u8 {
     if (!images.isName(name) or !images.has(t.providers(arch), provider))
         return s.refuse("invalid form image target {s}/{s}/{s}", .{ name, provider, arch });
-    return s.gpa.print("{s}/{s}/{s}", .{ name, provider, arch });
+    return s.gpa.print("{s}/{s}/{s}", .{ try s.variantPath(name), provider, arch });
 }
 
 pub fn isHex(text: []const u8, n: usize) bool {
@@ -192,6 +193,8 @@ const row_fields = [_][]const u8{
     "guide",
     "inputs",
     "latest",
+    "variants",
+    "variant_descriptions",
 };
 const latest_fields = [_][]const u8{ "serial", "commit", "descriptor", "object", "size" };
 
@@ -212,6 +215,17 @@ pub fn validate(s: *Sys, t: images.Images, row: Json) !Json {
     const a = o.get("arch").?;
     if (f != .string or p != .string or
         a != .string) return s.refuse("invalid form image target", .{});
+    if (json.get(
+        row,
+        "variants",
+    )) |v| if (v != .array) return s.refuse("catalog variants must be a list", .{});
+    if (json.get(
+        row,
+        "variant_descriptions",
+    )) |descriptions_| try validateVariantDescriptions(s, descriptions_);
+    const saved = s.variants;
+    defer s.variants = saved;
+    s.variants = try sys.selection(s, row);
     const key = try namespace(s, t, f.string, p.string, a.string);
     for ([_][]const u8{ "status", "run", "summary", "guide" }) |k| if (o.get(k)) |v| {
         if (v != .string or
@@ -225,6 +239,35 @@ pub fn validate(s: *Sys, t: images.Images, row: Json) !Json {
         key,
     )) return s.refuse("invalid published form image", .{});
     return row;
+}
+
+pub fn validateVariantDescriptions(s: *Sys, value: Json) !void {
+    const descriptions_ = json.object(value) catch return s.refuse(
+        "invalid variant descriptions",
+        .{},
+    );
+    for (descriptions_.keys(), descriptions_.values()) |name, description_| {
+        if (!form_lib.isName(name) or description_ != .string or
+            !form_lib.isVariantDescription(description_.string))
+            return s.refuse("invalid variant description for {s}", .{name});
+    }
+}
+
+fn variantLabel(s: *Sys, row: Json, selection: []const u8) ![]const u8 {
+    if (selection.len == 0) return "default";
+    var labels: std.ArrayList([]const u8) = .empty;
+    var names = mem.splitScalar(u8, selection, ',');
+    while (names.next()) |name| {
+        const text = if (mem.eql(u8, name, "ssh"))
+            form_lib.ssh_variant_description
+        else
+            json.text(json.get(row, "variant_descriptions") orelse .null, name) catch "";
+        try labels.append(
+            s.gpa,
+            if (text.len == 0) name else try s.gpa.print("{s}: {s}", .{ name, text }),
+        );
+    }
+    return mem.join(s.gpa, "; ", labels.items);
 }
 
 fn validLatest(s: *Sys, latest: Json, key: []const u8) bool {
@@ -249,10 +292,12 @@ fn validLatest(s: *Sys, latest: Json, key: []const u8) bool {
 /// Index is a signed catalog's rows, in its order.
 pub const Index = struct {
     rows: []const Json = &.{},
+    variants: []const u8 = "",
 
     /// row is the target's row, or null.
     pub fn row(x: Index, name: []const u8, provider: []const u8, arch: []const u8) ?Json {
         for (x.rows) |r| {
+            if (!sys.selectionMatches(r, x.variants)) continue;
             if (mem.eql(u8, json.text(r, "form") catch "", name) and
                 mem.eql(u8, json.text(r, "provider") catch "", provider) and
                 mem.eql(u8, json.text(r, "arch") catch "", arch)) return r;
@@ -273,9 +318,10 @@ pub fn openIndex(s: *Sys, t: images.Images, raw: []const u8, certificate: []cons
         !mem.eql(u8, json.text(doc, "format") catch "", format))
         return s.refuse("invalid form catalog", .{});
     var rows: std.ArrayList(Json) = .empty;
-    var index: Index = .{};
+    var index: Index = .{ .variants = s.variants };
     for (try json.items(try json.field(doc, "forms"))) |r| {
         const valid = try validate(s, t, r);
+        index.variants = try sys.selection(s, valid);
         if (index.row(
             try json.text(r, "form"),
             try json.text(r, "provider"),
@@ -285,6 +331,7 @@ pub fn openIndex(s: *Sys, t: images.Images, raw: []const u8, certificate: []cons
         try rows.append(s.gpa, valid);
         index.rows = rows.items;
     }
+    index.variants = s.variants;
     return index;
 }
 
@@ -394,6 +441,7 @@ pub fn page(
     for (rows) |row| {
         _ = try validate(s, t, row);
         const name = try json.text(row, "form");
+        const selection = try sys.selection(s, row);
         const guide_text = json.text(row, "guide") catch "";
         const guide = if (guide_text.len > 0)
             guide_text
@@ -408,10 +456,12 @@ pub fn page(
                 "<a href=\"{0s}/downloads.json.sig\">signature</a> · " ++
                 "<a href=\"{0s}/gates.json\">gates</a> · " ++
                 "<a href=\"{0s}/tests.json\">tests</a>" ++
-                "<small>{1s} · {2s} MiB</small>", .{
+                "<small>{1s} · {2s} MiB · {3d} hours old</small>", .{
                 base,
                 try json.text(latest, "serial"),
                 try mebibytes(gpa, try json.int(latest, "size")),
+                @divFloor(@max(0, s.now() - (sys.serialTime(try json.text(latest, "serial")) orelse
+                    return s.refuse("invalid published serial", .{}))), 3600),
             });
         }
         var status = try escape(gpa, try json.text(row, "status"));
@@ -423,7 +473,7 @@ pub fn page(
         try body.append(gpa, try gpa.print("<tr><td><a href=\"{s}/{s}/index.html\">{s}</a>" ++
             "<small>{s}</small>" ++
             "<small><a href=\"{s}\">Setup guide</a></small></td><td>" ++
-            "{s}/{s}</td><td>{s}</td><td>{s}</td></tr>", .{
+            "{s}/{s}<small>{s}</small></td><td>{s}</td><td>{s}</td></tr>", .{
             base_url,
             name,
             name,
@@ -431,6 +481,7 @@ pub fn page(
             try escape(gpa, guide),
             try json.text(row, "provider"),
             try json.text(row, "arch"),
+            try escape(gpa, try variantLabel(s, row, selection)),
             links,
             status,
         }));
@@ -474,6 +525,50 @@ pub fn page(
 const testing = std.testing;
 const fixture = @import("fixture.zig");
 
+test "signed catalog keeps base and SSH selections as separate identities" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const s = &f.s;
+    const key = try fixture.keys(&f, "image");
+    const table = try images.load(s);
+    const base = try json.from(
+        s.gpa,
+        .{ .form = "playground", .provider = "qemu", .arch = "x86_64", .status = ungated },
+    );
+    const ssh = try json.from(
+        s.gpa,
+        .{
+            .form = "playground",
+            .variants = &[_][]const u8{"ssh"},
+            .provider = "qemu",
+            .arch = "x86_64",
+            .status = ungated,
+        },
+    );
+    const raw = try envelope(
+        s,
+        try json.from(s.gpa, .{ .format = format, .forms = &[_]Json{ base, ssh } }),
+        key.key,
+    );
+    const plain = try openIndex(s, table, raw, key.crt);
+    try testing.expectEqual(@as(usize, 2), plain.rows.len);
+    try testing.expect(json.eql(base, plain.row("playground", "qemu", "x86_64").?));
+    s.variants = "ssh";
+    const selected = try openIndex(s, table, raw, key.crt);
+    try testing.expect(json.eql(ssh, selected.row("playground", "qemu", "x86_64").?));
+    try testing.expectEqualStrings(
+        "playground/variants/ssh/qemu/x86_64",
+        try namespace(s, table, "playground", "qemu", "x86_64"),
+    );
+    const duplicate = try envelope(
+        s,
+        try json.from(s.gpa, .{ .format = format, .forms = &[_]Json{ ssh, ssh } }),
+        key.key,
+    );
+    try testing.expectError(error.Refused, openIndex(s, table, duplicate, key.crt));
+}
+
 test "the catalog's signature, rows and published objects are checked" {
     var f: fixture.Fixture = undefined;
     try f.init();
@@ -490,6 +585,7 @@ test "the catalog's signature, rows and published objects are checked" {
             .arch = "x86_64",
             .status = ungated,
             .inputs = fixture.rep('a', 64),
+            .variant_descriptions = .{ .ssh = "SSH access" },
         },
     );
     const raw = try envelope(
@@ -539,6 +635,9 @@ test "the catalog's signature, rows and published objects are checked" {
         "{\"provider\":\"lima\"}",
         "{\"status\":\"\\u001b[2J\"}",
         "{\"extra\":1}",
+        "{\"variant_descriptions\":[]}",
+        "{\"variant_descriptions\":{\"ssh\":\"bad\\nline\"}}",
+        "{\"variant_descriptions\":{\"bad,name\":\"Description\"}}",
     };
     var bad: std.ArrayList([]const Json) = .empty;
     try bad.append(gpa, &.{ row, row });
@@ -588,6 +687,25 @@ test "the browsable catalog escapes text and links each form" {
     try testing.expect(mem.find(u8, html, "A &lt;server&gt;") != null);
     try testing.expect(mem.find(u8, html, "<script>") == null);
     try testing.expect(mem.find(u8, html, "caddy/index.html") != null);
+}
+
+test "variant descriptions are rendered and escaped in the catalog" {
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const s = &f.s;
+    const row = try json.from(s.gpa, .{
+        .form = "postgresql",
+        .provider = "qemu",
+        .arch = "x86_64",
+        .status = ungated,
+        .variants = &[_][]const u8{ "ssh", "vector" },
+        .variant_descriptions = .{ .vector = "Vector search <pgvector>" },
+    });
+    const html = try page(s, try images.load(s), &.{row}, "Images", &.{});
+    try testing.expect(mem.find(u8, html, "ssh: SSH access") != null);
+    try testing.expect(mem.find(u8, html, "vector: Vector search &lt;pgvector&gt;") != null);
+    try testing.expect(mem.find(u8, html, "<pgvector>") == null);
 }
 
 test "descriptions use the forms catalog's guides" {

@@ -1,79 +1,50 @@
-# Bastion - Hardened VM
+# Bastion
 
-A forwarding-only SSH server. Users open TCP forwards with a security key, to
-destinations named in the form, and nothing else: no shell, no command, no file copy.
-The destination authenticates them again. The form's manifest is
-[form.yaml](form.yaml).
+Ordinary operator SSH with controlled outbound SSH destinations. Bastion shares the
+`sshd` and `ssh-su` service used by SSH variants; `--ssh` adds no second listener.
 
-[Images, test status and download
-instructions](https://dist.werewolf-linux.org/boot/v1/bastion/index.html).
+## Configuration
 
-## Security Posture
-
-- sshd runs as its own user. There is no shell. The root is read-only.
-- Security keys only, touched at each login. No passwords, and no root login.
-- No session: no shell, SFTP, remote forward, or agent forward.
-- Each key reaches only that user's destinations.
-- The host key is made once on `/data`. With no disk, sshd stays down.
-
-### Weaknesses
-
-- sshd is how users get in. It opens no session.
-- Port forwarding is what a bastion is for.
-
-## Getting Started
-
-### Local test deployment (lima, qemu, firecracker)
-
-```sh
-howl create bastion --with bastion
-```
-
-This form has no users. A form of your own names them. A key is one line of a `.pub`
-file. A destination is a literal address and port. Everyone logs in as `bastion`.
+Define the destinations in a form based on bastion:
 
 ```yaml
 base: bastion
-
 bastion:
-  users:
-    alice:
-      keys:
-        - sk-ssh-ed25519@openssh.com AAAA... alice@laptop
-      destinations: [10.20.0.10:22]
+  destinations: [10.20.0.10:22, "[fd00::10]:2222"]
+weaknesses:
+  network-no-login: SSH provides operator access
+  programs-no-shell: mksh provides operator shells and /bin/sh
+  network-ssh-config: SSH forwards only to the declared destinations
 ```
 
-Create that form and jump through it. The host-key fingerprint is on the console at
-every boot. Connecting is in [OpenSSH's manual](https://man.openbsd.org/ssh).
+Destinations are literal IP addresses and ports. The allowlist applies to all
+people on the machine, both SSH forwards and connections from their processes.
+An empty list allows no outbound forwarding. Metadata destinations are refused.
 
-```text
-ssh -J bastion@ADDRESS you@10.20.0.10
+Supply ordinary `users` through the deployment configuration. For example:
+
+```yaml
+users:
+  alice:
+    keys: ["sk-ssh-ed25519@openssh.com PUBLIC_KEY alice"]
 ```
 
-### Cloud production deployment (aws, gcp, azure, proxmox)
+Alice may log in and jump to a permitted destination:
 
 ```sh
-howl create bastion --with bastion --on gcp --allow-from me
+ssh -J alice@BASTION you@10.20.0.10
 ```
 
-`--allow-from me` opens port 22 to your address. Deploy the form that names your
-users, with the same `--on` and `--allow-from`.
+Remote root login is refused, including when a valid root key is offered.
+Administrators log in as themselves before using local SSH-backed `su`.
+Login does not grant administration. Only people declared with `admin: true`
+join `wheel` and may use SSH-backed `su`, with fresh root-key authentication.
+Security-key and boot-protection defaults remain in force.
 
-### Importing data
+## Migration
 
-Who may reach what is in the form. There is no database to import, and no session to
-copy a file through.
-
-### Known Quirks
-
-- A key file is refused until `sshd.pubkey-accepted-algorithms` includes it. That
-  fails posture until the form says why.
-- A destination on a port other than 22 needs `connect bastion tcp/PORT` in the
-  form's network.
-- At most 256 users, with 32 keys and 32 destinations each. Hostnames are refused.
-- Edit the form and create again to change a user.
-
-### Network Exposure
-
-- listen: tcp/22 *
-- connect: tcp/22 global
+The former bastion used a shared forwarding-only account and per-key destinations.
+Those declarations are refused with a migration diagnostic. Create a new deployment,
+move keys to ordinary users, and explicitly choose the shared destination allowlist.
+Do not update an existing private bastion channel to this account model without
+planning that migration.

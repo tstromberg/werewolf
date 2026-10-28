@@ -126,7 +126,7 @@ pub fn run(p: *Posture) !void {
         .{ .truncate = false, .permissions = .fromMode(0o600) },
     ) catch |err| switch (err) {
         // A root SSH session may not write /run/werewolf (forms/sshd's
-        // Landlock layer, docs/design/ssh-hardening.md): boot's results.
+        // Landlock layer, docs/design/implemented/ssh-hardening.md): boot's results.
         error.AccessDenied => return p.fromBootRest(),
         else => return err,
     } else null;
@@ -277,7 +277,7 @@ fn leashAttack(p: *Posture) !void {
         Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
         Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
     }
-    // Grant a port the fence policy names (docs/design/fence.md), since
+    // Grant a port the fence policy names (docs/design/implemented/fence.md), since
     // fence refuses every other port whatever leash grants. If the policy
     // names none, as minimal's, the granted half is not tried.
     const granted = policyPort(p) orelse 0;

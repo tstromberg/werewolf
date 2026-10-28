@@ -431,8 +431,13 @@ fn comparePayload(
     plan: plans.Plan,
 ) !void {
     const gpa = t.gpa;
+    // The selected overlay moves from the production leaf to the generated
+    // test leaf. Its parent retains the original, unselected declaration.
+    const parent_spec = try gpa.print("usr/share/werewolf/forms/{s}/form.yaml", .{name});
+    const variant_selection: []const u8 = t.variable("VARIANTS") orelse "";
     for (a.keys(), a.values()) |path, record| {
         if (tests.has(&changed_metadata, path)) continue;
+        if (variant_selection.len > 0 and mem.eql(u8, path, parent_spec)) continue;
         const other = b.get(path) orelse return t.fail(
             "native dependency changed runtime file: {s}",
             .{path},

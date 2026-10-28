@@ -17,7 +17,7 @@
 //! check-independent-updates' evidence instead, which the gate made once:
 //! the same tree's updates, operator rollback, power cuts at the floor's
 //! increment, a refused retired release and a failed trial's fallback, on
-//! disposable keys (docs/design/independent-updates.md).
+//! disposable keys (docs/design/implemented/independent-updates.md).
 
 const std = @import("std");
 const host = @import("host");
@@ -64,6 +64,8 @@ const Lifecycle = struct {
     howl: []const u8 = "",
     provider: []const u8 = "",
     form: []const u8 = "",
+    variants: []const []const u8 = &.{},
+    login: bool = false,
     arch: []const u8 = "",
     channel: []const u8 = "",
     index: u64 = 0,
@@ -107,22 +109,37 @@ const Lifecycle = struct {
             source_commit,
             &why,
         ) catch return c.fail("{s}", .{why.text});
+        if (!published.sameVariants(evidence, l.variants))
+            return c.fail("the update evidence describes another variant selection", .{});
 
         // QEMU's sockets are Unix paths under a 108-byte limit; a fresh
         // consumer stays independent of the checkout's possibly deep path.
         l.consumer = try published.temporary(io, gpa, "ww-consumer-");
         const mirror = try c.path("mirror");
-        const base = try std.fs.path.join(gpa, &.{ mirror, l.form, l.provider, l.arch });
+        const base = try std.fs.path.join(
+            gpa,
+            &.{ mirror, try form.variantPath(gpa, l.form, l.variants), l.provider, l.arch },
+        );
         _ = try published.stock(io, gpa, bundle, base, l.arch);
         const latest = try std.fs.path.join(gpa, &.{ base, "latest" });
         try Io.Dir.cwd().createDirPath(io, latest);
         try published.promote(io, gpa, bundle, latest);
         l.identity = try c.path("ssh.key");
-        if (mem.eql(u8, l.form, "postdoc-server")) {
+        if (l.login or mem.eql(u8, l.form, "postdoc-server")) {
             l.security_key_provider = try c.absolute("build/host/test-sk.so");
             _ = try c.must(&.{
-                "ssh-keygen", "-q", "-t", "ed25519-sk", "-w", l.security_key_provider.?,
-                "-N",         "",   "-f", l.identity,
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519-sk",
+                "-w",
+                l.security_key_provider.?,
+                "-O",
+                "verify-required",
+                "-N",
+                "",
+                "-f",
+                l.identity,
             }, "ssh-key", .{});
         } else {
             const keygen = [_][]const u8{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f" };
@@ -135,11 +152,30 @@ const Lifecycle = struct {
             gpa,
             &.{ l.howl, "run", "--with", l.form, "--on", l.provider, "--add-current-user", "no" },
         );
+        if (l.variants.len > 0) try argv.appendSlice(
+            gpa,
+            &.{ "--variant", try mem.join(gpa, ",", l.variants) },
+        );
         if (!l.shellfree or l.security_key_provider != null)
             try argv.appendSlice(gpa, &.{ "--root-keys", try gpa.print("{s}.pub", .{l.identity}) });
         if (mem.eql(u8, l.form, "postdoc-server")) {
             const config = try c.path("config");
             _ = try c.must(&.{ "forms/postdoc-server/test/config", config }, "config", .{});
+            try argv.appendSlice(gpa, &.{ "--config", config });
+        }
+        if (mem.eql(u8, l.form, "bastion")) {
+            const config = try c.path("config");
+            try Io.Dir.cwd().createDirPath(io, config);
+            const key = try Io.Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}.pub", .{l.identity}),
+                gpa,
+                .limited(64 << 10),
+            );
+            try l.write(
+                try std.fs.path.join(gpa, &.{ config, "users" }),
+                try gpa.print("operator admin {s}", .{key}),
+            );
             try argv.appendSlice(gpa, &.{ "--config", config });
         }
         l.run_argv = argv.items;
@@ -148,6 +184,7 @@ const Lifecycle = struct {
         // tools) and boots the candidate with every protection.
         _ = try c.must(l.run_argv, "first-run", l.options(600));
         const first = try l.committed(null);
+        try l.checkLogin();
         if (mem.eql(u8, l.form, "postdoc-server")) try l.postdoc(false);
         try l.enrolled();
         if (try l.mirror.requests(gpa) == 0)
@@ -196,6 +233,7 @@ const Lifecycle = struct {
         _ = try c.must(&.{ l.howl, "stop" }, "stop", l.options(300));
         _ = try c.must(l.run_argv, "resume", l.options(600));
         _ = try l.committed(first.boot_id);
+        try l.checkLogin();
         if (mem.eql(u8, l.form, "postdoc-server")) try l.postdoc(true);
         if (!mem.eql(u8, &before, &try l.authority()))
             return c.fail("resume replaced the enrollment", .{});
@@ -220,6 +258,10 @@ const Lifecycle = struct {
         const manifest = try l.readJson(bundle, "boot.json");
         const image = published.field(manifest, "image") orelse json.Value{ .null = {} };
         l.form = published.text(manifest, "form") orelse "";
+        l.variants = try published.variants(c.gpa, manifest);
+        for (l.variants) |name| if (mem.eql(u8, name, "ssh")) {
+            l.login = true;
+        };
         l.arch = published.text(image, "arch") orelse "";
         l.channel = published.text(image, "channel_id") orelse "";
         const index = published.field(image, "index") orelse json.Value{ .null = {} };
@@ -233,7 +275,7 @@ const Lifecycle = struct {
         if (!images.isTarget(l.form, l.provider, l.arch))
             return c.fail("{s} is not published for {s} on {s}", .{ l.form, l.provider, l.arch });
         // Lima has no owner channel here; its gated forms have SSH.
-        if (!qemu and !mem.eql(u8, l.form, "playground") and
+        if (!qemu and !l.login and !mem.eql(u8, l.form, "playground") and
             !mem.eql(u8, l.form, "postdoc-server"))
             return c.fail("Lima tests playground and postdoc-server over SSH", .{});
         l.shellfree = qemu;
@@ -242,6 +284,11 @@ const Lifecycle = struct {
         else
             (try host.evidence.load(c.gpa, form)).ssh;
         return host.check.hexDigest(c.io, try std.fs.path.join(c.gpa, &.{ bundle, "boot.json" }));
+    }
+
+    fn checkLogin(l: *Lifecycle) !void {
+        if (l.login and !(try l.ssh("id -u", "variant-login", 30)).ok())
+            return l.c.fail("the SSH variant did not authenticate an operator login", .{});
     }
 
     /// serve starts the private HTTPS mirror and the consumer's env: no
@@ -371,7 +418,10 @@ const Lifecycle = struct {
         const argv = [_][]const u8{
             l.howl,
             "ssh",
-            "root@" ++ machine_name,
+            if (mem.eql(u8, l.form, "bastion"))
+                "operator@" ++ machine_name
+            else
+                "root@" ++ machine_name,
             "--no-agent",
             "--",
             command,
@@ -505,9 +555,12 @@ fn updated(
         !mem.eql(u8, published.text(evidence, "arch") orelse "", arch) or
         !mem.eql(u8, published.text(evidence, "commit") orelse "", commit))
         return why.refuse("the update evidence is of another target or source revision", .{});
-    if (mem.eql(u8, workload, "postdoc-server") and
+    if ((mem.eql(u8, workload, "postdoc-server") or mem.eql(u8, workload, "postgresql")) and
         !mem.eql(u8, published.text(evidence, "form") orelse "", workload))
-        return why.refuse("postdoc publication requires its own signed A/B workload evidence", .{});
+        return why.refuse(
+            "{s} publication requires its own signed A/B workload evidence",
+            .{workload},
+        );
     const checks = published.field(evidence, "checks") orelse json.Value{ .null = {} };
     for (update_gates) |gate| if (!published.isTrue(published.field(checks, gate)))
         return why.refuse("the update evidence lacks {s}", .{gate});

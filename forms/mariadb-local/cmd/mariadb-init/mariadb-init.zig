@@ -16,10 +16,6 @@ const network_cnf = run_dir ++ "/network.cnf";
 const svc_dir = "/data/svc/mariadb";
 const data_dir = svc_dir ++ "/data";
 const sql_dir = "/usr/share/werewolf-mariadb";
-/// import_dir is the read-only disk init mounts. Its .sql is applied once,
-/// into the data directory as that directory is first made.
-const import_dir = "/run/werewolf/import";
-const import_failed = import_dir ++ "/import-failed";
 /// share holds MariaDB's own SQL: its system tables, help and sys schema.
 const share = "/usr/share/mariadb";
 const mariadbd = "/usr/bin/mariadbd";
@@ -105,11 +101,6 @@ pub fn main(init: std.process.Init) !void {
                 "over its loss", .{data_dir});
             return error.DataLost;
         } else |_| {}
-        if (importBlocked(io)) {
-            say(io, "import disk did not mount; not making empty data", .{});
-            return error.ImportFailed;
-        }
-        const dump = try sqlFiles(io, gpa, import_dir);
         // The bootstrap writes as it goes, so an interrupted one would
         // look like data. Make it in data.new and rename it when whole.
         if (svc.access(io, "data.new", .{})) |_| {
@@ -136,25 +127,12 @@ pub fn main(init: std.process.Init) !void {
         );
         // Made by this release, so it needs no upgrade until the next.
         try svc.writeFile(io, .{ .sub_path = "data.new/" ++ upgrade_info, .data = version });
-        if (dump.len > 0) bootstrapFiles(
-            io,
-            gpa,
-            &.{ "--datadir=" ++ svc_dir ++ "/data.new", "--enforce-storage-engine=" },
-            dump,
-        ) catch |err| {
-            svc.deleteTree(io, "data.new") catch |del| {
-                say(io, "removing {s}/data.new: {s}", .{ svc_dir, @errorName(del) });
-            };
-            say(io, "import kept on {s}", .{import_dir});
-            return err;
-        };
         svc.rename("data.new", svc, "data", io) catch |err| {
             say(io, "{s} holds something, but no data: {s}", .{ data_dir, @errorName(err) });
             return err;
         };
         try syncSvc(io);
         try mark(io, svc, made);
-        for (dump) |path| say(io, "imported {s}", .{path});
     }
 
     var names: std.ArrayList([]const u8) = .empty;
@@ -349,63 +327,6 @@ fn writeNetwork(io: Io, text: []const u8) !void {
 /// bootstrap runs sql through `mariadbd --bootstrap`, the server with no
 /// clients, as mariadb-install-db does. It stops at the first error.
 fn bootstrap(io: Io, extra: []const []const u8, sql: []const u8) !void {
-    try bootstrapFeeds(io, extra, &.{.{ .bytes = sql }}, false);
-}
-
-/// bootstrapFiles streams each path into a bootstrap of the data directory
-/// extra names. Grant tables are loaded first, so CREATE USER is accepted.
-/// A short read is a failure: the server's own success does not commit a
-/// dump that was cut off.
-fn bootstrapFiles(
-    io: Io,
-    gpa: Allocator,
-    extra: []const []const u8,
-    paths: []const []const u8,
-) !void {
-    var feeds: std.ArrayList(Feed) = .empty;
-    try feeds.append(gpa, .{ .bytes = "FLUSH PRIVILEGES;\n" });
-    for (paths) |p| try feeds.append(gpa, .{ .file = p });
-    try bootstrapFeeds(io, extra, feeds.items, true);
-}
-
-/// importBlocked reports that init could not mount the import disk.
-fn importBlocked(io: Io) bool {
-    return if (Dir.cwd().access(io, import_failed, .{})) |_| true else |_| false;
-}
-
-/// sqlFiles returns dir's regular .sql files, in name order. A symlink is
-/// refused: the import is read as the service finds it, and a link can
-/// name something outside the disk.
-fn sqlFiles(io: Io, gpa: Allocator, dir: []const u8) ![]const []const u8 {
-    var d = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return &.{},
-        else => return err,
-    };
-    defer d.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = d.iterate();
-    while (try it.next(io)) |e| {
-        if (e.name.len == 0 or e.name[0] == '.') continue;
-        if (std.mem.eql(u8, e.name, "import-failed")) continue;
-        switch (e.kind) {
-            .file => if (std.mem.endsWith(u8, e.name, ".sql"))
-                try names.append(gpa, try gpa.dupe(u8, e.name)),
-            .sym_link => {
-                say(io, "{s}/{s} is a symlink; not importing", .{ dir, e.name });
-                return error.Symlink;
-            },
-            else => {},
-        }
-    }
-    std.mem.sort([]const u8, names.items, {}, lessThan);
-    var paths: std.ArrayList([]const u8) = .empty;
-    for (names.items) |name| try paths.append(gpa, try gpa.print("{s}/{s}", .{ dir, name }));
-    return paths.items;
-}
-
-const Feed = union(enum) { bytes: []const u8, file: []const u8 };
-
-fn bootstrapFeeds(io: Io, extra: []const []const u8, feeds: []const Feed, report_read: bool) !void {
     var argv: [8][]const u8 = undefined;
     const base = [_][]const u8{ mariadbd, defaults, "--bootstrap", "--log-warnings=0" };
     @memcpy(argv[0..base.len], &base);
@@ -415,38 +336,11 @@ fn bootstrapFeeds(io: Io, extra: []const []const u8, feeds: []const Feed, report
         .stdin = .pipe,
         .stdout = .ignore,
     });
-    var read_err = false;
-    for (feeds) |f| switch (f) {
-        .bytes => |b| child.stdin.?.writeStreamingAll(io, b) catch break,
-        .file => |p| streamFile(io, child.stdin.?, p) catch |err| {
-            if (report_read) say(io, "{s}: {s}", .{ p, @errorName(err) });
-            read_err = true;
-            break;
-        },
-    };
+    defer child.kill(io);
+    child.stdin.?.writeStreamingAll(io, sql) catch {};
     child.stdin.?.close(io);
     child.stdin = null;
-    const term = try child.wait(io);
-    if (term != .exited or term.exited != 0) {
-        say(io, "{s} --bootstrap failed; see above", .{mariadbd});
-        return error.BootstrapFailed;
-    }
-    if (read_err) return error.ImportFailed;
-}
-
-fn streamFile(io: Io, w: Io.File, path: []const u8) !void {
-    var f = try Dir.cwd().openFile(io, path, .{ .follow_symlinks = false });
-    defer f.close(io);
-    var buf: [1 << 16]u8 = undefined;
-    while (true) {
-        const n = f.readStreaming(io, &.{&buf}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        if (n == 0) break;
-        w.writeStreamingAll(io, buf[0..n]) catch return;
-    }
-    w.writeStreamingAll(io, "\n") catch {};
+    if (!(try child.wait(io)).success()) return error.BootstrapFailed;
 }
 
 /// mark creates the empty file name in dir and syncs it and its directory
@@ -501,25 +395,6 @@ test "network config stays closed until port 3306" {
         "[mariadbd]\nbind-address=0.0.0.0\nport=3306\n",
         networkText(true),
     );
-}
-
-test "import lists regular sql files and refuses a symlink" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "b.sql", .data = "select 2;\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "a.sql", .data = "select 1;\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "note.txt", .data = "no" });
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const dir = std.fs.path.dirname(try tmp.dir.realPathFileAlloc(io, "a.sql", gpa)).?;
-    const names = try sqlFiles(io, gpa, dir);
-    try std.testing.expectEqual(@as(usize, 2), names.len);
-    try std.testing.expect(std.mem.endsWith(u8, names[0], "/a.sql"));
-    try std.testing.expect(std.mem.endsWith(u8, names[1], "/b.sql"));
-    try tmp.dir.symLink(io, "a.sql", "c.sql", .{});
-    try std.testing.expectError(error.Symlink, sqlFiles(io, gpa, dir));
 }
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {

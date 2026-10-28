@@ -54,7 +54,7 @@ const form_yaml =
 
 // Caddy serves the releases from the image, and the channel's head from
 // /data/svc/ab-https/head, where the test puts the release it chooses: an SSH
-// session never writes a service's data (docs/design/ssh-hardening.md), so
+// session never writes a service's data (docs/design/implemented/ssh-hardening.md), so
 // the service opens that one directory to it as it starts, and lets it
 // through its own (share: shared).
 const caddyfile =

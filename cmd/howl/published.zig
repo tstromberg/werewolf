@@ -1,5 +1,5 @@
 //! published fetches the forms a build takes by name from werewolf's
-//! repository (docs/design/custom-updates.md): each NAME-form, checked
+//! repository (docs/design/implemented/custom-updates.md): each NAME-form, checked
 //! against the index the packages key signs, unpacked into
 //! build/published/ARCH/NAME. A form given as a path is the caller's own;
 //! the names it is built on and takes are published too. See README.md.
@@ -79,6 +79,7 @@ pub fn names(
         .{compose.format_package},
     );
     var queue: std.ArrayList([]const u8) = .empty;
+    for (howl.variants) |variant| if (mem.eql(u8, variant, "ssh")) try queue.append(gpa, "ssh-su");
     if (mem.findScalar(u8, ref, '/') == null) {
         try queue.append(gpa, ref);
     } else {
@@ -113,6 +114,11 @@ fn named(gpa: Allocator, fm: forms.Form) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (fm.spec.get("base")) |b| try out.append(gpa, b.scalar.text);
     try out.appendSlice(gpa, try fm.items(gpa, "with"));
+    if (fm.spec.get("variants")) |definitions| for (howl.variants) |variant| {
+        const selected = definitions.get(variant) orelse continue;
+        const layer: forms.Form = .{ .name = fm.name, .dir = fm.dir, .spec = selected };
+        try out.appendSlice(gpa, try layer.items(gpa, "with"));
+    };
     return out.items;
 }
 

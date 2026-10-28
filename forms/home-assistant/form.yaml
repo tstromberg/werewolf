@@ -2,7 +2,7 @@
 # behind Caddy, which serves it over HTTPS for the machine's domain (or
 # plain HTTP on :80 without one). It runs Home Assistant's own image, its
 # stable release pinned by digest when built, in a tree of its own
-# (docs/design/oci.md). Its owner comes from the config, made before it
+# (docs/design/implemented/oci.md). Its owner comes from the config, made before it
 # serves, so no visitor is offered onboarding. mDNS discovers LAN
 # devices; Bluetooth and USB need device passthrough. Its configuration and
 # history are in /data/svc/home-assistant. See forms/home-assistant/README.md.

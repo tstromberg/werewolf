@@ -207,7 +207,7 @@ fn shareMode(text: []const u8) ?u32 {
 }
 
 /// imageRoots checks that each service with a `root` (a baked-in OCI image,
-/// docs/design/adhoc.md) runs inside it, and that its writable binds are
+/// docs/design/implemented/adhoc.md) runs inside it, and that its writable binds are
 /// noexec and nodev.
 fn imageRoots(p: *Posture) !void {
     const mounts = p.read("/proc/self/mounts");

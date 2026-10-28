@@ -10,13 +10,14 @@
 //! overwriting a slot. Operator rollback, a power cut at the floor's
 //! increment, a restored older disk (refused by stage0), a failed trial and
 //! a service reaching for the TPM are each checked
-//! (docs/design/independent-updates.md). No host service but the static
+//! (docs/design/implemented/independent-updates.md). No host service but the static
 //! file server takes part. The check runs itself as QEMU, from the PATH it
 //! gives howl and Lima, to put its TPM proxy between QEMU and swtpm.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const host = @import("host");
+const form = @import("form");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
@@ -82,6 +83,8 @@ const Test = struct {
     private_ssh: []const u8 = "",
     source_form: []const u8 = "playground",
     postdoc_seeded: bool = false,
+    postgres_seeded: bool = false,
+    variants: []const []const u8 = &.{},
     create: []const []const u8 = &.{},
     passed: usize = 0,
     started: bool = false,
@@ -93,13 +96,21 @@ const Test = struct {
         if (c.args.len < 3 or c.args.len > 5)
             return c.fail(
                 "usage: check-independent-updates HOWL OUTPUT [lima|qemu] " ++
-                    "[playground|postdoc-server]",
+                    "[playground|postdoc-server|postgresql]",
                 .{},
             );
         if (c.args.len == 5) t.source_form = c.args[4];
         if (!mem.eql(u8, t.source_form, "playground") and
-            !mem.eql(u8, t.source_form, "postdoc-server"))
-            return c.fail("the update workload is playground or postdoc-server", .{});
+            !mem.eql(u8, t.source_form, "postdoc-server") and
+            !mem.eql(u8, t.source_form, "postgresql"))
+            return c.fail("the update workload is playground, postdoc-server or postgresql", .{});
+        const selection = c.env.get("FORM_IMAGES_VARIANTS") orelse c.env.get("VARIANTS") orelse "";
+        var failure: form.Failure = .{};
+        t.variants = try form.variantNames(
+            gpa,
+            if (selection.len == 0) &.{} else &.{selection},
+            &failure,
+        );
         t.provider = if (c.args.len > 3 and c.args[3].len > 0) c.args[3] else "lima";
         if (!mem.eql(u8, t.provider, "lima") and !mem.eql(u8, t.provider, "qemu"))
             return c.fail("provider must be lima or qemu", .{});
@@ -134,7 +145,7 @@ const Test = struct {
         const real_ssh = host.consumer.which(io, gpa, &c.env, "ssh") orelse
             return c.fail("no ssh on PATH", .{});
         t.private_ssh = try c.path("ssh.key");
-        const provider = if (mem.eql(u8, t.source_form, "postdoc-server"))
+        const provider = if (t.variants.len > 0 or !mem.eql(u8, t.source_form, "playground"))
             try c.absolute("build/host/test-sk.so")
         else
             null;
@@ -154,6 +165,15 @@ const Test = struct {
             try join(gpa, &.{ t.form, "form.yaml" }),
             try formYamlFor(gpa, t.source_form, original),
         );
+        if (mem.eql(u8, t.source_form, "postgresql")) {
+            const sql = try join(gpa, &.{ overlay, "usr/share/werewolf-postgres" });
+            try Io.Dir.cwd().createDirPath(io, sql);
+            try write(io, try join(
+                gpa,
+                &.{ sql, "99-update-test.sql" },
+            ), "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='root') " ++
+                "THEN CREATE ROLE root LOGIN SUPERUSER; END IF; END $$;\n");
+        }
         t.www = try c.path("www");
         try Io.Dir.cwd().createDirPath(io, try join(gpa, &.{ t.www, "image", t.arch }));
         const port = try host.check.freePort(io);
@@ -190,6 +210,8 @@ const Test = struct {
                     "-q",
                     "-t",
                     "ed25519-sk",
+                    "-O",
+                    "verify-required",
                     "-w",
                     p,
                     "-N",
@@ -226,7 +248,11 @@ const Test = struct {
         const keys = try gpa.print("{s}.pub", .{t.private_ssh});
         try create.appendSlice(gpa, &.{ t.howl, "create", t.name, "--with", t.form });
         try create.appendSlice(gpa, &.{ "--build", "--yes", "--root-keys", keys });
-        if (provider != null) {
+        if (t.variants.len > 0) try create.appendSlice(
+            gpa,
+            &.{ "--variant", try mem.join(gpa, ",", t.variants) },
+        );
+        if (mem.eql(u8, t.source_form, "postdoc-server")) {
             const config = try c.path("config");
             _ = try c.must(&.{ "forms/postdoc-server/test/config", config }, "config", .{});
             try create.appendSlice(gpa, &.{ "--config", config, "--add-current-user", "no" });
@@ -312,6 +338,7 @@ const Test = struct {
             .arch = t.arch,
             .commit = source_commit,
             .form = t.source_form,
+            .variants = t.variants,
             .passed = true,
             .checks = .{
                 .ab_upgrade = true,
@@ -514,6 +541,21 @@ const Test = struct {
                     t.postdoc_seeded = true;
                     t.ok("postdoc API and persistent verdict healthy on {s}", .{label});
                 }
+                if (committed and mem.eql(u8, t.source_form, "postgresql")) {
+                    const result = try t.ssh(
+                        try postgresCommand(c.gpa, t.variants, t.postgres_seeded),
+                        "postgres-health",
+                        90,
+                    );
+                    if (!result.ok() or
+                        !mem.eql(u8, mem.trim(u8, result.stdout, " \r\n"), "variant-data-kept"))
+                        return c.fail(
+                            "PostgreSQL data or selected extensions failed on {s}",
+                            .{label},
+                        );
+                    t.postgres_seeded = true;
+                    t.ok("PostgreSQL data and selected extensions healthy on {s}", .{label});
+                }
                 return s;
             }
             try c.io.sleep(.fromSeconds(3), .awake);
@@ -559,6 +601,10 @@ const Test = struct {
             if (a == .string) try disk_args.append(gpa, a.string);
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(gpa, &.{ t.howl, "_build", "--with", source, "--arch", t.arch });
+        if (t.variants.len > 0) try argv.appendSlice(
+            gpa,
+            &.{ "--variant", try mem.join(gpa, ",", t.variants) },
+        );
         try argv.appendSlice(gpa, &.{ "--build", build });
         try argv.appendSlice(gpa, &.{ "--ipe-kernel", try str(spec, "ipe_kernel") });
         try argv.appendSlice(gpa, &.{ "--ipe-key", try str(spec, "ipe_key") });
@@ -752,14 +798,48 @@ fn formYaml(gpa: Allocator, playground: []const u8) ![]const u8 {
 }
 
 fn formYamlFor(gpa: Allocator, name: []const u8, original: []const u8) ![]const u8 {
-    const at = mem.find(u8, original, "weaknesses:\n") orelse return error.NoWeaknesses;
-    var end = at + "weaknesses:\n".len;
+    const weaknesses = section(original, "weaknesses:\n") orelse return error.NoWeaknesses;
+    return gpa.print("base: {s}\n{s}{s}{s}{s}", .{
+        name,
+        if (mem.eql(u8, name, "postgresql"))
+            "with: [ssh-su]\npackages: [postgresql-client]\n"
+        else
+            "",
+        weaknesses,
+        if (mem.eql(u8, name, "postgresql"))
+            "  network-no-login: SSH controls the update test fixture\n" ++
+                "  programs-no-shell: The update test fixture uses a shell\n"
+        else
+            "",
+        section(original, "variants:\n") orelse "",
+    });
+}
+
+fn section(original: []const u8, key: []const u8) ?[]const u8 {
+    const at = mem.find(u8, original, key) orelse return null;
+    var end = at + key.len;
     while (end < original.len) {
         const next = if (mem.findScalarPos(u8, original, end, '\n')) |n| n + 1 else original.len;
         if (original[end] != ' ' and original[end] != '\n' and original[end] != '#') break;
         end = next;
     }
-    return gpa.print("base: {s}\n{s}", .{ name, original[at..end] });
+    return original[at..end];
+}
+
+fn postgresCommand(gpa: Allocator, variants: []const []const u8, seeded: bool) ![]const u8 {
+    var vector = false;
+    for (variants) |name| if (mem.eql(u8, name, "vector")) {
+        vector = true;
+    };
+    return gpa.print("/usr/bin/psql -X -w -A -t -q -v ON_ERROR_STOP=1 " ++
+        "-h /run/svc/postgres -U root -d postgres <<'SQL'\n{s}{s}" ++
+        "SELECT value FROM update_variant_test;\nSQL\n", .{
+        if (seeded) "" else "CREATE TABLE update_variant_test(value text);\n" ++
+            "INSERT INTO update_variant_test VALUES ('variant-data-kept');\n",
+        if (vector) "CREATE EXTENSION IF NOT EXISTS vector;\n" ++
+            "DO $$ BEGIN IF ('[1,2,3]'::vector <-> '[1,2,3]'::vector) <> 0 " ++
+            "THEN RAISE EXCEPTION 'vector distance failed'; END IF; END $$;\n" else "",
+    });
 }
 
 /// modes gives the overlay the modes a release's files have: directories

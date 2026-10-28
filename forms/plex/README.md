@@ -12,7 +12,7 @@ not require a Plex account.
 
 ## Security Posture
 
-- Plex, the transcoder, the media importer and Caddy have different users.
+- Plex, the transcoder, the media owner and Caddy have different users.
 - Plex reads media and owns its database. The transcoder reads media and
   writes only scratch output. It has no DNS or direct account-token access.
   Its only TCP destination is a loopback proxy accepting transcode callbacks.
@@ -66,8 +66,8 @@ replaces changed files while preserving destination-only files. Staging works wh
 the VM runs; the selected snapshot is applied after a full stop/start through Howl. A
 guest reboot alone does not switch the attached import disk. Completed snapshots are
 not reapplied across starts and updates. See the [data import
-design](../../docs/design/data-import.md) for recovery semantics. Do not import an
-old writable codec or plugin directory.
+design](../../docs/design/pending/data-import.md) for recovery semantics. Do not
+import an old writable codec or plugin directory.
 
 ### Known Quirks
 
@@ -89,8 +89,8 @@ old writable codec or plugin directory.
 `plex-transcode` is the transcoder socket client/worker. Its peers are checked
 by kernel UID; only the worker executes the fixed vendor transcoder, with a fixed
 environment. It does not select a program, inherit caller environment variables
-or run as root. Preferences setup and media import are separate programs,
-`plex-setup` and `plex-import`.
+or run as root. Preferences setup and media readiness are separate programs,
+`plex-setup` and `plex-media`.
 
 The callback proxy is Caddy under its own UID. It holds the configured account
 token, accepts only PUTs to progress and manifest paths, and reconstructs the
@@ -114,8 +114,10 @@ fixture token for preference reads and rejects anonymous requests. This delibera
 invalid account token cannot create a library, so the suite does **not** prove
 account registration, library management, metadata fetching or client playback. Those
 need a real account test, deferred for now. The exploratory namespace playback
-fixture is compatibility evidence only. `make check-plex-import` exercises the import
-lifecycle in a disposable protected Plex VM. Production IPE/verified-boot client
+fixture is compatibility evidence only. Data transfer uses `howl export` and
+`howl import`; `--service plex` selects server state, while `--service plex-media`
+selects media. The archive does not expand dependencies. See [data storage](../../docs/data.md) for current support and [application transfer tests](../../docs/design/pending/data-import-application.md) for the remaining release gate.
+Production IPE/verified-boot client
 playback remains unvalidated. Native VM checks exclude Secure Boot and TPM; IPE can
 be exercised with `IPE=1` and the signed kernel inputs described in the testing
-guide. The protected import fixture checks all three protections.
+guide. Protected transfer startup must separately pass all three protections.

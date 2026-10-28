@@ -1,7 +1,7 @@
 //! gpt writes a sparse disk image with werewolf's partition table: an EFI
 //! system partition and a root partition, both empty. howl's disk step
 //! (cmd/howl/disk.zig) imports it as the module "gpt", so a build host
-//! needs no sfdisk. See docs/design/native-boot.md.
+//! needs no sfdisk. See docs/design/implemented/native-boot.md.
 
 const std = @import("std");
 const Io = std.Io;

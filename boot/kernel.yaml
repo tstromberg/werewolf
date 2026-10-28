@@ -1,5 +1,5 @@
 # kernel: linux-werewolf, werewolf's own kernel for virtual machines
-# (docs/design/custom-kernel.md), built by werewolf-linux/kernel-build. The
+# (docs/design/implemented/custom-kernel.md), built by werewolf-linux/kernel-build. The
 # build keeps boot/vmlinuz-werewolf and its config; the kernel has no modules.
 # werewolf's key, beside the forms' in BUILD/keys, signs its repository.
 # The floor is the oldest kernel lib/image.zig's config checks accept (7.3-r7

@@ -61,6 +61,8 @@ pub fn write(b: *B) !void {
         },
     );
     const m: signed.Manifest = .{
+        .form = b.name,
+        .variants = b.spec.selected(),
         .format = signed.format,
         .ipe = true,
         .channel = url,

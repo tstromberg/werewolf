@@ -123,8 +123,10 @@ pub fn main(init: std.process.Init) !void {
     if (login) {
         const listener = std.mem.eql(u8, name, "sshd") or
             (std.mem.eql(u8, name, "sshd-dev") and exists("/usr/share/werewolf/dev"));
+        const export_only = std.mem.eql(u8, name, "sshd") and
+            exists("/usr/share/werewolf/export-only");
         if (user.uid != 0 or user.gid != 0 or !listener or
-            !allowances.has(.pty))
+            (!allowances.has(.pty) and !export_only))
             l.fail(.park, "caps login needs an SSH listener and the pty allowance", .{});
         // Disable Speculative Store Bypass for ssh-keygen, sshd and every
         // session (docs/security.md).
@@ -1019,7 +1021,7 @@ const floor = blk: {
 };
 
 /// login_writes are where production sshd, and every session it starts, may
-/// write, make and remove files (docs/design/ssh-hardening.md): never
+/// write, make and remove files (docs/design/implemented/ssh-hardening.md): never
 /// /run/werewolf, with the accounts and keys, nor /run/cgroup, with every
 /// service's limits. /run/runit holds runsv's controls and the reboot flag;
 /// /run/ssh-agent, ssh-su's forwarded agents; /dev/pts and /dev/ptmx, ptys.

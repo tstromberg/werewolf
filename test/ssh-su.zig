@@ -170,6 +170,16 @@ fn run(c: *host.Check) !void {
     }
     try su.expect("su-root-login", try su.elevate(.{}), true, result);
     try su.expect(
+        "su-rejects-non-admin",
+        try su.elevate(.{ .user = "guest" }),
+        false,
+        "administrator membership required",
+    );
+    try su.expect("direct-ssh-rejects-non-admin", try su.elevate(.{
+        .user = "guest",
+        .command = "ssh -F /etc/ssh/su_config root@127.0.0.1 true",
+    }), false, "Permission denied");
+    try su.expect(
         "su-agent-required",
         try su.elevate(.{ .forward = false }),
         false,

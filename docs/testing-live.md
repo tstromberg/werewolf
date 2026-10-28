@@ -23,11 +23,11 @@ killed anything in either boot. The consoles are in
   on the published `prod`, and gives slot a an older-looking staged `prod`. Slot b
   must install `minimal-form` and `prod-form`, compose `prod` from the package rather
   than slot a's copy, and carry the local form's files forward
-  ([design/custom-updates.md](design/custom-updates.md)). It passes once CI has
-  published this tree's format and forms.
+  ([design/implemented/custom-updates.md](design/implemented/custom-updates.md)). It
+  passes once CI has published this tree's format and forms.
 - `make check-updater-staged` cuts the power the moment slot b is staged. Slot b must
   boot all the same: a staged slot is armed
-  ([design/update-policy.md](design/update-policy.md)).
+  ([design/implemented/update-policy.md](design/implemented/update-policy.md)).
 
 It takes about 4 minutes with KVM or HVF, much longer under TCG.
 [update.yml](../.github/workflows/update.yml) runs it nightly on x86_64, as a
@@ -81,13 +81,13 @@ in:
 
 [test/check-independent-updates.zig](../test/check-independent-updates.zig), on Lima
 (macOS) or `PROVIDER=qemu` (Linux, swtpm), proves a machine takes its own TPM and
-updates from a static HTTPS channel alone ([design](design/independent-updates.md)).
-A, made by `howl create --build`, enrolls at floor 1; its updater installs B;
-rollback returns to A; power cuts around the floor's increment while installing C
-keep B booting; stage0 refuses a restored disk holding retired A; unhealthy E falls
-back to C at floor 3; a root session cannot open the TPM. Passed on Lima 2026-10-24,
-all ten checks, against swtpm. Output goes to `BUILD/check/independent-updates`; it
-must be new.
+updates from a static HTTPS channel alone
+([design](design/implemented/independent-updates.md)). A, made by `howl create
+--build`, enrolls at floor 1; its updater installs B; rollback returns to A; power
+cuts around the floor's increment while installing C keep B booting; stage0 refuses a
+restored disk holding retired A; unhealthy E falls back to C at floor 3; a root
+session cannot open the TPM. Passed on Lima 2026-10-24, all ten checks, against
+swtpm. Output goes to `BUILD/check/independent-updates`; it must be new.
 
 ## `make check-gcp-metadata`
 

@@ -1,6 +1,6 @@
 # immich: Immich, a photo and video library, from the image its project
 # publishes (ghcr.io/immich-app/immich-server, its 3.x releases, pinned by
-# digest when built and baked at /oci/immich; docs/design/oci.md,
+# digest when built and baked at /oci/immich; docs/design/implemented/oci.md,
 # cmd/howl/oci.zig), with PostgreSQL, pgvector, Valkey and Caddy beside it
 # (with). Caddy serves it over HTTPS at the machine's base URL, and opens
 # only once immich-setup has made the admin from the config, so no visitor

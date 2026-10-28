@@ -1,7 +1,7 @@
 # Writing form tests
 Author probes and workflows in `forms/FORM/test/tests.yaml`. Ship Zig only for what
 YAML cannot express; a new step type needs 3 forms. The host validates YAML; the
-guest parses JSON ([design](design/test-probes.md),
+guest parses JSON ([design](design/implemented/test-probes.md),
 [runner](../test/native/README.md)). `howl test --with gatus` runs clean and
 shipping-image checks; `make check-native-tests-gatus` runs the clean one.
 

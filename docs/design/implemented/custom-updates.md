@@ -1,0 +1,120 @@
+# One updater: apk
+
+**Status:** Implemented
+[2026-10-09](https://github.com/werewolf-linux/werewolf/commit/9e342e82)
+
+Proposed 2026-10-08. Phases 1, 2, 3 and 5 and the format pin are built;
+phase 4 was declined.
+
+## Summary
+An image becomes its `/etc/apk/world` plus compose, one deterministic step
+the build and the updater share. Everything else is a package: Wolfi's,
+werewolf's programs and forms from a repository CI signs, and the operator's
+inputs from one sealed into the image. Every machine updates one way, by apk
+into its other slot, so a `howl create shop --with cloudflared,bastion`
+machine updates werewolf's programs and forms too. Releases serve installs.
+
+## Background
+
+A form CI releases fetched its signed slot whole; any other `prod` form
+reinstalled its world ([updater.md](../../updater.md)) and copied werewolf's
+programs forward, so a fix to `fence` reached no `howl`-built machine.
+
+## Goals
+
+- A fix to any werewolf program reaches every `prod` machine within the
+  [update policy](update-policy.md)'s tiers, with no rebuild or operator.
+- One update path, one trust path (apk's keys), one test (`check-updater`).
+- A machine builds the slot the host would, and `make check-compose` proves it.
+
+## Non-Goals
+
+- Updating what the operator pinned (OCI digests, `--app`, local recipes,
+  bastion users), or putting apko or a compiler on the machine.
+- A CI-gated mirror of Wolfi, for now (see Reliability).
+
+## Detailed design
+
+The world file is the spec, apk the solver: host and machine resolve the same answer.
+
+**The image is its world.** The machine above has world `local-shop
+werewolf-format4`. `local-shop` depends on `prod-form`, `cloudflared-form`,
+`bastion-form` and `curl`; each form depends on its base's, its Wolfi packages
+and werewolf programs. apk refuses what cannot combine, at build time.
+
+**werewolf's repository** lives in R2 at
+`https://dist.werewolf-linux.org/apk/ARCH/` and is signed by the key in
+`release/packages.pub`, installed as `/etc/apk/keys/werewolf-packages.rsa.pub`.
+It holds `werewolf-PROGRAM`, packed from Zig's cross-compiled output on any
+host (lib/package.zig, `make packages`); `NAME-form`, sorting beside the
+package it serves, staging its files under `/usr/share/werewolf/forms/NAME/`
+as two forms may ship one path; and in-tree melange recipes' packages. Each
+version is its commit's time, so a clean tree packs the same bytes. Every
+package depends on `werewolf-formatN`. CI never deletes one.
+
+**What is not published** (forms outside `forms/`, OCI trees, `--app`) stays in the
+image, copied forward from the running slot at each update. With `updates.from`,
+[manifest apply](manifest.md) uses a persistent signed repository and `local-NAME`.
+
+**What howl builds.** A form named is the published one, fetched and checked
+against the signed index (lib/apk.zig), which the machine updates; one not yet
+published is the checkout's, with a warning. A path is the caller's, never
+updated. `--build` takes the tree's forms and programs, carried forward too.
+
+**compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
+what the chain derives. The updater runs it over the accounts apk laid, from
+the forms world names as NAME-form as the new root's packages laid them, and
+the image's own copies of the rest, and writes only into scratch.
+
+**One path.** Built: the release path is gone (`release.zig`, the manifest
+compare, `check-updater-release`); release signatures authenticate installs,
+and werewolf's advisories are a package, `werewolf-advisories`.
+
+**The format pin**, `werewolf-formatN`, named by a published world, keeps
+compose and the programs reading the same files. It holds a file (apk fetches
+no empty package) and provides `werewolf-format=N`, so apk installs one format:
+a machine on N takes N's newest and logs `held` each check, until reinstalled.
+
+**Phases.**
+1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
+2. Built: images stage their chain and the updater composes from it; CI
+   publishes changed programs, and a published machine took eight.
+3. Built: `NAME-form` packages, fetched by name; stage0 is a package; howl
+   builds with no checkout, holding the tree's files it uses (files.zig).
+4. Declined 2026-10-10: an `@local` repository in the image, signed by a throwaway
+   key, stores local content twice and adds signing machinery where copying forward
+   is built and tested; manifest apply opts into a persistent key instead.
+5. Built: the release path is gone; releases serve installs.
+
+## Drawbacks
+
+CI keeps a second key and a package host forever. A compose bug reaches every
+machine at once, bounded by one boot try and rollback. No `prod` machine runs
+an image CI booted first.
+
+## Alternatives Considered
+
+- **Keep the release path for `prod`**: CI-gated images, but two code paths,
+  trust paths and tests for one result. The tiers already hold Medium and
+  Low fixes for days, long enough for CI's hourly build to fail first.
+- **Publish instead of build** (`howl release` with the operator's key) suits
+  a fleet, and can be built on this design later.
+- **A signed tarball of programs** misses the forms; **upgrading in place**
+  drifts, and verity needs a whole image.
+
+## Security Considerations
+
+`packages.pub` is as powerful as a Wolfi key: a leak lets the holder ship a
+malicious `werewolf-init` to every machine, so its private half lives only in
+a CI secret and offline. The updater refuses older versions, and a new slot
+boots once before it is kept. compose parses signed data as root, from
+packages whose binaries root runs anyway. The host can withhold or replay,
+never forge. apk following package-laid links as root remains a known gap.
+
+## Reliability Considerations
+
+A removed package would strand every machine that needs it, so CI checks
+each published one is still served. Hourly checks fetch three indexes, so the
+`_update` fetcher asks conditionally. If ungated Wolfi proves too fast, the
+werewolf repository can become a CI-tested mirror of the forms' locked
+packages, with Wolfi reached only for tagged extras (`curl@wolfi`).

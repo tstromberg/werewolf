@@ -4,7 +4,7 @@
 # the feed (release/sign-tiers), commits it as cve-tiers.json and
 # cve-tiers.json.sig to FEED, a checkout of the feed's repository
 # (werewolf-linux/cve-feed), and pushes. Machines fetch the feed from there
-# (docs/design/update-policy.md). CACHE keeps NVD's scores between runs, so
+# (docs/design/implemented/update-policy.md). CACHE keeps NVD's scores between runs, so
 # a run asks NVD only for what changed since the last one.
 #
 #   release/tiers CACHE FEED

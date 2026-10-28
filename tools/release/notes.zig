@@ -52,7 +52,11 @@ pub fn inventory(
     var packages: std.ArrayList(Json) = .empty;
     for (locks.items) |path| {
         const file = std.fs.path.basename(path);
-        const scope = if (mem.eql(u8, file, try gpa.print("{s}.lock.json", .{name})))
+        const scope = if (mem.eql(
+            u8,
+            file,
+            try gpa.print("{s}.lock.json", .{try s.variantKey(name)}),
+        ))
             "runtime"
         else if (mem.eql(u8, file, "kernel.lock.json") or mem.eql(u8, file, "boot.lock.json"))
             file[0 .. file.len - ".lock.json".len]
@@ -99,7 +103,7 @@ pub fn inventory(
     mem.sort(Json, packages.items, PairOrder{ .a = "scope", .b = "name" }, PairOrder.less);
     const lock = try sys.readJson(
         s,
-        try sys.join(s, &.{ snapshot, try gpa.print("{s}.lock.json", .{name}) }),
+        try sys.join(s, &.{ snapshot, try gpa.print("{s}.lock.json", .{try s.variantKey(name)}) }),
         64 << 20,
     );
     var oci: std.ArrayList(Json) = .empty;
@@ -116,6 +120,7 @@ pub fn inventory(
     const result = try json.from(gpa, .{
         .format = format,
         .form = name,
+        .variants = try s.variantNames(),
         .arch = arch,
         .packages = packages.items,
         .images = oci.items,
@@ -150,7 +155,11 @@ fn text(v: Json) bool {
 /// validate refuses an inventory of another target, or with malformed or
 /// repeated entries.
 pub fn validate(s: *Sys, v: Json, name: []const u8, arch: []const u8) !Json {
-    if (!json.hasKeys(v, &.{ "format", "form", "arch", "packages", "images" }) or
+    const fields: []const []const u8 = if (json.get(v, "variants") != null)
+        &.{ "format", "form", "variants", "arch", "packages", "images" }
+    else
+        &.{ "format", "form", "arch", "packages", "images" };
+    if (!json.hasKeys(v, fields) or !s.matchesVariants(v) or
         !mem.eql(u8, json.text(v, "format") catch "", format) or
         !mem.eql(u8, json.text(v, "form") catch "", name) or
         !mem.eql(u8, json.text(v, "arch") catch "", arch))
@@ -261,6 +270,7 @@ fn lastWith(side: []const Json, k: Json, a: []const u8, b: []const u8) ?Json {
 
 pub const Candidate = struct {
     form: []const u8,
+    variants: []const []const u8 = &.{},
     provider: []const u8,
     arch: []const u8,
     serial: []const u8,
@@ -274,9 +284,19 @@ pub fn release(s: *Sys, c: Candidate, current: Json, previous: ?Json, old_invent
     _ = try validate(s, current, c.form, c.arch);
     if (previous) |p| {
         const prefix = if (mem.eql(u8, c.provider, "legacy-boot"))
-            try gpa.print("legacy-boot/{s}/{s}/objects/", .{ c.form, c.arch })
+            try gpa.print("legacy-boot/{s}/{s}/objects/", .{ try s.variantKey(c.form), c.arch })
         else
-            try gpa.print("{s}/{s}/{s}/objects/", .{ c.form, c.provider, c.arch });
+            try gpa.print(
+                "{s}/{s}/{s}/objects/",
+                .{
+                    if (s.variants.len > 0)
+                        try gpa.print("{s}/variants/{s}", .{ c.form, s.variants })
+                    else
+                        c.form,
+                    c.provider,
+                    c.arch,
+                },
+            );
         if (!mem.startsWith(u8, json.text(p, "object") catch "", prefix) or old_inventory == null)
             return s.refuse("release notes need the matching previous package inventory", .{});
         _ = try validate(s, old_inventory.?, c.form, c.arch);
@@ -299,6 +319,7 @@ pub fn release(s: *Sys, c: Candidate, current: Json, previous: ?Json, old_invent
     return json.from(gpa, .{
         .format = "werewolf-form-release-notes/1",
         .form = c.form,
+        .variants = c.variants,
         .provider = c.provider,
         .arch = c.arch,
         .serial = c.serial,

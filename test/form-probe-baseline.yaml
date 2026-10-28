@@ -1,4 +1,4 @@
-# The legacy form cases of the 730949c inventory (docs/design/test-probes.md).
+# The legacy form cases of the 730949c inventory (docs/design/implemented/test-probes.md).
 # A case counts as the case of its name in the form's tests.yaml or native
 # suites, or a retained legacy check; under replacements, as the SUITE/CASE
 # assertions that replace it, when it was split or renamed.

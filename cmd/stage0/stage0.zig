@@ -229,11 +229,12 @@ pub fn main(init: std.process.Init) !void {
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
-    // Pass init only WEREWOLF_BOOT, each phase's end in boot-clock ms, and
-    // WEREWOLF_ROLLBACK, the TPM floor found. The kernel puts every
+    // Pass init only the verified root identity, phase times and TPM floor.
+    // The kernel puts every
     // NAME=value it does not take into stage0's environment, and it must not
     // reach every process on the machine.
     var env: std.process.Environ.Map = .init(gpa);
+    try env.put("WEREWOLF_ROOT", &std.fmt.bytesToHex(params.root, .lower));
     var marker: [tpm.Marker.max]u8 = undefined;
     if (floor) |f| try env.put("WEREWOLF_ROLLBACK", try f.format(&marker));
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)

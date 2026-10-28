@@ -4,11 +4,11 @@
 arm64 Mac. Signing keys remain on the Mac. Builds honor caller boot credentials; howl
 manages local credentials when none are supplied. Plain `howl run` downloads a
 protected image with embedded production trust. Targets remain unavailable until
-their signed artifacts pass the [publication gates](design/protected-downloads.md);
-there is no implicit source build. howl's downloader
-([boot-download](../lib/boot-download.zig)) identifies Werewolf to the mirror and
-speaks TLS 1.3 itself, with certificate verification and bounded, authenticated
-downloads.
+their signed artifacts pass the [publication
+gates](design/implemented/protected-downloads.md); there is no implicit source build.
+howl's downloader ([boot-download](../lib/boot-download.zig)) identifies Werewolf to
+the mirror and speaks TLS 1.3 itself, with certificate verification and bounded,
+authenticated downloads.
 
 ## Why a Linux guest is needed
 
@@ -44,10 +44,10 @@ configuration, guest source bytes and provider, and preserves signing keys and T
 state. Changed inputs reinstall `howl run`'s machine; a named machine keeps the image
 it was made with, since an image signed with your keys takes changes by reinstalling
 unless its builder serves a channel ([local
-deployment](design/secure-local-deployment.md)). A stopped machine resumes its
-existing image; changed configuration updates only its config disk. `howl stop` keeps
-protected disks and TPM state; `howl delete` explicitly removes a machine for a fresh
-run.
+deployment](design/implemented/secure-local-deployment.md)). A stopped machine
+resumes its existing image; changed configuration updates only its config disk. `howl
+stop` keeps protected disks and TPM state; `howl delete` explicitly removes a machine
+for a fresh run.
 
 kernel-build compiles the kernel with Wolfi's pinned Clang 22. On macOS,
 `make ipe-kernel` (with `WEREWOLF_IPE_CRT`) needs `QEMU_KERNEL_IMAGE` and
@@ -92,8 +92,8 @@ unsupported architectures. `make check-independent-updates` deploys and updates 
 protected Lima machine ([live tests](testing-live.md)). kernel-build's CI boots each
 kernel with its probe before publishing it.
 
-Stub compilation through Melange QEMU and native firmware enrollment have passed
-on this arm64 Mac; the current enrollment dependencies require Python 3.10+. Complete
+Stub compilation through Melange QEMU and native firmware enrollment have passed on
+this arm64 Mac; the current enrollment dependencies require Python 3.10+. Complete
 deployment and A/B validation are separate gates: see [testing](testing.md) and the
-[local deployment design](design/secure-local-deployment.md). Compiler success alone
-does not establish a protected guest lifecycle.
+[local deployment design](design/implemented/secure-local-deployment.md). Compiler
+success alone does not establish a protected guest lifecycle.

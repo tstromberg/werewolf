@@ -5,7 +5,7 @@
 # (tools/cve-tiers.zig) covers these and the kernel, and nothing else,
 # because a CVE in a package werewolf never installs tells no machine
 # anything. A machine counts a package this list does not name, from a form
-# built elsewhere, as Medium (docs/design/update-policy.md).
+# built elsewhere, as Medium (docs/design/implemented/update-policy.md).
 #
 #   release/origins OUT
 #

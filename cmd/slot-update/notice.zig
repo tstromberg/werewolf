@@ -2,7 +2,7 @@
 //! when to speak and what to say. The text is the staged report joined to
 //! the tiers feed: package names, versions, CVE or advisory ids, and the
 //! four tier words. Nothing else, so a CVE title cannot write an escape
-//! onto a session. See docs/design/current.md.
+//! onto a session. See docs/design/implemented/current.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

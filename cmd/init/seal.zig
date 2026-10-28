@@ -80,10 +80,10 @@ fn startWatch() ?i32 {
 }
 
 /// seal installs a default-deny seccomp filter on PID 1, which every process
-/// inherits and none can remove before a reboot (docs/design/lockdown.md).
+/// inherits and none can remove before a reboot (docs/design/implemented/lockdown.md).
 /// It allows the calls of werewolf's base promises and of every promise in
 /// the services' `pledge` lines (/usr/share/werewolf/pledge,
-/// docs/design/pledge.md); leash then narrows each service to its own.
+/// docs/design/implemented/pledge.md); leash then narrows each service to its own.
 /// Other calls go to seal-watch, which refuses them with ENOSYS and logs
 /// each once. A leashed service's own filter refuses first; the kernel
 /// audits those refusals (SECCOMP_FILTER_FLAG_LOG).

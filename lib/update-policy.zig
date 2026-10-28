@@ -1,6 +1,6 @@
 //! update-policy decides when a staged update boots, and explains why. It
 //! also reads and writes werewolf's two time formats. See lib/README.md and
-//! docs/design/update-policy.md.
+//! docs/design/implemented/update-policy.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

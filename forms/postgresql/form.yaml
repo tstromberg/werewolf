@@ -2,8 +2,7 @@
 # answers on a UNIX socket in /run/svc/postgres and nothing else: no TCP
 # port, and the form declares none. Its data is in /data/svc/postgres.
 # leash starts it as the postgres user (etc/sv/postgres/service); before
-# each start pg-init makes the cluster if there is none, streams
-# /run/werewolf/import/*.sql into that first cluster, and applies the
+# each start pg-init makes the cluster if there is none, then applies the
 # SQL a form brings in /usr/share/werewolf-postgres. Local roles are
 # their system users (peer authentication). The package is pinned to major 18.
 base: prod
@@ -43,7 +42,10 @@ services:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim
       - /usr/bin/locale
-    # pg-init streams /run/werewolf/import/*.sql once, while it makes the cluster.
-    read: /run/werewolf/import
     # Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.
     share: shared
+
+variants:
+  vector:
+    description: Vector search with pgvector
+    packages: [pgvector-18]

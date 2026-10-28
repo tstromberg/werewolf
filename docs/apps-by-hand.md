@@ -121,19 +121,18 @@ boot (step 4), no rebuild; new code is a new image (step 2) on a new disk.
 
 ## How it works
 
-**The image** is the form's packages (apko, from `forms/NAME/form.yaml`
-and the forms it includes) under overlays laid in order: each form's
-`forms/NAME/`, werewolf's programs, and `APP` last, which is what `--app`
-does. An overlay mirrors the root: `$W/stage/usr/lib/app/main.py` is
-`/usr/lib/app/main.py` on the machine, where form.yaml's `app` keeps the
-application. Every file is made root's, `u=rwX,go=rX`, dated 1970, in a
-sorted ustar, so the same files make the same bytes, and the root is an
-erofs image stage0 mounts through dm-verity
-([design/verified-boot.md](design/verified-boot.md)): a byte changed on the
-disk stops the boot. For anything deployed more than once, put the files
-in a form of your own, under `forms/NAME/rootfs/usr/lib/app/`, where version
-control reviews them. Ship no links, devices or setuid files, as `--app`
-refuses them.
+**The image** is the form's packages (apko, from `forms/NAME/form.yaml` and the forms
+it includes) under overlays laid in order: each form's `forms/NAME/`, werewolf's
+programs, and `APP` last, which is what `--app` does. An overlay mirrors the root:
+`$W/stage/usr/lib/app/main.py` is `/usr/lib/app/main.py` on the machine, where
+form.yaml's `app` keeps the application. Every file is made root's, `u=rwX,go=rX`,
+dated 1970, in a sorted ustar, so the same files make the same bytes, and the root is
+an erofs image stage0 mounts through dm-verity
+([design/implemented/verified-boot.md](design/implemented/verified-boot.md)): a byte
+changed on the disk stops the boot. For anything deployed more than once, put the
+files in a form of your own, under `forms/NAME/rootfs/usr/lib/app/`, where version
+control reviews them. Ship no links, devices or setuid files, as `--app` refuses
+them.
 
 **How it runs.** leash starts the application from the form's service
 file, `etc/sv/app/service`, which the build writes from form.yaml's

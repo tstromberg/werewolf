@@ -2,7 +2,7 @@
 # on separate runners, require the two to match byte for byte, and publish
 # the packages whose files changed to dist.werewolf-linux.org/apk
 # (release/packages). Publishing waits for the repository variable
-# PUBLISH_PACKAGES to be "true". See docs/design/custom-updates.md.
+# PUBLISH_PACKAGES to be "true". See docs/design/implemented/custom-updates.md.
 name: packages
 
 on:

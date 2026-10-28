@@ -15,8 +15,10 @@ done
 cat "$prefix-key.pub" "$prefix-sk-key.pub" "$prefix-no-verify.pub" \
 	"$prefix-no-touch.pub" >"$prefix-config/authorized_keys"
 {
-	printf 'operator '
+	printf 'operator admin '
 	cat "$prefix-sk-key.pub"
-	printf 'second '
+	printf 'second admin '
+	cat "$prefix-sk-key.pub"
+	printf 'guest '
 	cat "$prefix-sk-key.pub"
 } >"$prefix-config/users"

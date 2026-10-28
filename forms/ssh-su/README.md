@@ -18,24 +18,21 @@ users:
 ```
 
 Use the complete public key from an enrolled authenticator. Admin keys are
-authorized for root as well as the named account. Every SSH login requires
+authorized for root as well as the named account. `admin: true` also manages
+`wheel` membership, required for local reauthentication even with a root key.
+Every SSH login requires
 presence; ed25519 security keys also require verification (PIN or biometric),
 which `sshd: verify-required-keys` names and init writes before each such key.
 There is no software-key or password fallback. Generate a credential with
 `ssh-keygen -t ed25519-sk -O verify-required` on the client.
 
-Apple's Secure Enclave keys (Touch ID, `sc_auth create-ctk-identity -k p-256-ne
--t bio`, loaded with `ssh-add -K -S /usr/lib/ssh-keychain.dylib`) are P-256
-security keys that cannot report verification, so P-256 keys are held to
-presence alone. macOS software, not the enclave, reports that presence: create
-these keys with `-t bio` so the enclave requires Touch ID for each signature.
-Inherited authentication requirements, including two distinct keys, remain in
-force. Load each required credential into the dedicated agent described below.
+Apple Secure Enclave P-256 keys cannot report verification; enroll them with
+Touch ID. Inherited authentication requirements, including two distinct keys,
+remain in force. See the SSH connection guide for host agent configuration.
 
-The machine's own `weaknesses:` must include su's declarations, since forms
-do not inherit excuses.
-The network grant permits all guest users to reach 127.0.0.1:22; SSH still
-requires an authorized root key. It grants no external SSH connections.
+The local SSH listener checks the client socket owner against current `wheel`
+membership before returning root keys. Calling ssh directly cannot bypass this
+check. The network grant permits local reauthentication without external SSH.
 
 ## Use
 
@@ -62,7 +59,6 @@ performs this setup. On first use it pins the host key with an authentication-fr
 handshake. `--identity KEY` selects keys explicitly; repeat it for additional
 credentials. `--no-agent` skips forwarding. Lima's login key can still authenticate
 locally but is not auto-forwarded.
-Expiration leaves sessions open but prevents new authentication; reconnect to reload.
 
 Inside the session, run `su`. Approve the local agent request and complete the
 authenticator's verification and presence checks. `exit` returns to the
@@ -72,9 +68,6 @@ and PIN prompts. Agent confirmation is client policy, not server-enforced.
 Outside an interactive SSH session, `su` exits with `su: unauthenticated
 session`. In an SSH session without an agent, it reports
 `su: agent forwarding required; reconnect with ssh -A`.
-
-Destination constraints limit where the credential can authenticate; a touch
-does not identify the command being approved.
 
 ## Local VMs
 

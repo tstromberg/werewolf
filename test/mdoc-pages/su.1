@@ -9,6 +9,11 @@
 .Op Fl
 .Op Cm root
 .Sh DESCRIPTION
+The caller must be a current member of the wheel group, derived from
+.Li "users.NAME.admin: true" .
+The SSH server checks local membership independently of this wrapper and still
+requires fresh authentication with an authorized root key.
+.Pp
 The Werewolf
 .Nm
 utility opens a fresh root SSH login to 127.0.0.1:22.

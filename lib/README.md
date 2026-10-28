@@ -37,7 +37,7 @@ init installs the machine seal, which allows the union of every promise
 the machine makes and hands other calls to seal-watch; leash installs a
 per-service filter that fails other calls with ENOSYS. seal-watch and
 `seal` name a refused call by the promise that would allow it. See
-[docs/design/pledge.md](../docs/design/pledge.md).
+[docs/design/implemented/pledge.md](../docs/design/implemented/pledge.md).
 
 Measured 2026-10-06 on an Apple M4 Max (20 million `getpid` calls), a call
 took 125 ns bare and 150 sealed on werewolf's kernel then (Alpine's 6.18), and
@@ -71,9 +71,10 @@ and `/boot`.
 
 ## tpm
 
-The release floor ([independent-updates.md](../docs/design/independent-updates.md)):
-one NV counter per release channel at `0x0150XXXX`, XXXX the channel identity's first
-two bytes, with empty authorization, no policy and the attributes AUTHWRITE, COUNTER,
+The release floor
+([independent-updates.md](../docs/design/implemented/independent-updates.md)): one NV
+counter per release channel at `0x0150XXXX`, XXXX the channel identity's first two
+bytes, with empty authorization, no policy and the attributes AUTHWRITE, COUNTER,
 AUTHREAD and NO_DA. `Device.boot`, for stage0, closes the platform hierarchy, enrolls
 a TPM nobody owns (defines the counter at the release's index, disables clear, sets
 random owner and lockout passwords it forgets) and returns the floor; `Device.raise`,
@@ -95,7 +96,7 @@ KiB blocks, SHA-256, levels top first after the data) and the table stage0 loads
 Used by howl's build, slot-update and stage0, and by `tools/verity.zig` for `make
 check-updater`. The salt is SHA-256 of the image rather than random, so the build and
 the updater make the same tree and builds stay reproducible. See
-[docs/design/verified-boot.md](../docs/design/verified-boot.md).
+[docs/design/implemented/verified-boot.md](../docs/design/implemented/verified-boot.md).
 
 ## image
 
@@ -110,7 +111,7 @@ address, where ASLR cannot move its code (`judgeElf`), but for those
 bit from a root's tar, whatever a package ships (`stripSetid`, which the
 updater does to its tree); and mkfs.erofs's options and the version check
 that refuses one before 1.9, which writes empty files from a tar. See
-[docs/design/howl-build.md](../docs/design/howl-build.md).
+[docs/design/implemented/howl-build.md](../docs/design/implemented/howl-build.md).
 
 ## cmdline
 
@@ -170,7 +171,7 @@ call the same function, so a slot built on a machine matches the build's. It wri
 only into the two directories it is given: on a machine, a scratch directory the
 updater copies in with its own checks, never the new root, where a package's symlink
 could redirect a write. See
-[docs/design/custom-updates.md](../docs/design/custom-updates.md).
+[docs/design/implemented/custom-updates.md](../docs/design/implemented/custom-updates.md).
 
 Each image stages its chain (form.yaml, rootfs) and
 posture-known in /usr/share/werewolf. A form CI publishes, NAME-form, holds
@@ -198,22 +199,20 @@ group by naming its user in `group`, without overriding either's ids.
 
 ## package
 
-Writes apk packages and the index that vouches for them, as apk-tools 2
-reads them, so werewolf's own programs update the way Wolfi's packages do
-([docs/design/custom-updates.md](../docs/design/custom-updates.md)). A
-package is two gzip members: its control, a tar of `.PKGINFO`, then its
-data, a tar of its files, each carrying its SHA-1 in a PAX record.
-`.PKGINFO`'s `datahash` is the SHA-256 of the data member, and the index
-lists each package with `C:`, the SHA-1 of its control member. An index is
-a signature member, added by whoever holds the key, then the member holding
-DESCRIPTION and APKINDEX, which is what the signature covers. A member that
-another follows is a tar without its end, as abuild writes it, so the
-members read as one tar. Nothing records when a package was built, so the
-same input gives the same bytes. Packages carry no signature of their own,
-as Wolfi's carry none: the index's `C:` vouches for them. `apk` checks all
-of this before anything reads a byte, and a test there runs those checks on
-what this writes. `repository_pem` is release/packages.pub, which howl
-checks fetched forms with.
+Writes apk packages and the index that vouches for them, as apk-tools 2 reads them,
+so werewolf's own programs update the way Wolfi's packages do
+([docs/design/implemented/custom-updates.md](../docs/design/implemented/custom-updates.md)).
+A package is two gzip members: its control, a tar of `.PKGINFO`, then its data, a tar
+of its files, each carrying its SHA-1 in a PAX record. `.PKGINFO`'s `datahash` is the
+SHA-256 of the data member, and the index lists each package with `C:`, the SHA-1 of
+its control member. An index is a signature member, added by whoever holds the key,
+then the member holding DESCRIPTION and APKINDEX, which is what the signature covers.
+A member that another follows is a tar without its end, as abuild writes it, so the
+members read as one tar. Nothing records when a package was built, so the same input
+gives the same bytes. Packages carry no signature of their own, as Wolfi's carry
+none: the index's `C:` vouches for them. `apk` checks all of this before anything
+reads a byte, and a test there runs those checks on what this writes.
+`repository_pem` is release/packages.pub, which howl checks fetched forms with.
 
 ## baselayout
 
@@ -245,13 +244,13 @@ the tiers feed use the same key code.
 
 ## allow
 
-Lists the allowances a form may grant (`kvm`, `nested-kvm`, `netadmin`,
-`packet`, `pty`, `jit`, `sh`) and the capabilities werewolf takes from
-root. Allowances in form.yaml's `allow` accumulate along the chain; the
-build writes one empty file each to /etc/werewolf/allow and derives
-kernel arguments from them. Nothing reads an allowance from the command
-line, config or metadata, which root could rewrite. Used by init, fence,
-posture and lib/form. See [docs/design/lockdown.md](../docs/design/lockdown.md).
+Lists the allowances a form may grant (`kvm`, `nested-kvm`, `netadmin`, `packet`,
+`pty`, `jit`, `sh`) and the capabilities werewolf takes from root. Allowances in
+form.yaml's `allow` accumulate along the chain; the build writes one empty file each
+to /etc/werewolf/allow and derives kernel arguments from them. Nothing reads an
+allowance from the command line, config or metadata, which root could rewrite. Used
+by init, fence, posture and lib/form. See
+[docs/design/implemented/lockdown.md](../docs/design/implemented/lockdown.md).
 
 ## sshd
 
@@ -284,19 +283,18 @@ only fill a declared key with a value of its type, and no type may hold
 its format's delimiters, so nothing is quoted. leash, service-config and
 howl share it. It also holds the config tar's rules (hostnames, entry
 names, data.key length) for init, cloud-metadata and howl pack. See
-[docs/design/settings.md](../docs/design/settings.md).
+[docs/design/implemented/settings.md](../docs/design/implemented/settings.md).
 
 ## update-policy
 
-Decides when a staged update boots, and says why in one sentence. Urgent
-and High fixes boot within a set time of first being seen; Medium and Low
-wait, then boot in the maintenance window. A machine's place in that span
-comes from SHA-256 of its id and the build, so a fleet spreads out. A form,
-then an operator, may change times and window within limits, never
-Urgent's. Times are passed in, so tests need no clock. It also owns the two
-time formats: RFC 3339 UTC, and a serial without dashes or colons for git
-tags. Used by slot-update, howl and tools/cve-tiers.zig. See
-[docs/design/update-policy.md](../docs/design/update-policy.md).
+Decides when a staged update boots, and says why in one sentence. Urgent and High
+fixes boot within a set time of first being seen; Medium and Low wait, then boot in
+the maintenance window. A machine's place in that span comes from SHA-256 of its id
+and the build, so a fleet spreads out. A form, then an operator, may change times and
+window within limits, never Urgent's. Times are passed in, so tests need no clock. It
+also owns the two time formats: RFC 3339 UTC, and a serial without dashes or colons
+for git tags. Used by slot-update, howl and tools/cve-tiers.zig. See
+[docs/design/implemented/update-policy.md](../docs/design/implemented/update-policy.md).
 
 ## cve
 

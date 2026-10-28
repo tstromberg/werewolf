@@ -1,4 +1,4 @@
-//! tiers reads the signed CVE tiers feed (docs/design/update-policy.md) and
+//! tiers reads the signed CVE tiers feed (docs/design/implemented/update-policy.md) and
 //! tiers an update's fixes by it, including Urgent and High fixes that the
 //! unsigned sources missed.
 

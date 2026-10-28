@@ -1,5 +1,5 @@
 //! check-provider-ab HOWL PROVIDER ARCH drives a real signed update on one
-//! VM backend (docs/design/provider-ab-tests.md): A boots and commits; the
+//! VM backend (docs/design/implemented/provider-ab-tests.md): A boots and commits; the
 //! updater installs B from the fixture's loopback HTTPS channel, which
 //! commits; operator rollback returns to A, which survives another reboot;
 //! an unhealthy signed candidate never commits, the deadman restores A, and

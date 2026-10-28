@@ -270,6 +270,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         try mem.concat(b.gpa, []const u8, &.{ &.{stamp}, b.rootfs, b.bins, b.made, b.app }),
         try mem.concat(b.gpa, []const u8, &.{ b.overlay, &.{try b.path("{s}/meta", .{out})} }),
     );
+    if (goals.transfer_helper) return @import("data-helper.zig").build(b, rootfs, overlay);
     const root = try b.path("{s}/slot/root.erofs", .{out});
     try rootErofs(b, root, rootfs, overlay);
     if (b.spec.ipe_kernel != null) try signIpe(b);

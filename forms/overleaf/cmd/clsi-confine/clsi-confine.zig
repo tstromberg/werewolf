@@ -25,7 +25,7 @@ const read_tree = sandbox.read_file | sandbox.read_dir;
 const own = sandbox.own_dir | sandbox.refer;
 
 /// floor is what TeX reads besides its project, as a narrowed program's
-/// (docs/design/narrow.md), but beneath clsi's root: TeX Live, perl and
+/// (docs/design/implemented/narrow.md), but beneath clsi's root: TeX Live, perl and
 /// their libraries, which it may also run; the loader's cache; fontconfig's
 /// files; the CPU list; and the devices. Not /etc as a whole, /proc, /tmp
 /// or /var/lib/overleaf, where every other project's compile is.

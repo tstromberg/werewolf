@@ -1,6 +1,6 @@
 //! init's image roots phase: it mounts what each OCI image root needs
 //! (proc, devices, its own /tmp, /run, /data) before fence forbids
-//! mounting. See docs/design/adhoc.md.
+//! mounting. See docs/design/implemented/adhoc.md.
 //!
 //! The build lists the roots in /usr/share/werewolf/oci:
 //!

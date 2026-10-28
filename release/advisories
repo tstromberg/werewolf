@@ -1,5 +1,5 @@
 # werewolf's own security advisories: fixes to werewolf's code, which no
-# CVE names (docs/design/update-policy.md, werewolf's own fixes). Add a
+# CVE names (docs/design/implemented/update-policy.md, werewolf's own fixes). Add a
 # line in the commit that makes the fix:
 #
 #   ID           DATE        TIER    TITLE

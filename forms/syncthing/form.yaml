@@ -2,7 +2,7 @@
 # devices, peer to peer, over TLS on :22000, and its web GUI behind Caddy,
 # which lets in the one user the config names. Syncthing runs from its
 # project's own image, its latest 2.x release, pinned by digest when built,
-# in a tree of its own (docs/design/oci.md, cmd/howl/oci.zig), as
+# in a tree of its own (docs/design/implemented/oci.md, cmd/howl/oci.zig), as
 # _oci-syncthing. It upgrades nothing itself, sends no crash reports, and
 # keeps its keys, config and folders in /data/svc/syncthing. See
 # forms/syncthing/README.md.

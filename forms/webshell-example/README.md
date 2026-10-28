@@ -26,7 +26,7 @@ ships coreutils and net-tools on purpose.
   through dm-verity, so nothing persists; the form declares no `connect`,
   so fence drops every packet going out.
 - `cat` also runs narrowed, by its link `/etc/sv/app/narrow/cat`
-  ([narrow](../../docs/design/narrow.md)): it reads the image but neither
+  ([narrow](../../docs/design/implemented/narrow.md)): it reads the image but neither
   the account list nor the app's own files, which plain `cat` reads.
 
 Weaknesses: `programs-no-interpreters` (python3 runs the application) and

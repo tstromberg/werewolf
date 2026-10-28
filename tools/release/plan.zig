@@ -47,6 +47,13 @@ pub fn query(s: *Sys, tree: Tree, args: []const []const u8) ![]const []const u8 
     return sys.lines(s, try sys.output(s, argv.items));
 }
 
+pub fn variantDescriptions(s: *Sys, tree: Tree, name: []const u8) !Json {
+    const lines = try query(s, tree, &.{ "variant-descriptions", name });
+    const value = try json.parse(s.gpa, try mem.join(s.gpa, "\n", lines));
+    try catalog.validateVariantDescriptions(s, value);
+    return value;
+}
+
 /// native refuses unless this is a Linux host of arch: builds and release
 /// tests are not cross-built.
 pub fn native(s: *Sys, tree: Tree, arch: []const u8) !void {
@@ -409,7 +416,12 @@ pub fn resolve(
     for (selected) |name| {
         var target = try json.from(
             s.gpa,
-            .{ .form = name, .arch = arch, .status = "resolution failed" },
+            .{
+                .form = name,
+                .variants = try s.variantNames(),
+                .arch = arch,
+                .status = "resolution failed",
+            },
         );
         try targets.append(s.gpa, target);
         resolveOne(
@@ -465,7 +477,7 @@ fn resolveOne(
     const snapshot = try sys.join(s, &.{ output, name });
     try sys.mkdir(s, snapshot);
     const chain = try query(s, tree, &.{ "names", name });
-    const lock = try gpa.print("{s}/{s}.lock.json", .{ tree.lock, name });
+    const lock = try gpa.print("{s}/{s}.lock.json", .{ tree.lock, try s.variantKey(name) });
     std.Io.Dir.cwd().deleteFile(s.io, lock) catch {};
     try sys.run(s, &.{
         try sys.resolve(s, tree.howl), "_build", "--with", name, "--arch", arch, "lock",
@@ -520,11 +532,12 @@ fn resolveOne(
         };
     }
     // Each release takes the next index of its channel, never one used: the TPM
-    // floor of every machine on it rises by these (docs/design/independent-updates.md).
+    // floor of every machine on it rises by these (docs/design/implemented/independent-updates.md).
     try o.put(gpa, "index", .{ .integer = index + 1 });
     try o.put(gpa, "status", .{ .string = if (settled and !force) "unchanged" else "build" });
     try sys.writeJson(s, try sys.join(s, &.{ snapshot, "input.json" }), try json.from(gpa, .{
         .chain = chain,
+        .variants = try s.variantNames(),
         .form = name,
         .arch = arch,
         .inputs = digest,

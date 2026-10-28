@@ -16,12 +16,24 @@ pub fn start() !void {
     if (!ephemeral) try directory("/data/svc", 0o755, null);
     try directory(db_dir, 0o700, dns.age_id);
     try directory(dns.age_socket_dir, 0o755, 0);
+    // This early writer lives outside runit's supervision and signal domain.
+    // A fixed cgroup lets the mount broker stop the whole excluded cache tree
+    // at shutdown without retaining a general process-signalling capability.
+    try directory("/run/cgroup/unwound-age", 0o755, null);
 
     var pair: [2]i32 = undefined;
     try okay(linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &pair));
     const pid = linux.fork();
     try okay(pid);
     if (pid == 0) {
+        const group = linux.open("/run/cgroup/unwound-age/cgroup.procs", .{
+            .ACCMODE = .WRONLY,
+            .NOFOLLOW = true,
+            .CLOEXEC = true,
+        }, 0);
+        if (linux.errno(group) != .SUCCESS) linux.exit_group(127);
+        if (linux.write(@intCast(group), "0", 1) != 1) linux.exit_group(127);
+        _ = linux.close(@intCast(group));
         _ = linux.close(pair[0]);
         if (linux.errno(linux.dup2(pair[1], 3)) != .SUCCESS) linux.exit_group(127);
         _ = linux.close_range(

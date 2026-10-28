@@ -1,6 +1,6 @@
 //! lock binds apko's two-architecture package lock to the declaration and
 //! local trees, and records the form versions and OCI digests it resolved.
-//! See docs/design/manifest.md.
+//! See docs/design/implemented/manifest.md.
 
 const std = @import("std");
 const forms = @import("form");
@@ -30,8 +30,9 @@ pub const Record = struct {
 };
 
 pub fn path(gpa: Allocator, s: native.Spec) ![]const u8 {
-    return gpa.print("build/lock/{s}{s}{s}.lock.json", .{
+    return gpa.print("build/lock/{s}{s}{s}{s}.lock.json", .{
         std.fs.path.basename(std.mem.trimEnd(u8, s.form, "/")),
+        try s.variantSuffix(gpa),
         s.devSuffix(),
         if (s.published) "-published" else "",
     });
@@ -127,6 +128,10 @@ pub fn inputs(io: Io, gpa: Allocator, s: native.Spec) ![64]u8 {
     if (s.dev) frame(&h, "ssh");
     frame(&h, if (s.published) "published" else "local");
     frame(&h, s.form);
+    for (s.selected()) |variant| {
+        frame(&h, "variant");
+        frame(&h, variant);
+    }
     if (s.published) {
         if (std.mem.findScalar(u8, s.form, '/') != null)
             frame(&h, &try formHash(io, gpa, s.form));
@@ -140,7 +145,15 @@ pub fn inputs(io: Io, gpa: Allocator, s: native.Spec) ![64]u8 {
         }
     } else {
         var why: forms.Failure = .{};
-        var chain = try forms.chain(io, gpa, Dir.cwd(), s.form, &why);
+        var chain = try forms.chainSelectedIn(
+            io,
+            gpa,
+            Dir.cwd(),
+            "forms",
+            s.form,
+            s.selected(),
+            &why,
+        );
         if (s.dev) {
             var dev_why: @import("howl.zig").Why = .{};
             chain = try @import("howl.zig").addDevSsh(io, gpa, chain, &dev_why);

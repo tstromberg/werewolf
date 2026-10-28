@@ -1,6 +1,14 @@
 # My Design Doc
 
-**Note for authors**: 100 lines maximum; 85 columns maximum. No unnecessary words or
+**Status:** Pending as of YYYY-MM-DD
+
+**Note for authors**: Place a new proposal in `docs/design/pending/`. Set the status
+to Pending, Implemented or Retired. For Implemented, date and link the commit that
+landed the core implementation; for other states, date the status. Move the document
+to the matching directory when its status changes. Implemented designs may
+have deferred follow-ups; retire designs that are no longer pursued or in use.
+
+100 lines maximum; 85 columns maximum. No unnecessary words or
 sentences - value the reader's time. **Note for reviewers**: While reviewing this
 proposal, focus on answering for yourself:
 
