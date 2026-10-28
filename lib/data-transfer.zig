@@ -29,7 +29,7 @@ pub const limits = struct {
 /// These are machine authority or filesystem bookkeeping, never application
 /// input. The installer enforces these independently of the manifest's claims.
 pub const exclusions = [_][]const u8{
-    ".werewolf", "lost+found", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
+    ".werewolf", "lost+found", "log", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
 };
 
 pub const Identity = struct { name: []const u8, id: u32 };
@@ -181,8 +181,10 @@ pub fn check(a: Allocator, m: Manifest, policy: Policy, service: ?[]const u8) !v
         if (total > limits.total_bytes) return error.TransferLimit;
         for ([_][]const u8{ entry.owner, entry.group }) |name|
             if (!validIdentity(name)) return error.TransferOwner;
-        _ = try identityByName(policy.users, entry.owner);
-        _ = try identityByName(policy.groups, entry.group);
+        if (selected(entry.path, service)) {
+            _ = try identityByName(policy.users, entry.owner);
+            _ = try identityByName(policy.groups, entry.group);
+        }
         if (std.fs.path.dirname(entry.path)) |parent| {
             const implicit = m.service != null and mem.eql(u8, parent, "svc");
             if (!implicit and seen.get(parent) != .directory) return error.TransferParent;
@@ -646,6 +648,25 @@ test "inventory cannot authorize machine state, unknown owners or ambiguous path
     try t.expectError(error.TransferService, check(a, m, test_policy, "postgres"));
 }
 
+test "service selection needs no destination authority for discarded owners" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const directory: Entry = .{ .path = "svc", .kind = .directory, .size = 0, .mode = 0o755, .mtime_ns = 0, .owner = "root", .group = "root" };
+    var entries = [_]Entry{ directory, directory, directory };
+    entries[1].path = "svc/plex";
+    entries[2].path = "foreign";
+    entries[2].owner = "remote-user";
+    const m: Manifest = .{ .image = test_image, .arch = .aarch64, .entries = &entries };
+    try t.expectError(error.TransferOwner, check(arena.allocator(), m, test_policy, null));
+    try check(arena.allocator(), m, test_policy, "plex");
+    entries[1].owner = "remote-user";
+    try t.expectError(error.TransferOwner, check(arena.allocator(), m, test_policy, "plex"));
+    entries[1].owner = "root";
+    entries[2].path = "../foreign";
+    try t.expectError(error.TransferPath, check(arena.allocator(), m, test_policy, "plex"));
+}
+
 test "real tree archive round trip validates all selected and unselected bytes" {
     const t = std.testing;
     const io = t.io;
@@ -657,9 +678,11 @@ test "real tree archive round trip validates all selected and unselected bytes" 
     try tmp.dir.createDirPath(io, "svc/plex/nested");
     try tmp.dir.createDirPath(io, "svc/plex-media");
     try tmp.dir.createDirPath(io, "svc/sshd");
+    try tmp.dir.createDirPath(io, "log");
     try tmp.dir.writeFile(io, .{ .sub_path = "svc/plex/nested/.db", .data = "database" });
     try tmp.dir.writeFile(io, .{ .sub_path = "svc/plex-media/movie", .data = "media-sentinel" });
     try tmp.dir.writeFile(io, .{ .sub_path = "svc/sshd/host-key", .data = "never export" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "log/current", .data = "native audit trail" });
     const owners: Ownership = .{ .get = testOwner };
     const m = try scan(io, a, tmp.dir, test_policy, null, owners);
     for (m.entries) |e| try t.expect(!excluded(e.path));

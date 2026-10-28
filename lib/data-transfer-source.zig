@@ -9,6 +9,9 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 pub const Identity = struct { image: []const u8, arch: data.Arch, users: []const u8 = "", nocloud: ?people.NoCloud = null };
+// Root-owned scratch within the existing SSH login write floor. Never put
+// privileged setup in /tmp or widen SSH access to account/enrollment state.
+pub const pg_scratch = "/run/runit/data-export-pg";
 
 pub fn cleanPostgres(io: Io, a: Allocator, root: Dir, session: bool) !void {
     var service = data.parentDir(io, root, "svc/postgres/entry") catch |err| switch (err) {
@@ -46,22 +49,44 @@ pub fn cleanPostgres(io: Io, a: Allocator, root: Dir, session: bool) !void {
     var contents: [8192]u8 = undefined;
     if ((try control.stat(io)).size != contents.len or
         try control.readPositionalAll(io, &contents, 0) != contents.len) return error.TransferPostgresControl;
-    try Dir.cwd().createDirPath(io, "/run/pg-check/global");
-    try Dir.cwd().setFilePermissions(io, "/run/pg-check", .fromMode(0o755), .{});
-    try Dir.cwd().setFilePermissions(io, "/run/pg-check/global", .fromMode(0o755), .{});
-    Dir.cwd().deleteFile(io, "/run/pg-check/global/pg_control") catch |err| if (err != error.FileNotFound) return err;
-    try Dir.cwd().writeFile(io, .{ .sub_path = "/run/pg-check/global/pg_control", .data = &contents, .flags = .{ .permissions = .fromMode(0o444) } });
+    try Dir.cwd().createDirPath(io, pg_scratch ++ "/global");
+    var private = try Dir.cwd().openDir(io, pg_scratch, .{ .iterate = true, .follow_symlinks = false });
+    defer private.close(io);
+    try private.setPermissions(io, .fromMode(0o700));
+    try Dir.cwd().setFilePermissions(io, pg_scratch ++ "/global", .fromMode(0o755), .{});
+    Dir.cwd().deleteFile(io, pg_scratch ++ "/global/pg_control") catch |err| if (err != error.FileNotFound) return err;
+    try Dir.cwd().writeFile(io, .{ .sub_path = pg_scratch ++ "/global/pg_control", .data = &contents, .flags = .{ .permissions = .fromMode(0o444) } });
+    // Only the unprivileged checker can enter its input directory. Restore
+    // root ownership and remove the control bytes on every return path.
+    defer private.deleteFile(io, "global/pg_control") catch {};
+    if (linux.errno(linux.fchown(private.handle, 78, 78)) != .SUCCESS) return error.TransferPostgresControl;
+    defer _ = linux.fchown(private.handle, 0, 0);
     var env: std.process.Environ.Map = .init(a);
     try env.put("LC_ALL", "C");
-    const result = try std.process.run(a, io, .{
+    const errors = try private.createFile(io, "global/check.stderr", .{ .read = true, .permissions = .fromMode(0o600) });
+    defer errors.close(io);
+    defer private.deleteFile(io, "global/check.stderr") catch {};
+    // One output pipe, read synchronously: do not create privileged I/O
+    // threads before the caller gives up its credentials. The tool bounds
+    // its regular-file stderr with RLIMIT_FSIZE and never parses the source
+    // in this process.
+    var child = try std.process.spawn(io, .{
         .argv = &.{ "/usr/lib/werewolf/data-transfer-tool", if (session) "postgres-session" else "postgres" },
         .environ_map = &env,
-        .stdout_limit = .limited(8192),
-        .stderr_limit = .limited(4096),
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .{ .file = errors },
     });
-    if (result.term != .exited or result.term.exited != 0 or result.stderr.len != 0)
+    defer child.kill(io);
+    const pipe = child.stdout.?;
+    child.stdout = null;
+    defer pipe.close(io);
+    var output_buffer: [4096]u8 = undefined;
+    var output = pipe.readerStreaming(io, &output_buffer);
+    const text = try output.interface.allocRemaining(a, .limited(8192));
+    if (!(try child.wait(io)).success() or (try errors.stat(io)).size != 0)
         return error.TransferPostgresControl;
-    var lines = mem.splitScalar(u8, result.stdout, '\n');
+    var lines = mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| if (mem.startsWith(u8, line, "Database cluster state:")) {
         if (mem.eql(u8, mem.trim(u8, line["Database cluster state:".len..], " \t"), "shut down")) return;
         return error.TransferPostgresUnclean;

@@ -6,9 +6,10 @@ const data = @import("data-transfer");
 const Io = std.Io;
 const Dir = Io.Dir;
 const A = std.mem.Allocator;
+pub const Endpoint = struct { host: []const u8, port: u16 = 22 };
 
-pub fn capture(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform, service: ?[]const u8, identity: ?[]const u8, work: []const u8, why: *howl.Why) !data.Policy {
-    const port = switch (on) {
+pub fn capture(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform, service: ?[]const u8, identity: ?[]const u8, endpoint: ?Endpoint, work: []const u8, why: *howl.Why) !data.Policy {
+    const port = if (endpoint) |e| try a.print("{d}", .{e.port}) else switch (on) {
         .qemu => @import("qemu.zig").record(io, a, at, "ssh") orelse return error.TransferSshAddress,
         .lima => @import("lima.zig").sshPort(io, a, name) orelse return error.TransferSshAddress,
         else => return error.TransferProvider,
@@ -32,7 +33,7 @@ pub fn capture(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform
         for (try @import("keys.zig").securityIdentities(io, a, try a.print("{s}/.ssh", .{home}))) |path|
             try args.appendSlice(a, &.{ "-i", path });
     }
-    try args.appendSlice(a, &.{ "root@127.0.0.1", "export-v1" });
+    try args.appendSlice(a, &.{ try a.print("root@{s}", .{if (endpoint) |e| e.host else "127.0.0.1"}), "export-v1" });
     if (service) |name_of_service| try args.append(a, name_of_service);
     var child = try std.process.spawn(io, .{ .argv = args.items, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit });
     defer child.kill(io);

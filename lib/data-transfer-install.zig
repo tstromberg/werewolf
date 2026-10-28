@@ -719,11 +719,15 @@ test "full compressed import preserves data and machine exclusions and rejects o
     try source.createDirPath(io, "svc/postgres");
     try source.createDirPath(io, "home/person/empty");
     try source.createDirPath(io, ".werewolf");
+    try source.createDirPath(io, "log");
+    try source.writeFile(io, .{ .sub_path = "log/current", .data = "source audit trail" });
     try source.writeFile(io, .{ .sub_path = ".werewolf/identities", .data = "source authority" });
     try source.writeFile(io, .{ .sub_path = "notes", .data = "outside service directories" });
     try source.writeFile(io, .{ .sub_path = "svc/postgres/data", .data = "cluster" });
     try source.writeFile(io, .{ .sub_path = "home/person/.empty", .data = "" });
     try target.createDir(io, ".werewolf", .fromMode(0o700));
+    try target.createDir(io, "log", .fromMode(0o700));
+    try target.writeFile(io, .{ .sub_path = "log/current", .data = "destination audit trail" });
     try target.writeFile(io, .{ .sub_path = ".werewolf/identities", .data = "destination authority" });
     const owner = try currentOwner(null, .{ .handle = source.handle, .flags = .{ .nonblocking = false } });
     const policy: data.Policy = .{
@@ -745,6 +749,7 @@ test "full compressed import preserves data and machine exclusions and rejects o
     const result = try apply(io, a, &input, target, policy, .{ .target = "new-machine" });
     try t.expect(result.manifest.service == null);
     try t.expectEqualStrings("destination authority", try target.readFileAlloc(io, ".werewolf/identities", a, .limited(1024)));
+    try t.expectEqualStrings("destination audit trail", try target.readFileAlloc(io, "log/current", a, .limited(1024)));
     for (manifest.entries) |e| {
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });
         try t.expectEqual(e.mode, @as(u32, st.permissions.toMode() & 0o7777));

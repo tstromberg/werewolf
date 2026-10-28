@@ -676,6 +676,7 @@ fn actionArgs(filter: []const Filter, arch: u32, nr: u32, args: [6]u32) u32 {
                 4 => arch,
                 0 => nr,
                 16, 24, 32, 40, 48, 56 => args[(i.k - 16) / 8],
+                20, 28, 36, 44, 52, 60 => 0,
                 else => unreachable,
             },
             JSET_K => pc += if (a & i.k != 0) i.jt else i.jf,
@@ -1040,4 +1041,15 @@ test parse {
     try testing.expectEqualStrings("ipc", bad);
     const ipc = try parse("shm sem msg", &bad);
     try testing.expectEqual(Set.initMany(&.{ .shm, .sem, .msg }), ipc);
+}
+
+test "pipe reader can reap and signal only its compressor" {
+    var buf: [max_filter]Filter = undefined;
+    const f = buildPipeReaderFilter(&buf, 123);
+    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.wait4), 0));
+    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.kill), 123));
+    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.kill), 124));
+    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.clone), 0));
+    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.execve), 0));
+    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.socket), linux.AF.INET));
 }

@@ -80,8 +80,8 @@ account defaults, developer access, forwarded agents and cloud firewall behavior
 `howl export NAME [--service NAME] [--output FILE]` writes a private data archive.
 `howl import NAME ARCHIVE [--service NAME]` restores empty data and leaves the
 machine stopped. See [data storage](../../docs/data.md) for supported adapters,
-image requirements and exclusions. `create --import`, directory seeds and `sync`
-are no longer supported.
+image requirements and exclusions. `howl start NAME` boots its enrolled image and
+saved configuration. `create --import`, directory seeds and `sync` are unsupported.
 
 ## Drawbacks
 

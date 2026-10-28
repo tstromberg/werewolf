@@ -21,6 +21,10 @@ const Options = struct {
     key: ?[]const u8 = null,
     config: ?[]const u8 = null,
     identity: ?[]const u8 = null,
+    host: ?[]const u8 = null,
+    port: ?u16 = null,
+    form: ?[]const u8 = null,
+    version: ?[]const u8 = null,
 };
 
 fn parse(op: Operation, args: []const []const u8) !Options {
@@ -44,14 +48,29 @@ fn parse(op: Operation, args: []const []const u8) !Options {
             o.output = value;
         } else if (op == .@"export" and mem.eql(u8, flag, "--identity") and o.identity == null) {
             o.identity = value;
+        } else if (op == .@"export" and mem.eql(u8, flag, "--host") and o.host == null) {
+            for (value) |c| if (!std.ascii.isAlphanumeric(c) and mem.findScalar(u8, ".-:[]%", c) == null)
+                return error.TransferArguments;
+            if (value[0] == '-') return error.TransferArguments;
+            o.host = value;
+        } else if (op == .@"export" and mem.eql(u8, flag, "--port") and o.port == null) {
+            o.port = std.fmt.parseUnsigned(u16, value, 10) catch return error.TransferArguments;
+            if (o.port.? == 0) return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--on") and o.on == null) {
             o.on = std.meta.stringToEnum(howl.Platform, value) orelse return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--data-key") and o.key == null) {
             o.key = value;
         } else if (op == .import and mem.eql(u8, flag, "--config") and o.config == null) {
             o.config = value;
+        } else if (op == .import and mem.eql(u8, flag, "--with") and o.form == null) {
+            if (!@import("form").isName(value)) return error.TransferArguments;
+            o.form = value;
+        } else if (op == .import and mem.eql(u8, flag, "--version") and o.version == null) {
+            o.version = value;
         } else return error.TransferArguments;
     }
+    if (o.port != null and o.host == null) return error.TransferArguments;
+    if (o.version != null and o.form == null) return error.TransferArguments;
     return o;
 }
 
@@ -82,6 +101,11 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
     });
     try Dir.cwd().createDir(io, work, .fromMode(0o700));
     defer Dir.cwd().deleteTree(io, work) catch {};
+    if (o.host) |host| {
+        const approved = try @import("data-ssh.zig").capture(io, a, o.name, at, o.on orelse .qemu, o.service, o.identity, .{ .host = host, .port = o.port orelse 22 }, work, why);
+        try publish(io, a, work, destination.?, approved, o.service);
+        return;
+    }
     const file = try a.print("{s}/authority/profile.json", .{at});
     const saved = Dir.cwd().readFileAlloc(io, file, a, .limited(256 << 10)) catch |err| switch (err) {
         error.FileNotFound => null,
@@ -92,15 +116,16 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
     var image: []const u8 = undefined;
     var users: []const u8 = "";
     if (saved) |text| {
+        if (o.form != null) return why.refuse("existing destinations retain their approved image; omit --with", .{});
         profile = try secure.parseProfile(a, text);
         if (o.on) |on| if (on != profile.provider) return error.TransferProvider;
         if (op == .@"export" and try machineRunning(io, a, o.name, at, profile.provider, why)) {
-            const approved = try @import("data-ssh.zig").capture(io, a, o.name, at, profile.provider, o.service, o.identity, work, why);
+            const approved = try @import("data-ssh.zig").capture(io, a, o.name, at, profile.provider, o.service, o.identity, null, work, why);
             try publish(io, a, work, destination.?, approved, o.service);
             return;
         }
         try requireStopped(io, a, o.name, at, profile.provider, why);
-        record = try images.approve(io, a, profile, false, why);
+        record = if (profile.data_image) |approved_image| try images.read(io, a, approved_image) else try images.approve(io, a, profile, false, why);
         image = try a.dupe(u8, &std.fmt.bytesToHex(record.verity.root, .lower));
         if (o.config != null) return why.refuse("existing destinations retain their configuration; omit --config", .{});
     } else {
@@ -108,12 +133,17 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
         // Hints are used solely as a key in the owner's approved image cache.
         const hint = try archiveHint(io, a, o.archive.?);
         image = hint.image;
-        record = images.read(io, a, image) catch |err| switch (err) {
-            error.FileNotFound => return why.refuse("matching image {s} is unavailable; provision a stopped destination with that approved image first", .{image}),
-            else => return err,
-        };
         const on = o.on orelse howl.engine(io, a, null).on;
         if (on != .qemu and on != .lima) return error.TransferProvider;
+        const arch = std.meta.stringToEnum(howl.Arch, @tagName(hint.arch)).?;
+        if (arch != howl.hostArch()) return error.TransferArchitecture;
+        record = if (o.form) |form_name|
+            try images.published(io, a, form_name, on, arch, o.version, image, why)
+        else
+            images.read(io, a, image) catch |err| switch (err) {
+                error.FileNotFound => return why.refuse("matching image {s} is unavailable; select its approved published release with --with FORM --version SERIAL", .{image}),
+                else => return err,
+            };
         const definition = record.profile.configuration orelse return error.MissingBootConfiguration;
         const previous = @import("boot-config.zig").current;
         @import("boot-config.zig").current = definition;
@@ -171,8 +201,12 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
         .target = at,
         .initialize = op == .import,
         .users = users,
+        .nocloud = if (profile.provider == .lima and op == .import)
+            try @import("lima.zig").dataIdentity(io, a, o.name)
+        else
+            @as(?@import("people").NoCloud, null),
     }, o.archive, o.key, why);
-    const policy = try helper.run(io, a, guest, .{ .data = source, .control = control, .writable = op == .import }, work);
+    const policy = try helper.run(io, a, guest, .{ .data = source, .control = control, .writable = op == .import, .guard = lock }, work);
     if (destination) |path| try publish(io, a, work, path, policy, o.service) else howl.say(io, "{s}: import complete; destination remains stopped", .{o.name});
 }
 
@@ -254,4 +288,11 @@ test "one archive syntax rejects legacy inputs and scope escalation" {
     try t.expectError(error.TransferArguments, parse(.@"export", &.{ "source", "--service", "../plex" }));
     try t.expectError(error.TransferArguments, parse(.@"export", &.{ "source", "--service", "plex", "--service", "postgres" }));
     try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--output", "elsewhere" }));
+    const remote = try parse(.@"export", &.{ "remote", "--host", "backup.example", "--port", "2222" });
+    try t.expectEqual(@as(u16, 2222), remote.port.?);
+    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--port", "2222" }));
+    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--host", "-oProxyCommand=sh" }));
+    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--host", "backup.example", "--port", "0" }));
+    try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--version", "20261027T000000Z" }));
+    try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--with", "../untrusted" }));
 }

@@ -328,7 +328,7 @@ fn hasLine(lines: []const u8, name: []const u8) bool {
     return false;
 }
 
-fn validNoCloudName(name: []const u8) bool {
+pub fn validNoCloudName(name: []const u8) bool {
     if (name.len == 0 or name.len > 32 or
         (!std.ascii.isLower(name[0]) and name[0] != '_')) return false;
     for (name[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and

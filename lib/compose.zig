@@ -1149,10 +1149,10 @@ fn privileges(
             );
         if (parsed.caps & service.cap.login != 0 and
             (!(mem.eql(u8, s.name, "sshd") or (dev and mem.eql(u8, s.name, "sshd-dev"))) or
-                !allows(allowed, "pty")))
+                (!allows(allowed, "pty") and !(mem.eql(u8, s.name, "sshd") and hasForm(forms, "data-export")))))
             return f.fail(
                 gpa,
-                "{s}: caps login is for sshd when the chain allows pty",
+                "{s}: caps login requires sshd with pty or the fixed data-export endpoint",
                 .{s.path},
             );
         for (parsed.data) |d| if (d.write and !owner_of.contains(d.host))
@@ -2166,6 +2166,25 @@ test "privileges: the developer SSH listener needs an explicit development build
     );
     try testing.expectError(error.Form, privileges(io, gpa, tmp.dir, chain, &.{}, true, &failure));
     try privileges(io, gpa, tmp.dir, chain, &.{"pty"}, true, &failure);
+}
+
+test "privileges: fixed export SSH needs no terminal and grants no other root service" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/data-export/rootfs/etc/sv/sshd");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/form.yaml", .data = "" });
+    const listener = "exec /usr/bin/sshd\nuser root\ncaps login\npledge stdio\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/rootfs/etc/sv/sshd/service", .data = listener });
+    var failure: Failure = .{};
+    const chain = try form.chain(io, a, tmp.dir, "data-export", &failure);
+    try privileges(io, a, tmp.dir, chain, &.{}, false, &failure);
+    try tmp.dir.createDirPath(io, "forms/data-export/rootfs/etc/sv/other");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/rootfs/etc/sv/other/service", .data = listener });
+    try testing.expectError(error.Form, privileges(io, a, tmp.dir, chain, &.{}, false, &failure));
 }
 
 test "apko: a service user apko.yaml does not name gets an account, its id its name's hash" {

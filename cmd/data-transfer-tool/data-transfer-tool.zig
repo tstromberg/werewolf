@@ -26,13 +26,16 @@ pub fn main(init: std.process.Init) !void {
         dir.close(io);
     }
     if (!compress) {
-        const scratch = try Dir.cwd().openDir(io, "/run/pg-check", .{});
+        const scratch = try Dir.cwd().openDir(io, @import("data-source").pg_scratch, .{});
         try rules.add(scratch.handle, sandbox.read_dir | sandbox.read_file);
         scratch.close(io);
     }
     try sandbox.closeExcept(&.{rules.fd});
     try sandbox.limit(.AS, 256 << 20);
-    if (!compress) try sandbox.limit(.CPU, 10);
+    if (!compress) {
+        try sandbox.limit(.CPU, 10);
+        try sandbox.limit(.FSIZE, 4096);
+    }
     if (session) try sandbox.dropSession(78, 0) else try sandbox.dropTo(78, null);
     try rules.restrict();
     _ = linux.close(rules.fd);
@@ -43,5 +46,5 @@ pub fn main(init: std.process.Init) !void {
     return std.process.replace(io, .{ .argv = if (compress)
         &.{ program, "-1", "-q", "-c", "--single-thread", "--no-asyncio" }
     else
-        &.{ program, "/run/pg-check" }, .environ_map = &env });
+        &.{ program, @import("data-source").pg_scratch }, .environ_map = &env });
 }

@@ -39,7 +39,7 @@ pub const Guest = struct {
     image: []const u8,
     verity: @import("verity").Params,
 };
-pub const Devices = struct { data: []const u8, control: []const u8, writable: bool = false };
+pub const Devices = struct { data: []const u8, control: []const u8, writable: bool = false, guard: ?Io.File = null };
 
 pub fn run(io: Io, a: Allocator, g: Guest, d: Devices, work: []const u8) !data.Policy {
     const console = try a.print("{s}/console.log", .{work});
@@ -49,7 +49,7 @@ pub fn run(io: Io, a: Allocator, g: Guest, d: Devices, work: []const u8) !data.P
         const f = try Dir.cwd().createFile(io, path, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         f.close(io);
     }
-    try execute(io, try argv(a, g, d, console, output), .fromSeconds(12 * 3600));
+    try executeLocked(io, try argv(a, g, d, console, output), .fromSeconds(12 * 3600), d.guard);
     const approved = try policy(a, try Dir.cwd().readFileAlloc(io, status, a, .limited(1 << 20)));
     if (!mem.eql(u8, approved.image, &std.fmt.bytesToHex(g.verity.root, .lower)) or
         !mem.eql(u8, @tagName(approved.arch), @tagName(g.arch))) return error.TransferImage;
@@ -58,11 +58,16 @@ pub fn run(io: Io, a: Allocator, g: Guest, d: Devices, work: []const u8) !data.P
 
 /// Reap the fixed helper command on completion or deadline, including errors.
 pub fn execute(io: Io, args: []const []const u8, timeout: Io.Duration) !void {
+    return executeLocked(io, args, timeout, null);
+}
+
+fn executeLocked(io: Io, args: []const []const u8, timeout: Io.Duration, guard: ?Io.File) !void {
     var child = try std.process.spawn(io, .{
         .argv = args,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
+        .inherit_files = if (guard) |file| &.{file} else &.{},
     });
     defer child.kill(io);
     const Event = union(enum) { process: std.process.Child.WaitError!std.process.Child.Term, timeout: Io.Cancelable!void };
@@ -139,6 +144,9 @@ pub fn argv(a: Allocator, g: Guest, d: Devices, console: []const u8, output: []c
         try args.appendSlice(a, &.{ "-drive", try a.print("if=none,id=d{d},format=raw,readonly={s},file={s}", .{ i, if (i == 0 and d.writable) "off" else "on", try escaped(a, path) }), "-device", try a.print("virtio-blk-pci,drive=d{d}", .{i}) });
     }
     try args.appendSlice(a, &.{ "-device", "virtio-serial-pci", "-chardev", try a.print("file,id=transfer,path={s}", .{try escaped(a, output)}), "-device", "virtserialport,chardev=transfer,name=werewolf.transfer", "-chardev", try a.print("file,id=status,path={s}.status", .{try escaped(a, console)}), "-device", "virtserialport,chardev=status,name=werewolf.transfer.status", "-object", "rng-random,id=rng0,filename=/dev/urandom", "-device", "virtio-rng-pci,rng=rng0" });
+    // Retain the already-held flock in QEMU's private descriptor set. If Howl
+    // dies, another lifecycle operation still waits until this helper exits.
+    if (d.guard) |file| try args.appendSlice(a, &.{ "-add-fd", try a.print("fd={d},set=9,opaque=transfer-lifecycle", .{file.handle}) });
     return args.toOwnedSlice(a);
 }
 
@@ -155,7 +163,13 @@ pub fn policy(a: Allocator, console: []const u8) !data.Policy {
         } else if (mem.eql(u8, line, "werewolf-transfer-complete")) {
             if (completed or result == null) return error.TransferConsole;
             completed = true;
-        } else if (mem.startsWith(u8, line, "werewolf-transfer-error:")) return error.TransferHelper;
+        } else if (mem.startsWith(u8, line, "werewolf-transfer-error:")) {
+            // Report fixed failure codes, never guest-controlled text or paths.
+            inline for (.{ error.TransferUnclean, error.TransferKey, error.TransferImage, error.TransferImageUnrecorded, error.TransferPostgresUnclean, error.TransferPostgresVersion, error.TransferPostgresControl, error.TransferFilesystem, error.TransferRead, error.TransferInstall, error.TransferHelperUnmount }) |err| {
+                if (mem.eql(u8, line, "werewolf-transfer-error: " ++ @errorName(err))) return err;
+            }
+            return error.TransferHelper;
+        }
     }
     if (!completed) return error.TransferIncomplete;
     return result orelse return error.TransferIncomplete;
@@ -190,6 +204,8 @@ test "helper success requires one policy and explicit terminal completion" {
     try t.expectError(error.TransferIncomplete, policy(a, line));
     _ = try policy(a, line ++ "werewolf-transfer-complete\r\n");
     try t.expectError(error.TransferConsole, policy(a, line ++ line ++ "werewolf-transfer-complete\n"));
-    try t.expectError(error.TransferHelper, policy(a, line ++ "werewolf-transfer-error: TransferKey\n"));
+    try t.expectError(error.TransferKey, policy(a, line ++ "werewolf-transfer-error: TransferKey\n"));
+    try t.expectError(error.TransferUnclean, policy(a, "werewolf-transfer-error: TransferUnclean\n"));
+    try t.expectError(error.TransferHelper, policy(a, "werewolf-transfer-error: untrusted diagnostic\n"));
     try t.expectError(error.TransferConsole, policy(a, "werewolf-transfer-complete\n"));
 }

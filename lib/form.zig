@@ -1551,10 +1551,9 @@ fn has(forms: []const Form, name: []const u8) bool {
     return false;
 }
 
-/// runsSshd reports whether the chain runs sshd: it has the sshd form or
-/// the bastion.
+/// runsSshd includes the fixed native export endpoint as well as logins.
 pub fn runsSshd(forms: []const Form) bool {
-    return has(forms, "sshd") or has(forms, "bastion");
+    return has(forms, "sshd") or has(forms, "bastion") or has(forms, "data-export");
 }
 
 /// takesKeyFiles reports whether the chain's sshd accepts plain key files,
@@ -1571,11 +1570,11 @@ pub fn verifyRequired(gpa: Allocator, forms: []const Form) Error![]const u8 {
 
 /// sshdConfig returns the image's sshd_config.d/form.conf from the chain's
 /// sshd: keywords, a later form's value replacing an earlier one, or "" for
-/// none. It fails unless the chain has the sshd or bastion form to read it.
+/// none. It fails unless the chain has a declared SSH endpoint to read it.
 pub fn sshdConfig(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u8 {
     const pairs = try chainSshd(gpa, forms);
     if (pairs.len == 0) return "";
-    if (!has(forms, "sshd") and !has(forms, "bastion")) return f.fail(
+    if (!runsSshd(forms)) return f.fail(
         gpa,
         "{s}: sshd: no sshd in the chain reads it; with: [sshd] brings one",
         .{forms[forms.len - 1].dir},
@@ -3030,4 +3029,20 @@ test "service lookups compile for its user; dns grants are refused" {
         const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
         try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
     }
+}
+
+test "fixed data export endpoint accepts SSH policy without a shell form" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/data-export");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/form.yaml", .data = "sshd:\n  log-level: VERBOSE\n" });
+    var failure: Failure = .{};
+    const forms = try chain(io, a, tmp.dir, "data-export", &failure);
+    try testing.expect(runsSshd(forms));
+    try testing.expect(!try takesKeyFiles(a, forms));
+    try testing.expect(mem.find(u8, try sshdConfig(a, forms, &failure), "LogLevel VERBOSE\n") != null);
 }

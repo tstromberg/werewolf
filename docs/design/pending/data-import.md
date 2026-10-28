@@ -25,7 +25,7 @@ Keep one `howl import`, no `--restore` or legacy-format fallback.
 ## Detailed design
 
 ```sh
-howl import replacement ./backup.tar.zst --on gcp
+howl import replacement ./backup.tar.zst --on qemu
 howl import replacement ./backup.tar.zst --service plex
 ```
 
@@ -39,7 +39,7 @@ supply code or authorize signers. Existing VMs must be stopped and match that
 image/architecture in every fallback slot and declare the signed boot barrier. Full
 import requires empty application data; service import requires only its root empty.
 Leave all unselected data untouched; never erase conflicts. Supply deployment
-configuration separately.
+configuration separately; `--with FORM --version SERIAL` selects a trusted release.
 
 **Delivery.** Copy the archive into a private transfer disk: attach locally, use
 private cloud storage/volumes, or authenticated SSH for remote hypervisors. Hold the
@@ -54,8 +54,8 @@ unselected entries, before publishing selected data. Require its manifest, compl
 digest and one complete Zstandard frame; reject trailing data. Bound decoder window,
 headers, entry count and expanded bytes; reject inventory mismatches and duplicates.
 
-Preserve modes/timestamps; map owners through approved destination identities. Refuse
-unknown owners or unsupported metadata. Initialize new identities before publication;
+Preserve modes/timestamps; selected owners must be approved destination identities.
+Reject invalid names/metadata; initialize new identities before publication;
 archives cannot create accounts. Regenerate new-machine SSH keys/enrollment; retain
 existing authority. Old import receipts are inert, never instructions to replay.
 

@@ -104,6 +104,24 @@ pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
     return if (n == 0) null else p;
 }
 
+/// Approved provider configuration for a new data identity ledger. The archive
+/// never chooses this account, its numeric identity or its credentials.
+pub fn dataIdentity(io: Io, gpa: Allocator, name: []const u8) !@import("people").NoCloud {
+    const r = try std.process.run(gpa, io, .{
+        .argv = &.{ "limactl", "list", name, "--format", "{{.Config.User.Name}}|{{.Config.User.UID}}" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    });
+    if (!r.term.success()) return error.LimaListFailed;
+    const line = std.mem.trim(u8, r.stdout, " \r\n");
+    var fields = std.mem.splitScalar(u8, line, '|');
+    const user = fields.next() orelse return error.LimaUnknownUser;
+    const id = try std.fmt.parseUnsigned(u32, fields.next() orelse return error.LimaUnknownUser, 10);
+    if (!@import("people").validNoCloudName(user) or fields.next() != null or id < 500 or id > 60000)
+        return error.LimaUnknownUser;
+    return .{ .name = try gpa.dupe(u8, user), .id = id, .keys = "" };
+}
+
 /// sshIdentity is the key Lima puts in its NoCloud user's authorized_keys.
 pub fn sshIdentity(io: Io, gpa: Allocator, name: []const u8, user: []const u8) !?[]const u8 {
     const r = try std.process.run(gpa, io, .{

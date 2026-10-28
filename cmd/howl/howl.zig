@@ -43,6 +43,7 @@ pub const usage =
     \\       howl ssh [[USER@]NAME] [--identity KEY | --no-agent] [-- COMMAND...]
     \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
+    \\       howl start NAME                                  start an enrolled stopped VM
     \\       howl export NAME [--service NAME] [--output FILE]   export a consistent data archive
     \\       howl import NAME ARCHIVE [--service NAME] [--on TARGET] [--config DIR]   restore data; leave the target stopped
     \\
@@ -132,6 +133,7 @@ pub fn main(init: std.process.Init) void {
             delete,
             console,
             stop,
+            start,
             ssh,
             @"_ssh-agent",
             owner,
@@ -192,6 +194,7 @@ pub fn main(init: std.process.Init) void {
         .apply => @import("apply.zig").apply(io, gpa, args[2..], &why),
         .delete => verbs.delete(io, gpa, args[2..], &why),
         .console => verbs.console(io, gpa, args[2..], &why),
+        .start => @import("local-secure.zig").start(io, gpa, args[2..], &why),
         .stop => verbs.stopHere(io, gpa, args[2..], &why),
         .ssh => verbs.sshTo(io, gpa, args[2..], &why),
         .@"_ssh-agent" => @import("ssh-agent.zig").command(io, gpa, args[2..], &why),

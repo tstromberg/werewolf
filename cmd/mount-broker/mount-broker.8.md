@@ -24,6 +24,11 @@ TPM floor when authorized, commits slots, and unmounts data and boot filesystems
 shutdown. EFI and slot writes use detached mounts; callers never receive a writable
 mount of the EFI partition or /boot.
 
+Before syncing filesystems at shutdown, the broker stops the early DNS age-cache
+authority through its fixed cgroup. That writer keeps a private writable view
+outside runit's signal domain. The broker waits for that disposable cache process
+tree to exit; it gains no general process-signalling capability.
+
 Only CAP_SYS_ADMIN is retained, under a restricted system call filter. The daemon
 executes no programs. Starting another copy from a login shell does not recreate its
 inherited authority or the privileges removed at boot.

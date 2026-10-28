@@ -1,7 +1,6 @@
 # Fixed policy precedes all configurable authentication settings.
 ForceCommand export-v1
 AllowUsers root
-PermitRootLogin prohibit-password
 DisableForwarding yes
 PermitTTY no
 PermitUserRC no
@@ -11,5 +10,7 @@ KbdInteractiveAuthentication no
 X11Forwarding no
 PermitTunnel no
 Compression no
+PrintMotd no
+Banner none
 Include /etc/ssh/sshd_config.d/form.conf
 Include /etc/ssh/sshd_config.d/werewolf.conf

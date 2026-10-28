@@ -14,30 +14,42 @@ pub fn capture(io: Io, a: A, supervise: Dir, cgroups: Dir, services: []const []c
     const stamps = try a.alloc(Stamp, services.len);
     errdefer a.free(stamps);
     for (services, stamps) |name, *stamp| {
-        if (!data.validName(name)) return error.TransferService;
-        const path = try a.print("supervise.{s}/status", .{name});
-        var parent = try data.parentDir(io, supervise, path);
-        defer parent.close(io);
-        const file = try data.openRegular(io, parent, "status");
-        defer file.close(io);
-        const st = try file.stat(io);
-        if (st.size != 20 or st.permissions.toMode() & 0o7777 != 0o600)
-            return error.TransferSupervision;
-        if (@import("builtin").os.tag == .linux) {
-            const owner = try data.metadata.owner(null, file);
-            if (owner.uid != 0 or owner.gid != 0) return error.TransferSupervision;
-        }
-        var status: [20]u8 = undefined;
-        if (try file.readPositionalAll(io, &status, 0) != status.len)
-            return error.TransferSupervision;
-        try stopped(&status);
+        stamp.* = try snapshot(io, a, supervise, name);
         // A down main process is insufficient while descendants still write.
-        const procs = try cgroups.readFileAlloc(io, try a.print("{s}/cgroup.procs", .{name}), a, .limited(64 << 10));
+        var parent = try data.parentDir(io, cgroups, try a.print("{s}/cgroup.procs", .{name}));
+        defer parent.close(io);
+        const file = try data.openRegular(io, parent, "cgroup.procs");
+        defer file.close(io);
+        // cgroupfs reports size zero even when processes remain. A positional
+        // reader can treat that size as EOF; read the bounded stream instead.
+        var buffer: [4096]u8 = undefined;
+        var reader = file.readerStreaming(io, &buffer);
+        const procs = try reader.interface.allocRemaining(a, .limited(64 << 10));
         defer a.free(procs);
         if (mem.trim(u8, procs, " \t\r\n").len != 0) return error.TransferWritersRunning;
-        stamp.* = .{ .path = path, .stat = st };
     }
     return stamps;
+}
+
+pub fn snapshot(io: Io, a: A, supervise: Dir, name: []const u8) !Stamp {
+    if (!data.validName(name)) return error.TransferService;
+    const path = try a.print("supervise.{s}/status", .{name});
+    var parent = try data.parentDir(io, supervise, path);
+    defer parent.close(io);
+    const file = try data.openRegular(io, parent, "status");
+    defer file.close(io);
+    const st = try file.stat(io);
+    if (st.size != 20 or st.permissions.toMode() & 0o7022 != 0)
+        return error.TransferSupervision;
+    if (@import("builtin").os.tag == .linux) {
+        const owner = try data.metadata.owner(null, file);
+        if (owner.uid != 0 or owner.gid != 0) return error.TransferSupervision;
+    }
+    var status: [20]u8 = undefined;
+    if (try file.readPositionalAll(io, &status, 0) != status.len)
+        return error.TransferSupervision;
+    try stopped(&status);
+    return .{ .path = path, .stat = st };
 }
 
 pub fn unchanged(io: Io, supervise: Dir, stamps: []const Stamp) !void {

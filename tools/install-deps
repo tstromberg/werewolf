@@ -166,7 +166,7 @@ Linux)
 		update="$apt update"
 		install="$apt install -y --no-install-recommends"
 		pkgs="ca-certificates curl make xz-utils zstd libarchive-tools erofs-utils e2fsprogs mtools
-			qemu-utils expect xorriso netcat-openbsd osslsigncode python3-pip python3-venv python3-virt-firmware
+			qemu-utils lsof sqlite3 expect xorriso netcat-openbsd osslsigncode python3-pip python3-venv python3-virt-firmware
             swtpm build-essential flex bison libssl-dev libelf-dev bc ninja-build gperf
             libcap-dev libmount-dev systemd-container bubblewrap $qemu"
 		apko_pkgs="ca-certificates curl"
@@ -180,7 +180,7 @@ Linux)
 		esac
 		pm=dnf
 		install="dnf install -y"
-		pkgs="curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img expect xorriso netcat osslsigncode
+		pkgs="curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img lsof sqlite expect xorriso netcat osslsigncode
 			python3-pip swtpm systemd-container bubblewrap $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"
@@ -196,7 +196,7 @@ Linux)
 		# Arch installs only onto an up-to-date system, hence -Syu. Its
 		# systemd includes systemd-nspawn.
 		install="pacman -Syu --needed --noconfirm"
-		pkgs="curl make xz zstd libarchive erofs-utils e2fsprogs mtools qemu-img expect xorriso openbsd-netcat
+		pkgs="curl make xz zstd libarchive erofs-utils e2fsprogs mtools qemu-img lsof sqlite expect xorriso openbsd-netcat
 			osslsigncode python-pip bubblewrap libfido2 $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"

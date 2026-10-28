@@ -12,8 +12,7 @@ Seed imports do not restore backups; [application tests] specify the replacement
 
 ## Goals
 
-- Round-trip all data and a selected service from running and stopped VMs.
-- Require no shell or consistency selection; validate each advertised provider.
+- Round-trip full and service data from running/stopped VMs without shells.
 
 ## Non-Goals
 
@@ -29,27 +28,30 @@ howl export source --service plex --output ./plex.tar.zst
 
 `howl export NAME` creates `NAME-export-TIMESTAMP-RANDOM.tar.zst` by default. Walk
 all `/data`: databases, media, preferences, caches, secrets and homes. Signed policy
-names every writer and exact exclusions for SSH host keys, updater and
-boot/enrollment/TPM state. Record exclusions; unsupported files or uncontrolled
-writers fail.
+names writers and excludes audit logs, SSH keys, updater and boot/enrollment/TPM
+state. Record exclusions; unsupported files or uncontrolled writers fail.
 
 `--service NAME` selects exactly `/data/svc/NAME`, with no dependencies. Require a
 known app service; record scope. Plex state is `plex`; media is `plex-media`.
 
 Provider state selects SSH or a stopped-disk copy; SSH timeout is not shutdown.
 Announce scope, method and downtime. Missing access/support fails, never enables
-listeners/firewalls. Export may interrupt services but never changes VM power.
+listeners/firewalls. Export never changes service state or VM power.
 
-One SSH connection exports and exits. A guard owns fixed service controls; a separate
-reader is confined before scanning and has read/search access only to selected roots.
-Neither accepts commands, SQL, paths or URLs. The reader cannot write, execute,
-connect externally or control services; the guard has no admin or mount authority.
+One SSH connection invokes the fixed native exporter and exits. The owner stops
+application services beforehand, leaving the VM powered on. Require every app
+service administratively down and its cgroup empty; v1 conservatively checks all
+apps even for one-service export. Missing supervision evidence fails closed.
 
-Lock against updates, imports and lifecycle changes. Save prior states, suppress
-restarts, stop clients before databases, and verify clean exit of every selected-root
-writer, including other services with write grants. Keep essential services and SSH
-outside capture. Timeout aborts; killing is not clean shutdown. Hold writers stopped
-through transfer, then restore prior states.
+A reader is confined before scanning and has read/search access only to selected
+roots. It cannot write, execute, connect externally or control services. Compression
+and PostgreSQL control-file checks run separately without privileges. Require clean
+PostgreSQL shutdown. Save supervision records before capture and check them after
+copying and compression; any start, including a complete up/down cycle, invalidates
+capture. The owner keeps writers down through transfer and resumes them explicitly.
+
+Serialize transfers and hold the host lifecycle lock. A disconnect discards the
+incomplete capture and changes no service state. Refuse live writers.
 
 Lock the stopped VM until an immutable copy includes all backing files. A Linux
 helper without network/host shares reads only that copy, on macOS too. Require clean
@@ -74,25 +76,23 @@ image/architecture. Compression may not help media; measure time, memory and CPU
 ## Alternatives Considered
 
 - Live dumps/snapshots need application-specific coordination; defer.
-- Generic SFTP/shell access exposes unnecessary operations; use one fixed verb.
-- Dependency expansion makes selection surprising; select an exact service root.
 
 ## Security Considerations
 
-Opt-in SSH requires owner grants, pinned host identity and security keys. Native
-login accepts [forced command] `export-v1` only; deny shell, PTY, SFTP, forwarding,
-agents, password/root login, user rc and environment. Enforce the authenticated
-scope. Reject traversal, duplicate names, links, special files and unsupported
-metadata. Never extract on the host. Archives are mode 0600, unencrypted and may
-hold credentials; document this. A cleanly stopped source is least dangerous.
+Opt-in SSH requires owner grants, pinned host identity and security keys. The root
+account's native login program accepts [forced command] `export-v1` and explicit
+owner stop/start requests for known apps. No root shell, PTY, SFTP, forwarding,
+agent access, password login, user rc or environment. Drop to an unprivileged reader
+with read/search capability; no SETPCAP is added to SSH. Reject traversal, duplicate
+names, links, special files and unsupported metadata. Never extract on the host.
+Archives are plaintext, mode 0600 and may hold credentials; offline is safest.
 
 ## Reliability Considerations
 
-Invalidate capture before restarting writers on disconnect, timeout or reader
-failure. The independent guard recovers saved states; reboot invalidates capture.
-Bound time, memory, headers and expansion. Verify into private scratch; fsync,
-publish without replacement, then sync the parent. Preserve valid output if restart
-fails; return nonzero and name services. Require [application tests] before delivery.
+Require unchanged supervision records and authenticated terminal success, in
+addition to a complete archive. Bound time, memory, headers and expansion. Verify
+into private scratch; fsync, publish without replacement, then sync the parent.
+Delete partial output on failure. Both paths require [application tests].
 
 [import]: data-import.md
 [application tests]: data-import-application.md

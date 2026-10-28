@@ -11,6 +11,15 @@ const reader_id = 78;
 pub const Options = struct { keep: []const i32 = &.{}, session: bool = false, child: ?u32 = null };
 
 pub fn confine(io: Io, root: Dir, service: ?[]const u8, options: Options) !Dir {
+    // Linux credentials and seccomp are per-thread. A synchronous worker
+    // must not leave another privileged thread behind when narrowing itself.
+    {
+        var tasks = try Dir.cwd().openDir(io, "/proc/self/task", .{ .iterate = true });
+        defer tasks.close(io);
+        var it = tasks.iterate();
+        _ = (try it.next(io)) orelse return error.TransferReaderThreads;
+        if (try it.next(io) != null) return error.TransferReaderThreads;
+    }
     var rules = try sandbox.Ruleset.init(.{});
     defer _ = linux.close(rules.fd);
     var confined = root;

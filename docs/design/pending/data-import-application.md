@@ -30,8 +30,8 @@ links. Require matching build, extensions, locale, image and architecture.
 
 Seed databases with transactions, roles, sequences, large objects and extensions.
 Export both source states, import into a fresh VM and query known records/invariants.
-Check acknowledged writes survive and prior services resume. Repeat with `--service
-postgres`: unrelated sentinel directories are absent from export and unchanged at
+Check acknowledged writes survive; operators stop/resume source services. Test
+`--service postgres`: unrelated sentinels are absent from export and unchanged at
 import. Never initialize over failed import or let image SQL overwrite records.
 
 **Plex.** Copy `/data/svc/plex` state (databases, metadata, artwork, preferences and
@@ -59,11 +59,11 @@ absent selections and image/architecture mismatch. Refuse running targets, occup
 selected roots and unsupported owners; preserve other data. Reject raw directories,
 SQL dumps and old seed/sync syntax without guessing formats.
 
-Inject failure during stopping, transfer, decompression, directory publication and
-service restart. Disconnect or timeout must invalidate capture before writers resume.
-An incomplete import blocks boot; only the same archive/scope can finish its receipt.
-A complete import never replays after reboot. Preserve valid export if restart fails,
-but require nonzero status identifying the affected services.
+Inject failure during transfer, decompression and directory publication. Refuse
+running writers, wanted-up states, remaining descendants and missing supervision.
+A restart during capture, including a complete up/down cycle, invalidates output.
+Disconnect/timeout changes no service state. Incomplete import blocks boot; only the
+same archive/scope may finish its receipt. Completed import never replays at boot.
 
 Run the real CLI on protected local VMs, each supported provider and cross-cloud
 pair. Verify fresh boot trust, Secure Boot, IPE, confinement, no shell and refusal to
@@ -89,9 +89,9 @@ Verify denied keys, host-key mismatch, forbidden commands and scope containment.
 ## Reliability Considerations
 
 Gate CI delivery on a proposed `make check-data-transfer` running this matrix. Test
-disk-full, collisions, lifecycle/update races, reboot and guard recovery. Failed
+disk-full, collisions, lifecycle/update races and reboot. Failed
 captures leave no complete artifact. Check offline source bytes and online records
-remain intact; report capture and service-resumption failures separately.
+remain intact; export never changes source service states.
 
 [export]: data-export.md
 [import]: data-import.md

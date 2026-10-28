@@ -16,7 +16,12 @@ pub const reader_id: u32 = 78;
 pub const Request = data.WorkerRequest;
 
 pub fn main(init: std.process.Init) void {
-    run(init) catch |err| {
+    var threaded: Io.Threaded = .init_single_threaded;
+    threaded.allocator = init.arena.allocator();
+    defer threaded.deinit();
+    var synchronous = init;
+    synchronous.io = threaded.io();
+    run(synchronous) catch |err| {
         // Archive content and source names never reach diagnostics.
         var buf: [256]u8 = undefined;
         var out = File.stderr().writerStreaming(init.io, &buf);
@@ -192,13 +197,14 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
     try tmp.dir.createDirPath(io, "svc/plex");
     try tmp.dir.createDirPath(io, "svc/plex-media");
     try tmp.dir.createDirPath(io, ".werewolf");
+    try tmp.dir.createDirPath(io, "log");
     try tmp.dir.createDir(io, "stage", .fromMode(0o700));
-    for ([_][]const u8{ "svc/plex/content", "svc/plex-media/secret", ".werewolf/secret", "public" }) |path|
+    for ([_][]const u8{ "svc/plex/content", "svc/plex-media/secret", ".werewolf/secret", "log/secret", "public" }) |path|
         try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "x", .flags = .{ .permissions = .fromMode(0o666) } });
     var stage = try tmp.dir.openDir(io, "stage", .{ .iterate = true });
     defer stage.close(io);
     try (File{ .handle = stage.handle, .flags = .{ .nonblocking = false } }).setOwner(io, reader_id, reader_id);
-    for (0..4) |mode| {
+    for (0..5) |mode| {
         const pid = try sandbox.sys(linux.fork(), "fork boundary test");
         if (pid == 0) {
             boundaryProbe(io, tmp.dir, stage, mode) catch linux.exit_group(1);
@@ -211,6 +217,26 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
 }
 
 fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
+    if (mode == 4) {
+        var done: std.atomic.Value(bool) = .init(false);
+        const thread = try std.Thread.spawn(.{}, struct {
+            fn run(stop: *std.atomic.Value(bool)) void {
+                while (!stop.load(.acquire)) {
+                    const delay: linux.timespec = .{ .sec = 0, .nsec = 1_000_000 };
+                    _ = linux.nanosleep(&delay, null);
+                }
+            }
+        }.run, .{&done});
+        defer {
+            done.store(true, .release);
+            thread.join();
+        }
+        if (@import("data-read").confine(io, root, null, .{})) |_|
+            return error.PrivilegedThreadAccepted
+        else |err| if (err != error.TransferReaderThreads) return err;
+        if (linux.geteuid() != 0) return error.Boundary;
+        return;
+    }
     if (mode == 3) try sandbox.inheritedCapabilities((1 << linux.CAP.DAC_READ_SEARCH) |
         (1 << linux.CAP.SETUID) | (1 << linux.CAP.SETGID));
     const view = if (mode == 0) blk: {
@@ -233,6 +259,7 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
         _ = linux.close(@intCast(fd));
         try denied(linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDWR }, 0));
         try denied(linux.openat(view.handle, ".werewolf/secret", .{ .ACCMODE = .RDONLY }, 0));
+        try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0));
         if (mode == 1) try denied(linux.openat(view.handle, "svc/plex-media/secret", .{ .ACCMODE = .RDONLY }, 0));
     }
     try denied(linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0));

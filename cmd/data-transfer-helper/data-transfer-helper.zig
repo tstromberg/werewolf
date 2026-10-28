@@ -120,6 +120,9 @@ fn run(io: Io, a: Allocator) !void {
             initialize = true;
         };
     }
+    // A verified boot slot alone does not prove this directory was the
+    // running image's /data. Require init's independent data-volume record.
+    if (c.operation != .import) try data.images.requireRecorded(io, root, c.image);
     var image_dir = try Dir.cwd().openDir(io, "/image", .{});
     defer image_dir.close(io);
     const policy = try @import("data-source").catalog(io, a, image_dir, root, .{ .image = c.image, .arch = c.arch, .users = c.users, .nocloud = c.nocloud }, initialize);

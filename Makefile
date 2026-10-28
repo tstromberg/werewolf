@@ -240,7 +240,7 @@ build/host/check-legacy-image: $(CONSOLE_CHECK)
 # Host-side checks' own tests, in make test: they import host and the lib modules.
 HOST_TESTS = test/check-hypervisor-isolation.zig test/metadata.zig test/check-dist.zig test/check-legacy-image.zig test/check-secureboot.zig \
 	test/check-provider-ab.zig test/ab-fixture.zig test/check-bhyve-secureboot.zig test/check-bhyve-lifecycle.zig \
-	test/check-lima-secureboot.zig test/check-plex-import.zig test/gcp-metadata.zig \
+	test/check-lima-secureboot.zig test/gcp-metadata.zig \
 	test/build-traced-stub.zig test/trace-stub.zig test/check-image-updater.zig \
 	test/check-independent-updates.zig test/check-people-persist.zig forms/vuln-demo/test/appliance.zig \
 	test/check-published-run.zig test/check-published-lifecycle.zig test/check-public-image.zig \
@@ -366,7 +366,7 @@ $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zi
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = lib/data-transfer.zig cmd/howl/data.zig cmd/howl/data-helper.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
@@ -768,9 +768,9 @@ check-one:
 # Native clients are a separate generated form, never a member of /etc/sv.
 # Compare their baseline before booting, then reuse one data disk.
 .PHONY: check-native-tests _check-native-tests
-.PHONY: check-plex-import
-check-plex-import: $(HOWL)
-	$(call host_test,test/check-plex-import.zig) $(HOWL)
+.PHONY: check-plex-data
+check-plex-data:
+	$(call host_test,test/check-plex-data.zig)
 # native-host runs a native run's host suites (test/native/host.zig) with the
 # guest's matchers, and so their regex shim.
 NATIVE_HOST = build/host/native-host
@@ -1316,16 +1316,33 @@ DATA_TRANSFER_IMAGE ?= build/$(ARCH)/postgresql/slot/root.erofs
 DATA_TRANSFER_VERITY ?= build/$(ARCH)/postgresql/verity/verity
 DATA_TRANSFER_KERNEL ?= build/$(ARCH)/postgresql/slot/vmlinuz
 .PHONY: check-data-transfer-helper
+.PHONY: check-data-transfer
+build/host/data-app-check: cmd/howl/data-app-check.zig $(wildcard cmd/howl/*.zig) $(wildcard lib/data-transfer*.zig)
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$@
+
+check-data-transfer: check-data-transfer-helper build/host/data-app-check build/$(ARCH)/transfer-control
+	build/host/data-app-check $(HOWL) build/$(ARCH)/transfer-control
 build/host/data-transfer-check: cmd/howl/data-transfer-check.zig cmd/howl/data-helper.zig $(wildcard lib/data-transfer*.zig)
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
-check-data-transfer-helper: $(HOWL) build/host/data-transfer-check build/$(ARCH)/transfer-boundaries.cpio
+
+build/$(ARCH)/transfer-control: test/transfer-control.zig
+	@mkdir -p $(dir $@)
+	zig build-exe $(PROGRAM_FLAGS) -target $(ARCH)-linux-musl $< -femit-bin=$@
+build/$(ARCH)/transfer-encrypted/init: test/transfer-encrypted-init.zig $(wildcard lib/data-transfer*.zig)
+	@mkdir -p $(dir $@)
+	zig build-exe $(PROGRAM_FLAGS) -target $(ARCH)-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
+check-data-transfer-helper: $(HOWL) build/host/data-transfer-check build/$(ARCH)/transfer-boundaries.cpio build/$(ARCH)/transfer-encrypted/init
+	$(HOWL) _build --with postgresql --arch $(ARCH) --disable=secureboot,tpm,ipe slot
 	$(HOWL) _build --with data-transfer-helper --arch $(ARCH) transfer_helper
-	build/host/data-transfer-check $(DATA_TRANSFER_KERNEL) build/$(ARCH)/data-transfer-helper/helper.cpio.zst $(DATA_TRANSFER_IMAGE) $(DATA_TRANSFER_VERITY) build/$(ARCH)/transfer-boundaries.cpio $(HOWL)
+	bsdtar -cf build/$(ARCH)/transfer-encrypted.cpio --format newc --uid 0 --gid 0 --numeric-owner @build/$(ARCH)/data-transfer-helper/rootfs.tar @build/$(ARCH)/data-transfer-helper/overlay.tar -C build/$(ARCH)/transfer-encrypted init
+	zstd -1 -q -T1 -f --rm build/$(ARCH)/transfer-encrypted.cpio -o build/$(ARCH)/transfer-encrypted.cpio.zst
+	build/host/data-transfer-check $(DATA_TRANSFER_KERNEL) build/$(ARCH)/data-transfer-helper/helper.cpio.zst $(DATA_TRANSFER_IMAGE) $(DATA_TRANSFER_VERITY) build/$(ARCH)/transfer-boundaries.cpio $(HOWL) build/$(ARCH)/transfer-encrypted.cpio.zst
 
 # Linux kernel enforcement is checked in its own networkless disposable VM.
 build/$(ARCH)/transfer-boundaries.cpio: cmd/data-transfer/data-transfer.zig test/transfer-boundary-init.zig $(wildcard lib/*.zig)
 	@mkdir -p build/$(ARCH)/transfer-boundaries
 	zig test -O ReleaseSafe -target $(ARCH)-linux-musl --test-no-exec $(call ZIG_MODULES,cmd/data-transfer/data-transfer.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/checks
-	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl test/transfer-boundary-init.zig -femit-bin=build/$(ARCH)/transfer-boundaries/init
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call ZIG_MODULES,test/transfer-boundary-init.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/init
 	bsdtar -cf $@ --format newc --uid 0 --gid 0 --numeric-owner -C build/$(ARCH)/transfer-boundaries init checks
