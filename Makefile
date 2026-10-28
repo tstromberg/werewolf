@@ -807,9 +807,9 @@ $(call native_boot,$(1),$(2),$(3),$(4),$(5))
 endef
 # Compare and boot an already prepared native image.
 define native_boot
-	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(5),-app)$(if $(IPE),-ipe) \
-		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(5),-app)) $(3) _check-native-tests
+	BUILD=$(BUILD) PRODUCTION_OUT=$(BUILD)/$(or $(4),$(1))$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) \
+		TEST_OUT=$(BUILD)/native-test-$(1)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)$(if $(IPE),-ipe) $(NATIVE_TESTS) compare $(2) $(ARCH)
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/$(1)/native-test-$(1) APP=$(5) DISABLE=$(CHECK_DISABLE) NATIVE_FORM=$(2) $(if $(4),NATIVE_PRODUCTION=$(BUILD)/$(4)$(if $(VARIANTS),-variants-$(VARIANTS))$(if $(5),-app)) $(3) _check-native-tests
 endef
 # Slot, deadman and the ordinary minimal check share the generated image.
 # One prerequisite prepares it once before any of those parallel boots read it.
@@ -878,7 +878,7 @@ check-adhoc: $(HOWL) $(NATIVE_TESTS)
 check-people: $(HOWL) $(NATIVE_TESTS)
 	@test/people-form $(CHECK) $(FORM_TOOL)
 	$(call native_check,people-check,$(CHECK)/people-check)
-$(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: $(HOWL)
+$(addprefix check-shellfree-,$(filter-out data-transfer-helper,$(FORMS))): check-shellfree-%: $(HOWL)
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) image)
 	@$(MAKE) --no-print-directory FORM=$* DISABLE=$(CHECK_DISABLE) _check-shellfree
 _check-shellfree: $(CONSOLE_CHECK) $(REMOTE_QEMU)
@@ -1039,11 +1039,11 @@ check-verity: $(HOWL) $(CONSOLE_CHECK)
 	@$(MAKE) --no-print-directory FORM=minimal DISABLE=$(CHECK_DISABLE) _check-verity
 # check-slot boots minimal's native test image from a slot (test/check-slot).
 check-slot: _check-native-image-minimal $(CONSOLE_CHECK)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-slot
 # check-deadman boots minimal's native test image, from which alone stage0
 # takes a shorter deadman.
 check-deadman: _check-native-image-minimal $(CONSOLE_CHECK)
-	@$(MAKE) --no-print-directory FORM=build/native-tests/$(ARCH)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
+	@$(MAKE) --no-print-directory FORM=$(NATIVE_WORK)/minimal/native-test-minimal DISABLE=$(CHECK_DISABLE) _check-deadman
 check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
@@ -1333,6 +1333,10 @@ DATA_TRANSFER_KERNEL ?= build/$(ARCH)/postgresql/slot/vmlinuz
 .PHONY: check-data-transfer
 .PHONY: check-data-export
 check-data-export: check-data-transfer
+# This private runtime replaces init for one networkless storage operation.
+# Its real boot, confinement and archive checks are the dedicated helper suite.
+.PHONY: check-shellfree-data-transfer-helper
+check-shellfree-data-transfer-helper: check-data-transfer-helper
 
 build/host/data-app-check: cmd/howl/data-app-check.zig $(wildcard cmd/howl/*.zig) $(wildcard lib/data-transfer*.zig)
 	@mkdir -p $(dir $@)

@@ -84,7 +84,7 @@ pub fn run(io: Io, a: Allocator, g: Guest, d: Devices, work: []const u8) !data.P
         );
         f.close(io);
     }
-    try executeLocked(io, try argv(a, g, d, console, output), .fromSeconds(12 * 3600), d.guard);
+    try executeLocked(io, try argv(io, a, g, d, console, output), .fromSeconds(12 * 3600), d.guard);
     const approved = try policy(a, try Dir.cwd().readFileAlloc(io, status, a, .limited(1 << 20)));
     if (!mem.eql(u8, approved.image, &std.fmt.bytesToHex(g.verity.root, .lower)) or
         !mem.eql(u8, @tagName(approved.arch), @tagName(g.arch))) return error.TransferImage;
@@ -213,15 +213,26 @@ fn escaped(a: Allocator, text: []const u8) ![]const u8 {
 
 /// Fixed device roles; no user-supplied QEMU options, network or host shares.
 pub fn argv(
+    io: Io,
     a: Allocator,
     g: Guest,
     d: Devices,
     console: []const u8,
     output: []const u8,
 ) ![]const []const u8 {
+    return command(a, g, d, console, output, @import("qemu.zig").accel(io));
+}
+
+fn command(
+    a: Allocator,
+    g: Guest,
+    d: Devices,
+    console: []const u8,
+    output: []const u8,
+    acceleration: @import("qemu.zig").Accel,
+) ![]const []const u8 {
     const host = howl.hostArch() orelse return error.UnsupportedHostArch;
     if (g.arch != host) return error.TransferArchitecture;
-    const mac = @import("builtin").os.tag == .macos;
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(
         a,
@@ -230,9 +241,9 @@ pub fn argv(
             "-M",
             if (g.arch == .aarch64) "virt,gic-version=3" else "q35",
             "-accel",
-            if (mac) "hvf" else "kvm",
+            @tagName(acceleration),
             "-cpu",
-            "host",
+            if (acceleration == .tcg) "max" else "host",
             "-smp",
             "2",
             "-m",
@@ -342,29 +353,41 @@ test "helper command attaches only explicit storage with no network or shares" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const args = try argv(
-        a,
-        .{
-            .arch = howl.hostArch().?,
-            .kernel = "/kernel",
-            .initramfs = "/init",
-            .image = "/image",
-            .verity = .{ .data_blocks = 1, .hash_start = 1, .salt = @splat(0), .root = @splat(0) },
-        },
-        .{ .data = "/a,b/data", .control = "/control" },
-        "/console",
-        "/output",
-    );
-    var disks: usize = 0;
-    for (args, 0..) |arg, i| {
-        try t.expect(!mem.eql(u8, arg, "-netdev") and !mem.eql(u8, arg, "-virtfs"));
-        if (mem.eql(u8, arg, "-nic")) try t.expectEqualStrings("none", args[i + 1]);
-        if (mem.eql(u8, arg, "-drive")) {
-            disks += 1;
-            try t.expect(mem.find(u8, args[i + 1], "readonly=on") != null);
+    for ([_]@import("qemu.zig").Accel{ .hvf, .kvm, .nvmm, .tcg }) |acceleration| {
+        const args = try command(
+            a,
+            .{
+                .arch = howl.hostArch().?,
+                .kernel = "/kernel",
+                .initramfs = "/init",
+                .image = "/image",
+                .verity = .{
+                    .data_blocks = 1,
+                    .hash_start = 1,
+                    .salt = @splat(0),
+                    .root = @splat(0),
+                },
+            },
+            .{ .data = "/a,b/data", .control = "/control" },
+            "/console",
+            "/output",
+            acceleration,
+        );
+        var disks: usize = 0;
+        for (args, 0..) |arg, i| {
+            try t.expect(!mem.eql(u8, arg, "-netdev") and !mem.eql(u8, arg, "-virtfs"));
+            if (mem.eql(u8, arg, "-nic")) try t.expectEqualStrings("none", args[i + 1]);
+            if (mem.eql(u8, arg, "-accel"))
+                try t.expectEqualStrings(@tagName(acceleration), args[i + 1]);
+            if (mem.eql(u8, arg, "-cpu"))
+                try t.expectEqualStrings(if (acceleration == .tcg) "max" else "host", args[i + 1]);
+            if (mem.eql(u8, arg, "-drive")) {
+                disks += 1;
+                try t.expect(mem.find(u8, args[i + 1], "readonly=on") != null);
+            }
         }
+        try t.expectEqual(@as(usize, 3), disks);
     }
-    try t.expectEqual(@as(usize, 3), disks);
     try t.expectError(error.TransferPath, escaped(a, "relative"));
     try t.expectEqualStrings("/a,,b/data", try escaped(a, "/a,b/data"));
 }

@@ -555,6 +555,29 @@ pub fn apko(
             return f.fail(gpa, "{s}: group {s} is its own", .{ s.path, g });
     };
     if (users.items.len == 0 and groups.items.len == 0) return merged;
+    if (forms[forms.len - 1].selected.len > 0) {
+        // Selecting an overlay on a generated test leaf can traverse the same
+        // accounts in a different order. Assign IDs first, then keep the
+        // selected image and its on-machine reconstruction byte-identical.
+        const Order = struct {
+            fn user(_: void, x: form.Node, y: form.Node) bool {
+                return mem.lessThan(
+                    u8,
+                    x.get("username").?.scalar.text,
+                    y.get("username").?.scalar.text,
+                );
+            }
+            fn group(_: void, x: form.Node, y: form.Node) bool {
+                return mem.lessThan(
+                    u8,
+                    x.get("groupname").?.scalar.text,
+                    y.get("groupname").?.scalar.text,
+                );
+            }
+        };
+        mem.sort(form.Node, users.items, {}, Order.user);
+        mem.sort(form.Node, groups.items, {}, Order.group);
+    }
     var acc = merged.get("accounts") orelse form.Node{ .map = &.{} };
     acc = try replaceField(gpa, acc, "groups", .{ .list = groups.items });
     acc = try replaceField(gpa, acc, "users", .{ .list = users.items });
@@ -2424,6 +2447,42 @@ test "apko: every component must opt in to a shared non-root identity" {
     const separate = try form.chain(io, gpa, tmp.dir, "app", &refused);
     _ = try apko(io, gpa, tmp.dir, separate, &.{}, &refused);
     try testing.expectError(error.Form, pledge(io, gpa, tmp.dir, separate, &refused));
+}
+
+test "selected account files survive wrapping the production leaf" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    for ([_][2][]const u8{
+        .{ "base", "accounts:\n  groups:\n    - groupname: worker\n" ++
+            "      gid: 77\n  users:\n    - username: worker\n      uid: 77\n" ++
+            "      homedir: /var/empty\n      shell: /sbin/nologin\n" },
+        .{ "ssh-su", "base: base\naccounts:\n  groups:\n    - groupname: agent\n" ++
+            "      gid: 22\n  users:\n    - username: agent\n      uid: 22\n" ++
+            "      homedir: /var/empty\n      shell: /sbin/nologin\n" },
+        .{ "wrapped", "base: base\n" },
+    }) |fixture| {
+        const path = try gpa.print("forms/{s}/form.yaml", .{fixture[0]});
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(path).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = fixture[1] });
+    }
+    var f: Failure = .{};
+    const base = try form.chainSelectedIn(io, gpa, tmp.dir, "forms", "base", &.{"ssh"}, &f);
+    const wrapped = try form.chainSelectedIn(io, gpa, tmp.dir, "forms", "wrapped", &.{"ssh"}, &f);
+    const empty: Accounts = .{ .passwd = "", .group = "", .shadow = "" };
+    const production = try withAccounts(io, gpa, tmp.dir, base, empty, &f);
+    const native = try withAccounts(io, gpa, tmp.dir, wrapped, empty, &f);
+    try testing.expectEqualStrings(production.passwd, native.passwd);
+    try testing.expectEqualStrings(production.group, native.group);
+    try testing.expectEqualStrings(production.shadow, native.shadow);
+    try testing.expectEqualStrings(
+        "agent:x:22:22:Account created by apko:/var/empty:/sbin/nologin\n" ++
+            "worker:x:77:77:Account created by apko:/var/empty:/sbin/nologin\n",
+        production.passwd,
+    );
 }
 
 test "apko: omitted account ids cannot collide with an explicit uid or gid" {

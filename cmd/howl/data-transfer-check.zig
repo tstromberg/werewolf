@@ -88,6 +88,7 @@ const Check = struct {
         try helper.execute(
             c.io,
             try helper.argv(
+                c.io,
                 c.a,
                 guest,
                 .{ .data = guest.image, .control = guest.image },
@@ -114,7 +115,7 @@ const Check = struct {
         defer if (held_open) held.close(c.io);
         try held.lock(c.io, .exclusive);
         var args: std.ArrayList([]const u8) = .empty;
-        try args.appendSlice(c.a, try helper.argv(c.a, c.guest, .{
+        try args.appendSlice(c.a, try helper.argv(c.io, c.a, c.guest, .{
             .data = c.guest.image,
             .control = c.guest.image,
             .guard = held,
@@ -299,6 +300,7 @@ const Check = struct {
         try helper.execute(
             c.io,
             try helper.argv(
+                c.io,
                 c.a,
                 guest,
                 .{ .data = disk, .control = control, .writable = true },
