@@ -82,15 +82,23 @@ test "image declarations fail closed when absent, mismatched or linked" {
     const image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     try t.expectError(error.TransferImageUnrecorded, requireRecorded(io, tmp.dir, image));
     try record(io, tmp.dir, image);
-    try requireRecorded(io, tmp.dir, image);
-    try t.expectError(
-        error.TransferImage,
-        requireRecorded(
-            io,
-            tmp.dir,
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ),
-    );
+    // Unprivileged Linux tests cannot create root-owned records. Exercise that
+    // refusal here; the root-run transfer boundary suite checks the valid record.
+    const unprivileged = @import("builtin").os.tag == .linux and
+        (std.os.linux.getuid() != 0 or std.os.linux.getgid() != 0);
+    if (unprivileged) {
+        try t.expectError(error.TransferState, requireRecorded(io, tmp.dir, image));
+    } else {
+        try requireRecorded(io, tmp.dir, image);
+        try t.expectError(
+            error.TransferImage,
+            requireRecorded(
+                io,
+                tmp.dir,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        );
+    }
     try tmp.dir.deleteFile(io, record_path);
     try tmp.dir.symLink(io, "missing", record_path, .{});
     if (requireRecorded(io, tmp.dir, image)) |_| return error.AcceptedLinkedIdentity else |_| {}
