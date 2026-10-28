@@ -658,7 +658,10 @@ const Tar = struct {
             const n = t.r.readSliceShort(&hdr) catch return why.refuse("the tar ends early", .{});
             if (n == 0) return null;
             if (n < hdr.len) return why.refuse("the tar ends inside a header", .{});
-            if (std.mem.allEqual(u8, &hdr, 0)) return null;
+            if (std.mem.allEqual(u8, &hdr, 0)) {
+                try t.finish(why);
+                return null;
+            }
             if (!checksumOk(&hdr)) return why.refuse(
                 "not a tar, or damaged: a header's checksum is wrong",
                 .{},
@@ -749,6 +752,23 @@ const Tar = struct {
                     };
                 },
             }
+        }
+    }
+
+    fn finish(t: *Tar, why: *Why) !void {
+        // Read through EOF so crane can finish writing the archive footer
+        // without SIGPIPE. Only bounded zero padding may follow the end.
+        var buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        while (true) {
+            const n = t.r.readSliceShort(&buf) catch
+                return why.refuse("cannot read the tar's final padding", .{});
+            if (n == 0) return;
+            total += n;
+            if (total > 1 << 20)
+                return why.refuse("more than 1 MiB of tar end padding", .{});
+            if (!std.mem.allEqual(u8, buf[0..n], 0))
+                return why.refuse("nonzero data after the end of the tar", .{});
         }
     }
 };
@@ -1293,6 +1313,27 @@ test "unpack: files, directories, links; refusals" {
         var br: Io.Reader = .fixed(try tarOf(gpa, &.{bad}));
         try testing.expectError(error.Refused, unpack(io, &br, tmp.dir, &bw));
     }
+}
+
+test "unpack consumes bounded zero padding and refuses trailing payloads" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try gpa.alloc(u8, (1 << 20) + 1024);
+    defer gpa.free(bytes);
+    @memset(bytes, 0);
+    var why: Why = .{};
+    var good: Io.Reader = .fixed(bytes[0 .. 256 << 10]);
+    _ = try unpack(io, &good, tmp.dir, &why);
+    try testing.expectEqual(good.end, good.seek);
+
+    bytes[1024] = 'x';
+    var payload: Io.Reader = .fixed(bytes[0..1536]);
+    try testing.expectError(error.Refused, unpack(io, &payload, tmp.dir, &why));
+    @memset(bytes, 0);
+    var excessive: Io.Reader = .fixed(bytes);
+    try testing.expectError(error.Refused, unpack(io, &excessive, tmp.dir, &why));
 }
 
 test "unpack refuses a hardlink through an archive symlink" {

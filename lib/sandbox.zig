@@ -167,13 +167,19 @@ pub fn dropKeeping(id: u32, keep: u32) !void {
 pub fn dropSession(id: u32, keep: u32) !void {
     if (id == 0 or keep & (1 << linux.CAP.SETUID) != 0) return error.StillRoot;
     const tie: Tie = .note();
-    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0), "keep session read capability");
+    _ = try sys(
+        linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0),
+        "keep session read capability",
+    );
     var unused: linux.gid_t = 0;
     _ = try sys(linux.setgroups(0, @ptrCast(&unused)), "session groups");
     _ = try sys(linux.setresgid(id, id, id), "session gid");
     _ = try sys(linux.setresuid(id, id, id), "session uid");
     try inheritedCapabilities(keep);
-    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "session no_new_privs");
+    _ = try sys(
+        linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
+        "session no_new_privs",
+    );
     try refuseExecGain();
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "session dumpable");

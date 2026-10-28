@@ -72,7 +72,7 @@ services:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim
       - /usr/bin/locale
-    read: /etc/postgresql /run/werewolf/import
+    read: /etc/postgresql
     listen: tcp/5432 loopback
     share: shared
 

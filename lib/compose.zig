@@ -1149,7 +1149,10 @@ fn privileges(
             );
         if (parsed.caps & service.cap.login != 0 and
             (!(mem.eql(u8, s.name, "sshd") or (dev and mem.eql(u8, s.name, "sshd-dev"))) or
-                (!allows(allowed, "pty") and !(mem.eql(u8, s.name, "sshd") and hasForm(forms, "data-export")))))
+                (!allows(
+                    allowed,
+                    "pty",
+                ) and !(mem.eql(u8, s.name, "sshd") and hasForm(forms, "data-export")))))
             return f.fail(
                 gpa,
                 "{s}: caps login requires sshd with pty or the fixed data-export endpoint",
@@ -2178,12 +2181,18 @@ test "privileges: fixed export SSH needs no terminal and grants no other root se
     try tmp.dir.createDirPath(io, "forms/data-export/rootfs/etc/sv/sshd");
     try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/form.yaml", .data = "" });
     const listener = "exec /usr/bin/sshd\nuser root\ncaps login\npledge stdio\n";
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/rootfs/etc/sv/sshd/service", .data = listener });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "forms/data-export/rootfs/etc/sv/sshd/service", .data = listener },
+    );
     var failure: Failure = .{};
     const chain = try form.chain(io, a, tmp.dir, "data-export", &failure);
     try privileges(io, a, tmp.dir, chain, &.{}, false, &failure);
     try tmp.dir.createDirPath(io, "forms/data-export/rootfs/etc/sv/other");
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/rootfs/etc/sv/other/service", .data = listener });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "forms/data-export/rootfs/etc/sv/other/service", .data = listener },
+    );
     try testing.expectError(error.Form, privileges(io, a, tmp.dir, chain, &.{}, false, &failure));
 }
 

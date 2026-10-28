@@ -46,7 +46,16 @@ pub fn remember(io: Io, a: A, profile: secure.Profile, why: *howl.Why) !void {
 
 /// The owner selects a published release through normal Howl trust, never a
 /// URL or signer supplied by the archive. A different image is not a restore.
-pub fn published(io: Io, a: A, form: []const u8, on: howl.Platform, arch: howl.Arch, version: ?[]const u8, expected: []const u8, why: *howl.Why) !Record {
+pub fn published(
+    io: Io,
+    a: A,
+    form: []const u8,
+    on: howl.Platform,
+    arch: howl.Arch,
+    version: ?[]const u8,
+    expected: []const u8,
+    why: *howl.Why,
+) !Record {
     const request = try @import("download.zig").selected(io, a, form, on, arch, version, why);
     const m = (try bundle.verify(io, a, request, arch)).manifest;
     const verity = try parameters(io, a, try a.print("{s}/slot", .{request.directory}));
@@ -107,13 +116,29 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
         if (!pristine or r.disk_sha256 != null) return r;
     } else |err| if (err != error.FileNotFound) return err;
     for ([_][]const u8{ "vmlinuz", "root.erofs" }) |name|
-        try Dir.cwd().copyFile(try a.print("{s}/{s}", .{ slot, name }), Dir.cwd(), try a.print("{s}/{s}", .{ dir, name }), io, .{});
-    try Dir.cwd().copyFile(profile.spec.boot_cert orelse return error.TransferImageCertificate, Dir.cwd(), try a.print("{s}/boot.crt", .{dir}), io, .{});
+        try Dir.cwd().copyFile(
+            try a.print("{s}/{s}", .{ slot, name }),
+            Dir.cwd(),
+            try a.print("{s}/{s}", .{ dir, name }),
+            io,
+            .{},
+        );
+    try Dir.cwd().copyFile(
+        profile.spec.boot_cert orelse return error.TransferImageCertificate,
+        Dir.cwd(),
+        try a.print("{s}/boot.crt", .{dir}),
+        io,
+        .{},
+    );
     var disk_hash: ?[]const u8 = null;
     if (pristine) {
         const disk = try a.print("{s}/disk.raw", .{dir});
         // No unsafe shared-image option: QEMU must acquire its storage lock.
-        try howl.run(io, why, &.{ "qemu-img", "convert", "-O", "raw", profile.spec.disk_path.?, disk });
+        try howl.run(
+            io,
+            why,
+            &.{ "qemu-img", "convert", "-O", "raw", profile.spec.disk_path.?, disk },
+        );
         try Dir.cwd().setFilePermissions(io, disk, .fromMode(0o600), .{});
         const f = try Dir.cwd().openFile(io, disk, .{});
         defer f.close(io);
@@ -131,7 +156,8 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
     }
     if (approved.bundle) |*request| {
         request.boot_certificate = approved.spec.boot_cert.?;
-        request.image_certificate = approved.spec.ipe_cert orelse return error.TransferImageCertificate;
+        request.image_certificate = approved.spec.ipe_cert orelse
+            return error.TransferImageCertificate;
         const original = request.directory;
         const kept = try a.print("{s}/bundle", .{dir});
         for ([_][]const u8{ "boot.json", "boot.json.sig", "disk.img.zst" }) |name|
@@ -139,7 +165,13 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
         inline for (@import("prebuilt").names) |name|
             try keepFile(io, a, original, kept, try a.print("slot/{s}", .{name}));
         for ([_][]const u8{ "latest.json", "latest.json.sig" }) |name|
-            try keepFile(io, a, original, kept, try a.print("prebuilt/{t}/{s}", .{ profile.spec.arch, name }));
+            try keepFile(
+                io,
+                a,
+                original,
+                kept,
+                try a.print("prebuilt/{t}/{s}", .{ profile.spec.arch, name }),
+            );
         request.directory = kept;
     }
     const r: Record = .{
@@ -147,7 +179,12 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
         .verity = verity,
         .disk_sha256 = disk_hash,
     };
-    try replaceRecord(io, a, try a.print("{s}/image.json", .{dir}), try std.json.Stringify.valueAlloc(a, r, .{}));
+    try replaceRecord(
+        io,
+        a,
+        try a.print("{s}/image.json", .{dir}),
+        try std.json.Stringify.valueAlloc(a, r, .{}),
+    );
     return r;
 }
 

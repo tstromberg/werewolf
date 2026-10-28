@@ -91,7 +91,11 @@ pub fn main(init: std.process.Init) !void {
     }
     m.accounts();
     if (!exists("/run/werewolf/nodata")) if (init.environ_map.get("WEREWOLF_ROOT")) |root_hash| {
-        var data_dir = Dir.cwd().openDir(m.io, "/data", .{ .iterate = true, .follow_symlinks = false }) catch
+        var data_dir = Dir.cwd().openDir(
+            m.io,
+            "/data",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch
             refuse("cannot record data image identity", .{});
         defer data_dir.close(m.io);
         @import("data-transfer").images.record(m.io, data_dir, root_hash) catch

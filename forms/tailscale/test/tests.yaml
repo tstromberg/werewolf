@@ -27,12 +27,6 @@ suites:
           - file: /proc/sys/net/ipv4/ip_forward
             expect:
               body: "0\n"
-      - name: tailscale-no-ingress
-        steps:
-          - file: /usr/share/werewolf/net
-            expect:
-              body:
-                absent: 'listen '
       - name: tailscale-listeners
         steps:
           - listeners: tcp
@@ -61,3 +55,13 @@ suites:
               json:
                 /advertiseRoutes: [10.20.0.0/24]
                 /locked: true
+  - name: tailscale-policy
+    source: driver.zig
+    mode: policy
+    user: nobody
+    policy:
+      pledge: stdio rpath
+      read: [/usr/share/werewolf/net]
+    cases:
+      seed: [tailscale-no-ingress]
+      verify: [tailscale-no-ingress]

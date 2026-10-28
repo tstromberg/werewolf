@@ -145,7 +145,8 @@ only updates signed with them, so back that directory up.
 | `tpm` | Booting an older signed release. |
 | `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-Firecracker's [host-pinned boot files](design/firecracker-boot.md) retain IPE,
+Firecracker's
+[host-pinned boot files](design/implemented/firecracker-boot.md) retain IPE,
 dm-verity, the seal and fence. This supplies neither firmware Secure Boot nor a TPM
 release floor: the trusted host can replace the record or restore older vulnerable
 state. Keep it outside guest access. Changed boot files fail closed; legacy mode
@@ -159,9 +160,10 @@ BusyBox tools, root SSH through a Howl-managed Ed25519 key, optional seal learni
 console. The key lives under `$XDG_DATA_HOME/howl/keys/dev/`; `howl ssh root@NAME`
 uses it. Playground's keys are separate. With the checked debug command line and
 Howl's dev config marker, init mounts `/run/howl-dev` as executable RAM for SSH
-uploads. [Test iteration](design/local-test-iteration.md) uses SSH and `sh-shim`,
-without BusyBox or a console shell, and confines a selected driver with its declared
-leash policy. Dev images require protections off: `--disable=secureboot,tpm,ipe`, and
+uploads. [Test iteration](design/implemented/local-test-iteration.md) uses SSH and
+`sh-shim`, without BusyBox or a console shell, and confines a selected driver with
+its declared leash policy. Dev images require protections off:
+`--disable=secureboot,tpm,ipe`, and
 are never published. A root console fails posture.
 
 ## Not done, by choice

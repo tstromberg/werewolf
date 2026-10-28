@@ -82,7 +82,6 @@ services:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim
       - /usr/bin/locale
-    read: /run/werewolf/import
     share: shared
 
   # Caddy, as its own user, for IRIS. The domain is the site.

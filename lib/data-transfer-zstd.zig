@@ -14,26 +14,51 @@ pub fn manifest(a: std.mem.Allocator, input: *Reader) !transfer.Manifest {
     var frame = try Frame.init(input, frame_buffer);
     const buffer = try a.alloc(u8, max_window + std.compress.zstd.block_size_max);
     defer a.free(buffer);
-    var decoder = std.compress.zstd.Decompress.init(&frame.reader, buffer, .{ .window_len = max_window });
+    var decoder = std.compress.zstd.Decompress.init(
+        &frame.reader,
+        buffer,
+        .{ .window_len = max_window },
+    );
     return transfer.manifest(a, &decoder.reader);
 }
 
-pub fn validate(a: std.mem.Allocator, input: *Reader, policy: transfer.Policy, service: ?[]const u8, sink: ?transfer.Sink) !transfer.Result {
+pub fn validate(
+    a: std.mem.Allocator,
+    input: *Reader,
+    policy: transfer.Policy,
+    service: ?[]const u8,
+    sink: ?transfer.Sink,
+) !transfer.Result {
     const frame_buffer = try a.alloc(u8, std.compress.zstd.block_size_max + 18);
     defer a.free(frame_buffer);
     var frame = try Frame.init(input, frame_buffer);
     const buffer = try a.alloc(u8, max_window + std.compress.zstd.block_size_max);
     defer a.free(buffer);
-    var decoder = std.compress.zstd.Decompress.init(&frame.reader, buffer, .{ .window_len = max_window });
+    var decoder = std.compress.zstd.Decompress.init(
+        &frame.reader,
+        buffer,
+        .{ .window_len = max_window },
+    );
     var checksum = std.hash.XxHash64.init(0);
-    const result = transfer.validateChecksummed(a, &decoder.reader, policy, service, sink, &checksum) catch |err| {
+    const result = transfer.validateChecksummed(
+        a,
+        &decoder.reader,
+        policy,
+        service,
+        sink,
+        &checksum,
+    ) catch |err| {
         if (frame.err) |e| return e;
         if (decoder.err) |e| return e;
         return err;
     };
     if (frame.state != .done or frame.pending_at != frame.pending_len) return error.TransferFrame;
-    if (frame.checksummed and @as(u32, @truncate(checksum.final())) != frame.checksum) return error.TransferFrameChecksum;
-    if (input.takeByte()) |_| return error.TransferTrailing else |err| if (err != error.EndOfStream) return err;
+    if (frame.checksummed and
+        @as(u32, @truncate(checksum.final())) != frame.checksum) return error.TransferFrameChecksum;
+    if (input.takeByte()) |_|
+        return error.TransferTrailing
+    else |err| if (err != error.EndOfStream)
+        return err;
     return result;
 }
 
@@ -141,7 +166,11 @@ test "Zstandard frame boundary rejects concatenation, damage and truncation" {
         .users = &.{},
         .groups = &.{},
     };
-    const empty_manifest: transfer.Manifest = .{ .image = policy.image, .arch = policy.arch, .entries = &.{} };
+    const empty_manifest: transfer.Manifest = .{
+        .image = policy.image,
+        .arch = policy.arch,
+        .entries = &.{},
+    };
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     var tar: Io.Writer.Allocating = .init(a);
@@ -153,7 +182,15 @@ test "Zstandard frame boundary rejects concatenation, damage and truncation" {
     _ = try transfer.emit(io, a, tmp.dir, empty_manifest, policy, owners, &tar.writer);
     try tmp.dir.writeFile(io, .{ .sub_path = "input.tar", .data = tar.written() });
     const path = try tmp.dir.realPathFileAlloc(io, "input.tar", a);
-    const result = try std.process.run(a, io, .{ .argv = &.{ "zstd", "-1", "-q", "-c", "--", path }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(4096) });
+    const result = try std.process.run(
+        a,
+        io,
+        .{
+            .argv = &.{ "zstd", "-1", "-q", "-c", "--", path },
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(4096),
+        },
+    );
     try t.expect(result.term == .exited and result.term.exited == 0);
     var input: Reader = .fixed(result.stdout);
     _ = try validate(a, &input, policy, null, null);
@@ -168,7 +205,9 @@ test "Zstandard frame boundary rejects concatenation, damage and truncation" {
         var scratch = std.heap.ArenaAllocator.init(t.allocator);
         defer scratch.deinit();
         input = .fixed(result.stdout[0..n]);
-        if (validate(scratch.allocator(), &input, policy, null, null)) |_| return error.AcceptedTruncation else |_| {}
+        if (validate(scratch.allocator(), &input, policy, null, null)) |_|
+            return error.AcceptedTruncation
+        else |_| {}
     }
     // No allocation or decoder execution is needed to reject these frame kinds.
     input = .fixed("\x50\x2a\x4d\x18\x00");

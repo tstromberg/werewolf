@@ -101,12 +101,29 @@ test "even a completed writer restart invalidates a capture" {
     try tmp.dir.writeFile(io, .{ .sub_path = "postgres/cgroup.procs", .data = "" });
     var status: [20]u8 = @splat(0);
     status[17] = 'd';
-    try tmp.dir.writeFile(io, .{ .sub_path = "supervise.postgres/status", .data = &status, .flags = .{ .permissions = .fromMode(0o600) } });
+    try tmp.dir.writeFile(
+        io,
+        .{
+            .sub_path = "supervise.postgres/status",
+            .data = &status,
+            .flags = .{ .permissions = .fromMode(0o600) },
+        },
+    );
     const stamps = try capture(io, arena.allocator(), tmp.dir, tmp.dir, &.{"postgres"});
     try unchanged(io, tmp.dir, stamps);
-    try tmp.dir.writeFile(io, .{ .sub_path = "supervise.postgres/status.new", .data = &status, .flags = .{ .permissions = .fromMode(0o600) } });
+    try tmp.dir.writeFile(
+        io,
+        .{
+            .sub_path = "supervise.postgres/status.new",
+            .data = &status,
+            .flags = .{ .permissions = .fromMode(0o600) },
+        },
+    );
     try tmp.dir.rename("supervise.postgres/status.new", tmp.dir, "supervise.postgres/status", io);
     try t.expectError(error.TransferWritersChanged, unchanged(io, tmp.dir, stamps));
     try tmp.dir.writeFile(io, .{ .sub_path = "postgres/cgroup.procs", .data = "42\n" });
-    try t.expectError(error.TransferWritersRunning, capture(io, arena.allocator(), tmp.dir, tmp.dir, &.{"postgres"}));
+    try t.expectError(
+        error.TransferWritersRunning,
+        capture(io, arena.allocator(), tmp.dir, tmp.dir, &.{"postgres"}),
+    );
 }

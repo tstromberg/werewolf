@@ -8,7 +8,12 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
-pub const Identity = struct { image: []const u8, arch: data.Arch, users: []const u8 = "", nocloud: ?people.NoCloud = null };
+pub const Identity = struct {
+    image: []const u8,
+    arch: data.Arch,
+    users: []const u8 = "",
+    nocloud: ?people.NoCloud = null,
+};
 // Root-owned scratch within the existing SSH login write floor. Never put
 // privileged setup in /tmp or widen SSH access to account/enrollment state.
 pub const pg_scratch = "/run/runit/data-export-pg";
@@ -48,22 +53,48 @@ pub fn cleanPostgres(io: Io, a: Allocator, root: Dir, session: bool) !void {
     defer control.close(io);
     var contents: [8192]u8 = undefined;
     if ((try control.stat(io)).size != contents.len or
-        try control.readPositionalAll(io, &contents, 0) != contents.len) return error.TransferPostgresControl;
+        try control.readPositionalAll(
+            io,
+            &contents,
+            0,
+        ) != contents.len) return error.TransferPostgresControl;
     try Dir.cwd().createDirPath(io, pg_scratch ++ "/global");
-    var private = try Dir.cwd().openDir(io, pg_scratch, .{ .iterate = true, .follow_symlinks = false });
+    var private = try Dir.cwd().openDir(
+        io,
+        pg_scratch,
+        .{ .iterate = true, .follow_symlinks = false },
+    );
     defer private.close(io);
     try private.setPermissions(io, .fromMode(0o700));
     try Dir.cwd().setFilePermissions(io, pg_scratch ++ "/global", .fromMode(0o755), .{});
-    Dir.cwd().deleteFile(io, pg_scratch ++ "/global/pg_control") catch |err| if (err != error.FileNotFound) return err;
-    try Dir.cwd().writeFile(io, .{ .sub_path = pg_scratch ++ "/global/pg_control", .data = &contents, .flags = .{ .permissions = .fromMode(0o444) } });
+    Dir.cwd().deleteFile(
+        io,
+        pg_scratch ++ "/global/pg_control",
+    ) catch |err| if (err != error.FileNotFound) return err;
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = pg_scratch ++ "/global/pg_control",
+            .data = &contents,
+            .flags = .{ .permissions = .fromMode(0o444) },
+        },
+    );
     // Only the unprivileged checker can enter its input directory. Restore
     // root ownership and remove the control bytes on every return path.
     defer private.deleteFile(io, "global/pg_control") catch {};
-    if (linux.errno(linux.fchown(private.handle, 78, 78)) != .SUCCESS) return error.TransferPostgresControl;
+    if (linux.errno(linux.fchown(
+        private.handle,
+        78,
+        78,
+    )) != .SUCCESS) return error.TransferPostgresControl;
     defer _ = linux.fchown(private.handle, 0, 0);
     var env: std.process.Environ.Map = .init(a);
     try env.put("LC_ALL", "C");
-    const errors = try private.createFile(io, "global/check.stderr", .{ .read = true, .permissions = .fromMode(0o600) });
+    const errors = try private.createFile(
+        io,
+        "global/check.stderr",
+        .{ .read = true, .permissions = .fromMode(0o600) },
+    );
     defer errors.close(io);
     defer private.deleteFile(io, "global/check.stderr") catch {};
     // One output pipe, read synchronously: do not create privileged I/O
@@ -71,7 +102,10 @@ pub fn cleanPostgres(io: Io, a: Allocator, root: Dir, session: bool) !void {
     // its regular-file stderr with RLIMIT_FSIZE and never parses the source
     // in this process.
     var child = try std.process.spawn(io, .{
-        .argv = &.{ "/usr/lib/werewolf/data-transfer-tool", if (session) "postgres-session" else "postgres" },
+        .argv = &.{
+            "/usr/lib/werewolf/data-transfer-tool",
+            if (session) "postgres-session" else "postgres",
+        },
         .environ_map = &env,
         .stdin = .ignore,
         .stdout = .pipe,
@@ -88,17 +122,38 @@ pub fn cleanPostgres(io: Io, a: Allocator, root: Dir, session: bool) !void {
         return error.TransferPostgresControl;
     var lines = mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| if (mem.startsWith(u8, line, "Database cluster state:")) {
-        if (mem.eql(u8, mem.trim(u8, line["Database cluster state:".len..], " \t"), "shut down")) return;
+        if (mem.eql(
+            u8,
+            mem.trim(u8, line["Database cluster state:".len..], " \t"),
+            "shut down",
+        )) return;
         return error.TransferPostgresUnclean;
     };
     return error.TransferPostgresControl;
 }
 
-pub fn catalog(io: Io, a: Allocator, image: Dir, root: Dir, c: Identity, initialize: bool) !data.Policy {
+pub fn catalog(
+    io: Io,
+    a: Allocator,
+    image: Dir,
+    root: Dir,
+    c: Identity,
+    initialize: bool,
+) !data.Policy {
     var base: people.Files = .{
-        .passwd = try image.readFileAlloc(io, "usr/share/werewolf/etc/passwd", a, .limited(1 << 20)),
+        .passwd = try image.readFileAlloc(
+            io,
+            "usr/share/werewolf/etc/passwd",
+            a,
+            .limited(1 << 20),
+        ),
         .group = try image.readFileAlloc(io, "usr/share/werewolf/etc/group", a, .limited(1 << 20)),
-        .shadow = try image.readFileAlloc(io, "usr/share/werewolf/etc/shadow", a, .limited(1 << 20)),
+        .shadow = try image.readFileAlloc(
+            io,
+            "usr/share/werewolf/etc/shadow",
+            a,
+            .limited(1 << 20),
+        ),
         .made = "",
     };
     var ledger: []const people.Identity = &.{};
@@ -111,7 +166,15 @@ pub fn catalog(io: Io, a: Allocator, image: Dir, root: Dir, c: Identity, initial
     } else |err| if (err != error.FileNotFound) return err;
     if (initialize) {
         if (!try people.freshData(root.handle)) return error.TransferConflict;
-        const change = try people.applyReserved(a, base, &.{}, c.users, "/sbin/nologin", c.nocloud, true);
+        const change = try people.applyReserved(
+            a,
+            base,
+            &.{},
+            c.users,
+            "/sbin/nologin",
+            c.nocloud,
+            true,
+        );
         if (change.refused.len != 0) return error.TransferIdentity;
         const dir = try people.openLedgerDir(root.handle);
         defer _ = linux.close(dir);
@@ -135,7 +198,12 @@ pub fn catalog(io: Io, a: Allocator, image: Dir, root: Dir, c: Identity, initial
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (!data.validName(entry.name) or names.items.len >= 4096) return error.TransferService;
-        const text = dir.readFileAlloc(io, try a.print("{s}/service", .{entry.name}), a, .limited(64 << 10)) catch |err| switch (err) {
+        const text = dir.readFileAlloc(
+            io,
+            try a.print("{s}/service", .{entry.name}),
+            a,
+            .limited(64 << 10),
+        ) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -144,7 +212,13 @@ pub fn catalog(io: Io, a: Allocator, image: Dir, root: Dir, c: Identity, initial
         const uid = try data.identityByName(users.items, if (s.user.len == 0) "root" else s.user);
         if (uid > services.system_id_max) try names.append(a, try a.dupe(u8, entry.name));
     }
-    return .{ .image = c.image, .arch = c.arch, .services = names.items, .users = users.items, .groups = groups.items };
+    return .{
+        .image = c.image,
+        .arch = c.arch,
+        .services = names.items,
+        .users = users.items,
+        .groups = groups.items,
+    };
 }
 
 fn accountList(a: Allocator, text: []const u8, list: *std.ArrayList(data.Identity)) !void {
@@ -153,7 +227,11 @@ fn accountList(a: Allocator, text: []const u8, list: *std.ArrayList(data.Identit
         var fields = mem.splitScalar(u8, line, ':');
         const name = fields.next() orelse return error.TransferIdentity;
         _ = fields.next() orelse return error.TransferIdentity;
-        const id = try std.fmt.parseUnsigned(u32, fields.next() orelse return error.TransferIdentity, 10);
+        const id = try std.fmt.parseUnsigned(
+            u32,
+            fields.next() orelse return error.TransferIdentity,
+            10,
+        );
         try addIdentity(a, list, name, id);
     }
 }

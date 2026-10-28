@@ -119,7 +119,7 @@ services:
     before: /usr/lib/werewolf/valkey-init
     user: valkey
     pledge: stdio rpath wpath inet unix listen proc
-    read: /etc/valkey /run/werewolf/import
+    read: /etc/valkey
     listen: tcp/6379 loopback
     share: shared
     memory: 512

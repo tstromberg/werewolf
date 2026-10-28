@@ -80,7 +80,7 @@ services:
     user: mariadb
     pledge: stdio rpath wpath unix inet listen proc aio
     listen: tcp/3306 loopback
-    read: /etc/mariadb /run/werewolf/import
+    read: /etc/mariadb
     share: shared
     memory: 1024
     nofile: 16384
@@ -97,7 +97,7 @@ services:
     user: valkey
     pledge: stdio rpath wpath inet unix listen proc
     listen: tcp/6379 loopback
-    read: /etc/valkey /run/werewolf/import
+    read: /etc/valkey
     share: shared
     memory: 256
     nofile: 10240

@@ -19,7 +19,7 @@ services:
     user: mariadb
     pledge: stdio rpath wpath unix inet listen proc aio
     listen: [tcp/3306]
-    read: /etc/mariadb /run/werewolf/import
+    read: /etc/mariadb
     share: shared
     memory: 1024
     nofile: 16384
