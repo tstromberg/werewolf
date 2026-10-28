@@ -379,6 +379,7 @@ _test/probes:
 	zig test --dep test-driver -Mroot=forms/samba/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test -lc --dep test-driver -Mroot=forms/nats/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/zeek/test/driver.zig -Mtest-driver=test/native/driver.zig
+	zig test --dep test-driver -Mroot=forms/solr/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test --dep test-driver -Mroot=forms/suricata/test/driver.zig -Mtest-driver=test/native/driver.zig
 	zig test test/native/bson.zig
 	zig test test/native/amqp.zig
