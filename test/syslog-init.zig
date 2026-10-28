@@ -336,11 +336,14 @@ fn waitSender(pid: i32) !void {
 }
 
 fn flooding(io: Io, gpa: mem.Allocator) !void {
-    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid, 32);
+    // Timer coalescing and VM scheduling must not spread this burst below
+    // the 1,000/second limit. The sibling senders remain deliberately paced.
+    const noisy = try logAs(65537, "pid-flood", 3 * p.per_pid, 128);
     try waitSender(noisy);
     // These share the noisy process's UID but each stays below the PID limit.
     try waitSender(try logAs(65537, "pid-sibling-one", 600, 4));
     try waitSender(try logAs(65537, "pid-sibling-two", 600, 4));
+    var last: [3]usize = @splat(0);
     for (0..500) |_| {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
@@ -371,6 +374,7 @@ fn flooding(io: Io, gpa: mem.Allocator) !void {
             notices += 1;
         }
         if (notices > 1) return error.FloodNoticeFlood;
+        last = .{ notices, one, two };
         if (notices == 1 and one == 600 and two == 600) {
             std.debug.print(
                 "syslog-check: PID flooding notice and independent same-UID senders verified\n",
@@ -380,6 +384,8 @@ fn flooding(io: Io, gpa: mem.Allocator) !void {
         }
         try io.sleep(.fromMilliseconds(10), .awake);
     }
+    std.debug.print("syslog-check: flood evidence: notices={d} sibling-one={d} " ++
+        "sibling-two={d}\n", .{ last[0], last[1], last[2] });
     return error.FloodChecksFailed;
 }
 

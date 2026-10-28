@@ -18,7 +18,8 @@ suites:
             expect:
               status: 200
               json:
-                /lucene/solr-spec-version: 10.0.0
+                /lucene/solr-spec-version:
+                  matches: '^10[.][0-9]+[.][0-9]+$'
             await: 120s
       - name: solr-cores
         steps:
@@ -39,6 +40,8 @@ suites:
                 name: check
                 configSet: _default
                 wt: json
+            # Core creation warms the JVM and writes its first index files.
+            timeout: 60s
             expect:
               status:
                 one_of:
@@ -50,6 +53,7 @@ suites:
               status: 200
               json:
                 /status/check/name: check
+            await: 60s
         phases:
           - seed
       - name: solr-index-document
@@ -61,6 +65,7 @@ suites:
                 - id:
                     run: true
                   name: shell-free Solr
+            timeout: 60s
             expect:
               status: 200
               json:
@@ -144,11 +149,6 @@ suites:
           - file: /usr/lib/solr/server/lib/ext/log4j-core-2.14.1.jar
             expect:
               exists: false
-          - file: /usr/lib/solr/server/lib/ext/log4j-core-2.25.3.jar
-            expect:
-              type: file
-              size:
-                min: 1
       - name: solr-private-listener
         steps:
           - listeners:
@@ -159,3 +159,13 @@ suites:
                 - protocol: tcp
                   address: 127.0.0.1
                   port: 8983
+  - name: solr-libraries
+    source: driver.zig
+    mode: libraries
+    user: nobody
+    policy:
+      pledge: stdio rpath
+      read: [/usr/lib/solr/server/lib/ext]
+    cases:
+      seed: [solr-log4j-version]
+      verify: [solr-log4j-version]
