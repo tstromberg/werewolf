@@ -1,4 +1,4 @@
-//! Offline apk's runtime and confinement; see docs/design/updater-installer.md.
+//! Offline apk's runtime and confinement; see docs/design/implemented/updater-installer.md.
 const std = @import("std");
 const sandbox = @import("sandbox");
 const linux = std.os.linux;

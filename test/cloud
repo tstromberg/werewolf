@@ -1,6 +1,6 @@
 #!/bin/sh
 # cloud tests a werewolf form on a real cloud, made as a user makes one, with
-# `howl create --on CLOUD` (docs/design/cli.md): its release disk becomes the
+# `howl create --on CLOUD` (docs/design/implemented/cli.md): its release disk becomes the
 # cloud's image, it boots under UEFI, and its config goes in the instance's
 # user data. `make check-gcp`, `make check-aws` and `make check-azure` use it;
 # see docs/testing.md.

@@ -49,15 +49,15 @@ howl's build calls lib/verity.zig itself.
 
 ## uki
 
-`uki STUB OUT NAME=FILE...` appends one section per name to systemd's EFI
-stub, making a Unified Kernel Image: kernel, stage0, root and command line
-as one PE a boot key can sign whole
-([docs/design/verified-boot.md](../docs/design/verified-boot.md)). The
-Makefile's uki rule builds and signs a form's this way, `osslsigncode`
-signs, and `make check-secureboot` boots what it made on firmware that
-verifies it. It parses the PE's own headers, keeps their alignments, and
-refuses what is not an arm64 PE32+ stub; the section headers it adds go in
-the room before the first section's data, where the loader reads them.
+`uki STUB OUT NAME=FILE...` appends one section per name to systemd's EFI stub,
+making a Unified Kernel Image: kernel, stage0, root and command line as one PE a boot
+key can sign whole
+([docs/design/implemented/verified-boot.md](../docs/design/implemented/verified-boot.md)).
+The Makefile's uki rule builds and signs a form's this way, `osslsigncode` signs, and
+`make check-secureboot` boots what it made on firmware that verifies it. It parses
+the PE's own headers, keeps their alignments, and refuses what is not an arm64 PE32+
+stub; the section headers it adds go in the room before the first section's data,
+where the loader reads them.
 
 ## tpm-floor
 
@@ -97,7 +97,7 @@ each file. Each file's memory is released before reading the next.
 ## cve-tiers
 
 `cve-tiers KERNEL ORIGINS CACHE WORK OUT` (`make cve-tiers`) builds the CVE
-tiers feed (docs/design/update-policy.md) for the packages in ORIGINS and
+tiers feed (docs/design/implemented/update-policy.md) for the packages in ORIGINS and
 KERNEL's stable branch. It reads Wolfi's security.json, the kernel CNA's
 records, CISA's KEV catalog and NVD scores, which it caches in CACHE so later
 runs fetch only changes. A CVE is urgent if in KEV or scored 9.0+ over the

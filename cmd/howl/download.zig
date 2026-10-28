@@ -24,9 +24,16 @@ fn trust(gpa: Allocator) !Trust {
 
 /// channel is the update channel werewolf's published images of form for
 /// provider follow: static files on its public mirror, which every machine
-/// fetches for itself (docs/design/independent-updates.md).
+/// fetches for itself (docs/design/implemented/independent-updates.md).
 pub fn channel(gpa: Allocator, form: []const u8, provider: howl.Platform) ![]const u8 {
-    return gpa.print("{s}/{s}/{t}", .{ (try trust(gpa)).source, form, provider });
+    return gpa.print(
+        "{s}/{s}/{t}",
+        .{
+            (try trust(gpa)).source,
+            try @import("form").variantPath(gpa, form, howl.variants),
+            provider,
+        },
+    );
 }
 
 /// x86 bhyve boots the same signed native UEFI disk and follows its existing
@@ -154,6 +161,7 @@ pub fn selected(
         .image_certificate = image,
         .channel = followed,
         .form = form,
+        .variants = if (howl.variants.len > 0) try std.mem.join(gpa, ",", howl.variants) else null,
         .provider = @tagName(published),
         .arch = @tagName(arch),
         .version = version,
@@ -218,7 +226,10 @@ pub fn versions(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why
         gpa,
         h.transport(),
         root,
-        form,
+        if (howl.variants.len > 0)
+            try gpa.print("{s}-variants-{s}", .{ form, try std.mem.join(gpa, ",", howl.variants) })
+        else
+            form,
         @tagName(published),
         target,
     ) catch |err|

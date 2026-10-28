@@ -23,7 +23,7 @@ pub fn network(m: *Machine) void {
     const local_validator = exists(dns.local_validator_path);
     // Keep the directory present even when DHCP has not acquired a lease.
     // Every program asks unwound; only it, fence and DHCP read upstream,
-    // which DHCP atomically replaces (docs/design/unwound.md).
+    // which DHCP atomically replaces (docs/design/implemented/unwound.md).
     mkdir("/run/werewolf/network", 0o755);
     m.write(dns.resolv_path, dns.resolv_text, 0o644);
     m.write(dns.service_address_path, "", 0o644);

@@ -1,5 +1,5 @@
 #!/bin/sh
-# example runs the shell fence in a form's README (docs/design/examples.md).
+# example runs the shell fence in a form's README (docs/design/implemented/examples.md).
 #
 #   example check FORM     the fences only, no machine
 #   example local FORM     the local fence, on howl's default engine

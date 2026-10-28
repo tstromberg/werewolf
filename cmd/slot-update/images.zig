@@ -26,7 +26,22 @@ fn identity(u: *Update, arch: []const u8) !signed.Identity {
         else => return err,
     };
     try signed.channel(url);
-    return .{ .channel = url, .arch = arch };
+    const selection = u.read("/usr/share/werewolf/variants") catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+    var variants: std.ArrayList([]const u8) = .empty;
+    const text = std.mem.trim(u8, selection, " \n");
+    if (text.len > 0) {
+        if (!signed.variantSelection(text)) return error.BadImageVariants;
+        var it = std.mem.splitScalar(u8, text, ',');
+        while (it.next()) |name| try variants.append(u.gpa, name);
+    }
+    const form = if (variants.items.len > 0)
+        std.mem.trim(u8, try u.read("/usr/share/werewolf/form"), "\n")
+    else
+        null;
+    return .{ .channel = url, .arch = arch, .form = form, .variants = variants.items };
 }
 
 fn open(u: *Update, arch: []const u8, data: []const u8, sig: []const u8) !signed.Manifest {

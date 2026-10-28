@@ -177,7 +177,7 @@ pub fn verify(
     const image = try json.field(manifest, "image");
     const form = try json.text(manifest, "form");
     const arch = try json.text(image, "arch");
-    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ form, provider, arch });
+    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ try s.variantKey(form), provider, arch });
     const head_name = try s.gpa.print("{s}-downloads.json", .{prefix});
     const signature_name = try s.gpa.print("{s}.sig", .{head_name});
     const head = try sys.join(s, &.{ directory, head_name });
@@ -201,6 +201,7 @@ pub fn verify(
         .boot_profile = "secure-boot",
         .descriptor = &descriptor,
         .form = form,
+        .variants = try s.variantNames(),
         .provider = provider,
         .arch = arch,
         .serial = try json.field(image, "serial"),
@@ -350,7 +351,7 @@ pub fn exportBundle(
     );
     const form = try json.text(plan, "form");
     const arch = try json.text(plan, "arch");
-    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ form, provider, arch });
+    const prefix = try s.gpa.print("{s}-{s}-{s}", .{ try s.variantKey(form), provider, arch });
     const staging = try sys.join(s, &.{ work, "assets" });
     try sys.mkdir(s, staging);
     var originals: std.ArrayList(Source) = .empty;
@@ -411,6 +412,7 @@ pub fn exportBundle(
         .boot_profile = "secure-boot",
         .descriptor = try json.field(plan, "descriptor"),
         .form = form,
+        .variants = try s.variantNames(),
         .provider = provider,
         .arch = arch,
         .serial = try json.field(plan, "serial"),

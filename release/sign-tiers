@@ -3,7 +3,7 @@
 # an expiry three days out, signs it with the tiers key as FEED.sig, and
 # checks the signature against release/tiers.pub. CI signs the feed at least
 # daily, so a current feed never expires. If the feed stops coming, a machine
-# counts every fix as High within three days (docs/design/update-policy.md).
+# counts every fix as High within three days (docs/design/implemented/update-policy.md).
 #
 #   WEREWOLF_TIERS_KEY=<PEM> release/sign-tiers SERIAL FEED
 #

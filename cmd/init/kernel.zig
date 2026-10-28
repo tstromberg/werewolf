@@ -80,7 +80,7 @@ fn cgroups(m: *Machine) void {
     mkdir("/run/cgroup/svc", 0o755);
     _ = writeFile("/run/cgroup/svc/cgroup.subtree_control", "+memory +pids");
     // Apart, so a kernel without the cpu controller still caps memory; a
-    // service's cpu weight then goes unset (docs/design/cpu-and-first-run.md).
+    // service's cpu weight then goes unset (docs/design/implemented/cpu-and-first-run.md).
     const cpu = writeFile("/run/cgroup/cgroup.subtree_control", "+cpu") and
         writeFile("/run/cgroup/svc/cgroup.subtree_control", "+cpu");
     say("cgroups: a memory cap{s} and a reaper per service", .{if (cpu) ", a cpu share" else ""});
@@ -116,7 +116,7 @@ pub fn seed(m: *Machine) void {
 
 /// kernel raises lockdown to confidentiality, as stage0 has already, rather
 /// than trust the command line, and applies the sysctls and MDWE. The kernel
-/// has no module loader to close (docs/design/custom-kernel.md).
+/// has no module loader to close (docs/design/implemented/custom-kernel.md).
 /// It returns an error if a protection is refused outside a container.
 pub fn kernel(m: *Machine) !void {
     if (!m.isMounted("/sys/kernel/security")) m.mount(&.{

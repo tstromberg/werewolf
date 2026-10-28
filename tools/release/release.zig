@@ -130,6 +130,8 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
         return keys.withProtectedKeys(s, try strings(s, args));
     }
     const a = try Args.parse(s, args);
+    s.variants = a.option("variant") orelse s.getenv("FORM_IMAGES_VARIANTS") orelse "";
+    _ = try s.variantNames();
     if (mem.eql(u8, verb, "report-publishing-health")) {
         const event = try sys.readJson(
             s,
@@ -240,26 +242,55 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
     unreachable;
 }
 
-fn formImages(s: *Sys, t: images.Images, tree: plan.Tree, a: Args) !u8 {
+fn formImages(s: *Sys, configured: images.Images, tree: plan.Tree, a: Args) !u8 {
     if (a.positional.len < 1) return s.refuse(
         "usage: form-images matrix|gates|resolve|build|check|gate|export|publish ...",
         .{},
     );
     const command = a.at(0);
+    s.variants = a.option("variant") orelse s.getenv("FORM_IMAGES_VARIANTS") orelse "";
+    _ = try s.variantNames();
+    const all = if (mem.eql(u8, s.getenv("FORM_IMAGES_TARGET") orelse "base", "all"))
+        try configured.entire(s)
+    else
+        configured;
+    const t = try all.selected(s);
     const recovery = try plan.focused(s, t);
     const store = Store.init(s.getenv("PROTECTED_BUCKET") orelse "s3://werewolf/boot/v1");
+    if (mem.eql(u8, command, "selections")) {
+        try std.Io.File.stdout().writeStreamingAll(
+            s.io,
+            try json.dumps(s.gpa, try json.from(s.gpa, try all.selections(s))),
+        );
+        return 0;
+    }
     if (mem.eql(u8, command, "matrix") or mem.eql(u8, command, "gates")) {
         try a.want(s, 1, "form-images matrix|gates [--shards N]");
         const shards = if (a.option("shards")) |n|
             std.fmt.parseInt(i64, n, 10) catch return s.refuse("--shards takes a number", .{})
         else
             t.shards;
-        const value = if (mem.eql(u8, command, "matrix"))
-            try plan.matrix(s, t, shards, recovery)
-        else if (shards < 1 or shards > 32)
-            return s.refuse("invalid lifecycle gate shards", .{})
-        else
-            try plan.gates(s, t, tree, recovery, shards);
+        var include: std.ArrayList(json.Json) = .empty;
+        const saved = s.variants;
+        defer s.variants = saved;
+        for (try all.selections(s)) |selection| {
+            s.variants = selection;
+            const selected = try all.selected(s);
+            if (selected.forms.len == 0 or (recovery and
+                !selected.hasForm(selected.focused.form))) continue;
+            const matrix = if (mem.eql(u8, command, "matrix"))
+                try plan.matrix(s, selected, shards, recovery)
+            else if (shards < 1 or shards > 32)
+                return s.refuse("invalid lifecycle gate shards", .{})
+            else
+                try plan.gates(s, selected, tree, recovery, shards);
+            for (try json.items(try json.field(matrix, "include"))) |entry| {
+                var item = entry;
+                try item.object.put(s.gpa, "variants", .{ .string = selection });
+                try include.append(s.gpa, item);
+            }
+        }
+        const value = try json.from(s.gpa, .{ .include = include.items });
         try std.Io.File.stdout().writeStreamingAll(
             s.io,
             try s.gpa.print("{s}\n", .{try json.dumps(s.gpa, value)}),
@@ -334,17 +365,43 @@ fn formImages(s: *Sys, t: images.Images, tree: plan.Tree, a: Args) !u8 {
             6,
             "form-images export SNAPSHOTS VERIFIED GATED ASSETS LISTING [--legacy-verified DIR]",
         );
-        try publication.exportAll(
+        var exported: std.ArrayList(json.Json) = .empty;
+        const selections: []const []const u8 = if (s.variants.len > 0)
+            &.{s.variants}
+        else
+            try all.selections(s);
+        const saved = s.variants;
+        defer s.variants = saved;
+        s.collect_outputs = true;
+        defer s.collect_outputs = false;
+        for (selections) |selection| {
+            s.variants = selection;
+            const selected = try all.selected(s);
+            if (selected.forms.len == 0 or (recovery and
+                !selected.hasForm(selected.focused.form))) continue;
+            const listing = try s.gpa.print(
+                "{s}.{s}",
+                .{ a.at(5), if (selection.len == 0) "default" else selection },
+            );
+            try publication.exportAll(
+                s,
+                selected,
+                tree,
+                a.at(1),
+                a.at(2),
+                a.at(3),
+                store,
+                a.at(4),
+                listing,
+                a.option("legacy-verified"),
+            );
+            try exported.appendSlice(s.gpa, try json.items(try sys.readJson(s, listing, 16 << 20)));
+        }
+        try sys.writeJson(s, a.at(5), try json.from(s.gpa, exported.items));
+        s.collect_outputs = false;
+        try publication.githubOutput(
             s,
-            t,
-            tree,
-            a.at(1),
-            a.at(2),
-            a.at(3),
-            store,
-            a.at(4),
-            a.at(5),
-            a.option("legacy-verified"),
+            &.{.{ "targets", try s.gpa.print("{d}", .{exported.items.len}) }},
         );
         return 0;
     }
@@ -357,18 +414,41 @@ fn formImages(s: *Sys, t: images.Images, tree: plan.Tree, a: Args) !u8 {
                 .{},
             ),
         );
-        return @intFromBool(try publication.publishAll(
-            s,
-            t,
-            tree,
-            a.at(1),
-            a.at(2),
-            try publication.gatedTargets(s, groups),
-            a.at(3),
-            store,
-            recovery,
-            t.forms,
-        ));
+        var failed = false;
+        var released = true;
+        var smoke: std.ArrayList(json.Json) = .empty;
+        var count: usize = 0;
+        const selections: []const []const u8 = if (s.variants.len > 0)
+            &.{s.variants}
+        else
+            try all.selections(s);
+        const saved = s.variants;
+        defer s.variants = saved;
+        s.collect_outputs = true;
+        defer s.collect_outputs = false;
+        for (selections) |selection| {
+            s.variants = selection;
+            const selected = try all.selected(s);
+            if (selected.forms.len == 0 or (recovery and
+                !selected.hasForm(selected.focused.form))) continue;
+            failed = (try publication.publishAll(s, all, tree, a.at(
+                1,
+            ), a.at(2), try publication.gatedTargets(
+                s,
+                groups,
+            ), a.at(3), store, recovery, selected.forms)) or failed;
+            released = released and mem.eql(u8, s.outputs.get("released") orelse "false", "true");
+            count += try std.fmt.parseInt(usize, s.outputs.get("public_targets") orelse "0", 10);
+            const matrix = try json.parse(s.gpa, s.outputs.get("smoke") orelse "{\"include\":[]}");
+            try smoke.appendSlice(s.gpa, try json.items(try json.field(matrix, "include")));
+        }
+        s.collect_outputs = false;
+        try publication.githubOutput(s, &.{
+            .{ "released", if (released) "true" else "false" },
+            .{ "public_targets", try s.gpa.print("{d}", .{count}) },
+            .{ "smoke", try json.dumps(s.gpa, try json.from(s.gpa, .{ .include = smoke.items })) },
+        });
+        return @intFromBool(failed);
     }
     return s.refuse("unknown form-images command {s}", .{command});
 }

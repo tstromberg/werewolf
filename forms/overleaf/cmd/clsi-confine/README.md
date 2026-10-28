@@ -11,8 +11,8 @@ Overleaf's compiler, clsi, runs every project's TeX as one user, `_oci-clsi`, be
 one directory. TeX runs what its users write. TeX Live 2026 made `openin_any` a no-op
 (`texmf.cnf`: `kpse_in_name_ok` always returns true), so `\input` of any path clsi's
 user can read worked, another project's compile directory included. clsi's leash
-cannot tell compiles apart, and `narrow` (docs/design/narrow.md) takes neither an
-image's root nor a directory chosen per run.
+cannot tell compiles apart, and `narrow` (docs/design/implemented/narrow.md) takes
+neither an image's root nor a directory chosen per run.
 
 ## Goals
 

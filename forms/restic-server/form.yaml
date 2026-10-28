@@ -6,7 +6,7 @@
 # repository of its own name; the users are the config's, as bcrypt
 # htpasswd lines, and none is built in. It runs restic's own image, its
 # latest release, pinned by digest when built, in a tree of its own
-# (docs/design/oci.md, cmd/howl/oci.zig), and keeps
+# (docs/design/implemented/oci.md, cmd/howl/oci.zig), and keeps
 # the repositories in /data/svc/restic-server. See
 # forms/restic-server/README.md.
 base: prod

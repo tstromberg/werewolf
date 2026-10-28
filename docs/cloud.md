@@ -47,8 +47,9 @@ az vm create --name web-1 --user-data config.tar ...
 
 There is no address to give: the machine asks DHCP. A `network` file in the user data
 is not read, the network being up to fetch it; one on a config disk is, before the
-network comes up ([design/cli.md](design/cli.md#config-the-config-tar-from-flags)). A
-NoCloud seed's `network-config` (cloud-init's v1 and v2) is never read: the address
+network comes up
+([design/implemented/cli.md](design/implemented/cli.md#config-the-config-tar-from-flags)).
+A NoCloud seed's `network-config` (cloud-init's v1 and v2) is never read: the address
 comes from the command line, the config tar or DHCP.
 
 ## What happens at boot
@@ -113,11 +114,11 @@ x86, pass `--arch x86_64 --size Standard_D2s_v5`.
 Otherwise cloud builds keep one in howl's data directory, `$XDG_DATA_HOME/howl`
 (`~/.local/share/howl`)'s `keys/boot/ARCH`. A machine's first boot makes the vTPM its
 own and holds its channel's floor ([independent
-updates](design/independent-updates.md)). Signed machines hold updates until they
-follow a matching signed image channel, which the builder serves: `IPE_UPDATES` names
-it and `IMAGE_INDEX` the release's index ([prebuilt
-images](design/prebuilt-images.md)); locally composing an unsigned replacement cannot
-preserve the verified boot chain.
+updates](design/implemented/independent-updates.md)). Signed machines hold updates
+until they follow a matching signed image channel, which the builder serves:
+`IPE_UPDATES` names it and `IMAGE_INDEX` the release's index ([prebuilt
+images](design/implemented/prebuilt-images.md)); locally composing an unsigned
+replacement cannot preserve the verified boot chain.
 
 ## Separation
 
@@ -148,9 +149,9 @@ afresh, nothing in the fetched one but names and contents reaches init.
 
 - **Only `_cloud` reaches the metadata server's port 80 once the machine is up.**
   fence's routing rules refuse other users, root included
-  ([docs/design/fence.md](design/fence.md)). The confined fetcher can read user data
-  for the poller; application processes cannot. Root could delete the rules until the
-  seal takes `CAP_NET_ADMIN` away.
+  ([docs/design/implemented/fence.md](design/implemented/fence.md)). The confined
+  fetcher can read user data for the poller; application processes cannot. Root could
+  delete the rules until the seal takes `CAP_NET_ADMIN` away.
 - **Whoever sets the user data is root on the machine**: it carries root's ssh keys.
   That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are not

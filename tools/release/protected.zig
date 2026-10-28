@@ -134,7 +134,8 @@ pub fn build(
     }
     var env = try s.env.clone(s.gpa);
     try env.put("UKI_STUB", stub);
-    // Machines follow the public mirror themselves (docs/design/independent-updates.md).
+    // Machines follow the public mirror themselves
+    // (docs/design/implemented/independent-updates.md).
     const trust = try sys.readJson(s, try sys.join(s, &.{ tree.trust, "trust.json" }), 4096);
     const channel = try s.gpa.print(
         "{s}/{s}/{s}",
@@ -184,7 +185,7 @@ pub fn build(
         "--boot-key",    keys[2],  "--boot-cert",   keys[3],   "--boot-native",  "--tpm",
         "--disk",        disk,     "--disk-args",   disk_args, "disk",
     }, .{ .env = &env });
-    const slot = try sys.join(s, &.{ work, try s.gpa.print("{s}-ipe", .{form}) });
+    const slot = try sys.join(s, &.{ work, try s.gpa.print("{s}-ipe", .{try s.variantKey(form)}) });
     const config = try sys.join(s, &.{ work, "seal.json" });
     try sys.write(s, config, try json.dumps(s.gpa, try json.from(s.gpa, .{
         .form = form,

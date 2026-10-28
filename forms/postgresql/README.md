@@ -49,19 +49,19 @@ howl create postgresql --with postgresql --on gcp --allow-from me
 `--allow-from` opens no port: there is no listener. Keep the database on the same
 machine as the service that queries it.
 
-### Importing data
+### Exporting and importing data
 
-The host cannot reach this server. `--import` attaches a directory of SQL. `pg-init`
-applies it once, in the `postgres` database, while it makes the cluster.
-[example/shop.sql](example/shop.sql) is a two-row shop. `CREATE DATABASE` is not
-available in that backend.
+Use a physical archive from the same image and architecture. The service scope is
+`postgres`; full transfer also includes companion service data. The destination
+must have empty selected data and remains stopped after import. See [data storage](../../docs/data.md) for supported adapters and consistency requirements.
 
 ```sh
-howl create postgresql --with postgresql --import ./dump
+howl export source --service postgres --output backup.tar.zst
+howl import replacement backup.tar.zst
 ```
 
-A form can still carry `rootfs/usr/share/werewolf-postgres/NAME.sql`. That SQL runs
-on every start.
+A form may carry `rootfs/usr/share/werewolf-postgres/NAME.sql` for setup on
+every start.
 
 ### Known Quirks
 
@@ -69,7 +69,7 @@ on every start.
 - A dump's roles must be system users on this machine. Peer authentication has no
   passwords.
 - The image's SQL files run on every start. An `INSERT` needs a conflict target, or
-  the rows multiply. `--import` runs once.
+  the rows multiply.
 - This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger
   uses `/bin/mksh`. A form replacing the PostgreSQL service must keep its explicit
   initdb, sh-shim and locale run paths.

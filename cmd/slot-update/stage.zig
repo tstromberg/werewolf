@@ -1,4 +1,4 @@
-//! stage decides when a staged slot boots (docs/design/update-policy.md). It
+//! stage decides when a staged slot boots (docs/design/implemented/update-policy.md). It
 //! holds the settings, the CVE tiers feed, `attempt`, `pending`, the lock and
 //! the reboot. Update in slot-update.zig re-exports these as its methods.
 
@@ -115,7 +115,7 @@ pub fn waited(u: *Update) !Waits {
 // --- policy -----------------------------------------------------------------
 
 /// loadPolicy applies the form's settings, then the operator's, over
-/// werewolf's defaults (docs/design/update-policy.md, Settings), and logs the
+/// werewolf's defaults (docs/design/implemented/update-policy.md, Settings), and logs the
 /// result. Each file is taken whole or refused whole.
 pub fn loadPolicy(u: *Update, s: *policy.Settings) !void {
     var refused: std.ArrayList(Refused) = .empty;

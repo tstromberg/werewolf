@@ -116,7 +116,10 @@ pub fn prepare(
     const temporary = try sys.scratch(s, parent, "protected-public-");
     defer sys.remove(s, temporary);
     const staging = try sys.join(s, &.{ temporary, "tree" });
-    const relative = try s.gpa.print("{s}/{s}/{s}", .{ b.form, provider, b.arch });
+    const relative = try s.gpa.print(
+        "{s}/{s}/{s}",
+        .{ try s.variantPath(b.form), provider, b.arch },
+    );
     const channel = try sys.join(s, &.{ staging, relative });
     const objects = try sys.join(s, &.{ channel, "objects", b.descriptor });
     const latest = try sys.join(s, &.{ channel, "latest" });
@@ -183,7 +186,10 @@ pub fn prepare(
                 try sys.join(s, &.{ objects, e.key_ptr.* }),
             );
         }
-        const prefix = try s.gpa.print("{s}-{s}-{s}", .{ b.form, provider, b.arch });
+        const prefix = try s.gpa.print(
+            "{s}-{s}-{s}",
+            .{ try s.variantKey(b.form), provider, b.arch },
+        );
         for ([_][]const u8{ "downloads.json", "downloads.json.sig" }) |name|
             try sys.copy(
                 s,
@@ -220,6 +226,7 @@ pub fn prepare(
     const plan = try json.from(s.gpa, .{
         .format = "werewolf-boot-upload/2",
         .form = b.form,
+        .variants = try s.variantNames(),
         .provider = provider,
         .arch = b.arch,
         .descriptor = b.descriptor,

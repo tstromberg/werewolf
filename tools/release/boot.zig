@@ -37,11 +37,12 @@ pub fn request(
         .source = source,
         .cache = "unused",
         .form = form,
+        .variants = if (s.variants.len == 0) null else s.variants,
         .arch = arch,
         .provider = provider,
         .boot_certificate = try sys.join(s, &.{ trust_dir, "boot.crt" }),
         .image_certificate = try sys.join(s, &.{ trust_dir, "image.crt" }),
-        .channel = try s.gpa.print("{s}/{s}/{s}", .{ source, form, provider }),
+        .channel = try s.gpa.print("{s}/{s}/{s}", .{ source, try s.variantPath(form), provider }),
     };
     bd.validate(r) catch |err| return s.refuse("{s}", .{bd.describe(err)});
     return r;
@@ -65,6 +66,7 @@ pub fn native(s: *Sys, howl: []const u8, operation: []const u8, dir: []const u8,
         },
     );
     if (mem.eql(u8, operation, "head")) try argv.append(s.gpa, r.form);
+    if (r.variants) |variants| try argv.appendSlice(s.gpa, &.{ "--variant", variants });
     const result = try sys.exec(s, argv.items, .{ .capture = .both });
     // Native diagnostics name the failed check, never a private credential.
     if (!result.ok()) return s.refuse(

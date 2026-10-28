@@ -1,0 +1,102 @@
+# howl builds images
+
+**Status:** Implemented
+[2026-10-09](https://github.com/werewolf-linux/werewolf/commit/594d32c7)
+
+Built, 2026-10-09: howl builds every image and make asks it; the Makefile is 599
+lines.
+
+## Summary
+
+howl makes a form's image itself, in Zig, for users and the checks alike.
+The Makefile keeps the programs' compiles, tests, lint, checks and releases.
+
+## Background
+
+Before stage 1, make built every image howl made, as shell and awk in a
+1,940-line Makefile and two scripts, the split [cli.md](cli.md) chose. howl
+depended on make's target names and `--debug=b` output, and:
+
+- A released howl could not build without a checkout and make, against
+  [custom-updates.md](custom-updates.md)'s goal that it needs no Zig; now it
+  holds the tree's files it uses (files.zig).
+- The updater (`cmd/slot-update/slot.zig`) does module order, decompression,
+  the zboot unwrap and verity in Zig too: twice, in two languages.
+
+## Goals
+
+- `howl build`, `run` and `create` run make only for the programs.
+- One copy of each shared step, in `lib/image.zig`, used by howl and the updater.
+- With `FREEZE=1`, every form builds byte-identical `root.erofs`,
+  `stage0*.zst`, `initramfs.zst`, disks and manifests to the old recipes.
+- The Makefile falls below 600 lines, and `make help` fits on a screen.
+
+## Non-Goals
+
+- Compiling werewolf's programs in howl: that needs Zig. howl takes them
+  from `build/ARCH/programs` until custom-updates publishes them as packages.
+- Replacing apko, bsdtar, mkfs.erofs, zstd, mtools, mke2fs, qemu-img or `make check`.
+
+## Detailed design
+
+**lib/image.zig** holds what howl and the updater share, as functions of
+bytes, never paths: gunzip and unzstd; the zboot unwrap and x86 `vmlinux`;
+the kernel config's rules; mkfs.erofs's options and version check. Its
+`stripSetid` clears every setuid and setgid bit in a root's tar, through
+an open file, as the updater clears them in its tree.
+
+**cmd/howl/build.zig** (with `packages.zig`, `app.zig`, `melange.zig` and
+`slot.zig`) runs the pipeline as steps, each skipped when its output is
+newer than its inputs, howl's executable among them: config, locks, rootfs
+and kernel (apko), a tutorial's application, melange's packages, meta
+(`lib/compose.zig`), overlay, root.erofs and verity, both stage0s,
+initramfs, slot, disk, each to a temporary name, renamed. `disk.zig` and
+`manifest.zig` replaced `boot/mkdisk` (with the GPT in process, from
+`boot/gpt.zig`) and `release/manifest`. make compiles the programs first,
+with make's own variables cleared, so an outer make passes it nothing.
+
+**What identity takes.** The same tools with the same arguments, and the
+`layer` macro's normalisation in Zig: a file laid over another keeps the
+first's mode, as cp leaves it, and names are listed as find lists them.
+zstd writes a frame's content size only for a file, so the initramfs's
+second cpio still goes through `bsdtar | bsdtar | zstd`.
+
+**Stage 2.** `run` and `create` build with build.zig on every engine. QEMU's
+command line is `qemu.zig`'s; the Lima-managed template, `lima.zig`'s. The
+Makefile's `image`, `slot`, `disk` and `OUT/disk.qcow2` wrap `howl _build`,
+passing BUILD, PROGRAMS, DEV, APP, FREEZE, DISK, DISK_MIB and DISK_ARGS;
+`_dist-form` runs `howl build`. Gone: the image recipes, the run, lima, demo
+and webshell targets, `examples/vm.mk`, `test/gcp`, `test/lima-demo`, the
+scripts and `build/host/gpt`. make keeps the locks' rules, for CI's
+`release-inputs`, which runs with apko and the form tool alone. The gate
+(FREEZE=1, fresh roots) matched 11 aarch64 builds (DEV=1, `--app`, ad hoc)
+and x86_64 minimal and prod-ssh; then the wrappers, the tutorials and
+vaultwarden; then the ports' disks (both arches, other sizes and arguments)
+and release files. **Stage 3** moved `examples/build.mk` and `melange.mk`
+into `app.zig` and `melange.zig`, commands, environment and stamps alike,
+and `build-apk` too. Its gate matched aarch64 vaultwarden and the three
+compiled tutorials (aspnet in one root: dotnet records absolute paths).
+
+## Drawbacks
+
+A bug in `lib/image.zig` reaches the build and every machine's updates.
+
+## Alternatives Considered
+
+- **Keep make** (cli.md): the duplication with the updater, and the coupling.
+- **build.zig**: it still shells out to apko and mkfs.erofs, and a released
+  howl would carry the build runner.
+
+## Security Considerations
+
+| Risk | Mitigation |
+| --- | --- |
+| A form's path escapes the build directory | refuse `..` and absolute paths, as compose does |
+| The build host leaks into the image | the same bsdtar normalisation; the byte-identical gate |
+| apko verification is skipped | the same apko commands and keyrings |
+
+## Reliability Considerations
+
+apko retries network errors (howl; make, for locks). zstd dates `stage0.zst` to its
+cpio's second, so the step dates it now. A disk's size and arguments sit beside it in
+`disk.img.options`, rewritten only when they change, so new ones rebuild it.

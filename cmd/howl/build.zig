@@ -2,7 +2,7 @@
 //! the Makefile's image recipes used, at their paths, so the bytes match.
 //! make still compiles the programs. The steps are in packages.zig,
 //! melange.zig, app.zig and slot.zig. See README.md and
-//! docs/design/howl-build.md.
+//! docs/design/implemented/howl-build.md.
 
 const std = @import("std");
 const forms = @import("form");
@@ -29,6 +29,8 @@ const mem = std.mem;
 
 /// Goals are the make targets a build stands in for.
 pub const Goals = struct {
+    /// Private networkless storage appliance, never an application boot disk.
+    transfer_helper: bool = false,
     prebuilt: bool = false,
     /// image is BUILD/vmlinuz and OUT/initramfs.zst, for a direct boot.
     image: bool = false,
@@ -47,6 +49,7 @@ pub const Goals = struct {
 pub const Spec = struct {
     /// form is a form's name, or the directory of one outside forms/.
     form: []const u8,
+    variants: []const []const u8 = &.{},
     arch: howl.Arch,
     /// dev adds developer SSH for test iteration (--dev=ssh): sh-shim and the
     /// native clients, with no shell.
@@ -65,7 +68,7 @@ pub const Spec = struct {
     disk: disk.Options = .{},
     /// published takes werewolf's programs from its apk repository, as make's
     /// PUBLISHED=1 does, not from PROGRAMS: a machine built so updates them
-    /// with apk (docs/design/custom-updates.md). stage0's and a form's own
+    /// with apk (docs/design/implemented/custom-updates.md). stage0's and a form's own
     /// programs, which are not packaged, still come from PROGRAMS.
     published: bool = false,
     /// disk_path is where the disk goal writes, as make's DISK; null is
@@ -87,7 +90,7 @@ pub const Spec = struct {
     boot_native: bool = false,
     /// tpm makes a root whose boot requires its channel's TPM floor: the
     /// signed UKI names werewolf.channel and werewolf.index, and stage0
-    /// enrolls or checks the TPM (docs/design/independent-updates.md).
+    /// enrolls or checks the TPM (docs/design/implemented/independent-updates.md).
     tpm: bool = false,
     /// image_index is the release's place in its channel: 1, 2, 3, ...
     image_index: u64 = 1,
@@ -115,8 +118,21 @@ pub const Spec = struct {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
         h.update("werewolf-local:");
         h.update(std.fs.path.basename(std.mem.trimEnd(u8, s.form, "/")));
+        for (s.selected()) |variant| {
+            h.update("/variant:");
+            h.update(variant);
+        }
         h.final(&id);
         return id;
+    }
+
+    pub fn selected(s: Spec) []const []const u8 {
+        return s.variants;
+    }
+
+    pub fn variantSuffix(s: Spec, gpa: Allocator) ![]const u8 {
+        if (s.selected().len == 0) return "";
+        return gpa.print("-variants-{s}", .{try mem.join(gpa, ",", s.selected())});
     }
 
     pub fn devSuffix(s: Spec) []const u8 {
@@ -142,9 +158,10 @@ pub fn paths(gpa: Allocator, s: Spec) !Paths {
     );
     return .{
         .build = dir,
-        .out = try gpa.print("{s}/{s}{s}{s}{s}{s}", .{
+        .out = try gpa.print("{s}/{s}{s}{s}{s}{s}{s}", .{
             dir,
             name,
+            try s.variantSuffix(gpa),
             s.devSuffix(),
             if (s.app != null) "-app" else "",
             if (s.published) "-published" else "",
@@ -339,6 +356,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     const direct = std.mem.eql(u8, f, "minimal");
     const spec: Spec = .{
         .form = ref,
+        .variants = howl.variants,
         .arch = o.arch,
         .disabled = o.disabled,
         .app = ab.root,
@@ -513,7 +531,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
         "[--ipe-updates URL --image-serial UTC [--image-index N]] [--boot-key KEY " ++
         "--boot-cert CERT [--boot-native [--tpm]]] [--update-ca PEM] [--verbose] " ++
         "image|slot|disk|qcow2|prebuilt...";
-    var spec: Spec = .{ .form = "", .arch = undefined };
+    var spec: Spec = .{ .form = "", .arch = undefined, .variants = howl.variants };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
     var app_dir: ?[]const u8 = null;
@@ -870,10 +888,12 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         } else |err| if (err != error.FileNotFound) return err;
     };
     if (previous) |rec| b.locked_images = rec.images;
-    const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt;
+    const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt or
+        goals.transfer_helper;
     // A lock needs image digests, but no downloaded or unpacked layers.
     try oci.lay(&b, goals.lock and !image_goals);
-    const suffix = try gpa.print("{s}{s}", .{
+    const suffix = try gpa.print("{s}{s}{s}", .{
+        try s.variantSuffix(gpa),
         s.devSuffix(),
         if (s.published) "-published" else "",
     });
@@ -898,6 +918,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
             try gpa.print("-j{d}", .{std.Thread.getCpuCount() catch 1}),
             "--no-print-directory",
             try gpa.print("FORM={s}", .{s.form}),
+            try gpa.print("VARIANTS={s}", .{try mem.join(gpa, ",", s.selected())}),
             try gpa.print("ARCH={t}", .{s.arch}),
             try gpa.print("BUILD={s}", .{p.build}),
             try gpa.print("PROGRAMS={s}", .{p.programs}),
@@ -1105,7 +1126,7 @@ test "image enrollment requires IPE, a safe channel and a release serial" {
 /// each in PROGRAMS/NAME/usr/lib/werewolf/NAME, in overlay order: stage0's
 /// init, the network's setup and policy, the mounts,
 /// posture, the seal's two, and those that replace shell scripts
-/// (docs/design/shell-free.md).
+/// (docs/design/implemented/shell-free.md).
 pub const every_program = [_][]const u8{
     "stage0",    "iface-up",     "fence",        "mount",       "mount-broker",
     "posture",   "seal-watch",   "seal",         "runit-stage", "reboot",
@@ -1124,7 +1145,15 @@ fn plan(
     names: []const u8,
 ) !B {
     var f: forms.Failure = .{};
-    var chain = forms.chainIn(io, gpa, Dir.cwd(), names, s.form, &f) catch |err| switch (err) {
+    var chain = forms.chainSelectedIn(
+        io,
+        gpa,
+        Dir.cwd(),
+        names,
+        s.form,
+        s.selected(),
+        &f,
+    ) catch |err| switch (err) {
         error.Form => return steps.fail(f.text),
         else => |e| return e,
     };

@@ -236,6 +236,7 @@ const Connect = struct {
     public: bool = false,
     lan: bool = false,
     loopback: bool = false,
+    destination: ?std.Io.net.IpAddress = null,
 };
 
 const Prefix = network.Prefix;
@@ -326,7 +327,7 @@ const Policy = struct {
     nloopback: usize = 0,
     /// udp holds the served UDP ports, each with the one user that may send
     /// from it: Landlock cannot hold a UDP bind, so the reply is what fence
-    /// holds (docs/design/listen-udp.md).
+    /// holds (docs/design/implemented/listen-udp.md).
     udp: [max_entries]Udp = undefined,
     nudp: usize = 0,
     connect: [max_entries]Connect = undefined,
@@ -462,6 +463,27 @@ fn parsePolicy(text: []const u8) !Policy {
                 p.connect[p.nconnect].loopback = true;
                 _ = words.next();
             }
+            if (std.mem.eql(u8, words.peek() orelse "", "destination")) {
+                _ = words.next();
+                if (proto != .tcp or any or p.connect[p.nconnect].loopback or
+                    p.connect[p.nconnect].public)
+                    return error.BadPolicy;
+                p.connect[p.nconnect].destination = std.Io.net.IpAddress.parse(
+                    words.next() orelse return error.BadPolicy,
+                    0,
+                ) catch return error.BadPolicy;
+                const unsafe = switch (p.connect[p.nconnect].destination.?) {
+                    .ip4 => |a| std.mem.eql(u8, &a.bytes, &metadata_ip) or
+                        std.mem.eql(u8, &a.bytes, &wire_server_ip),
+                    .ip6 => |a| std.mem.eql(u8, &a.bytes, &metadata_ip6) or
+                        std.mem.eql(
+                            u8,
+                            a.bytes[0..12],
+                            &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255 },
+                        ),
+                };
+                if (unsafe) return error.BadPolicy;
+            }
             p.nconnect += 1;
         } else if (std.mem.eql(u8, key, "dns")) {
             try p.dns.add(.one(try user(words.next() orelse "")));
@@ -498,6 +520,44 @@ const FR_ACT_BLACKHOLE = 6;
 const FR_ACT_UNREACHABLE = 7;
 const FR_ACT_PROHIBIT = 8;
 const RT_TABLE_MAIN = 254;
+
+test "bastion destinations constrain shell connections as well as forwarding" {
+    const p = try parsePolicy(
+        "listen tcp 22\nconnect 1000 tcp 22 loopback\n" ++
+            "connect 1000 tcp 22 destination 192.0.2.5\n" ++
+            "connect 1000 tcp 22 destination 2001:db8::5\n",
+    );
+    const decide = struct {
+        fn action(rules: []const Rule, uid: u32, destination: []const u8, target: u16) u8 {
+            for (rules) |r| {
+                if (!r.from_here or (r.proto != null and r.proto != .tcp) or
+                    r.sport != null) continue;
+                if (r.uid) |id| if (uid < id or uid > (r.uid_last orelse id)) continue;
+                if (r.dport) |port_number| if (target != port_number) continue;
+                if (r.dst) |dst| if (!prefixMatches(
+                    destination,
+                    dst,
+                    r.dst_len orelse @intCast(dst.len * 8),
+                )) continue;
+                if (r.action == FR_ACT_TO_TBL and r.table == RT_TABLE_LOCAL and
+                    !std.mem.eql(u8, destination, &loopback_ip) and
+                    !std.mem.eql(u8, destination, &loopback6)) continue;
+                return r.action;
+            }
+            return 0;
+        }
+    }.action;
+    var rules: [max_rules]Rule = undefined;
+    const ipv4 = plan(&p, linux.AF.INET, &rules);
+    try std.testing.expectEqual(FR_ACT_TO_TBL, decide(ipv4, 1000, &.{ 192, 0, 2, 5 }, 22));
+    try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(ipv4, 1000, &.{ 192, 0, 2, 6 }, 22));
+    try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(ipv4, 1001, &.{ 192, 0, 2, 5 }, 22));
+    const ipv6 = plan(&p, linux.AF.INET6, &rules);
+    const allowed = try std.Io.net.IpAddress.parse("2001:db8::5", 0);
+    const denied = try std.Io.net.IpAddress.parse("2001:db8::6", 0);
+    try std.testing.expectEqual(FR_ACT_TO_TBL, decide(ipv6, 1000, &allowed.ip6.bytes, 22));
+    try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(ipv6, 1000, &denied.ip6.bytes, 22));
+}
 const RT_TABLE_LOCAL = 255;
 
 /// Rule is one policy-routing rule, as `ip rule` shows it.
@@ -540,7 +600,7 @@ const max_rules = 24 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
 /// allowed traffic with no route (IPv6 on an IPv4 network) fails with
 /// "network unreachable" and the client tries the next address, instead of
 /// falling through to EACCES, which many clients take as final.
-fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
+fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     const md: []const u8 = if (family == linux.AF.INET6) &metadata_ip6 else &metadata_ip;
     var rules: struct {
         out: *[max_rules]Rule,
@@ -684,6 +744,29 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .uid = id,
         });
     }
+    for (p.connect[0..p.nconnect]) |*c| if (c.destination) |*address| {
+        if ((address.* == .ip4) != (family == linux.AF.INET)) continue;
+        rules.add(.{
+            .priority = pref.loopback_allow,
+            .action = FR_ACT_TO_TBL,
+            .table = if (switch (address.*) {
+                .ip4 => |a| a.bytes[0] == 127,
+                .ip6 => |a| std.mem.eql(u8, &a.bytes, &loopback6),
+            })
+                RT_TABLE_LOCAL
+            else
+                RT_TABLE_MAIN,
+            .from_here = true,
+            .dst = switch (address.*) {
+                .ip4 => |*a| &a.bytes,
+                .ip6 => |*a| &a.bytes,
+            },
+            .proto = .tcp,
+            .dport = c.port,
+            .uid = c.uid,
+            .uid_last = c.uid_last,
+        });
+    };
     // A loopback-only connector gets the named port on the two loopback
     // addresses. Refuse every other destination before the local table,
     // including another address assigned to this machine.
@@ -763,7 +846,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dport = port_number,
     });
     for (p.connect[0..p.nconnect]) |c| {
-        if (c.loopback) continue;
+        if (c.loopback or c.destination != null) continue;
         const r: Rule = .{
             .priority = pref.out_allow,
             .action = FR_ACT_TO_TBL,
@@ -974,7 +1057,7 @@ fn routeRules(p: Policy) !void {
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
         if (family == linux.AF.INET6 and !hasIpv6()) continue;
         var rules: [max_rules]Rule = undefined;
-        for (plan(p, family, &rules)) |r| {
+        for (plan(&p, family, &rules)) |r| {
             var msg: [256]u8 = undefined;
             // Two forms, or a form and fence itself, may produce the same
             // rule. EEXIST under NLM_F_EXCL means it is already in, which is
@@ -1175,7 +1258,7 @@ const terminal: u64 = device | sandbox.ioctl_dev;
 const files = [_]struct { path: [*:0]const u8, access: u64 }{
     .{ .path = "/", .access = sandbox.read_dir },
     .{ .path = "/usr", .access = sandbox.execute },
-    // Image roots (docs/design/adhoc.md) are in the verified root like /usr,
+    // Image roots (docs/design/implemented/adhoc.md) are in the verified root like /usr,
     // so they may run too. Their writable binds are added in restrict.
     .{ .path = "/oci", .access = sandbox.execute },
     // runit's FIFOs and the services' sockets live in /run.
@@ -1397,7 +1480,7 @@ test "loopback-only TCP grants do not open an Internet port" {
     }.action;
     var rules: [max_rules]Rule = undefined;
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        const planned = plan(p, family, &rules);
+        const planned = plan(&p, family, &rules);
         const local: []const u8 = if (family == linux.AF.INET) &loopback_ip else &loopback6;
         const remote: []const u8 = if (family == linux.AF.INET)
             &.{ 1, 1, 1, 1 }
@@ -1512,7 +1595,7 @@ test "LAN discovery allows on-link peers and groups, refusing other addresses an
     p.lan = lan.prefixes[0..lan.len];
     var rules: [max_rules]Rule = undefined;
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        const planned = plan(p, family, &rules);
+        const planned = plan(&p, family, &rules);
         const peer: []const u8 = if (family == linux.AF.INET)
             &.{ 10, 77, 0, 2 }
         else
@@ -1575,7 +1658,7 @@ test "LAN discovery allows on-link peers and groups, refusing other addresses an
         offline.lan = &.{};
         try std.testing.expectEqual(
             FR_ACT_BLACKHOLE,
-            udpAction(plan(offline, family, &rules), false, 207, peer, 5353, 5353),
+            udpAction(plan(&offline, family, &rules), false, 207, peer, 5353, 5353),
         );
     }
     var encoded: [256]u8 = undefined;
@@ -1596,7 +1679,7 @@ test "a TCP DNS listener accepts only connected subnets" {
     try lan.add(&.{ 10, 77, 0, 1 }, 24);
     p.lan = lan.prefixes[0..lan.len];
     var rules: [max_rules]Rule = undefined;
-    const planned = plan(p, linux.AF.INET, &rules);
+    const planned = plan(&p, linux.AF.INET, &rules);
     var allow_lan = false;
     var deny_other = false;
     for (planned) |r| {
@@ -1648,7 +1731,7 @@ fn udpAction(
 
 test "the plan, in the order the kernel tries it" {
     var rules: [max_rules]Rule = undefined;
-    const r = plan(try parsePolicy(example), linux.AF.INET, &rules);
+    const r = plan(&(try parsePolicy(example)), linux.AF.INET, &rules);
     var last: u32 = 0;
     for (r) |x| {
         try std.testing.expect(x.priority >= last); // ascending
@@ -1768,7 +1851,7 @@ test "every port range is one the kernel accepts" {
     var rules: [max_rules]Rule = undefined;
     const p = try parsePolicy(example ++ "connect 70 udp 7844\nconnect 71 tcp any\n");
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        for (plan(p, family, &rules)) |r| {
+        for (plan(&p, family, &rules)) |r| {
             if (r.sport) |source| try std.testing.expect(source != 0 and source < 0xffff);
             if (r.dport) |first| {
                 const last = r.dport_last orelse first;
@@ -1784,7 +1867,7 @@ test "private ports drop arrivals before forged replies can admit them" {
         example ++ "listen tcp 54000 loopback\nconnect 70 tcp 5432\nconnect 71 tcp any\n",
     );
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        const planned = plan(p, family, &rules);
+        const planned = plan(&p, family, &rules);
         for ([_]u16{ 443, 5432, 40000 }) |source| {
             for ([_]u16{ 5432, 54000 }) |destination|
                 try std.testing.expectEqual(
@@ -1822,7 +1905,7 @@ fn arrivingAction(rules: []const Rule, destination: u16, source: u16) u8 {
 test "tunnels and IPsec arriving are dropped, like the transports" {
     var rules: [max_rules]Rule = undefined;
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        const r = plan(try parsePolicy(example), family, &rules);
+        const r = plan(&(try parsePolicy(example)), family, &rules);
         for (dropped) |pr| {
             const found = for (r) |x| {
                 if (x.priority == pref.in_drop and x.action == FR_ACT_BLACKHOLE and
@@ -1838,7 +1921,7 @@ test "tunnels and IPsec arriving are dropped, like the transports" {
 
 test "an empty policy refuses everything but local traffic" {
     var rules: [max_rules]Rule = undefined;
-    const r = plan(.{}, linux.AF.INET, &rules);
+    const r = plan(&.{}, linux.AF.INET, &rules);
     for (r) |x| {
         if (x.action != FR_ACT_TO_TBL) continue;
         // Only local traffic, ICMP in, and the moved local rule pass.
@@ -1849,7 +1932,7 @@ test "an empty policy refuses everything but local traffic" {
 
 test "IPv6: the same rules, its metadata address, and ICMPv6 sent by anyone" {
     var rules: [max_rules]Rule = undefined;
-    const r = plan(try parsePolicy(example), linux.AF.INET6, &rules);
+    const r = plan(&(try parsePolicy(example)), linux.AF.INET6, &rules);
     var icmp_out = false;
     var md_refused = false;
     for (r) |x| {
@@ -1903,7 +1986,7 @@ test "lookup users reach unwound from their own labels; DNS elsewhere is refused
         p.lookups.ids[0..p.lookups.len],
     );
     var rules: [max_rules]Rule = undefined;
-    const r = plan(p, linux.AF.INET, &rules);
+    const r = plan(&p, linux.AF.INET, &rules);
     // Own label, any forged loopback source, the kernel's pick, then no one.
     const want = [_]struct { u32, ?u32, ?[4]u8, u32, u8 }{
         .{ pref.label_own, 1001, .{ 127, 53, 0, 1 }, 0x5301, FR_ACT_TO_TBL },
@@ -1936,7 +2019,7 @@ test "lookup users reach unwound from their own labels; DNS elsewhere is refused
         udpAction(r, true, 207, &.{ 8, 8, 8, 8 }, 40000, 853),
     );
     // IPv6 has no labels, and refuses DNS too.
-    const r6 = plan(p, linux.AF.INET6, &rules);
+    const r6 = plan(&p, linux.AF.INET6, &rules);
     for (r6) |x| try std.testing.expect(x.priority > pref.label_refuse);
     var refusals: usize = 0;
     for (r6) |x| if (x.priority == pref.dns_refuse) {
@@ -1958,7 +2041,7 @@ test "a range of uids, as :people, connects and looks up as one user" {
     var labelled: usize = 0;
     var allowed = false;
     var buf: [256]u8 = undefined;
-    for (plan(p, linux.AF.INET, &rules)) |r| {
+    for (plan(&p, linux.AF.INET, &rules)) |r| {
         if (r.uid != 500) continue;
         try std.testing.expectEqual(60000, r.uid_last.?);
         try std.testing.expect(hasAttr(
@@ -1986,7 +2069,7 @@ test "a DNS service reaches only its declared direct upstream ports" {
         "connect 207 udp 53\nconnect 207 tcp 853 public\nconnect 208 udp 53\n");
     var rules: [max_rules]Rule = undefined;
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
-        const planned = plan(p, family, &rules);
+        const planned = plan(&p, family, &rules);
         var grants: usize = 0;
         for (planned) |r| if (r.priority == pref.dns_direct_allow and r.action == FR_ACT_TO_TBL) {
             grants += 1;
@@ -2016,7 +2099,7 @@ test "a local validator refuses loopback DNS except unwound upstream" {
     var p = try parsePolicy("dns 54\nlookup 2001 * A AAAA\nlisten tcp 53 loopback\n");
     p.local_validator = true;
     var rules: [max_rules]Rule = undefined;
-    const planned = plan(p, linux.AF.INET, &rules);
+    const planned = plan(&p, linux.AF.INET, &rules);
     for ([_]Proto{ .udp, .tcp }) |proto| {
         var found = false;
         for (planned) |r| if (r.priority == pref.local_validator_refuse and r.proto == proto and
@@ -2034,7 +2117,7 @@ test "a direct LAN DNS grant stays on connected subnets" {
     try lan.add(&.{ 10, 77, 0, 1 }, 24);
     p.lan = lan.prefixes[0..lan.len];
     var rules: [max_rules]Rule = undefined;
-    const planned = plan(p, linux.AF.INET, &rules);
+    const planned = plan(&p, linux.AF.INET, &rules);
     for (planned) |r| {
         if (r.priority != pref.dns_direct_allow) continue;
         try std.testing.expect(r.dst != null);
@@ -2050,7 +2133,7 @@ test "public: refused to every non-public prefix, first, on its port alone" {
     const p = try parsePolicy("connect 207 tcp 443 public\nconnect 207 udp 53\n");
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
         var rules: [max_rules]Rule = undefined;
-        const r = plan(p, fam, &rules);
+        const r = plan(&p, fam, &rules);
         const want: usize = if (fam == linux.AF.INET6) non_public6.len else non_public4.len;
         var refusals: usize = 0;
         for (r, 0..) |x, i| {
@@ -2088,7 +2171,7 @@ test "Azure's wire server is refused on its two ports, to everyone, IPv4 alone" 
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
         var rules: [max_rules]Rule = undefined;
         var refusals: usize = 0;
-        for (plan(p, fam, &rules)) |x| {
+        for (plan(&p, fam, &rules)) |x| {
             const dst = x.dst orelse continue;
             if (!std.mem.eql(u8, dst, &wire_server_ip)) continue;
             refusals += 1;
@@ -2123,7 +2206,7 @@ test "a full policy fits its rules" {
     p.nconnect = max_entries;
     p.nmetadata = max_entries;
     var rules: [max_rules]Rule = undefined;
-    _ = plan(p, linux.AF.INET6, &rules);
+    _ = plan(&p, linux.AF.INET6, &rules);
 }
 
 test "a scan reaches every port and not this machine's services" {
@@ -2139,7 +2222,7 @@ test "a scan reaches every port and not this machine's services" {
     try std.testing.expectError(error.BadPolicy, parsePolicy("connect 70 udp any\n"));
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
         var rules: [max_rules]Rule = undefined;
-        const got = plan(p, fam, &rules);
+        const got = plan(&p, fam, &rules);
         var redis = false;
         var prohibited = false;
         var wide_out = false;

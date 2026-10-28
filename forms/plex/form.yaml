@@ -1,7 +1,6 @@
 # Unmodified Plex; isolation lives here. No shell, JIT, discovery, DLNA,
 # UPnP, relay, downloaded plugins or runtime codec installation.
 base: prod
-imports: [init, sync]
 
 programs: [plex-loopback.so]
 
@@ -19,10 +18,9 @@ prune:
 
 services:
   plex-media:
-    exec: /usr/lib/werewolf/plex-import
+    exec: /usr/lib/werewolf/plex-media
     user: plex-media
     pledge: stdio rpath wpath
-    read: /run/werewolf/import
     share: browseable
     memory: 64
     nofile: 64

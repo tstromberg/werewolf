@@ -72,16 +72,31 @@ pub fn main(init: std.process.Init) !void {
     m.config();
     m.developerUploads();
     phases.add("config", bootMs());
-    // The import disk is not /data. Mount it before services, and always
-    // leave the directory, so a service's read of it does not spin.
-    m.importDisk();
     m.network();
     phases.add("network", bootMs());
     m.metadata();
     phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
+    // The installer may publish several service roots. Its durable receipt
+    // blocks even a provider-side/manual boot until all roots are installed.
+    // Do this before account publication, which would otherwise mutate /data.
+    {
+        var data_dir = Dir.cwd().openDir(m.io, "/data", .{ .follow_symlinks = false }) catch
+            refuse("cannot inspect data import state", .{});
+        defer data_dir.close(m.io);
+        if (@import("data-transfer").install.blocked(m.io, data_dir) catch
+            refuse("cannot verify data import state", .{}))
+            refuse("data import is incomplete; retry the same archive before booting", .{});
+    }
     m.accounts();
+    if (!exists("/run/werewolf/nodata")) if (init.environ_map.get("WEREWOLF_ROOT")) |root_hash| {
+        var data_dir = Dir.cwd().openDir(m.io, "/data", .{ .iterate = true, .follow_symlinks = false }) catch
+            refuse("cannot record data image identity", .{});
+        defer data_dir.close(m.io);
+        @import("data-transfer").images.record(m.io, data_dir, root_hash) catch
+            refuse("cannot record data image identity", .{});
+    };
     phase_age.start() catch |err| refuse("age authority unavailable: {s}", .{@errorName(err)});
     if (m.oci()) phases.add("oci", bootMs());
 
@@ -240,7 +255,6 @@ pub const Machine = struct {
     pub const metadata = phase_config.metadata;
     pub const accounts = phase_config.accounts;
     pub const data = phase_data.data;
-    pub const importDisk = phase_data.importDisk;
     pub const oci = phase_oci.oci;
 
     /// developerUploads makes the one writable executable directory a local

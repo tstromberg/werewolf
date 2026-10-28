@@ -1,4 +1,4 @@
-//! Private, chrooted worker launcher. See docs/design/updater-coordinator.md.
+//! Private, chrooted worker launcher. See docs/design/implemented/updater-coordinator.md.
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");

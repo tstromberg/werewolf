@@ -4,7 +4,7 @@
 
 *Settings* are values that differ per machine but are not secret: a router's
 routes, a database URL. A service file declares each with a type and says
-where the values go ([design](design/settings.md)):
+where the values go ([design](design/implemented/settings.md)):
 
 ```text
 config  settings /run/config/tailscale/settings.json

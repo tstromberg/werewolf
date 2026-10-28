@@ -78,7 +78,9 @@ pub fn closeAllButAnonymous(keep: []const i32) !void {
     try closeExcept(keep);
 }
 
-fn closeExcept(keep: []const i32) !void {
+/// Close inherited descriptors above stderr while preserving the supplied
+/// handles. Unlike closeAllBut, this keeps the launcher's fixed stdio pipes.
+pub fn closeExcept(keep: []const i32) !void {
     var sorted: [8]i32 = undefined;
     if (keep.len > sorted.len) return error.TooManyKept;
     const k = sorted[0..keep.len];
@@ -157,6 +159,31 @@ pub fn dropKeeping(id: u32, keep: u32) !void {
     // Changing uid resets dumpability, including for inherited role sockets.
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "dumpable");
     tie.keep();
+}
+
+/// Narrow an inherited SSH login context, which intentionally lacks SETPCAP.
+/// No bounding-set change or new capability is attempted. After the uid change,
+/// no_new_privs and zero inheritable capabilities prevent privilege on exec.
+pub fn dropSession(id: u32, keep: u32) !void {
+    if (id == 0 or keep & (1 << linux.CAP.SETUID) != 0) return error.StillRoot;
+    const tie: Tie = .note();
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0), "keep session read capability");
+    var unused: linux.gid_t = 0;
+    _ = try sys(linux.setgroups(0, @ptrCast(&unused)), "session groups");
+    _ = try sys(linux.setresgid(id, id, id), "session gid");
+    _ = try sys(linux.setresuid(id, id, id), "session uid");
+    try inheritedCapabilities(keep);
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "session no_new_privs");
+    try refuseExecGain();
+    if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0), "session dumpable");
+    tie.keep();
+}
+
+pub fn inheritedCapabilities(keep: u32) !void {
+    var hdr: CapHeader = .{};
+    const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
+    _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "inherited capset");
 }
 
 /// keepOnly keeps only the capabilities in keep, a mask of CAP_ numbers

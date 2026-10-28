@@ -16,6 +16,9 @@ const syntax = "usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--publish
 const Image = struct { object: []const u8, serial: []const u8 };
 const Row = struct {
     form: []const u8,
+    variants: []const []const u8 = &.{},
+    available_variants: []const []const u8 = &.{},
+    variant_descriptions: forms.VariantDescriptions = .{},
     /// Each provider of a published architecture is its own image.
     provider: []const u8 = "",
     arch: howl.Arch,
@@ -66,9 +69,29 @@ fn checkout(io: Io, gpa: Allocator, root: Io.Dir, why: *howl.Why) ![]Row {
         for (chain) |form| if (form.spec.get("archs") != null) {
             arches = try form.items(gpa, "archs");
         };
+        var available: std.ArrayList([]const u8) = .empty;
+        try available.append(gpa, "ssh");
+        if (chain[chain.len - 1].spec.get("variants")) |definitions| {
+            for (definitions.map) |definition| try available.append(gpa, definition.key);
+        }
+        var supported = true;
+        for (howl.variants) |variant| {
+            const known = for (available.items) |v| {
+                if (mem.eql(
+                    u8,
+                    v,
+                    variant,
+                )) break true;
+            } else false;
+            if (!known) supported = false;
+        }
+        if (!supported) continue;
         const details = try description(gpa, text, name);
         for (arches) |arch| try rows.append(gpa, .{
             .form = name,
+            .variants = howl.variants,
+            .available_variants = available.items,
+            .variant_descriptions = try forms.variantDescriptions(gpa, chain[chain.len - 1]),
             .arch = howl.archName(arch) orelse return error.BadFormArch,
             .summary = details.summary,
             .guide = details.guide,
@@ -220,6 +243,20 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
 /// Found is what a query selected, sorted, and whether it named one form.
 const Found = struct { rows: []Row, exact: bool };
 
+fn matches(row: Row, word: []const u8) bool {
+    if (std.ascii.findIgnoreCase(row.form, word) != null or
+        std.ascii.findIgnoreCase(row.summary, word) != null) return true;
+    for (row.available_variants) |name| if (std.ascii.findIgnoreCase(
+        name,
+        word,
+    ) != null) return true;
+    for (row.variant_descriptions.map.keys(), row.variant_descriptions.map.values()) |name, text| {
+        if (std.ascii.findIgnoreCase(name, word) != null or
+            std.ascii.findIgnoreCase(text, word) != null) return true;
+    }
+    return false;
+}
+
 /// select returns all's rows q asks for. A word naming a form selects it;
 /// any other word searches names and descriptions. It refuses a catalog row
 /// that could drive a terminal or point anywhere but werewolf's repository.
@@ -236,12 +273,35 @@ fn select(gpa: Allocator, all: []const Row, q: Query, local: bool, why: *howl.Wh
             return error.BadCatalogEntry;
         if (row.latest) |latest| if (!printable(latest.object) or !printable(latest.serial))
             return error.BadCatalogEntry;
+        const descriptions = row.variant_descriptions.map;
+        for (descriptions.keys(), descriptions.values()) |name, text| {
+            if (!forms.isName(name) or
+                !forms.isVariantDescription(text)) return error.BadCatalogEntry;
+        }
+        if (row.variants.len > 0 and
+            !@import("prebuilt").variantSelection(try mem.join(
+                gpa,
+                ",",
+                row.variants,
+            ))) return error.BadCatalogEntry;
+        if (howl.variants.len > 0) {
+            if (row.variants.len != howl.variants.len) continue;
+            var same = true;
+            for (row.variants, howl.variants) |a, b| if (!mem.eql(
+                u8,
+                a,
+                b,
+            )) {
+                same = false;
+                break;
+            };
+            if (!same) continue;
+        }
         if (q.arch != null and q.arch.? != row.arch) continue;
         if (q.word) |word| {
             if (exact) {
                 if (!mem.eql(u8, row.form, word)) continue;
-            } else if (std.ascii.findIgnoreCase(row.form, word) == null and
-                std.ascii.findIgnoreCase(row.summary, word) == null) continue;
+            } else if (!matches(row, word)) continue;
         }
         if (!exact and mem.eql(u8, row.status, "unsupported architecture")) continue;
         try selected.append(gpa, row);
@@ -272,7 +332,12 @@ fn show(w: *Io.Writer, gpa: Allocator, found: Found, local: bool, base: []const 
         try w.print("\n{s}\n{s}\nSetup: {s}\nImages: {s}/{s}/index.html\n", .{
             row.form, row.summary, row.guide, base, row.form,
         });
+        try showVariants(w, gpa, found.rows, "");
         for (found.rows) |item| {
+            if (item.variants.len > 0) try w.print(
+                "  variants: {s}\n",
+                .{try mem.join(gpa, ",", item.variants)},
+            );
             if (local) {
                 try w.print("  {t}: {s}\n", .{ item.arch, item.status });
                 continue;
@@ -326,9 +391,58 @@ fn show(w: *Io.Writer, gpa: Allocator, found: Found, local: bool, base: []const 
                 "none",
             row.summary,
         });
+        if (local) {
+            try showVariants(w, gpa, &.{row}, "  ");
+        } else {
+            var combinations: std.ArrayList([]const u8) = .empty;
+            for (found.rows) |item| if (mem.eql(u8, item.form, row.form) and item.latest != null) {
+                const names = if (item.variants.len == 0)
+                    "default"
+                else
+                    try mem.join(gpa, ",", item.variants);
+                var seen_combination = false;
+                for (combinations.items) |previous_names| if (mem.eql(u8, names, previous_names)) {
+                    seen_combination = true;
+                    break;
+                };
+                if (!seen_combination) try combinations.append(gpa, names);
+            };
+            if (combinations.items.len > 0) try w.print(
+                "  published variants: {s}\n",
+                .{try mem.join(gpa, "; ", combinations.items)},
+            );
+            var mine: std.ArrayList(Row) = .empty;
+            for (found.rows) |item| if (mem.eql(
+                u8,
+                item.form,
+                row.form,
+            )) try mine.append(gpa, item);
+            try showVariants(w, gpa, mine.items, "  ");
+        }
     }
     try w.writeAll("\nUse howl forms NAME for setup, images and run/test commands.\n");
     if (local) try w.writeAll("Use --published to see which images run/create can download.\n");
+}
+
+fn showVariants(w: *Io.Writer, gpa: Allocator, rows: []const Row, indent: []const u8) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    try names.append(gpa, "ssh");
+    for (rows) |row| {
+        try names.appendSlice(gpa, row.available_variants);
+        try names.appendSlice(gpa, row.variants);
+        try names.appendSlice(gpa, row.variant_descriptions.map.keys());
+    }
+    var failure: forms.Failure = .{};
+    const canonical = try forms.variantNames(gpa, names.items, &failure);
+    try w.print("{s}Variants:\n", .{indent});
+    for (canonical) |name| {
+        const text = if (mem.eql(u8, name, "ssh"))
+            forms.ssh_variant_description
+        else for (rows) |row| {
+            if (row.variant_descriptions.map.get(name)) |description_| break description_;
+        } else "";
+        try w.print("{s}  {s: <12} {s}\n", .{ indent, name, text });
+    }
 }
 
 test "catalog trust is a valid pinned RSA certificate" {
@@ -376,7 +490,8 @@ test "a checkout's forms, by name, search and architecture" {
     defer tmp.cleanup();
     for ([_][2][]const u8{
         .{ "minimal", "archs: [aarch64, x86_64]\n" },
-        .{ "web", "base: minimal\n" },
+        .{ "web", "base: minimal\nvariants:\n  vector:\n" ++
+            "    description: Vector search with pgvector\n    packages: [pgvector]\n" },
         .{ "intel-only", "base: minimal\narchs: [x86_64]\n" },
     }) |form| {
         try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
@@ -397,6 +512,7 @@ test "a checkout's forms, by name, search and architecture" {
         .{ .{}, "intel-only/x86_64 minimal/aarch64 minimal/x86_64 web/aarch64 web/x86_64 " },
         .{ .{ .arch = .aarch64 }, "minimal/aarch64 web/aarch64 " },
         .{ .{ .word = "searchable" }, "web/aarch64 web/x86_64 " },
+        .{ .{ .word = "pgvector" }, "web/aarch64 web/x86_64 " },
         .{ .{ .word = "web" }, "web/aarch64 web/x86_64 " },
     }) |case| {
         names.clearRetainingCapacity();
@@ -417,12 +533,51 @@ test "a checkout's forms, by name, search and architecture" {
         "howl test --with web\n",
         "howl pack --build --with web -h\n",
         "Setup: " ++ repository ++ "forms/web/README.md\n",
+        "ssh          SSH access\n",
+        "vector       Vector search with pgvector\n",
     }) |line| try testing.expect(mem.find(u8, text.written(), line) != null);
     try tmp.dir.createDirPath(io, "outside");
     var outside = try tmp.dir.openDir(io, "outside", .{});
     defer outside.close(io);
     try testing.expectError(error.Refused, checkout(io, gpa, outside, &why));
     try testing.expect(mem.find(u8, why.text, "no ./forms") != null);
+}
+
+test "published descriptions survive JSON and older rows still explain SSH" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const described = try std.json.parseFromSliceLeaky(Row, gpa,
+        \\{"form":"postgresql","provider":"qemu","arch":"aarch64","status":"published",
+        \\ "variants":["ssh","vector"],"variant_descriptions":{"ssh":"SSH access","vector":"Vector search with pgvector"}}
+    , .{});
+    var why: howl.Why = .{};
+    var text: Io.Writer.Allocating = .init(gpa);
+    try show(&text.writer, gpa, try select(
+        gpa,
+        &.{described},
+        .{ .word = "postgresql" },
+        false,
+        &why,
+    ), false, "https://example.test");
+    try testing.expect(mem.find(u8, text.written(), "ssh          SSH access") != null);
+    try testing.expect(mem.find(
+        u8,
+        text.written(),
+        "vector       Vector search with pgvector",
+    ) != null);
+    const encoded = try std.json.Stringify.valueAlloc(gpa, described, .{});
+    const decoded = try std.json.parseFromSliceLeaky(Row, gpa, encoded, .{});
+    try testing.expectEqualStrings(
+        "Vector search with pgvector",
+        decoded.variant_descriptions.map.get("vector").?,
+    );
+    const old = try std.json.parseFromSliceLeaky(Row, gpa, "{\"form\":\"postgresql\",\"provider" ++
+        "\":\"qemu\",\"arch\":\"aarch64\",\"status\":\"publis" ++
+        "hed\"}", .{});
+    text.clearRetainingCapacity();
+    try showVariants(&text.writer, gpa, &.{old}, "");
+    try testing.expect(mem.find(u8, text.written(), "ssh          SSH access") != null);
 }
 
 test "a catalog must carry werewolf's signature" {

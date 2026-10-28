@@ -1,7 +1,7 @@
 //! settings checks the typed values a service takes from the config tar's
 //! settings.json against its declarations, and renders them for its daemon.
 //! It also holds the config tar's naming rules. See lib/README.md and
-//! docs/design/settings.md.
+//! docs/design/implemented/settings.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

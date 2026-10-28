@@ -6,24 +6,27 @@ the form it is built on, its services, its network policy, the posture checks it
 fails and why), `rootfs/` (laid over the packages) and, where needed, `cmd/`,
 `test/`, `melange/` and a README. It gets the parts of the form it is built on and
 its ancestors. [forms/README.md](../forms/README.md) lists every file and key;
-[design/forms.md](design/forms.md) explains composition; `make list-forms` lists
-chains.
+[design/implemented/forms.md](design/implemented/forms.md) explains composition;
+`make list-forms` lists chains.
+
+[Variants](variants.md) add compatible features inline. For example, `howl run
+--with postgresql --variant vector --ssh` selects pgvector and operator SSH. Every
+form offers implicit `ssh`; selected combinations keep separate update channels.
 
 [forms-catalog.md](forms-catalog.md) lists every form. Each boots the same way:
 stage0 opens its `root.erofs` read-only through dm-verity and hands over to init
-([design/verified-boot.md](design/verified-boot.md)). For local test iteration only,
-howl's `--dev=ssh` adds root SSH with a local key (`$XDG_DATA_HOME/howl/keys/dev/`)
-that `howl ssh root@NAME` selects and [`howl test
---iterate`](design/local-test-iteration.md) reuses; no image has a shell, and what
-ships has no developer SSH.
+([design/implemented/verified-boot.md](design/implemented/verified-boot.md)). For
+local test iteration only, howl's `--dev=ssh` adds root SSH with a local key
+(`$XDG_DATA_HOME/howl/keys/dev/`) that `howl ssh root@NAME` selects and
+[local iteration](design/implemented/local-test-iteration.md) reuses. Published
+images have no developer SSH; login forms or the `ssh` variant give operator access.
 
 ## The runtime forms
 
-Forms declare the data operations they support, `imports: [init]` (the default),
-`imports: [init, sync]` or `imports: []`, in the signed deployment definition, and
-supply the confined importer: Plex loads media initially and syncs without deleting;
-database forms keep their own initialization. See
-[design/data-import.md](design/data-import.md).
+Data transfer operates on `/data`, or exactly one `/data/svc/NAME`, using
+`howl export` and `howl import`. Forms no longer declare seed or sync import modes.
+Normal initialization uses an existing restored service directory directly. See
+[data storage](data.md) and the [import design](design/pending/data-import.md).
 
 `nginx`, `php`, `node`, `python`, `ruby` and `jre` are each `prod` plus one runtime
 from Wolfi, as Chainguard's images are, and no application. `nginx` and `php` serve
@@ -125,7 +128,7 @@ accounts](people.md) for keys, admin grants, account lifecycle and Howl defaults
 
 *Settings* are values that differ per machine but are not secret: a router's routes,
 a database URL. A service file declares each with a type and says where the values go
-([design/settings.md](design/settings.md)):
+([design/implemented/settings.md](design/implemented/settings.md)):
 
 ```text
 config  settings /run/config/tailscale/settings.json

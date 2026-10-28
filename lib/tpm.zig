@@ -1,6 +1,6 @@
 //! TPM 2.0 release floor: one NV counter per release channel, which boot
 //! reads, the mount broker raises, and nothing lowers. A release boots only
-//! if its index is at least the floor (docs/design/independent-updates.md).
+//! if its index is at least the floor (docs/design/implemented/independent-updates.md).
 //!
 //! stage0 enrolls a fresh TPM on first boot: it defines the counter, disables
 //! clear and sets random owner and lockout authorization that nothing keeps.

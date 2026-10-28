@@ -66,6 +66,34 @@ pub const Failure = struct {
 
 pub const Error = error{ Form, OutOfMemory };
 
+pub const ssh_variant_description = "SSH access";
+pub const VariantDescriptions = std.json.ArrayHashMap([]const u8);
+
+pub fn isVariantDescription(text: []const u8) bool {
+    if (text.len == 0 or text.len > 256 or mem.trim(u8, text, " ").len == 0 or
+        !std.unicode.utf8ValidateSlice(text)) return false;
+    for (text) |c| if (c < ' ' or c == 127) return false;
+    return true;
+}
+
+/// Descriptions belong to the selected form; SSH is supplied centrally.
+pub fn variantDescriptions(gpa: Allocator, fm: Form) Allocator.Error!VariantDescriptions {
+    var out: VariantDescriptions = .{};
+    try out.map.put(gpa, "ssh", ssh_variant_description);
+    if (fm.spec.get("variants")) |definitions| for (definitions.map) |variant| {
+        if (variant.value.get("description")) |description|
+            try out.map.put(gpa, variant.key, description.scalar.text);
+    };
+    return out;
+}
+
+fn variantOverlay(gpa: Allocator, definition: Node) Allocator.Error!Node {
+    var fields: std.ArrayList(Entry) = .empty;
+    for (definition.map) |field| if (!mem.eql(u8, field.key, "description"))
+        try fields.append(gpa, field);
+    return .{ .map = fields.items };
+}
+
 pub const Form = struct {
     name: []const u8,
     /// dir is forms/NAME, or the directory of a form outside the tree.
@@ -76,6 +104,7 @@ pub const Form = struct {
     /// service's tree and record as `howl form` bakes an `image:` into
     /// rootfs: howl's build bakes a form's `image:` services there.
     images: []const []const u8 = &.{},
+    selected: []const []const u8 = &.{},
 
     /// items returns the unquoted items of form.yaml's list key. It returns
     /// none if key is absent or not a list of values.
@@ -143,11 +172,11 @@ pub const Key = struct { name: []const u8, shape: Shape };
 /// Those of apko's are in apko's shape: accounts (groups and users) and
 /// paths; bastion holds its users; weaknesses maps checks to excuses.
 pub const keys = [_]Key{
+    .{ .name = "variants", .shape = .file },
     .{ .name = "base", .shape = .scalar },
     .{ .name = "with", .shape = .list },
     .{ .name = "packages", .shape = .list },
     .{ .name = "recipes", .shape = .list },
-    .{ .name = "imports", .shape = .list },
     .{ .name = "repositories", .shape = .list },
     .{ .name = "keyring", .shape = .list },
     .{ .name = "archs", .shape = .list },
@@ -401,10 +430,45 @@ pub fn loadIn(
         .{apko_path},
     ) else |_| {}
     const spec = try parseFile(gpa, path, text, f);
+    try validate(gpa, path, spec, f);
+    return .{ .name = name, .dir = dir, .spec = spec };
+}
+
+fn validate(gpa: Allocator, path: []const u8, spec: Node, f: *Failure) Error!void {
+    if (spec != .map) return f.fail(gpa, "{s}: form is a map", .{path});
     for (spec.map) |e| {
         if (keyShape(e.key) == null)
             return f.fail(gpa, "{s}: no key {s} (forms/README.md lists them)", .{ path, e.key });
-        if (mem.eql(u8, e.key, "accounts")) {
+        if (mem.eql(u8, e.key, "variants")) {
+            if (e.value != .map) return f.fail(gpa, "{s}: variants is a map", .{path});
+            for (e.value.map) |v| {
+                if (!isName(v.key) or mem.eql(u8, v.key, "ssh"))
+                    return f.fail(gpa, "{s}: invalid or reserved variant {s}", .{ path, v.key });
+                if (v.value != .map) return f.fail(
+                    gpa,
+                    "{s}: variant {s} is a map",
+                    .{ path, v.key },
+                );
+                for (v.value.map) |field| {
+                    if (mem.eql(u8, field.key, "description") and
+                        (field.value != .scalar or !isVariantDescription(field.value.scalar.text)))
+                        return f.fail(gpa, "{s}: variant {s}: description is one line of 1..256 " ++
+                            "bytes", .{ path, v.key });
+                    if (isOneOf(field.key, &.{ "base", "users", "variants" }))
+                        return f.fail(
+                            gpa,
+                            "{s}: variant {s} cannot declare {s}",
+                            .{ path, v.key, field.key },
+                        );
+                }
+                try validate(
+                    gpa,
+                    try gpa.print("{s}: variant {s}", .{ path, v.key }),
+                    try variantOverlay(gpa, v.value),
+                    f,
+                );
+            }
+        } else if (mem.eql(u8, e.key, "accounts")) {
             if (e.value != .map) return f.fail(
                 gpa,
                 "{s}: accounts is apko's: groups and users, each a list",
@@ -626,6 +690,14 @@ pub fn loadIn(
         } else if (mem.eql(u8, e.key, "bastion")) {
             // Check each user, allowing key files for now; whether sshd
             // takes them depends on the whole chain (bastionFiles).
+            if (e.value == .map and e.value.get("destinations") != null) {
+                _ = try bastionDestinations(
+                    gpa,
+                    &.{.{ .name = "bastion", .dir = path, .spec = .{ .map = &.{e} } }},
+                    f,
+                );
+                continue;
+            }
             const users = try bastionUsers(gpa, path, e.value, f);
             var why: []const u8 = "";
             _ = sshd.authorizedKeys(gpa, users, true, &why) catch |err| switch (err) {
@@ -648,7 +720,6 @@ pub fn loadIn(
             return f.fail(gpa, "{s}: {s} is a list of lines", .{ path, e.key });
         }
     }
-    return .{ .name = name, .dir = dir, .spec = spec };
 }
 
 fn parseFile(gpa: Allocator, path: []const u8, text: []const u8, f: *Failure) Error!Node {
@@ -660,6 +731,423 @@ fn parseFile(gpa: Allocator, path: []const u8, text: []const u8, f: *Failure) Er
 }
 
 const max_chain = 16;
+
+/// variantNames validates, sorts and deduplicates comma-separated selections.
+pub fn variantNames(
+    gpa: Allocator,
+    selections: []const []const u8,
+    f: *Failure,
+) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (selections) |selection| {
+        var it = mem.splitScalar(u8, selection, ',');
+        while (it.next()) |name| {
+            if (!isName(name)) return f.fail(gpa, "invalid variant name {s}", .{name});
+            if (!isOneOf(name, out.items)) try out.append(gpa, name);
+        }
+    }
+    mem.sortUnstable([]const u8, out.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
+        }
+    }.less);
+    return out.items;
+}
+
+/// variantPath keeps existing channels for the default selection.
+pub fn variantPath(
+    gpa: Allocator,
+    name: []const u8,
+    selected: []const []const u8,
+) Error![]const u8 {
+    if (selected.len == 0) return name;
+    return gpa.print("{s}/variants/{s}", .{ name, try mem.join(gpa, ",", selected) });
+}
+
+fn equalNode(a: Node, b: Node) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .scalar => mem.eql(u8, a.scalar.text, b.scalar.text),
+        .list => blk: {
+            if (a.list.len != b.list.len) break :blk false;
+            for (a.list, b.list) |x, y| if (!equalNode(x, y)) break :blk false;
+            break :blk true;
+        },
+        .map => blk: {
+            if (a.map.len != b.map.len) break :blk false;
+            for (a.map) |e| if (!equalNode(
+                e.value,
+                b.get(e.key) orelse break :blk false,
+            )) break :blk false;
+            break :blk true;
+        },
+    };
+}
+
+fn variantConflict(gpa: Allocator, a: Node, b: Node, path: []const u8) Allocator.Error!?[]const u8 {
+    if (a == .list and b == .list) return null;
+    if (a == .map and b == .map) {
+        for (a.map) |e| {
+            // Dependency ancestry and unselected definitions are structure,
+            // not competing settings of the selected image.
+            if (path.len == 0 and isOneOf(e.key, &.{ "base", "variants", "description" })) continue;
+            const other = b.get(e.key) orelse continue;
+            const next = try gpa.print(
+                "{s}{s}{s}",
+                .{ path, if (path.len > 0) "." else "", e.key },
+            );
+            if (mem.eql(u8, path, "services")) {
+                if (!equalNode(e.value, other)) return next;
+            } else if (try variantConflict(gpa, e.value, other, next)) |conflict| return conflict;
+        }
+        return null;
+    }
+    return if (equalNode(a, b)) null else path;
+}
+
+/// overlay follows form composition: services replace whole declarations.
+fn overlay(gpa: Allocator, base: Node, over: Node) Allocator.Error!Node {
+    var out: std.ArrayList(Entry) = .empty;
+    for (base.map) |e| {
+        const value = over.get(e.key) orelse {
+            try out.append(gpa, e);
+            continue;
+        };
+        const merged = try merge(
+            gpa,
+            .{ .map = &.{e} },
+            .{ .map = &.{.{ .key = e.key, .value = value }} },
+        );
+        if (e.value == .list and value == .list) {
+            var entries: std.ArrayList(Node) = .empty;
+            for (merged.map[0].value.list) |item| {
+                const seen = for (entries.items) |before| {
+                    if (equalNode(before, item)) break true;
+                } else false;
+                if (!seen) try entries.append(gpa, item);
+            }
+            try out.append(gpa, .{ .key = e.key, .value = .{ .list = entries.items } });
+            continue;
+        }
+        if (mem.eql(u8, e.key, "services") and e.value == .map and value == .map) {
+            var declarations: std.ArrayList(Entry) = .empty;
+            for (e.value.map) |service| try declarations.append(gpa, .{
+                .key = service.key,
+                .value = value.get(service.key) orelse service.value,
+            });
+            for (value.map) |service| if (e.value.get(service.key) == null) try declarations.append(
+                gpa,
+                service,
+            );
+            try out.append(gpa, .{ .key = e.key, .value = .{ .map = declarations.items } });
+            continue;
+        }
+        try out.append(gpa, merged.map[0]);
+    }
+    for (over.map) |e| if (base.get(e.key) == null) try out.append(gpa, e);
+    return .{ .map = out.items };
+}
+
+pub fn chainSelectedIn(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    names: []const u8,
+    ref: []const u8,
+    selected: []const []const u8,
+    f: *Failure,
+) Error![]const Form {
+    const original = try chainIn(io, gpa, root, names, ref, f);
+    if (selected.len == 0) return original;
+    const wanted = try variantNames(gpa, selected, f);
+    var top = original[original.len - 1];
+    top.selected = wanted;
+    const definitions = top.spec.get("variants");
+    var out: std.ArrayList(Form) = .empty;
+    try out.appendSlice(gpa, original[0 .. original.len - 1]);
+    const Contribution = struct { name: []const u8, spec: Node };
+    var contributions: std.ArrayList(Contribution) = .empty;
+    for (wanted) |name| {
+        const ssh = mem.eql(u8, name, "ssh");
+        const definition: Node = if (ssh)
+            .{ .map = &.{} }
+        else if (definitions) |v|
+            v.get(name) orelse return f.fail(gpa, "{s}: unknown variant {s}", .{ ref, name })
+        else
+            return f.fail(gpa, "{s}: unknown variant {s}", .{ ref, name });
+        const spec = try variantOverlay(gpa, definition);
+        var patch: Node = .{ .map = &.{} };
+        const layer: Form = .{ .name = name, .dir = top.dir, .spec = spec };
+        const dependencies = if (ssh) &[_][]const u8{"ssh-su"} else try layer.items(gpa, "with");
+        for (dependencies) |dependency| {
+            for (try chainIn(io, gpa, root, names, dependency, f)) |part| {
+                if (!ssh and
+                    mem.eql(
+                        u8,
+                        part.dir,
+                        top.dir,
+                    )) return f.fail(gpa, "{s}: variant {s} depends on itself", .{ ref, name });
+                var existing = false;
+                for (original) |have| if (mem.eql(u8, have.dir, part.dir)) {
+                    existing = true;
+                    break;
+                };
+                if (existing) continue;
+                patch = try overlay(gpa, patch, part.spec);
+                var seen = false;
+                for (out.items) |have| if (mem.eql(u8, have.dir, part.dir)) {
+                    seen = true;
+                    break;
+                };
+                if (!seen) try out.append(gpa, part);
+            }
+        }
+        patch = try overlay(gpa, patch, spec);
+        for (contributions.items) |previous| {
+            if (try variantConflict(gpa, previous.spec, patch, "")) |path|
+                return f.fail(
+                    gpa,
+                    "{s}: variants {s} and {s} conflict at {s}",
+                    .{ ref, previous.name, name, path },
+                );
+        }
+        try contributions.append(gpa, .{ .name = name, .spec = patch });
+        if (!ssh) {
+            // Dependencies already supply additive fields in the chain. Their
+            // settings and service replacements must also win over the leaf.
+            var settings: std.ArrayList(Entry) = .empty;
+            for (patch.map) |entry| if (isOneOf(entry.key, &.{
+                "services", "updates", "machine", "app", "sshd", "check", "archs",
+            })) try settings.append(gpa, entry);
+            top.spec = try overlay(gpa, top.spec, .{ .map = settings.items });
+        }
+        // Dependencies are already in the chain; only their weaknesses need
+        // copying to the leaf, whose posture declarations are authoritative.
+        if (patch.get("weaknesses")) |w| top.spec = try overlay(
+            gpa,
+            top.spec,
+            .{ .map = &.{.{ .key = "weaknesses", .value = w }} },
+        );
+        top.spec = try overlay(gpa, top.spec, spec);
+        if (ssh and !has(original, "ssh-su")) {
+            if (top.spec.get("services")) |declared| if (declared.get("sshd")) |existing| {
+                if (patch.get("services")) |added| if (added.get("sshd")) |operator| {
+                    const service = try merge(gpa, existing, operator);
+                    top.spec = try overlay(
+                        gpa,
+                        top.spec,
+                        .{ .map = &.{.{
+                            .key = "services",
+                            .value = .{ .map = &.{.{ .key = "sshd", .value = service }} },
+                        }} },
+                    );
+                };
+            };
+            top.spec = try overlay(
+                gpa,
+                top.spec,
+                .{ .map = &.{.{
+                    .key = "with",
+                    .value = .{ .list = &.{.{ .scalar = .{ .text = "ssh-su", .raw = "ssh-su" } }} },
+                }} },
+            );
+        }
+    }
+    try validate(gpa, top.dir, top.spec, f);
+    try out.append(gpa, top);
+    return out.items;
+}
+
+test "variant normalization and deterministic channel paths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var f: Failure = .{};
+    const names = try variantNames(gpa, &.{ "vector,ssh", "ssh" }, &f);
+    try std.testing.expectEqualStrings("ssh", names[0]);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings(
+        "postgresql/variants/ssh,vector",
+        try variantPath(gpa, "postgresql", names),
+    );
+    try std.testing.expectEqualStrings("postgresql", try variantPath(gpa, "postgresql", &.{}));
+    try std.testing.expectError(error.Form, variantNames(gpa, &.{"ssh,"}, &f));
+}
+
+test "variants retain leaf files and reject conflicting service replacements" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "forms/db");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/db/form.yaml", .data =
+        \\packages: [database]
+        \\services:
+        \\  db:
+        \\    exec: /usr/bin/db
+        \\    user: db
+        \\variants:
+        \\  vector:
+        \\    description: Vector search with pgvector
+        \\    packages: [vector]
+        \\  tcp:
+        \\    description: TCP access
+        \\    services:
+        \\      db:
+        \\        exec: /usr/bin/db --tcp
+        \\        user: db
+        \\  other:
+        \\    services:
+        \\      db:
+        \\        exec: /usr/bin/db --other
+        \\        user: db
+    });
+    var f: Failure = .{};
+    const base = try chainSelectedIn(io, gpa, tmp.dir, "forms", "db", &.{}, &f);
+    try std.testing.expectEqual(@as(usize, 1), (try base[0].items(gpa, "packages")).len);
+    const chosen = try chainSelectedIn(io, gpa, tmp.dir, "forms", "db", &.{ "vector", "tcp" }, &f);
+    const descriptions = try variantDescriptions(gpa, chosen[0]);
+    try std.testing.expectEqualStrings("SSH access", descriptions.map.get("ssh").?);
+    try std.testing.expectEqualStrings(
+        "Vector search with pgvector",
+        descriptions.map.get("vector").?,
+    );
+    try std.testing.expectEqual(@as(?Node, null), chosen[0].spec.get("description"));
+    try std.testing.expectEqualStrings("forms/db", chosen[0].dir);
+    try std.testing.expectEqual(@as(usize, 2), (try chosen[0].items(gpa, "packages")).len);
+    try std.testing.expectEqualStrings(
+        "/usr/bin/db --tcp",
+        chosen[0].spec.get("services").?.get("db").?.get("exec").?.scalar.text,
+    );
+    try std.testing.expectError(
+        error.Form,
+        chainSelectedIn(io, gpa, tmp.dir, "forms", "db", &.{ "other", "tcp" }, &f),
+    );
+    try std.testing.expect(mem.indexOf(u8, f.text, "services.db") != null);
+    try std.testing.expectError(
+        error.Form,
+        chainSelectedIn(io, gpa, tmp.dir, "forms", "db", &.{"missing"}, &f),
+    );
+}
+
+test "variant descriptions are optional bounded lines, never form settings" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "forms/db");
+    var failure: Failure = .{};
+    for ([_][]const u8{ "\"\"", "[]", "{}", "\"bad\\nline\"", "\"   \"" }) |bad| {
+        try tmp.dir.writeFile(
+            io,
+            .{
+                .sub_path = "forms/db/form.yaml",
+                .data = try gpa.print("variants:\n  vector:\n    description: {s}\n", .{bad}),
+            },
+        );
+        try std.testing.expectError(error.Form, load(io, gpa, tmp.dir, "db", &failure));
+    }
+    try std.testing.expect(!isVariantDescription(&@as([257]u8, @splat('x'))));
+    try std.testing.expect(!isVariantDescription("bad\nline"));
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "forms/db/form.yaml", .data = "description: Not a form setting\n" },
+    );
+    try std.testing.expectError(error.Form, load(io, gpa, tmp.dir, "db", &failure));
+}
+
+test "variant dependencies compose across ancestry and replace the leaf's service" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const fixtures = [_][2][]const u8{
+        .{ "base", "packages: [base]\n" },
+        .{ "middle", "base: base\n" },
+        .{ "first", "base: base\nservices:\n  app:\n    exec: /usr/bin/selected\n    user: app\n" },
+        .{ "second", "base: middle\npackages: [second]\n" },
+        .{ "app", "base: base\nservices:\n  app:\n    exec: /usr/bin/original\n    user: app\n" ++
+            "variants:\n  a:\n    with: [first]\n  b:\n    with: [second]\n" },
+    };
+    for (fixtures) |fixture| {
+        const dir = try gpa.print("forms/{s}", .{fixture[0]});
+        try tmp.dir.createDirPath(io, dir);
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}/form.yaml", .{dir}), .data = fixture[1] },
+        );
+    }
+    var failure: Failure = .{};
+    const selected = try chainSelectedIn(
+        io,
+        gpa,
+        tmp.dir,
+        "forms",
+        "app",
+        &.{ "b", "a" },
+        &failure,
+    );
+    const leaf = selected[selected.len - 1];
+    try std.testing.expectEqualStrings(
+        "/usr/bin/selected",
+        leaf.spec.get("services").?.get("app").?.get("exec").?.scalar.text,
+    );
+    const reversed = try chainSelectedIn(
+        io,
+        gpa,
+        tmp.dir,
+        "forms",
+        "app",
+        &.{ "a", "b" },
+        &failure,
+    );
+    try std.testing.expect(equalNode(leaf.spec, reversed[reversed.len - 1].spec));
+}
+
+test "every catalog form offers implicit operator SSH" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var dir = try Dir.cwd().openDir(io, "forms", .{ .iterate = true });
+    defer dir.close(io);
+    var entries = dir.iterate();
+    var count: usize = 0;
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        dir.access(io, try gpa.print("{s}/form.yaml", .{entry.name}), .{}) catch continue;
+        var f: Failure = .{};
+        const forms = chainSelectedIn(
+            io,
+            gpa,
+            Dir.cwd(),
+            "forms",
+            entry.name,
+            &.{"ssh"},
+            &f,
+        ) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ entry.name, f.text });
+            return err;
+        };
+        try std.testing.expect(has(forms, "ssh-su"));
+        try std.testing.expect(runsSshd(forms));
+        _ = try apko(gpa, forms, &.{});
+        const declared = try services(io, gpa, Dir.cwd(), forms, &f);
+        var listeners: usize = 0;
+        for (declared) |service| if (mem.eql(u8, service.name, "sshd")) {
+            listeners += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), listeners);
+        count += 1;
+    }
+    try std.testing.expect(count > 0);
+}
 
 /// chain returns ref's chain of forms, base first, in the order the build
 /// lays them. Each form follows the forms it takes `with` it (and their
@@ -907,7 +1395,10 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                         if (mem.eql(u8, w, "dns")) {
                             return f.fail(gpa, "{s}/form.yaml: services: {s}: connect dns " ++
                                 "is gone: name what it looks up, lookup: NAME " ++
-                                "(docs/design/unwound-policy.md)", .{ form.dir, s.key });
+                                "(docs/design/implemented/unwound-policy.md)", .{
+                                form.dir,
+                                s.key,
+                            });
                         } else if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w) or
                             mem.eql(u8, w, "any"))
                             try net.append(gpa, w);
@@ -930,8 +1421,13 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
     // one's port is a connect line (bastionService rewrites sshd's to them).
     for (forms) |form| {
         const node = form.spec.get("bastion") orelse continue;
+        if (node.get("destinations") != null) continue;
         for (try bastionUsers(gpa, form.dir, node, f)) |u| for (u.destinations) |d|
             try out.append(gpa, try gpa.print("connect bastion tcp/{d}", .{sshd.port(d)}));
+    }
+    for (try bastionDestinations(gpa, forms, f)) |destination| {
+        try out.append(gpa, try gpa.print("bastion-connect :people {s}", .{destination}));
+        try out.append(gpa, try gpa.print("bastion-connect root {s}", .{destination}));
     }
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
@@ -941,7 +1437,7 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
         if (mem.eql(u8, key, "dns")) return f.fail(
             gpa,
             "{s}/form.yaml: net: {s}: dns is gone: lookup USER NAME names what USER " ++
-                "looks up (docs/design/unwound-policy.md)",
+                "looks up (docs/design/implemented/unwound-policy.md)",
             .{ form.dir, line },
         );
         if (mem.eql(u8, key, "dns-direct")) return f.fail(
@@ -1055,10 +1551,9 @@ fn has(forms: []const Form, name: []const u8) bool {
     return false;
 }
 
-/// runsSshd reports whether the chain runs sshd: it has the sshd form or
-/// the bastion.
+/// runsSshd includes the fixed native export endpoint as well as logins.
 pub fn runsSshd(forms: []const Form) bool {
-    return has(forms, "sshd") or has(forms, "bastion");
+    return has(forms, "sshd") or has(forms, "bastion") or has(forms, "data-export");
 }
 
 /// takesKeyFiles reports whether the chain's sshd accepts plain key files,
@@ -1075,11 +1570,11 @@ pub fn verifyRequired(gpa: Allocator, forms: []const Form) Error![]const u8 {
 
 /// sshdConfig returns the image's sshd_config.d/form.conf from the chain's
 /// sshd: keywords, a later form's value replacing an earlier one, or "" for
-/// none. It fails unless the chain has the sshd or bastion form to read it.
+/// none. It fails unless the chain has a declared SSH endpoint to read it.
 pub fn sshdConfig(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u8 {
     const pairs = try chainSshd(gpa, forms);
     if (pairs.len == 0) return "";
-    if (!has(forms, "sshd") and !has(forms, "bastion")) return f.fail(
+    if (!runsSshd(forms)) return f.fail(
         gpa,
         "{s}: sshd: no sshd in the chain reads it; with: [sshd] brings one",
         .{forms[forms.len - 1].dir},
@@ -1089,7 +1584,73 @@ pub fn sshdConfig(gpa: Allocator, forms: []const Form, f: *Failure) Error![]cons
         error.Invalid => return f.fail(gpa, "{s}: {s}", .{ forms[forms.len - 1].dir, why }),
         error.OutOfMemory => return error.OutOfMemory,
     };
+    if (has(forms, "bastion")) {
+        const destinations = try bastionDestinations(gpa, forms, f);
+        return gpa.print("AllowTcpForwarding local\nPermitOpen {s}\n{s}" ++
+            "Match User root Address *,!127.0.0.1,!::1\n    PermitRootLogin no\nMatch all\n", .{
+            if (destinations.len == 0) "none" else try mem.join(gpa, " ", destinations), frag.text,
+        });
+    }
     return frag.text;
+}
+
+pub fn bastionDestinations(
+    gpa: Allocator,
+    forms: []const Form,
+    f: *Failure,
+) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (forms) |fm| {
+        const node = fm.spec.get("bastion") orelse continue;
+        const destinations = node.get("destinations") orelse continue;
+        if (node.map.len != 1 or
+            !isScalars(destinations)) return f.fail(
+            gpa,
+            "{s}: bastion holds destinations only",
+            .{fm.dir},
+        );
+        for (try scalars(gpa, destinations)) |destination| {
+            const address = std.Io.net.IpAddress.parseLiteral(destination) catch
+                return f.fail(
+                    gpa,
+                    "{s}: bastion destination must be a literal IP and port: {s}",
+                    .{ fm.dir, destination },
+                );
+            if (address.getPort() == 0) return f.fail(
+                gpa,
+                "{s}: bastion destination has no port",
+                .{fm.dir},
+            );
+            // Metadata and ambiguous mapped destinations are never SSH egress.
+            const unsafe = switch (address) {
+                .ip4 => |a| a.bytes[0] == 0 or (a.bytes[0] == 169 and a.bytes[1] == 254) or
+                    mem.eql(u8, &a.bytes, &.{ 168, 63, 129, 16 }),
+                .ip6 => |a| blk: {
+                    const bytes = a.bytes;
+                    var zero = true;
+                    for (bytes[0..15]) |b| if (b != 0) {
+                        zero = false;
+                        break;
+                    };
+                    break :blk (zero and bytes[15] == 0) or (bytes[0] == 0xfe and
+                        bytes[1] & 0xc0 == 0x80) or
+                        mem.eql(u8, bytes[0..12], &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255 }) or
+                        mem.eql(
+                            u8,
+                            &bytes,
+                            &.{ 0xfd, 0, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0x54 },
+                        );
+                },
+            };
+            if (unsafe) return f.fail(
+                gpa,
+                "{s}: bastion destination is local or metadata: {s}",
+                .{ fm.dir, destination },
+            );
+            if (!isOneOf(destination, out.items)) try out.append(gpa, destination);
+        }
+    }
+    return out.items;
 }
 
 fn chainSshd(gpa: Allocator, forms: []const Form) Error![]const sshd.Pair {
@@ -1279,7 +1840,7 @@ fn loopbackUdp(gpa: Allocator, spec: Node) Allocator.Error![]const u16 {
 /// render returns a service file from form.yaml's services.NAME: one line a
 /// directive, a list one line each, in the form's order; listen and connect
 /// lines keep leash's words alone. A service with `image` runs in that
-/// image's tree, baked at /oci/NAME (docs/design/oci.md): its record gives
+/// image's tree, baked at /oci/NAME (docs/design/implemented/oci.md): its record gives
 /// the command, environment and directory, it runs as _oci-NAME, with
 /// image_pledge and image_memory unless the service says otherwise; `link`
 /// names services it reaches on loopback, a connect line of their ports.
@@ -2468,4 +3029,20 @@ test "service lookups compile for its user; dns grants are refused" {
         const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
         try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
     }
+}
+
+test "fixed data export endpoint accepts SSH policy without a shell form" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/data-export");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/data-export/form.yaml", .data = "sshd:\n  log-level: VERBOSE\n" });
+    var failure: Failure = .{};
+    const forms = try chain(io, a, tmp.dir, "data-export", &failure);
+    try testing.expect(runsSshd(forms));
+    try testing.expect(!try takesKeyFiles(a, forms));
+    try testing.expect(mem.find(u8, try sshdConfig(a, forms, &failure), "LogLevel VERBOSE\n") != null);
 }

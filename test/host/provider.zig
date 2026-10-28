@@ -1,5 +1,5 @@
 //! provider runs one disposable machine of a provider A/B fixture
-//! (docs/design/provider-ab-tests.md) on a VM backend: QEMU here, Lima, a
+//! (docs/design/implemented/provider-ab-tests.md) on a VM backend: QEMU here, Lima, a
 //! cloud through howl create, bhyve or Firecracker on a remote host, or
 //! Proxmox. It gives the machine's SSH and console, and removes only what
 //! it made. buildArgv and exportRelease make and keep the fixture's

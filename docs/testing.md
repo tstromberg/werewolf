@@ -13,25 +13,26 @@ YAML probes and compiled Zig drivers, run under leash as service clients without
 shell or SSH ([guide](testing-native.md)); a runtime without one boots a hello-world
 application ([scenarios](testing-scenarios.md)). A generated test form pins the
 production package closure and is compared with production before boot
-([design](design/image-release-testing.md)). Image publishing requires further checks
-([form-images.md](form-images.md)). [Local iteration](design/local-test-iteration.md)
-keeps the VM running between changes. Checks boot their kernels directly, so they
-build without Secure Boot, the TPM and, unless `IPE=1`, IPE, and name them in
-`--disable` (the Makefile's `CHECK_DISABLE`); `check-secureboot`, `check-tpm-floor`,
-`check-ipe` and the release gates test those.
+([design](design/pending/image-release-testing.md)). Image publishing requires
+further checks ([form-images.md](form-images.md)). [Local
+iteration](design/implemented/local-test-iteration.md) keeps the VM running between
+changes. Checks boot their kernels directly, so they build without Secure Boot, the
+TPM and, unless `IPE=1`, IPE, and name them in `--disable` (the Makefile's
+`CHECK_DISABLE`); `check-secureboot`, `check-tpm-floor`, `check-ipe` and the release
+gates test those.
 
 PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
 [Greenbone](../forms/greenbone/README.md#testing-status) covers GMP/OSP, database
 roles, Valkey ACLs, mounts and persistence. Logs: `build/ARCH/check/FORM-native/`.
 Protected lifecycle evidence is separate.
 
-For driver edits, [iteration](design/local-test-iteration.md) keeps a disposable VM
-running and replaces only the selected driver. Native drivers default to 128 MiB;
-`memory` (16–8192 MiB) sizes their test cgroup. An optional driver `allow` list
-permits `python:native`, `node:native` or `java:native` in that driver's runtime
-namespace. Production grants stay unchanged; the payload comparison rejects blanket
-grants and undeclared files. Iteration uses SSH with `sh-shim`, without BusyBox. It
-is not release evidence. Run the plain command after editing.
+For driver edits, [iteration](design/implemented/local-test-iteration.md) keeps a
+disposable VM running and replaces only the selected driver. Native drivers default
+to 128 MiB; `memory` (16–8192 MiB) sizes their test cgroup. An optional driver
+`allow` list permits `python:native`, `node:native` or `java:native` in that driver's
+runtime namespace. Production grants stay unchanged; the payload comparison rejects
+blanket grants and undeclared files. Iteration uses SSH with `sh-shim`, without
+BusyBox. It is not release evidence. Run the plain command after editing.
 `KERNEL_ROOTFS=/path/rootfs.tar` tests a candidate kernel; changing its bytes resets
 the VM. This profile explicitly disables IPE.
 

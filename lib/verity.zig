@@ -1,5 +1,5 @@
 //! verity builds the dm-verity hash tree for a root image and the table
-//! stage0 opens it with. See lib/README.md and docs/design/verified-boot.md.
+//! stage0 opens it with. See lib/README.md and docs/design/implemented/verified-boot.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -61,6 +61,31 @@ pub const Tree = struct { tree: []u8, params: Params };
 /// digests, and never holds it whole; the tree is 1/128 of its size.
 pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
     const size = try file.length(io);
+    return buildSize(gpa, io, file, size);
+}
+
+/// Verify an attached image against parameters supplied by the authenticated
+/// image policy. Never derive its identity from the attached filesystem.
+pub fn verify(gpa: Allocator, io: std.Io, file: std.Io.File, p: Params) !void {
+    if (p.data_blocks == 0 or p.data_blocks > (16 << 30) / block_size or
+        p.hash_start != p.data_blocks) return error.BadVerity;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const tree = try buildSize(arena.allocator(), io, file, p.data_blocks * block_size);
+    if (!std.meta.eql(p, tree.params)) return error.ImageIdentityMismatch;
+    var buf: [64 << 10]u8 = undefined;
+    var at: usize = 0;
+    while (at < tree.tree.len) {
+        const n = @min(buf.len, tree.tree.len - at);
+        if (try file.readPositionalAll(io, buf[0..n], p.hash_start * block_size + at) != n or
+            !std.mem.eql(u8, buf[0..n], tree.tree[at..][0..n])) return error.ImageIdentityMismatch;
+        at += n;
+    }
+    if (try file.readPositionalAll(io, buf[0..1], p.hash_start * block_size + tree.tree.len) != 0)
+        return error.ImageIdentityMismatch;
+}
+
+fn buildSize(gpa: Allocator, io: std.Io, file: std.Io.File, size: u64) !Tree {
     if (size == 0 or size % block_size != 0) return error.NotWholeBlocks;
     const data_blocks = size / block_size;
     const buf = try gpa.alloc(u8, 256 * block_size);
@@ -116,6 +141,30 @@ pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
         .salt = salt,
         .root = digest(&salt, top[0..block_size]),
     } };
+}
+
+test "attached image must match approved data, verity tree and exact length" {
+    const t = std.testing;
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const f = try tmp.dir.createFile(io, "image", .{ .read = true });
+    defer f.close(io);
+    const bytes: [block_size * 2]u8 = @splat(42);
+    try f.writeStreamingAll(io, &bytes);
+    const tree = try build(arena.allocator(), io, f);
+    try f.writePositionalAll(io, tree.tree, bytes.len);
+    try verify(t.allocator, io, f, tree.params);
+    try f.writePositionalAll(io, "x", 0);
+    try t.expectError(error.ImageIdentityMismatch, verify(t.allocator, io, f, tree.params));
+    try f.writePositionalAll(io, bytes[0..1], 0);
+    try f.writePositionalAll(io, "x", bytes.len);
+    try t.expectError(error.ImageIdentityMismatch, verify(t.allocator, io, f, tree.params));
+    try f.writePositionalAll(io, tree.tree, bytes.len);
+    try f.writePositionalAll(io, "x", bytes.len + tree.tree.len);
+    try t.expectError(error.ImageIdentityMismatch, verify(t.allocator, io, f, tree.params));
 }
 
 /// readAt reads into buf the piece of file at off, or what is left of it.

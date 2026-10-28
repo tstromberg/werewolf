@@ -170,10 +170,17 @@ pub const Tool = struct {
         };
     }
 
+    fn selectedCommand(t: *Tool, argv: []const []const u8) ![]const []const u8 {
+        const selection = t.variable("VARIANTS") orelse return argv;
+        const program = std.fs.path.basename(argv[0]);
+        if (!mem.eql(u8, program, "form") and !mem.eql(u8, program, "howl")) return argv;
+        return mem.concat(t.gpa, []const u8, &.{ argv, &.{ "--variant", selection } });
+    }
+
     /// call runs argv and refuses unless it exits 0.
     pub fn call(t: *Tool, argv: []const []const u8, options: Call) !void {
         var child = try std.process.spawn(t.io, .{
-            .argv = argv,
+            .argv = try t.selectedCommand(argv),
             .environ_map = options.env orelse t.env,
             .stdout = if (options.log) |log| .{ .file = log } else .inherit,
             .stderr = if (options.log) |log| .{ .file = log } else .inherit,
@@ -187,7 +194,7 @@ pub const Tool = struct {
     /// output is what argv prints, refusing unless it exits 0.
     pub fn output(t: *Tool, argv: []const []const u8) ![]const u8 {
         const result = try std.process.run(t.gpa, t.io, .{
-            .argv = argv,
+            .argv = try t.selectedCommand(argv),
             .environ_map = t.env,
             .stdout_limit = .limited(16 << 20),
             .stderr_limit = .limited(1 << 20),
@@ -236,7 +243,11 @@ fn prepare(t: *Tool, f: Form, arch: []const u8) !void {
     const io = t.io;
     const gpa = t.gpa;
     const plan = try t.bootPlan(f);
-    const work = try gpa.print("build/native-tests/{s}/{s}", .{ arch, f.name });
+    const selected = if (t.variable("VARIANTS")) |names|
+        try gpa.print("/variants-{s}", .{names})
+    else
+        "";
+    const work = try gpa.print("build/native-tests/{s}{s}/{s}", .{ arch, selected, f.name });
     const generated = try gpa.print("{s}/native-test-{s}", .{ work, f.name });
     const root = try gpa.print("{s}/rootfs", .{generated});
     // This directory is exclusively generated test output; clear stale drivers.
@@ -421,6 +432,18 @@ pub fn formConfig(t: *Tool, f: Form, plan: plans.Plan, pins: []const []const u8)
     const gpa = t.gpa;
     var out: std.ArrayList(u8) = .empty;
     // Written as the harness always has, so existing test locks still match.
+    if (t.variable("VARIANTS") != null) {
+        var failure: forms.Failure = .{};
+        const production = try forms.load(t.io, gpa, Dir.cwd(), f.ref, &failure);
+        if (production.spec.get("variants")) |definitions| {
+            var text: Io.Writer.Allocating = .init(gpa);
+            try forms.write(
+                &text.writer,
+                .{ .map = &.{.{ .key = "variants", .value = definitions }} },
+            );
+            try out.appendSlice(gpa, text.written());
+        }
+    }
     try out.print(gpa, "base: {s}\npackages: [", .{f.ref});
     for (try mem.concat(gpa, []const u8, &.{ pins, plan.packages }), 0..) |p, i|
         try out.print(gpa, "{s}\"{s}\"", .{ if (i > 0) ", " else "", p });

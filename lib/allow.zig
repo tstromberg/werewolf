@@ -1,6 +1,6 @@
 //! allow lists the allowances a form may use to take back one of werewolf's
 //! defaults, and the capabilities werewolf takes from root. Only the image
-//! decides allowances. See lib/README.md and docs/design/lockdown.md.
+//! decides allowances. See lib/README.md and docs/design/implemented/lockdown.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -44,7 +44,7 @@ pub const dir = "/etc/werewolf/allow";
 /// read-only root, never from argv or the environment, which a process that
 /// re-runs its runtime controls; NS is the service's cgroup leaf, which the
 /// supervisor sets and the process cannot change. See
-/// docs/design/hardened-interpreters.md.
+/// docs/design/implemented/hardened-interpreters.md.
 pub const runtime_dir = "/etc/runtime-hardening/allow";
 
 /// runtime_blanket names the namespace an image-wide runtime allowance uses.

@@ -1,0 +1,120 @@
+# howl: the werewolf command
+
+**Status:** Implemented
+[2026-10-07](https://github.com/werewolf-linux/werewolf/commit/b113b29a)
+
+Built, 2026-10-07 (cmd/howl, [README](../../../cmd/howl/README.md)). Run end
+to end on Lima, GCP, AWS and Azure; bhyve, Firecracker and Proxmox are
+experimental, Proxmox never run on a node. `pack --image` is not built.
+
+bhyve update, 2026-10-18: x86_64 and ARM64 are integrated, with TAP by default and
+explicit SLIRP retained. ARM64 passed signed A/B recovery with private runtime fixes,
+but failed a sustained-transfer soak in virtio TX; Secure Boot remains unsupported
+on ARM64. See [live testing](../../testing-live.md#bhyve) for current limits.
+
+## Summary
+`howl` builds a form's image, packs a machine's config tar, and puts both
+on a machine, here or in a cloud. Users run howl; contributors run make.
+
+## Background
+
+A machine is a *form* ([forms.md](../../forms.md)), which says what runs and
+changes only by a rebuild, plus a *config tar* of per-machine settings and
+secrets ([cloud.md](../../cloud.md)). Before howl, make was the interface: it
+ignored unknown variables, checked nothing, and left users packing the tar
+by hand.
+
+## Goals
+
+- A bastion or Tailscale router from a clean checkout in one command.
+- Every config error the host can find, it finds, naming the file.
+- The same inputs give the same tar, and the same image with a manifest.
+- Any hypervisor that attaches two disks runs werewolf with no howl code.
+
+## Non-Goals
+
+- A daemon or an independent inventory of provider VMs.
+- Building the application, or `make` deploying machines. (Building
+  without make was a non-goal; [howl-build.md](howl-build.md) makes it one.)
+
+## Detailed design
+
+`build` makes a *file*, by itself and byte for byte as make's `_dist-form` did
+([howl-build.md](howl-build.md)), never with `DEV`, so every image has a release's
+manifest ([releases.md](../../releases.md)). `run`/`create` default to protected Lima
+on macOS and QEMU on Linux, from werewolf's published image
+([design](published-secure-boot.md)) or, with `--build`, this checkout; clouds take
+`--build` images only. Firecracker builds an IPE image and pins its boot files on the
+host, warning that firmware Secure Boot and TPM rollback protection are unavailable.
+`--disable=LIST` gives up protections by name (`secureboot`, `tpm`, `ipe`):
+Firecracker also accepts `secureboot,tpm`, its default limitations; other providers
+take the whole list. A machine's command line names what it lacks
+(`werewolf.disable`) for posture and the login message
+([security](../../security.md#protections-a-machine-can-be-made-without)). `create`
+makes a *machine*: source builds if stale, packs, uploads only an image the cloud
+lacks, starts the machine, waits for init's `up in`, and prints `NAME ADDRESS FORM`.
+`run` uses `werewolf-run`, reusing an unchanged protected VM and resuming its
+existing image when stopped. Changed image inputs replace it. Each platform is driven
+by its own tool (`limactl`, `qm`, `gcloud`, `aws`, `az`…) with argument lists. The
+provider supplies VM existence and runtime state; local files retain build inputs,
+firmware variables and TPM state.
+
+| Target | Choice, and why |
+| --- | --- |
+| lima | protected QEMU by default; `--disable=secureboot,tpm,ipe` uses the legacy VZ path |
+| firecracker | no firmware or TPM: IPE and dm-verity with host-pinned boot files by default; legacy A/B boot selection only with all three protections explicitly disabled |
+| proxmox | `qm` over ssh: the REST API has no serial log, and no address without a guest agent |
+| aws | an EBS snapshot written directly: VM Import took 6–10 minutes and a hand-made bucket and role |
+
+### CONFIG: the config tar from flags
+
+`pack`, `run` and `create` take the same flags. Beyond howl's own, the
+form declares them: a service's `config NAME PATH` line is a `--NAME FILE`
+flag and `setting NAME TYPE` a `--NAME VALUE` one ([settings.md](settings.md)),
+so the list grows with the form, not with howl:
+`howl create router --with tailscale --auth-key - --routes 10.20.0.0/24`.
+howl refuses a chain that declares a name twice; qualifying the names
+would rename a flag whenever a service is added. `--ip`/`--gw`/`--dns`
+write the `network` file, which init reads from a config disk but never
+from cloud user data ([lib/README.md](../../../lib/README.md#network)). `pack`
+makes no host key: [ssh-host-key](../../../cmd/ssh-host-key/ssh-host-key.8.md) makes
+one on the machine, so its private half never leaves.
+
+## Drawbacks
+
+- **Two interfaces**, though make's image targets now ask howl
+  ([howl-build.md](howl-build.md)).
+- **Flags from service files are indirect**: a typo there is a missing flag.
+- **Five provider CLIs** change output and flags on their own schedules.
+- **Azure copies a disk per machine**: a reusable image needs a root agent.
+
+## Alternatives Considered
+
+- **Keep make.** It cannot validate a variable, read a service file, or
+  write a deterministic tar without shell.
+- **Other verbs.** One `boot` would hide that `run` keeps one unnamed
+  machine; `check` is `make check`; `create`/`delete` is every cloud's pair.
+- **Per-form flags in howl, or a generic `--set K=V`.** The first changes
+  howl for every form; the second makes users spell guest paths.
+- **Declarations in the manifest, for `--image`.** A second source of truth.
+- **A provider SDK, or Terraform.** A dependency per cloud, or a daemon's
+  worth of state; an argument list is auditable.
+
+## Security Considerations
+
+- **The host checks with the guest's code** (`lib/service.zig`,
+  `settings.zig`, `network.zig`), so the two cannot drift; the guest's
+  check still counts. A value fills only a key the image declared.
+- **Proxmox's `qm` runs through the node's shell**, so `PROXMOX_*` values
+  must be plain words.
+- **Whoever sets user data holds root's keys** ([cloud.md](../../cloud.md)).
+  Open: `create` does not say which account set it.
+
+## Reliability Considerations
+
+- **Provider inventory**: a machine left by a laptop that died mid-`create`
+  is in the provider's list, for `delete`. Lima files left after an external
+  deletion are cleared before the name is reused. Firmware variables and TPM
+  state are retained for extant instances, including stopped ones.
+- **Open: tested by hand.** `make check` uses `howl pack`; the cloud
+  checks run `create` and `delete`, but nothing runs them on a schedule.

@@ -76,14 +76,25 @@ jobs:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
         run: |
-          export WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$(uname -m)/rootfs.tar"
+          kernel_arch=$(uname -m)
+          export WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$kernel_arch/rootfs.tar"
           make IPE=1 PROVIDER=qemu check-independent-updates
+      - name: Quiesced data export, import and isolation
+        env:
+          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
+          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
+        run: |
+          kernel_arch=$(uname -m)
+          export WEREWOLF_IPE_KERNEL="$PWD/build/ipe-kernel/$kernel_arch/rootfs.tar"
+          make check-data-transfer check-plex-data
       - name: Keep console logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ipe-${{ runner.arch }}
           path: |
+            build/check/data-transfer/*/*.log
+            build/check/plex-data/*/*.log
             build/*/ipe/check/ipe/*.log
             build/*/ipe/check/image-updater/*.log
             build/*/check/secureboot/*.log

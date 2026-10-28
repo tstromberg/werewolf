@@ -57,18 +57,52 @@ is never opened without it. Keep each
 machine's key somewhere other than the machine, since without it the data
 is gone. Encryption does not detect tampering.
 
-**Import.** `howl create --import DIR` builds an ext4 disk labelled
-`werewolf-import` and attaches it read-only. init mounts one such disk at
-`/run/werewolf/import`. The form reads it once, while it first makes its
-data: MariaDB and PostgreSQL stream `*.sql` into the new database, and
-Valkey copies one `dump.rdb`. The directory is there even when empty. Two
-disks with the label, or a mount that fails, leave `import-failed` in it
-and the form makes no empty database. A cloud cannot attach the disk. A
-machine that already exists refuses `--import`. See
-[data-import.md](design/data-import.md).
+**Export and import.** `howl export NAME --output backup.tar.zst` captures
+`/data`, excluding machine authority, audit logs and system state. `--service NAME`
+selects exactly `/data/svc/NAME`. Archives use Zstandard level 1 and preserve paths,
+bytes, ownership, modes and timestamps. They are private, mode 0600, and plaintext;
+keep them as carefully as credentials.
 
-**Backups** are yours. werewolf keeps `/data` across reboots and updates,
-and copies it nowhere.
+`howl import NAME backup.tar.zst` restores into empty application data on a stopped
+VM with the same image and architecture. A new local destination uses an approved
+matching image kept by Howl; supply its deployment configuration with `--config`.
+On another host, select the matching published release with `--with FORM --version
+SERIAL`. It goes through normal image verification; archives never authorize code.
+The destination remains stopped; `howl start NAME` starts its saved image and
+configuration. A selected-service import preserves companion
+roots and never merges occupied data. Fence the source before starting a replacement
+that shares application identity. Plex state (`plex`) and media (`plex-media`) are
+separate selections.
+
+The current storage adapter accepts stopped local QEMU and Lima machines with
+standalone raw destination disks. Unsupported providers and running storage are
+refused. New destinations retain the approved image's disk size; v1 does not grow
+disks. A networkless Linux appliance reads a detached source copy or installs onto
+the stopped destination; Howl never mounts guest filesystems on the host. Encrypted
+data needs `--data-key FILE`. Cleanly stopped export is the least dangerous approach.
+
+A running source can export over pinned SSH when its image includes `data-export`.
+The owner stops all application services first, keeps them down until export exits,
+and starts them afterward. Export checks supervision and clean PostgreSQL shutdown;
+it never stops services or powers off the VM. Stop clients before their databases.
+For example, with an already pinned host key and an authorized security key:
+
+```sh
+howl ssh root@database -- service-down-v1 postgres
+howl export database --output database.tar.zst
+howl ssh root@database -- service-up-v1 postgres
+```
+
+Repeat the explicit stop/start requests for other application services as needed.
+These fixed operations work without a shell. The opt-in endpoint refuses system
+service control, PTYs, SFTP and forwarding. A failed export leaves service state
+alone; the owner decides when to resume. `--host HOST --port PORT` selects a remote
+SSH address using the same saved host-key pin. Connection failure never falls back
+to copying possibly live storage. See the [export design](design/pending/data-export.md).
+
+Directory, SQL and raw media seeds, `create --import` and `sync` have been replaced
+by this archive interface. Database startup initializes only an empty service or
+uses the restored physical data. Image-owned SQL setup still runs normally.
 
 **Updates** roll back the image, not `/data`. A release that changes how a
 service stores its data should change it only once its slot has committed

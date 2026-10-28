@@ -498,7 +498,7 @@ pub fn isAdvisoryId(id: []const u8) bool {
 pub fn describeEvent(e: Event) []const u8 {
     if (std.mem.eql(u8, e.event, "check"))
         return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
-    // Logs from before staging say "update" (docs/design/update-policy.md).
+    // Logs from before staging say "update" (docs/design/implemented/update-policy.md).
     if (std.mem.eql(u8, e.event, "update")) return "updated, and rebooted into it";
     if (std.mem.eql(u8, e.event, "stage")) return "staged, to boot when due";
     if (std.mem.eql(u8, e.event, "skip")) return e.reason;

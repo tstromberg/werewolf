@@ -80,6 +80,54 @@ fn policy(io: Io, gpa: std.mem.Allocator, ctx: driver.Run, suite: []const u8) !v
         refused.term.exited == 126 and absent and
         std.mem.indexOf(u8, refused.stderr, "refused: only trailing /dev/null redirects") != null);
     try ctx.result(io, suite, "no-tcp-listener", try driver.tcpPrivate(io, gpa, 5432, false));
+    const selected = try Io.Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/werewolf/variants",
+        gpa,
+        .limited(1024),
+    );
+    var vector = false;
+    var names = std.mem.splitScalar(u8, selected, ',');
+    while (names.next()) |name| if (std.mem.eql(u8, name, "vector")) {
+        vector = true;
+    };
+    const sql = if (vector)
+        "CREATE EXTENSION IF NOT EXISTS vector; " ++
+            "SELECT ('[1,2,3]'::vector <-> '[1,2,3]'::vector)::int;"
+    else
+        "SELECT count(*) FROM pg_available_extensions WHERE name='vector';";
+    var healthy = false;
+    for (0..30) |_| {
+        const reply = try std.process.run(gpa, io, .{
+            .argv = &.{
+                "/usr/bin/psql",
+                "-X",
+                "-w",
+                "-A",
+                "-t",
+                "-q",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                "/run/svc/postgres",
+                "-U",
+                "postgres",
+                "-d",
+                "postgres",
+                "-c",
+                sql,
+            },
+            .stdout_limit = .limited(4096),
+            .stderr_limit = .limited(4096),
+            .timeout = driver.deadline(io, 10),
+        });
+        if (reply.term == .exited and reply.term.exited == 0) {
+            healthy = std.mem.eql(u8, std.mem.trim(u8, reply.stdout, " \r\n"), "0");
+            break;
+        }
+        try io.sleep(.fromSeconds(2), .awake);
+    }
+    try ctx.result(io, suite, "vector-selection", healthy);
 }
 
 /// hasLine reports whether text holds line as one whole line: a grant

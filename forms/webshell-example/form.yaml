@@ -57,6 +57,6 @@ services:
     listen: [tcp/8080]
     env: [PYTHONDONTWRITEBYTECODE=1, PYTHONUNBUFFERED=1]
     # cat also runs narrowed, by /etc/sv/app/narrow/cat, its link to leash
-    # (docs/design/narrow.md): it reads the image, but not the account list or
+    # (docs/design/implemented/narrow.md): it reads the image, but not the account list or
     # the app's own files, as the app may; it writes nothing and has no network.
     narrow: /usr/bin/cat pledge stdio rpath

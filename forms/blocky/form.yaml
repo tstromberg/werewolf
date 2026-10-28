@@ -3,7 +3,7 @@
 # upstreams over TLS alone, keeps no query log, and blocks every name for
 # a client outside private networks, so it is no open resolver. It runs
 # Blocky's own image, its latest release, pinned by digest when built, in
-# a tree of its own (docs/design/oci.md). Its configuration is the image's
+# a tree of its own (docs/design/implemented/oci.md). Its configuration is the image's
 # (rootfs/oci/blocky/app/blocky.json), with the upstreams and blocklists
 # the machine's settings give. See forms/blocky/README.md.
 base: prod

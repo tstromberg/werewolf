@@ -13,6 +13,10 @@ su — authenticate a new root login through the forwarded SSH agent
 
 ## DESCRIPTION
 
+The caller must be a current member of the wheel group, derived from
+`users.NAME.admin: true`. The SSH server checks local membership independently
+of this wrapper and still requires fresh authentication with an authorized root key.
+
 The Werewolf **su** utility opens a fresh root SSH login to 127.0.0.1:22. All
 accepted invocations open the same root login shell. It has no set-user-ID privilege;
 the existing SSH server authenticates the key and creates the session.

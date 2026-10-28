@@ -1,7 +1,7 @@
 //! uki assembles a Unified Kernel Image on the build host: sections named
 //! on the command line (.linux, .initrd, .cmdline, ...) are appended to a
 //! stub (systemd's linuxaa64.efi.stub), making one PE the firmware can
-//! load, and a signature can cover whole. See docs/design/verified-boot.md.
+//! load, and a signature can cover whole. See docs/design/implemented/verified-boot.md.
 //!
 //!     uki STUB OUT NAME=FILE...
 

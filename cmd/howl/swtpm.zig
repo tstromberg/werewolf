@@ -1,7 +1,7 @@
 //! swtpm keeps a local machine's swtpm in the invoking user's custody: the
 //! guest gets only its emulated device, never the control socket. The
 //! supervisor, `howl _tpm serve AUTHORITY SOCKETS BACKEND`, is what start
-//! leaves running and stop ends. See docs/design/secure-local-deployment.md.
+//! leaves running and stop ends. See docs/design/implemented/secure-local-deployment.md.
 
 const std = @import("std");
 const builtin = @import("builtin");

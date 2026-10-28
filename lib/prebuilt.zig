@@ -8,6 +8,21 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const format = "werewolf-image/2";
 pub const metadata = "/usr/share/werewolf/image-update";
 pub const max_manifest = 1 << 20;
+
+/// Wire selections are canonical: lowercase names, sorted and unique.
+pub fn variantSelection(text: []const u8) bool {
+    if (text.len == 0 or text.len > 1024) return false;
+    var it = mem.splitScalar(u8, text, ',');
+    var previous: []const u8 = "";
+    while (it.next()) |name| {
+        if (name.len == 0 or name.len > 64 or name[0] == '-' or
+            !mem.lessThan(u8, previous, name)) return false;
+        for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and
+            c != '-') return false;
+        previous = name;
+    }
+    return true;
+}
 pub const max_artifact: u64 = 8 << 30;
 /// Package is an installed package. origin is its source package, or
 /// ORIGIN:VERSION for the actual upstream source (rebuiltFrom), which
@@ -45,6 +60,8 @@ pub const names = [_][]const u8{
 };
 pub const Manifest = struct {
     format: []const u8,
+    form: ?[]const u8 = null,
+    variants: []const []const u8 = &.{},
     channel: []const u8,
     arch: []const u8,
     serial: []const u8,
@@ -63,6 +80,19 @@ pub const Manifest = struct {
     index: u64,
     files: Files,
 
+    pub fn jsonStringify(m: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        inline for (@typeInfo(@This()).@"struct".field_names) |field| {
+            const selected_field = comptime mem.eql(u8, field, "form") or
+                mem.eql(u8, field, "variants");
+            if (!selected_field or m.variants.len > 0) {
+                try jw.objectField(field);
+                try jw.write(@field(m, field));
+            }
+        }
+        try jw.endObject();
+    }
+
     pub fn artifact(m: Manifest, name: []const u8) ?Artifact {
         inline for (names) |n| if (mem.eql(u8, name, n)) return @field(m.files, n);
         return null;
@@ -77,7 +107,12 @@ pub fn channelId(url: []const u8) [32]u8 {
     Sha256.hash(url, &id, .{});
     return id;
 }
-pub const Identity = struct { channel: []const u8, arch: []const u8 };
+pub const Identity = struct {
+    channel: []const u8,
+    arch: []const u8,
+    form: ?[]const u8 = null,
+    variants: ?[]const []const u8 = null,
+};
 
 /// Authenticate bytes before JSON parsing. A signature authorizes a whole
 /// bundle only for the channel and architecture enrolled in the running root.
@@ -104,6 +139,27 @@ pub fn check(m: Manifest, identity: Identity) !void {
     if (!mem.eql(u8, m.format, format) or !m.ipe) return error.NotAnIpeImage;
     try channel(m.channel);
     if (!mem.eql(u8, m.channel, identity.channel)) return error.WrongImageChannel;
+    if (m.variants.len > 0) {
+        const name = m.form orelse return error.BadImageForm;
+        if (name.len == 0 or name.len > 64 or name[0] == '-') return error.BadImageForm;
+        for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and
+            c != '-') return error.BadImageForm;
+        for (m.variants, 0..) |variant, i| {
+            if (!variantSelection(variant) or
+                mem.findScalar(u8, variant, ',') != null) return error.BadImageVariants;
+            if (i > 0 and
+                !mem.lessThan(u8, m.variants[i - 1], variant)) return error.BadImageVariants;
+        }
+    }
+    if (identity.form) |form| if (!mem.eql(u8, m.form orelse "", form)) return error.WrongImageForm;
+    if (identity.variants) |variants| {
+        if (m.variants.len != variants.len) return error.WrongImageVariants;
+        for (m.variants, variants) |actual, wanted| if (!mem.eql(
+            u8,
+            actual,
+            wanted,
+        )) return error.WrongImageVariants;
+    }
     if (!mem.eql(u8, m.arch, identity.arch) or
         (!mem.eql(u8, m.arch, "aarch64") and
             !mem.eql(u8, m.arch, "x86_64"))) return error.WrongImageArch;
@@ -224,7 +280,7 @@ pub fn channel(url: []const u8) !void {
         uri.fragment != null)
         return error.BadImageChannel;
     if (uri.port == 0) return error.BadImageChannel;
-    for (url) |c| if (!std.ascii.isAlphanumeric(c) and mem.indexOfScalar(u8, "-._:/[]", c) == null)
+    for (url) |c| if (!std.ascii.isAlphanumeric(c) and mem.indexOfScalar(u8, "-._:/[],", c) == null)
         return error.BadImageChannel;
     var parts = mem.splitScalar(u8, url["https://".len..], '/');
     while (parts.next()) |p| if (mem.eql(u8, p, ".") or mem.eql(u8, p, "..") or p.len == 0)
@@ -394,6 +450,42 @@ fn fixture() Manifest {
             .cmdline = a,
         },
     };
+}
+
+test "variant identity rejects substitution even on the same signed channel" {
+    var m = fixture();
+    const build = buildId(m.files);
+    m.build = &build;
+    m.form = "postgresql";
+    m.variants = &.{ "ssh", "vector" };
+    const identity: Identity = .{
+        .channel = m.channel,
+        .arch = m.arch,
+        .form = "postgresql",
+        .variants = &.{ "ssh", "vector" },
+    };
+    try check(m, identity);
+    m.variants = &.{"ssh"};
+    try testing.expectError(error.WrongImageVariants, check(m, identity));
+    m.variants = &.{};
+    try testing.expectError(error.WrongImageVariants, check(m, identity));
+    m.variants = &.{ "vector", "ssh" };
+    try testing.expectError(error.BadImageVariants, check(m, identity));
+    m.variants = &.{ "ssh", "ssh" };
+    try testing.expectError(error.BadImageVariants, check(m, identity));
+    m.variants = &.{ "ssh", "vector" };
+    m.form = "other";
+    try testing.expectError(error.WrongImageForm, check(m, identity));
+}
+
+test "default manifests retain the old wire fields" {
+    const wire = try std.json.Stringify.valueAlloc(testing.allocator, fixture(), .{});
+    defer testing.allocator.free(wire);
+    try testing.expect(mem.find(u8, wire, "\"variants\"") == null);
+    try testing.expect(mem.find(u8, wire, "\"form\"") == null);
+    const old = try std.json.parseFromSlice(Manifest, testing.allocator, wire, .{});
+    defer old.deinit();
+    try testing.expectEqual(@as(usize, 0), old.value.variants.len);
 }
 
 test rebuiltFrom {

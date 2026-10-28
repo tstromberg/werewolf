@@ -41,18 +41,19 @@ howl create valkey --with valkey --on gcp --allow-from me
 `--allow-from` opens no port: there is no listener. Keep the store on the same
 machine as the service that uses it.
 
-### Importing data
+### Exporting and importing data
 
-The host cannot reach this server. `--import` attaches a directory. `valkey-init`
-copies `dump.rdb` from it once, before the first start, and the server loads that
-file. Take the file from the old server with `valkey-cli --rdb dump.rdb`.
+Use a physical archive from the same image and architecture. The service scope is
+`valkey`; full transfer also includes companion service data. The destination
+must have empty selected data and remains stopped after import. See [data storage](../../docs/data.md) for supported adapters and consistency requirements.
 
 ```sh
-howl create valkey --with valkey --import ./dump
+howl export source --service valkey --output backup.tar.zst
+howl import replacement backup.tar.zst
 ```
 
-[valkey-tcp](../valkey-tcp/README.md) is this server on port 6379. Its cap is
-`--maxmemory`, and `0` removes it.
+[valkey-tcp](../valkey-tcp/README.md) exposes port 6379. Its memory cap is
+`--maxmemory`; `0` removes it.
 
 ### Known Quirks
 
@@ -60,5 +61,4 @@ howl create valkey --with valkey --import ./dump
 - A cache sets `maxmemory-policy allkeys-lru`. This one keeps every key until it is
   full, then refuses writes. To raise or drop the 192 MiB cap, use
   [valkey-tcp](../valkey-tcp/README.md).
-- A second start that finds `dump.rdb` keeps it. `--import` does not replace a store
-  that exists.
+- A second start uses the existing `dump.rdb`; import refuses an occupied store.

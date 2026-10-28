@@ -27,8 +27,7 @@ prune:
 
 services:
     # MariaDB, as its own user, for local clients over its UNIX socket
-    # alone. mariadb-init makes the data on the first start, streams
-    # /run/werewolf/import/*.sql into that first database, upgrades the data
+    # alone. mariadb-init makes the data on the first start and upgrades it
     # when the server is of a newer series, and applies the image's SQL
     # before each start, through the server in bootstrap mode.
   mariadb:
@@ -41,7 +40,7 @@ services:
     # aio: InnoDB's reads and writes, by Linux native AIO. It reaches no
     # network: there is no inet promise.
     pledge: stdio rpath wpath unix listen proc aio
-    read: /etc/mariadb /run/werewolf/import
+    read: /etc/mariadb
     # Local clients reach its socket, /run/svc/mariadb/mariadb.sock.
     share: shared
     memory: 1024

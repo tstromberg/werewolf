@@ -78,7 +78,16 @@ const Public = struct {
         const host_arch = if (cpu_arch == .aarch64) "aarch64" else @tagName(cpu_arch);
         if (builtin.os.tag != .linux or !mem.eql(u8, host_arch, arch))
             return c.fail("public image checks require a native Linux QEMU runner", .{});
-        const leaf = try gpa.print("{s}-{s}", .{ name, arch });
+        const variants = try published.variants(gpa, target);
+        const leaf = try gpa.print(
+            "{s}-{s}{s}{s}",
+            .{
+                name,
+                arch,
+                if (variants.len == 0) "" else "-variants-",
+                try mem.join(gpa, ",", variants),
+            },
+        );
         const work = try std.fs.path.join(gpa, &.{ output, leaf });
         if (exists(io, work)) return c.fail("{s} exists already", .{work});
         try c.setWork(work);
@@ -110,7 +119,8 @@ const Public = struct {
             return c.fail("discovery: howl forms said no JSON", .{});
         const object = published.text(target, "object") orelse
             return c.fail("a target names no object", .{});
-        const advertised = latestObject(catalog, name, arch) orelse
+        const variants = try published.variants(gpa, target);
+        const advertised = selectedObject(catalog, name, arch, variants) orelse
             return c.fail("signed public catalog has no single {s}/qemu/{s} row", .{ name, arch });
         if (!mem.eql(u8, advertised, object))
             return c.fail("signed public catalog does not advertise the published descriptor", .{});
@@ -127,6 +137,10 @@ const Public = struct {
             "--add-current-user",
             "no",
         });
+        if (variants.len > 0) try create.appendSlice(
+            gpa,
+            &.{ "--variant", try mem.join(gpa, ",", variants) },
+        );
         if (mem.eql(u8, name, "postdoc-server")) {
             const config = try c.path("config");
             _ = try c.must(&.{ "forms/postdoc-server/test/config", config }, "config", .{});
@@ -300,6 +314,15 @@ fn ready(
 /// latestObject is the object the catalog's one row for form/qemu/arch
 /// advertises as latest, or null if there is not exactly one such row.
 fn latestObject(catalog: json.Value, name: []const u8, arch: []const u8) ?[]const u8 {
+    return selectedObject(catalog, name, arch, &.{});
+}
+
+fn selectedObject(
+    catalog: json.Value,
+    name: []const u8,
+    arch: []const u8,
+    variants: []const []const u8,
+) ?[]const u8 {
     const rows = published.field(catalog, "forms") orelse return null;
     if (rows != .array) return null;
     var found: ?json.Value = null;
@@ -307,7 +330,8 @@ fn latestObject(catalog: json.Value, name: []const u8, arch: []const u8) ?[]cons
         const f = published.text(row, "form") orelse continue;
         const provider = published.text(row, "provider") orelse continue;
         const a = published.text(row, "arch") orelse continue;
-        if (!mem.eql(u8, f, name) or !mem.eql(u8, provider, "qemu") or !mem.eql(u8, a, arch))
+        if (!mem.eql(u8, f, name) or !mem.eql(u8, provider, "qemu") or !mem.eql(u8, a, arch) or
+            !published.sameVariants(row, variants))
             continue;
         if (found != null) return null;
         found = row;

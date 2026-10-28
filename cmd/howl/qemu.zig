@@ -23,8 +23,6 @@ pub const Machine = struct {
     /// web_port is this host's port that reaches the machine's guest_web.
     web_port: u16,
     guest_web: u16,
-    /// import_disk is the read-only ext4 image of --import, or null.
-    import_disk: ?[]const u8 = null,
     /// Host-private swtpm control socket; only its emulated device enters the guest.
     tpm_socket: ?[]const u8 = null,
     /// Optional host-private fixed operator channel, never a TCP listener.
@@ -195,12 +193,7 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
         "-chardev", try gpa.print("socket,id=owner,path={s}/owner.sock,server=on,wait=off", .{d}),
         "-device",  "virtserialport,chardev=owner,name=werewolf.owner",
     } }) else attached;
-    const imp = m.import_disk orelse return managed;
-    const p = try std.mem.replaceOwned(u8, gpa, imp, ",", ",,");
-    return std.mem.concat(gpa, []const u8, &.{ managed, &.{
-        "-drive",
-        try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{p}),
-    } });
+    return managed;
 }
 
 /// running returns QEMU's pid from d/qemu.pid, or null if it is not running.
@@ -416,18 +409,6 @@ test argv {
         "driver=cfi.pflash01,property=secure,value=on",
     ) != null);
     try std.testing.expect(std.mem.find(u8, sx, "unit=1,file=/w,,x/m/vars.fd") != null);
-    var brought = m;
-    brought.import_disk = "/w,x/m/import.img";
-    const with = try std.mem.join(
-        arena.allocator(),
-        " ",
-        try argv(arena.allocator(), brought, .hvf),
-    );
-    try std.testing.expect(std.mem.find(
-        u8,
-        with,
-        "file=/w,,x/m/import.img,format=raw,if=virtio,readonly=on",
-    ) != null);
 }
 
 test freePort {

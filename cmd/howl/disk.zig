@@ -1,6 +1,6 @@
 //! disk writes werewolf's UEFI boot disk from a slot: a GPT (boot/gpt.zig),
 //! an EFI system partition filled with mtools, and an ext4 partition made
-//! with mke2fs -d. See docs/design/native-boot.md.
+//! with mke2fs -d. See docs/design/implemented/native-boot.md.
 //!
 //! Every GUID, UUID, serial number and time is fixed, so the same slot gives
 //! the same disk, byte for byte.

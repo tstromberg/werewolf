@@ -11,7 +11,7 @@
 //! _unwoundnet, the one user fence lets reach the resolvers, it forwards
 //! what the frontend allowed. Each side treats the other's messages as
 //! input to check. An observe-only age child classifies screened requests
-//! without changing answers. See docs/design/unwound.md and cmd/unwound/unwound.8.
+//! without changing answers. See docs/design/implemented/unwound.md and cmd/unwound/unwound.8.
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
