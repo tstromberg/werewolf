@@ -111,6 +111,7 @@ services:
     exec: /usr/bin/ruby -C /usr/lib/mastodon /usr/bin/bundle exec puma -C config/puma.rb
     before:
       - /usr/bin/ruby /usr/share/werewolf-mastodon/secrets.rb
+      - /usr/bin/ruby /usr/share/werewolf-mastodon/postgres-ready.rb
       - /usr/bin/ruby -C /usr/lib/mastodon bin/rails db:prepare
       - /usr/bin/ruby -C /usr/lib/mastodon bin/rails runner /usr/share/werewolf-mastodon/owner.rb
     user: mastodon
