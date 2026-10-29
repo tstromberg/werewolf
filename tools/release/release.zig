@@ -153,10 +153,11 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
     const tree: plan.Tree = .{};
     if (mem.eql(u8, verb, "form-images")) return formImages(s, t, tree, a);
     if (mem.eql(u8, verb, "legacy-images")) {
+        const selected = try (try imageScope(s, t)).selected(s);
         if (a.positional.len < 1) return s.refuse("usage: legacy-images build|check ...", .{});
         if (mem.eql(u8, a.at(0), "build")) {
             try a.want(s, 3, "legacy-images build SNAPSHOT OUTPUT");
-            return @intFromBool(try legacy.build(s, t, tree, a.at(1), a.at(2)));
+            return @intFromBool(try legacy.build(s, selected, tree, a.at(1), a.at(2)));
         }
         try a.want(s, 5, "legacy-images check SNAPSHOT FIRST SECOND OUTPUT");
         if (!mem.eql(
@@ -164,7 +165,15 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
             a.at(0),
             "check",
         )) return s.refuse("usage: legacy-images build|check ...", .{});
-        return @intFromBool(try legacy.check(s, t, tree, a.at(1), a.at(2), a.at(3), a.at(4)));
+        return @intFromBool(try legacy.check(
+            s,
+            selected,
+            tree,
+            a.at(1),
+            a.at(2),
+            a.at(3),
+            a.at(4),
+        ));
     }
     if (mem.eql(u8, verb, "protected-inputs")) {
         try a.want(s, 3, "protected-inputs HOWL ARCH OUTPUT");
@@ -242,6 +251,13 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
     unreachable;
 }
 
+fn imageScope(s: *Sys, configured: images.Images) !images.Images {
+    return if (mem.eql(u8, s.getenv("FORM_IMAGES_TARGET") orelse "base", "all"))
+        try configured.entire(s)
+    else
+        configured;
+}
+
 fn formImages(s: *Sys, configured: images.Images, tree: plan.Tree, a: Args) !u8 {
     if (a.positional.len < 1) return s.refuse(
         "usage: form-images matrix|gates|resolve|build|check|gate|export|publish ...",
@@ -250,10 +266,7 @@ fn formImages(s: *Sys, configured: images.Images, tree: plan.Tree, a: Args) !u8 
     const command = a.at(0);
     s.variants = a.option("variant") orelse s.getenv("FORM_IMAGES_VARIANTS") orelse "";
     _ = try s.variantNames();
-    const all = if (mem.eql(u8, s.getenv("FORM_IMAGES_TARGET") orelse "base", "all"))
-        try configured.entire(s)
-    else
-        configured;
+    const all = try imageScope(s, configured);
     const t = try all.selected(s);
     const recovery = try plan.focused(s, t);
     const store = Store.init(s.getenv("PROTECTED_BUCKET") orelse "s3://werewolf/boot/v1");
@@ -500,6 +513,47 @@ const Args = struct {
         if (a.positional.len != n) return s.refuse("usage: " ++ use, .{});
     }
 };
+
+test "legacy build and check use the scheduled full catalog selection" {
+    const testing = std.testing;
+    const fixture = @import("fixture.zig");
+    var f: fixture.Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const s = &f.s;
+    const configured = try images.load(s);
+    const extra = for (configured.catalog_forms) |name| {
+        if (!configured.hasForm(name)) break name;
+    } else return error.TestExpectedCatalogForm;
+    try testing.expect(!(try imageScope(s, configured)).hasForm(extra));
+    try f.env.put("FORM_IMAGES_TARGET", "all");
+    const selected = try (try imageScope(s, configured)).selected(s);
+    try testing.expect(selected.hasForm(extra));
+    try sys.writeJson(s, f.path("snapshot/plan.json"), try json.from(s.gpa, .{
+        .arch = "x86_64",
+        .targets = &[_]json.Json{try json.from(s.gpa, .{
+            .form = extra,
+            .arch = "x86_64",
+            .status = "unchanged",
+            .legacy_status = "unchanged",
+        })},
+    }));
+    const tree: plan.Tree = .{ .native = false };
+    try testing.expect(!try legacy.build(s, selected, tree, f.path("snapshot"), f.path("built")));
+    try testing.expect(!try legacy.check(
+        s,
+        selected,
+        tree,
+        f.path("snapshot"),
+        f.path("first"),
+        f.path("second"),
+        f.path("checked"),
+    ));
+    try testing.expectError(
+        error.Refused,
+        legacy.build(s, configured, tree, f.path("snapshot"), f.path("base")),
+    );
+}
 
 test {
     _ = @import("json.zig");
