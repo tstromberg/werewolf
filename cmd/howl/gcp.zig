@@ -85,13 +85,23 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
+    return ensureImageAt(io, gpa, p, form, arch, disk, work, null, why);
+}
+
+/// Application data is published only through an operation-private bucket
+/// and image; never through the shared distributable-image cache.
+pub fn privateImage(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.Arch, disk: []const u8, work: []const u8, name: []const u8, bucket: []const u8, why: *howl.Why) ![]const u8 {
+    return ensureImageAt(io, gpa, p, form, arch, disk, work, .{ .name = name, .bucket = bucket }, why);
+}
+
+fn ensureImageAt(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.Arch, disk: []const u8, work: []const u8, private: ?struct { name: []const u8, bucket: []const u8 }, why: *howl.Why) ![]const u8 {
     // The image's own boot certificate is PK, KEK and db: the published
     // vendor's for a download, the builder's for a --build.
     _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     const digest = try images.sha256(io, disk);
     const code = try gpa.print("{s}/boot.der", .{work});
-    const name = try images.name(gpa, form, arch, &digest);
-    if (ask(
+    const name = if (private) |v| v.name else try images.name(gpa, form, arch, &digest);
+    if (private == null and ask(
         io,
         gpa,
         p,
@@ -119,7 +129,7 @@ pub fn ensureImage(
         tarball,
         "disk.raw",
     });
-    const bucket = try gpa.print("gs://{s}-werewolf-images", .{p.project});
+    const bucket = if (private) |target| target.bucket else try gpa.print("gs://{s}-werewolf-images", .{p.project});
     const region = p.zone[0 .. std.mem.findScalarLast(u8, p.zone, '-') orelse p.zone.len];
     if (ask(
         io,

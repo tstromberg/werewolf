@@ -107,7 +107,7 @@ pub fn controlDisk(io: Io, a: Allocator, work: []const u8, request: anytype, arc
     defer f.close(io);
     try f.setLength(io, size);
     const mk = @import("ext4.zig").findMke2fs(io, a) orelse return why.refuse("no mke2fs; install e2fsprogs", .{});
-    try howl.run(io, why, &.{ mk, "-q", "-F", "-t", "ext4", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", "-d", files, disk });
+    try howl.run(io, why, &.{ mk, "-q", "-F", "-t", "ext4", "-o", "Linux", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", "-d", files, disk });
     try f.sync(io);
     return disk;
 }
@@ -137,9 +137,14 @@ fn escaped(a: Allocator, text: []const u8) ![]const u8 {
 pub fn argv(a: Allocator, g: Guest, d: Devices, console: []const u8, output: []const u8) ![]const []const u8 {
     const host = howl.hostArch() orelse return error.UnsupportedHostArch;
     if (g.arch != host) return error.TransferArchitecture;
-    const mac = @import("builtin").os.tag == .macos;
+    const acceleration: []const u8 = switch (@import("builtin").os.tag) {
+        .macos => "hvf",
+        .linux => "kvm",
+        .freebsd => "tcg",
+        else => return error.TransferProvider,
+    };
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ if (g.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64", "-M", if (g.arch == .aarch64) "virt,gic-version=3" else "q35", "-accel", if (mac) "hvf" else "kvm", "-cpu", "host", "-smp", "2", "-m", "2048", "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none", "-nic", "none", "-serial", try a.print("file:{s}", .{try escaped(a, console)}), "-kernel", g.kernel, "-initrd", g.initramfs, "-append", if (g.arch == .aarch64) "console=ttyAMA0 panic=-1 rdinit=/init" else "console=ttyS0 panic=-1 rdinit=/init" });
+    try args.appendSlice(a, &.{ if (g.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64", "-M", if (g.arch == .aarch64) "virt,gic-version=3" else "q35", "-accel", acceleration, "-cpu", if (mem.eql(u8, acceleration, "tcg")) "max" else "host", "-smp", "2", "-m", "2048", "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none", "-nic", "none", "-serial", try a.print("file:{s}", .{try escaped(a, console)}), "-kernel", g.kernel, "-initrd", g.initramfs, "-append", if (g.arch == .aarch64) "console=ttyAMA0 panic=-1 rdinit=/init" else "console=ttyS0 panic=-1 rdinit=/init" });
     for ([_][]const u8{ d.data, d.control, g.image }, 0..) |path, i| {
         try args.appendSlice(a, &.{ "-drive", try a.print("if=none,id=d{d},format=raw,readonly={s},file={s}", .{ i, if (i == 0 and d.writable) "off" else "on", try escaped(a, path) }), "-device", try a.print("virtio-blk-pci,drive=d{d}", .{i}) });
     }

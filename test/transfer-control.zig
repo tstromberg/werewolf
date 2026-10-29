@@ -7,6 +7,20 @@ const Io = std.Io;
 const Dir = Io.Dir;
 
 pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 2 and std.mem.eql(u8, args[1], "park")) {
+        while (true) try init.io.sleep(.fromSeconds(3600), .awake);
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "prepare-postgres")) {
+        const role = try Dir.cwd().readFileAlloc(init.io, "/run/svc/postgres/transfer-role", init.arena.allocator(), .limited(32));
+        if (std.mem.eql(u8, std.mem.trim(u8, role, "\r\n"), "empty")) {
+            if (Dir.cwd().access(init.io, "/data/svc/postgres/data/PG_VERSION", .{})) |_| {} else |err| {
+                if (err == error.FileNotFound) return;
+                return err;
+            }
+        }
+        return std.process.replace(init.io, .{ .argv = &.{"/usr/lib/werewolf/pg-init"} });
+    }
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) return error.Fork;
     if (pid != 0) {
@@ -26,7 +40,9 @@ pub fn main(init: std.process.Init) !void {
 fn control(io: Io, a: std.mem.Allocator) !void {
     const id = try postgresId(io, a);
     const role = try Dir.cwd().readFileAlloc(io, "/run/config/transfer-role", a, .limited(32));
-    try ready(io, a, id);
+    const empty = std.mem.eql(u8, std.mem.trim(u8, role, "\r\n"), "empty") and
+        (if (Dir.cwd().access(io, "/data/svc/postgres/data/PG_VERSION", .{})) |_| false else |_| true);
+    if (!empty) try ready(io, a, id);
     if (std.mem.eql(u8, std.mem.trim(u8, role, "\r\n"), "source") and
         (if (sql(io, a, id, "SELECT value FROM transfer_rows WHERE id=7", "acknowledged")) |_| false else |_| true))
     {
@@ -40,10 +56,37 @@ fn control(io: Io, a: std.mem.Allocator) !void {
             "SELECT lo_from_bytea(195001,decode('001122aaff','hex'));", null);
         try sqlAt(io, a, id, "transfer_a", "CREATE TABLE other_rows(value text); INSERT INTO other_rows VALUES('second database');", null);
     }
-    try verify(io, a, id);
+    if (!empty) {
+        try verify(io, a, id);
+        say(io, "database verified");
+    }
     say(io, "ready");
+    for (0..60) |_| {
+        if (Dir.cwd().access(io, "/run/svc/sshd/host-key.pub", .{})) |_| break else |_| {}
+        try io.sleep(.fromSeconds(1), .awake);
+    }
     const pubkey = try Dir.cwd().readFileAlloc(io, "/run/svc/sshd/host-key.pub", a, .limited(4096));
     try Io.File.stdout().writeStreamingAll(io, try a.print("transfer-host-key: {s}", .{pubkey}));
+    if (Dir.cwd().access(io, "/usr/share/werewolf/transfer-stop-fixture", .{})) |_| {
+        var armed = false;
+        while (true) {
+            if (Dir.cwd().openFile(io, "/run/runit/supervise.transfer-stop/status", .{})) |file| {
+                defer file.close(io);
+                var status: [20]u8 = undefined;
+                if (try file.readPositionalAll(io, &status, 0) != status.len) return error.Supervision;
+                if (status[17] == 'd') armed = true;
+                if (armed and status[17] == 'u') {
+                    // Firecracker exits on a clean reboot; its supervisor's
+                    // private host marker keeps this disposable fixture off.
+                    try Dir.cwd().setFilePermissions(io, "/run/runit/reboot", .fromMode(0o100), .{});
+                    try Dir.cwd().setFilePermissions(io, "/run/runit/stopit", .fromMode(0o100), .{});
+                    if (linux.errno(linux.kill(1, linux.SIG.CONT)) != .SUCCESS) return error.Poweroff;
+                    return;
+                }
+            } else |err| if (err != error.FileNotFound) return err;
+            try io.sleep(.fromMilliseconds(100), .awake);
+        }
+    } else |err| if (err != error.FileNotFound) return err;
 }
 
 fn postgresId(io: Io, a: std.mem.Allocator) !u32 {

@@ -580,14 +580,26 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
     return pid;
 }
 
-/// stop kills Firecracker, like cutting power, and waits up to 10 s for
-/// the supervisor to remove the pidfile.
+pub fn supervised(io: Io, gpa: Allocator, dir: []const u8) !bool {
+    const guard = Dir.cwd().openFile(io, try gpa.print("{s}/firecracker.lock", .{dir}), .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer guard.close(io);
+    if (try guard.tryLock(io, .exclusive)) {
+        guard.unlock(io);
+        return false;
+    }
+    return true;
+}
+
+/// Stop cuts power. Offline transfer still requires a clean guest shutdown.
 pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: *howl.Why) !void {
     if (builtin.os.tag != .linux) return;
     std.posix.kill(pid, .KILL) catch {};
     var waited: u32 = 0;
     while (waited < 10) : (waited += 1) {
-        if (running(io, gpa, dir) == null) return;
+        if (running(io, gpa, dir) == null and !try supervised(io, gpa, dir)) return;
         try io.sleep(.fromSeconds(1), .awake);
     }
     return why.refuse("{s}: its Firecracker, pid {d}, did not stop", .{ dir, pid });
@@ -908,7 +920,34 @@ fn drain(io: Io, from: Io.File, to: Io.File) !bool {
 /// Firecracker exits 0 on both reboot and halt, so keep observes the console
 /// stream to tell them apart, and restarts on reboot while config.tar
 /// exists; delete removes it. Any other exit ends the machine.
-pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
+pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
+    if (args.len == 0) return why.refuse("_firecracker DIR [--pinned] [--guard FD]", .{});
+    var pinned = false;
+    var handoff: ?Io.File = null;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (mem.eql(u8, args[i], "--pinned") and !pinned) {
+            pinned = true;
+        } else if (mem.eql(u8, args[i], "--guard") and handoff == null and i + 1 < args.len) {
+            i += 1;
+            const fd = std.fmt.parseInt(std.posix.fd_t, args[i], 10) catch return error.FirecrackerGuard;
+            if (fd < 3) return error.FirecrackerGuard;
+            handoff = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+        } else return error.FirecrackerArguments;
+    }
+    try keep(io, gpa, args[0], pinned, handoff);
+}
+
+pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool, handoff: ?Io.File) !void {
+    const launch_guard = handoff orelse try @import("data-cloud.zig").guard(io, gpa, dir);
+    var inherited = true;
+    defer if (inherited) launch_guard.close(io);
+    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/firecracker.lock", .{dir}), .{ .truncate = false, .permissions = .fromMode(0o600) });
+    defer guard.close(io);
+    if (!try guard.tryLock(io, .exclusive)) return error.FirecrackerAlreadyRunning;
+    defer guard.unlock(io);
+    launch_guard.close(io);
+    inherited = false;
     // Preserve admission when an operator invokes the internal supervisor directly.
     // Once selected, losing the record during a guest reboot never downgrades it.
     const require_pin = pinned or
@@ -992,6 +1031,7 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool) !void {
                 "the guest asked to reboot" },
         ) catch unreachable) catch {};
         if (code != 0 or halted) return;
+        if (Dir.cwd().access(io, try gpa.print("{s}/stop-request", .{dir}), .{})) |_| return else |err| if (err != error.FileNotFound) return err;
         Dir.cwd().access(io, config_tar, .{}) catch return;
     }
 }

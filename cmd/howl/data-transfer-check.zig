@@ -54,6 +54,7 @@ const Check = struct {
     image: []const u8,
     why: howl.Why = .{},
     phase: []const u8 = "fixture creation",
+    replay_copy: bool = false,
 
     fn path(c: *Check, name: []const u8) ![]const u8 {
         return c.a.print("{s}/{s}", .{ c.work, name });
@@ -132,7 +133,7 @@ const Check = struct {
         defer f.close(c.io);
         try f.setLength(c.io, 96 << 20);
         const mk = @import("ext4.zig").findMke2fs(c.io, c.a) orelse return error.TransferTestTool;
-        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", "-d", tree, disk });
+        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-o", "Linux", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", "-d", tree, disk });
         // mke2fs preserves host ownership. Normalize this disposable fixture
         // to the image's approved root identity, never change source VMs.
         var dir = try Dir.cwd().openDir(c.io, tree, .{ .iterate = true });
@@ -161,8 +162,9 @@ const Check = struct {
             .target = "public-fixture",
             .service = scope,
             .initialize = archive != null,
+            .replay_journal_on_copy = c.replay_copy,
         }, archive, key, &c.why);
-        const policy = try helper.run(c.io, c.a, c.guest, .{ .data = disk, .control = control, .writable = archive != null }, work);
+        const policy = try helper.run(c.io, c.a, c.guest, .{ .data = disk, .control = control, .writable = archive != null or c.replay_copy }, work);
         return .{ .policy = policy, .archive = try c.a.print("{s}/archive.tar.zst", .{work}) };
     }
 
@@ -254,7 +256,7 @@ const Check = struct {
         const layout = try @import("gpt").layout(512, 16);
         try @import("gpt").create(c.io, disk, layout);
         const mk = @import("ext4.zig").findMke2fs(c.io, c.a) orelse return error.TransferTestTool;
-        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0", "-E", try c.a.print("offset={d},lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", .{layout.root_first * 512}), "-d", tree, disk, try c.a.print("{d}", .{(layout.root_last + 1 - layout.root_first) / 8}) });
+        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-o", "Linux", "-b", "4096", "-m", "0", "-E", try c.a.print("offset={d},lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", .{layout.root_first * 512}), "-d", tree, disk, try c.a.print("{d}", .{(layout.root_last + 1 - layout.root_first) / 8}) });
         const view = try c.a.print("{s}?offset={d}", .{ disk, layout.root_first * 512 });
         var dir = try Dir.cwd().openDir(c.io, tree, .{ .iterate = true });
         defer dir.close(c.io);
@@ -354,7 +356,23 @@ const Check = struct {
         const before = try c.hash(source);
         const full = try c.invoke("full-export", source, null, null);
         const inventory = try c.validate(full.archive, full.policy, null);
+        var has_log = false;
+        for (inventory.manifest.entries) |e|
+            if (mem.eql(u8, e.path, "log/current") and e.kind == .file) {
+                has_log = true;
+            };
+        if (!has_log) return error.TransferTestMissingLogs;
         try c.equal(before, try c.hash(source));
+        {
+            const replay = try c.path("journal-copy.raw");
+            try Dir.cwd().copyFile(source, .cwd(), replay, c.io, .{});
+            _ = try c.debug(replay, "feature needs_recovery", true);
+            c.replay_copy = true;
+            defer c.replay_copy = false;
+            const recovered = try c.invoke("journal-copy-export", replay, null, null);
+            _ = try c.validate(recovered.archive, recovered.policy, null);
+            try c.equal(before, try c.hash(source));
+        }
         for (inventory.manifest.entries) |e| if (data.excluded(e.path)) return error.TransferTestExclusion;
         const selected = try c.invoke("service-export", source, null, "postgres");
         const selected_inventory = try c.validate(selected.archive, selected.policy, "postgres");
@@ -393,7 +411,10 @@ const Check = struct {
         if (c.invoke("corrupt-import", empty, corrupt, null)) |_| return error.TransferTestCorruption else |err| if (err != error.TransferInstall) return err;
         _ = try c.debug(source, "set_super_value state 2", true);
         const dirty_hash = try c.hash(source);
-        if (c.invoke("dirty-export", source, null, null)) |_| return error.TransferTestDirty else |err| if (err != error.TransferUnclean) return err;
+        if (c.invoke("dirty-export", source, null, null)) |_| return error.TransferTestDirty else |err| if (err != error.TransferFilesystem) return err;
+        c.replay_copy = true;
+        if (c.invoke("damaged-copy-refused", source, null, null)) |_| return error.TransferTestDirty else |err| if (err != error.TransferFilesystem) return err;
+        c.replay_copy = false;
         try c.equal(dirty_hash, try c.hash(source));
     }
 };

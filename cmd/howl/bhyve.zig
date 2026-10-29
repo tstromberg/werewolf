@@ -455,7 +455,10 @@ pub fn installed(io: Io) bool {
 /// exists reports whether bhyve has a VM named name. A VM exists from its
 /// first run until bhyvectl --destroy.
 pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
-    Dir.cwd().access(io, try gpa.print("/dev/vmm/{s}", .{name}), .{}) catch return false;
+    Dir.cwd().access(io, try gpa.print("/dev/vmm/{s}", .{name}), .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     return true;
 }
 

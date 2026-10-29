@@ -29,7 +29,7 @@ pub const limits = struct {
 /// These are machine authority or filesystem bookkeeping, never application
 /// input. The installer enforces these independently of the manifest's claims.
 pub const exclusions = [_][]const u8{
-    ".werewolf", "lost+found", "log", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
+    ".werewolf", "lost+found", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
 };
 
 pub const Identity = struct { name: []const u8, id: u32 };
@@ -133,6 +133,11 @@ pub fn selected(path: []const u8, service: ?[]const u8) bool {
     return mem.startsWith(u8, path, "svc/") and beneath(path[4..], s);
 }
 
+/// Logs are archive evidence, never destination application state.
+pub fn importSelected(path: []const u8, service: ?[]const u8) bool {
+    return !beneath(path, "log") and selected(path, service);
+}
+
 pub fn identityByName(ids: []const Identity, name: []const u8) !u32 {
     for (ids) |id| if (mem.eql(u8, id.name, name)) return id.id;
     return error.TransferOwner;
@@ -181,7 +186,7 @@ pub fn check(a: Allocator, m: Manifest, policy: Policy, service: ?[]const u8) !v
         if (total > limits.total_bytes) return error.TransferLimit;
         for ([_][]const u8{ entry.owner, entry.group }) |name|
             if (!validIdentity(name)) return error.TransferOwner;
-        if (selected(entry.path, service)) {
+        if (importSelected(entry.path, service)) {
             _ = try identityByName(policy.users, entry.owner);
             _ = try identityByName(policy.groups, entry.group);
         }
@@ -425,7 +430,12 @@ pub fn emit(io: Io, a: Allocator, root: Dir, m: Manifest, p: Policy, owners: Own
         defer file.close(io);
         const st = try file.stat(io);
         const actual = try entryFor(e.path, st, try owners.get(owners.context, file), p);
-        if (!entryEqual(e, actual)) return error.TransferChanged;
+        if (beneath(e.path, "log")) {
+            var snapshot = actual;
+            snapshot.size = e.size;
+            snapshot.mtime_ns = e.mtime_ns;
+            if (actual.size < e.size or !entryEqual(e, snapshot)) return error.TransferChanged;
+        } else if (!entryEqual(e, actual)) return error.TransferChanged;
         const extended = try pax(a, e);
         defer a.free(extended);
         if (extended.len > limits.pax) return error.TransferLimit;
@@ -441,7 +451,12 @@ pub fn emit(io: Io, a: Allocator, root: Dir, m: Manifest, p: Policy, owners: Own
             try out.put(buffer[0..n]);
             offset += n;
         }
-        if (!unchanged(st, try file.stat(io))) return error.TransferChanged;
+        const after = try file.stat(io);
+        if (beneath(e.path, "log")) {
+            if (after.inode != st.inode or after.kind != st.kind or
+                (e.kind == .file and (after.nlink != 1 or after.size < e.size)))
+                return error.TransferChanged;
+        } else if (!unchanged(st, after)) return error.TransferChanged;
         try out.pad(e.size);
     }
     const digest = std.fmt.bytesToHex(out.hash.finalResult(), .lower);
@@ -552,7 +567,7 @@ pub fn validateChecksummed(a: Allocator, reader: *Io.Reader, p: Policy, service:
         if (!mem.eql(u8, given, extended)) return error.TransferMetadata;
         try in.take(&h);
         try matchHeader(h, "entry", if (e.kind == .file) '0' else '5', 0, e.mode, e.owner, e.group);
-        const dest = if (selected(e.path, scope)) sink else null;
+        const dest = if (importSelected(e.path, scope)) sink else null;
         if (dest) |s| try s.begin(s.context, e);
         var remaining = e.size;
         var buf: [64 << 10]u8 = undefined;
@@ -686,13 +701,16 @@ test "real tree archive round trip validates all selected and unselected bytes" 
     const owners: Ownership = .{ .get = testOwner };
     const m = try scan(io, a, tmp.dir, test_policy, null, owners);
     for (m.entries) |e| try t.expect(!excluded(e.path));
+    // Active audit writers may append after inventory. Export the bounded
+    // prefix that was measured, without weakening application consistency.
+    try tmp.dir.writeFile(io, .{ .sub_path = "log/current", .data = "native audit trail appended" });
     var out: Io.Writer.Allocating = .init(a);
     const digest = try emit(io, a, tmp.dir, m, test_policy, owners, &out.writer);
     var input: Io.Reader = .fixed(out.written());
     const checked = try validate(a, &input, test_policy, "plex", null);
     try t.expectEqualStrings(&digest, &checked.sha256);
-    try t.expectEqual(@as(u64, 22), checked.bytes);
-    const offset = mem.find(u8, out.written(), "media-sentinel").?;
+    try t.expectEqual(@as(u64, 40), checked.bytes);
+    const offset = mem.find(u8, out.written(), "native audit trail").?;
     out.written()[offset] ^= 1;
     input = .fixed(out.written());
     try t.expectError(error.TransferChecksum, validate(a, &input, test_policy, "plex", null));

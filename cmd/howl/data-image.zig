@@ -108,7 +108,9 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
     } else |err| if (err != error.FileNotFound) return err;
     for ([_][]const u8{ "vmlinuz", "root.erofs" }) |name|
         try Dir.cwd().copyFile(try a.print("{s}/{s}", .{ slot, name }), Dir.cwd(), try a.print("{s}/{s}", .{ dir, name }), io, .{});
-    try Dir.cwd().copyFile(profile.spec.boot_cert orelse return error.TransferImageCertificate, Dir.cwd(), try a.print("{s}/boot.crt", .{dir}), io, .{});
+    if (profile.spec.boot_cert) |cert| {
+        try Dir.cwd().copyFile(cert, Dir.cwd(), try a.print("{s}/boot.crt", .{dir}), io, .{});
+    } else if (profile.provider != .firecracker) return error.TransferImageCertificate;
     var disk_hash: ?[]const u8 = null;
     if (pristine) {
         const disk = try a.print("{s}/disk.raw", .{dir});
@@ -123,7 +125,7 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
     var approved = profile;
     if (approved.configuration) |definition| approved.spec.form = definition.form;
     approved.data_image = try a.dupe(u8, &image);
-    approved.spec.boot_cert = try a.print("{s}/boot.crt", .{dir});
+    approved.spec.boot_cert = if (profile.spec.boot_cert != null) try a.print("{s}/boot.crt", .{dir}) else null;
     if (profile.spec.ipe_cert) |cert| {
         const path = try a.print("{s}/image.crt", .{dir});
         try Dir.cwd().copyFile(cert, .cwd(), path, io, .{});

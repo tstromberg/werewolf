@@ -150,7 +150,7 @@ fn newOnly(o: Options, name: []const u8, on: Platform, why: *Why) error{Refused}
 /// Cloud is a machine in a cloud: its arch (--arch or this host's), the
 /// directory where create keeps its files, and the path of its config tar
 /// in base64, as clouds take user data, written 0600 in that directory.
-const Cloud = struct { arch: Arch, dir: []const u8, b64: []const u8 };
+const Cloud = struct { arch: Arch, dir: []const u8, b64: []const u8, guard: Io.File };
 
 fn cloudMachine(
     io: Io,
@@ -163,11 +163,14 @@ fn cloudMachine(
     const arch = o.arch orelse hostArch() orelse
         return why.refuse("{s}: --arch", .{not_built_here});
     const dir = try machineDir(gpa, name);
+    const guard = try @import("data-cloud.zig").guard(io, gpa, dir);
+    errdefer guard.close(io);
+    try @import("data-cloud-target.zig").requireUnstaged(io, gpa, dir);
     const b64 = try gpa.print("{s}/config.b64", .{dir});
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(tar.len));
     try writePrivate(io, gpa, b64, std.base64.standard.Encoder.encode(encoded, tar), why);
-    return .{ .arch = arch, .dir = dir, .b64 = b64 };
+    return .{ .arch = arch, .dir = dir, .b64 = b64, .guard = guard };
 }
 
 /// createGcp makes the release disk a GCP image, once, and a VM of it with
@@ -184,6 +187,7 @@ pub fn createGcp(
 ) !void {
     const p = try gcp.place(io, gpa, why);
     const c = try cloudMachine(io, gpa, o, name, tar, why);
+    defer c.guard.close(io);
     var made = false;
     if (try gcp.formOf(io, gpa, p, name, why)) |was| {
         try reconfigurable(o, name, was, .gcp, why);
@@ -200,12 +204,14 @@ pub fn createGcp(
             gpa,
             o,
             c.arch,
+            .gcp,
             try gpa.print("{s}/disk.qcow2", .{c.dir}),
             why,
         );
         const image = try gcp.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.zone });
         try gcp.create(io, gpa, p, name, o.form, c.arch, o.size, image, c.b64, why);
+        try @import("data-cloud.zig").capture(io, gpa, name, .{ .gcp = .{ .project = p.project, .zone = p.zone, .id = "" } });
         made = true;
     }
     switch (try gcp.awaitUp(io, gpa, p, name)) {
@@ -235,6 +241,7 @@ pub fn createAws(
 ) !void {
     const p = try aws.place(io, gpa, why);
     const c = try cloudMachine(io, gpa, o, name, tar, why);
+    defer c.guard.close(io);
     var id: []const u8 = undefined;
     var made = false;
     if (try aws.find(io, gpa, p, name, why)) |i| {
@@ -254,12 +261,14 @@ pub fn createAws(
             gpa,
             o,
             c.arch,
+            .aws,
             try gpa.print("{s}/disk.qcow2", .{c.dir}),
             why,
         );
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
+        try @import("data-cloud.zig").capture(io, gpa, name, .{ .aws = .{ .region = p.region, .id = "" } });
         made = true;
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {
@@ -297,6 +306,7 @@ pub fn createAzure(
     );
     const p = try azure.place(io, gpa, why);
     const c = try cloudMachine(io, gpa, o, name, tar, why);
+    defer c.guard.close(io);
     // az reads the tar from a file and encodes it in base64 itself.
     const tar_path = try gpa.print("{s}/config.tar", .{c.dir});
     try writePrivate(io, gpa, tar_path, tar, why);
@@ -313,12 +323,14 @@ pub fn createAzure(
         gpa,
         o,
         c.arch,
+        .azure,
         try gpa.print("{s}/disk.qcow2", .{c.dir}),
         why,
     );
     const image = try azure.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
     say(io, "{s}: starting it in {s}, {s}", .{ name, p.group, p.location });
     try azure.create(io, gpa, p, name, o.form, c.arch, o.size, image, tar_path, why);
+    try @import("data-cloud.zig").capture(io, gpa, name, .{ .azure = .{ .group = p.group, .location = p.location, .id = "" } });
     try azureUp(io, gpa, p, name, o.form, "", w, why);
     try sayOpen(io, gpa, name, o.form, azure, p, o.allow_from, why);
 }

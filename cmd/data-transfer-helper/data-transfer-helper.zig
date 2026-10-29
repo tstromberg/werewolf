@@ -25,6 +25,7 @@ pub const Config = struct {
     initialize: bool = false,
     users: []const u8 = "",
     nocloud: ?people.NoCloud = null,
+    replay_journal_on_copy: bool = false,
 };
 
 pub fn main(init: std.process.Init) noreturn {
@@ -52,14 +53,15 @@ fn setup() !void {
     if (console > 2) _ = linux.close(@intCast(console));
     try mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
     try mount("sysfs", "/sys", "sysfs", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
-    // No device is allowed to hide a dirty filesystem behind a journal replay.
+    // The control disk never replays a journal or accepts uncommitted requests.
     try mount("/dev/vdb", "/control", "ext4", linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, "noload");
 }
 
 fn run(io: Io, a: Allocator) !void {
     const bytes = try read(io, a, "/control/request.json", 1 << 20);
     const c = try std.json.parseFromSliceLeaky(Config, a, bytes, .{});
-    if (c.version != 1 or c.target.len == 0 or c.target.len > 256 or c.users.len > 1 << 18)
+    if (c.version != 1 or c.target.len == 0 or c.target.len > 256 or c.users.len > 1 << 18 or
+        (c.replay_journal_on_copy and c.operation != .@"export"))
         return error.TransferControl;
     const native_arch: data.Arch = switch (@import("builtin").cpu.arch) {
         .aarch64 => .aarch64,
@@ -78,8 +80,17 @@ fn run(io: Io, a: Allocator) !void {
         try data.images.requireBarrier(io, image_dir);
     }
     const device: [:0]const u8 = if (c.layout == .boot) "/dev/vda2" else "/dev/vda";
-    const source = try unlock(io, a, device, c.operation != .import);
-    if (c.operation != .import) try cleanExt4(io, source);
+    const source = try unlock(io, a, device, c.operation != .import and !c.replay_journal_on_copy);
+    if (c.operation != .import) cleanExt4(io, source) catch |err| {
+        if (err != error.TransferUnclean or !c.replay_journal_on_copy) return err;
+        // Only the owner's detached private copy is writable. A read-only
+        // mount permits the kernel to replay its journal, then we unmount and
+        // demand clean metadata before the ordinary noload reader mount.
+        try mount(source, "/volume", "ext4", linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
+        if (linux.errno(linux.umount2("/volume", 0)) != .SUCCESS) return error.TransferHelperUnmount;
+        try cleanExt4(io, source);
+        try File.stderr().writeStreamingAll(io, "replayed filesystem journal on private export copy\n");
+    };
     try mount(source, "/volume", "ext4", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC | linux.MS.NOATIME | 256 |
         @as(u32, if (c.operation == .import) 0 else linux.MS.RDONLY), if (c.operation == .import) null else "noload");
     errdefer {
@@ -141,7 +152,8 @@ fn run(io: Io, a: Allocator) !void {
         .import => {
             const archive_file = try Dir.cwd().openFile(io, "/control/archive.tar.zst", .{});
             defer archive_file.close(io);
-            const request: data.WorkerRequest = .{ .policy = policy, .service = c.service, .target = c.target };
+            const target = try data.install.targetIdentity(io, root);
+            const request: data.WorkerRequest = .{ .policy = policy, .service = c.service, .target = &target };
             try Dir.cwd().writeFile(io, .{ .sub_path = "/run/worker.json", .data = try std.json.Stringify.valueAlloc(a, request, .{}), .flags = .{ .permissions = .fromMode(0o600) } });
             const control = try Dir.cwd().openFile(io, "/run/worker.json", .{});
             defer control.close(io);
@@ -196,6 +208,7 @@ fn cleanExt4(io: Io, path: []const u8) !void {
     var super: [1024]u8 = undefined;
     if (try file.readPositionalAll(io, &super, 1024) != super.len) return error.TransferFilesystem;
     if (mem.readInt(u16, super[0x38..0x3a], .little) != 0xef53) return error.TransferFilesystem;
+    if (mem.readInt(u16, super[0x3a..0x3c], .little) & 2 != 0) return error.TransferFilesystem;
     if (mem.readInt(u16, super[0x3a..0x3c], .little) & 3 != 1 or
         mem.readInt(u32, super[0x60..0x64], .little) & 4 != 0) return error.TransferUnclean;
 }

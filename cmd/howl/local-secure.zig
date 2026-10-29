@@ -6,6 +6,7 @@
 //! otherwise takes changes by reinstalling (docs/design/implemented/independent-updates.md).
 const std = @import("std");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const lima = @import("lima.zig");
 const native = @import("build.zig");
 const secureboot = @import("secureboot.zig");
@@ -34,6 +35,10 @@ pub const Profile = struct {
     local: ?native.Spec = null,
     /// The approved immutable image cache, independent of later source builds.
     data_image: ?[]const u8 = null,
+    cloud: ?@import("data-cloud.zig").Context = null,
+    /// Restored storage remains local and unbooted until explicit activation.
+    cloud_staged: bool = false,
+    cloud_size: ?[]const u8 = null,
     // Older protected bhyve profiles used SLIRP exclusively. Preserve that
     // choice on resume; new profiles explicitly select the normal TAP default.
     bhyve_network: bhyve.Mode = .slirp,
@@ -238,6 +243,7 @@ pub fn transferTarget(
     tar: []const u8,
     why: *howl.Why,
 ) !Profile {
+    if (r.profile.spec.boot_cert == null) return why.refuse("create an empty destination with the approved image before importing", .{});
     _ = try admit(io, a, on, false, why);
     const at = try std.fs.path.resolveAlloc(
         a,
@@ -1090,6 +1096,28 @@ pub fn start(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
     var profile = try parseProfile(gpa, try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/authority/profile.json", .{at}), gpa, .limited(256 << 10)));
+    if (profile.cloud_staged) return @import("data-cloud-target.zig").start(io, gpa, name, at, profile, why);
+    if (cloud.supported(profile.provider)) {
+        const context = try @import("data-cloud.zig").load(io, gpa, at, profile.provider);
+        if ((try @import("data-cloud.zig").state(io, gpa, name, context)).running) return why.refuse("{s}: already running", .{name});
+        const argv: []const []const u8 = switch (context) {
+            .gcp => |p| &.{ "gcloud", "--quiet", "--project", p.project, "compute", "instances", "start", name, "--zone", p.zone },
+            .azure => |p| &.{ "az", "vm", "start", "-g", p.group, "-n", name, "-o", "none" },
+        };
+        return howl.run(io, why, argv);
+    }
+    if (profile.provider == .firecracker) {
+        if (@import("builtin").os.tag != .linux or profile.spec.arch != howl.hostArch()) return error.TransferArchitecture;
+        if (try @import("firecracker.zig").supervised(io, gpa, at)) return why.refuse("{s}: already running", .{name});
+        const spec = profile.local orelse return error.MissingBootImage;
+        const definition = profile.configuration orelse return error.MissingBootConfiguration;
+        const saved_definition = @import("boot-config.zig").current;
+        @import("boot-config.zig").current = definition;
+        defer @import("boot-config.zig").current = saved_definition;
+        const tar = try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/config.tar", .{at}), gpa, .limited(64 << 20));
+        const tell: howl.Tell = .{ .verbose = false, .command = try gpa.print("howl start {s}", .{name}), .began = Io.Clock.awake.now(io) };
+        return @import("local.zig").createFirecrackerLocked(io, gpa, .{ .form = definition.form, .local = true, .on = .firecracker, .disabled = spec.disabled }, name, tar, null, tell, guard, why);
+    }
     profile.spec.form = (profile.configuration orelse return error.MissingBootConfiguration).form;
     if (profile.spec.arch != try admit(io, gpa, profile.provider, false, why)) return error.TransferArchitecture;
     if (profile.bundle) |request| {
