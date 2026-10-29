@@ -64,24 +64,65 @@ const Test = struct {
         for ([_][]const u8{ "ipe", "boot/aarch64", "boot/x86_64" }) |sub|
             try Dir.cwd().createDirPath(c.io, try c.path(try c.gpa.print("credentials/howl/keys/{s}", .{sub})));
         t.key = try c.path("owner.key");
-        _ = try c.must(&.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "data-transfer-fixture", "-f", t.key }, "identity", .{});
+        _ = try c.must(
+            &.{
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "data-transfer-fixture",
+                "-f",
+                t.key,
+            },
+            "identity",
+            .{},
+        );
         t.form = try c.path(try c.gpa.print("transfer-fixture-{s}", .{suffix}));
-        try Dir.cwd().createDirPath(c.io, try c.gpa.print("{s}/rootfs/usr/lib/werewolf", .{t.form}));
-        try Dir.cwd().createDirPath(c.io, try c.gpa.print("{s}/rootfs/usr/share/werewolf", .{t.form}));
+        try Dir.cwd().createDirPath(
+            c.io,
+            try c.gpa.print("{s}/rootfs/usr/lib/werewolf", .{t.form}),
+        );
+        try Dir.cwd().createDirPath(
+            c.io,
+            try c.gpa.print("{s}/rootfs/usr/share/werewolf", .{t.form}),
+        );
         try Dir.cwd().createDirPath(c.io, try c.gpa.print("{s}/rootfs/etc/sv/posture", .{t.form}));
-        try Dir.cwd().copyFile(c.args[2], .cwd(), try c.gpa.print("{s}/rootfs/usr/lib/werewolf/transfer-control", .{t.form}), c.io, .{});
-        try Dir.cwd().symLink(c.io, "/usr/lib/werewolf/transfer-control", try c.gpa.print("{s}/rootfs/etc/sv/posture/run", .{t.form}), .{});
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.gpa.print("{s}/rootfs/usr/share/werewolf/test-image", .{t.form}), .data = "private data-transfer fixture\n" });
+        try Dir.cwd().copyFile(
+            c.args[2],
+            .cwd(),
+            try c.gpa.print("{s}/rootfs/usr/lib/werewolf/transfer-control", .{t.form}),
+            c.io,
+            .{},
+        );
+        try Dir.cwd().symLink(
+            c.io,
+            "/usr/lib/werewolf/transfer-control",
+            try c.gpa.print("{s}/rootfs/etc/sv/posture/run", .{t.form}),
+            .{},
+        );
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.gpa.print("{s}/rootfs/usr/share/werewolf/test-image", .{t.form}),
+                .data = "private data-transfer fixture\n",
+            },
+        );
         try Dir.cwd().writeFile(c.io, .{
             .sub_path = try c.gpa.print("{s}/form.yaml", .{t.form}),
-            .data = "base: postgresql\nwith: [data-export]\nupdates: off\npackages: [postgresql-client~18]\n" ++
+            .data = "base: postgresql\nwith: [data-export]\nupdates: off\npackages: " ++
+                "[postgresql-client~18]\n" ++
                 "sshd:\n  pubkey-accepted-algorithms: ssh-ed25519\n" ++
                 "weaknesses:\n  network-no-login: fixed native export in a disposable VM\n" ++
                 "  kernel-write-xor-execute: the PostgreSQL form permits JIT\n" ++
-                "  network-ssh-security-keys: disposable fixture identity; real hardware is a separate gate\n" ++
+                "  network-ssh-security-keys: disposable fixture identity; real hardware is a " ++
+                "separate gate\n" ++
                 "services:\n  postgres:\n" ++
-                "    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres\n" ++
-                "    before: /usr/lib/werewolf/transfer-control prepare-postgres\n    user: postgres\n" ++
+                "    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c " ++
+                "unix_socket_directories=/run/svc/postgres\n" ++
+                "    before: /usr/lib/werewolf/pg-init\n    user: postgres\n" ++
                 "    pledge: stdio rpath wpath proc shm unix listen connect\n" ++
                 "    run: [/usr/lib/werewolf/pg-init, /usr/bin/initdb, /usr/lib/werewolf/sh-shim, /usr/bin/locale]\n" ++
                 "    share: shared\n    config: transfer-role /run/config/transfer-role\n",
@@ -94,11 +135,16 @@ const Test = struct {
             try fixture.writePositionalAll(c.io, "  transfer-stop:\n    exec: /usr/lib/werewolf/transfer-control park\n    user: transfer-stop\n    pledge: stdio\n", try fixture.length(c.io));
         }
         const target_config = try t.configuration("target");
-        const source = try t.own(try c.gpa.print("transfer-src-{s}", .{suffix}));
+        // Keep Unix socket paths below the limit in long runner checkouts.
+        const source = try t.own(try c.gpa.print("dts{s}", .{suffix}));
         try t.create(source, source_config, "source-create");
         try t.pin(source);
         const denied_key = try c.path("unauthorized.key");
-        _ = try c.must(&.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", denied_key }, "unauthorized-identity", .{});
+        _ = try c.must(
+            &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", denied_key },
+            "unauthorized-identity",
+            .{},
+        );
         defer Dir.cwd().deleteFile(c.io, denied_key) catch {};
         {
             const owner_key = t.key;
@@ -114,23 +160,104 @@ const Test = struct {
         try t.ssh(source, &.{ "export-v1", "../postgres" }, "scope-path-refused", false);
         const pin_path = try c.gpa.print("{s}/known_hosts", .{try howl.machineDir(c.gpa, source)});
         const original_pin = try Dir.cwd().readFileAlloc(c.io, pin_path, c.gpa, .limited(4096));
-        const wrong_key = try Dir.cwd().readFileAlloc(c.io, try c.gpa.print("{s}.pub", .{t.key}), c.gpa, .limited(4096));
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = pin_path, .data = try c.gpa.print("{s} {s}", .{ source, wrong_key }) });
+        const wrong_key = try Dir.cwd().readFileAlloc(
+            c.io,
+            try c.gpa.print("{s}.pub", .{t.key}),
+            c.gpa,
+            .limited(4096),
+        );
+        try Dir.cwd().writeFile(
+            c.io,
+            .{ .sub_path = pin_path, .data = try c.gpa.print("{s} {s}", .{ source, wrong_key }) },
+        );
         try t.exportData(source, try c.path("wrong-pin.tar.zst"), null, false, "wrong-pin-refused");
         try Dir.cwd().writeFile(c.io, .{ .sub_path = pin_path, .data = original_pin });
         const refused = try c.path("live-refused.tar.zst");
         try t.exportData(source, refused, null, false, "live-refused");
-        if (Dir.cwd().access(c.io, refused, .{})) |_| return error.PublishedLiveCapture else |err| if (err != error.FileNotFound) return err;
-        try t.stopApplications(source, "manual-down");
-        const cloud_provider = cloud.supported(t.on);
+        if (Dir.cwd().access(c.io, refused, .{})) |_|
+            return error.PublishedLiveCapture
+        else |err| if (err != error.FileNotFound)
+            return err;
+        try t.ssh(source, &.{ "service-down-v1", "postgres" }, "manual-down", true);
         for ([_]bool{ true, false }) |online| {
             if (!online and !cloud_provider) try t.poweroff(source);
             const prefix = if (online) "online" else "offline";
             const full = try c.path(try c.gpa.print("{s}-full.tar.zst", .{prefix}));
             const selected = try c.path(try c.gpa.print("{s}-postgres.tar.zst", .{prefix}));
-            if (online or !cloud_provider) {
-                try t.exportData(source, full, null, true, try c.gpa.print("{s}-full-export", .{prefix}));
-                try t.exportData(source, selected, "postgres", true, try c.gpa.print("{s}-service-export", .{prefix}));
+            try t.exportData(
+                source,
+                full,
+                null,
+                true,
+                try c.gpa.print("{s}-full-export", .{prefix}),
+            );
+            try t.exportData(
+                source,
+                selected,
+                "postgres",
+                true,
+                try c.gpa.print("{s}-service-export", .{prefix}),
+            );
+            for (0..3) |which| {
+                const name = try t.own(try c.gpa.print(
+                    "dt{s}{d}{s}",
+                    .{ if (online) "n" else "f", which, suffix },
+                ));
+                var args: std.ArrayList([]const u8) = .empty;
+                try args.appendSlice(
+                    c.gpa,
+                    &.{
+                        t.binary,
+                        "import",
+                        name,
+                        if (which == 1) selected else full,
+                        "--on",
+                        @tagName(t.on),
+                        "--config",
+                        target_config,
+                    },
+                );
+                if (which == 2) try args.appendSlice(c.gpa, &.{ "--service", "postgres" });
+                _ = try c.must(
+                    args.items,
+                    try c.gpa.print("{s}-{d}-import", .{ prefix, which }),
+                    .{},
+                );
+                if (try t.running(name)) return error.ImportStartedTarget;
+                const before_start = try c.path(try c.gpa.print(
+                    "{s}-{d}-before-start.tar.zst",
+                    .{ prefix, which },
+                ));
+                try t.exportData(
+                    name,
+                    before_start,
+                    if (which == 0) null else "postgres",
+                    true,
+                    try c.gpa.print("{s}-{d}-verify-bytes", .{ prefix, which }),
+                );
+                if (!mem.eql(
+                    u8,
+                    &try t.plainHash(if (which == 0) full else selected),
+                    &try t.plainHash(before_start),
+                )) return error.RestoredBytes;
+                _ = try c.must(
+                    &.{ t.binary, "start", name },
+                    try c.gpa.print("{s}-{d}-start", .{ prefix, which }),
+                    .{},
+                );
+                _ = try t.consoleUntil(name, "transfer-fixture: ready", 180);
+                try t.pin(name);
+                try t.ssh(
+                    name,
+                    &.{ "service-down-v1", "postgres" },
+                    try c.gpa.print("{s}-{d}-down", .{ prefix, which }),
+                    true,
+                );
+                try t.poweroff(name);
+                c.say(
+                    "pass: {s} case {d}, pre-start bytes and restored PostgreSQL queries",
+                    .{ prefix, which },
+                );
             }
             if (online) {
                 // SSH-only runs no longer need the captured cloud source.
@@ -152,164 +279,38 @@ const Test = struct {
             try t.diskImports(full, selected, &suffix, online, target_config);
             if (online and !cloud_provider) {
                 try t.ssh(source, &.{ "service-up-v1", "postgres" }, "manual-up", true);
-                try t.exportData(source, try c.path("restarted-refused.tar.zst"), null, false, "restarted-writer-refused");
-                try t.stopApplications(source, "manual-down-again");
+                try t.exportData(
+                    source,
+                    try c.path("restarted-refused.tar.zst"),
+                    null,
+                    false,
+                    "restarted-writer-refused",
+                );
+                try t.ssh(source, &.{ "service-down-v1", "postgres" }, "manual-down-again", true);
             }
         }
-        c.say("pass: real PostgreSQL full/service imports, both source states, online SSH and offline disk destinations", .{});
-    }
-
-    fn diskImports(t: *Test, full: []const u8, selected: []const u8, suffix: []const u8, online: bool, target_config: []const u8) !void {
-        const c = t.c;
-        if (c.env.get("DATA_TRANSFER_CASE")) |one| {
-            var valid = false;
-            for ([_][]const u8{ "online-0", "online-1", "online-2", "offline-0", "offline-1", "offline-2" }) |name|
-                if (mem.eql(u8, one, name)) {
-                    valid = true;
-                };
-            if (!valid) return error.TransferTestArguments;
-        }
-        const cloud_provider = cloud.supported(t.on);
-        const prefix = if (online) "online" else "offline";
-        for (0..3) |which| {
-            if (c.env.get("DATA_TRANSFER_CASE")) |selected_case|
-                if (!mem.eql(u8, selected_case, try c.gpa.print("{s}-{d}", .{ prefix, which }))) continue;
-            const name = try t.own(try c.gpa.print("transfer-{s}-{d}-{s}", .{ prefix, which, suffix[0..8] }));
-            var args: std.ArrayList([]const u8) = .empty;
-            const existing = t.on == .firecracker;
-            if (existing) {
-                try t.create(name, try t.configuration("empty"), try c.gpa.print("{s}-{d}-empty", .{ prefix, which }));
-                try t.pin(name);
-                try t.stopApplications(name, try c.gpa.print("{s}-{d}-empty-down", .{ prefix, which }));
-                try t.poweroff(name);
-            }
-            try args.appendSlice(c.gpa, &.{ t.binary, "import", name, if (which == 1) selected else full, "--on", @tagName(t.on) });
-            if (!existing) try args.appendSlice(c.gpa, &.{ "--config", target_config });
-            if (cloud_provider) if (c.env.get("DATA_TRANSFER_SIZE")) |size| try args.appendSlice(c.gpa, &.{ "--size", size });
-            if (which == 2) try args.appendSlice(c.gpa, &.{ "--service", "postgres" });
-            _ = try c.must(args.items, try c.gpa.print("{s}-{d}-import", .{ prefix, which }), .{});
-            try t.rememberDisk(name);
-            if (try t.running(name)) return error.ImportStartedTarget;
-            const before_start = try c.path(try c.gpa.print("{s}-{d}-before-start.tar.zst", .{ prefix, which }));
-            try t.exportData(name, before_start, if (which == 0) null else "postgres", true, try c.gpa.print("{s}-{d}-verify-bytes", .{ prefix, which }));
-            if (!mem.eql(u8, &try t.plainHash(if (which == 0) full else selected), &try t.plainHash(before_start))) return error.RestoredBytes;
-            try t.startMachine(name, try c.gpa.print("{s}-{d}-start", .{ prefix, which }));
-            _ = try t.consoleUntil(name, "transfer-fixture: ready", 180);
-            if (!cloud_provider) {
-                try t.pin(name);
-                try t.stopApplications(name, try c.gpa.print("{s}-{d}-down", .{ prefix, which }));
-            }
-            try t.poweroff(name);
-            if (cloud_provider and online and which == 0) {
-                const before = try t.cloudContext(name);
-                var pending = try t.profile(name);
-                pending.cloud_staged = true;
-                try @import("data-image.zig").replaceRecord(c.io, c.gpa, try c.gpa.print("{s}/authority/profile.json", .{try howl.machineDir(c.gpa, name)}), try std.json.Stringify.valueAlloc(c.gpa, pending, .{}));
-                try t.boot_markers.put(c.gpa, name, @import("azure.zig").mark(try t.cloudConsole(name)));
-                try t.startMachine(name, "resume-recorded-vm-start");
-                _ = try t.consoleUntil(name, "transfer-fixture: ready", 180);
-                const after = try t.cloudContext(name);
-                if (!mem.eql(u8, try std.json.Stringify.valueAlloc(c.gpa, before, .{}), try std.json.Stringify.valueAlloc(c.gpa, after, .{}))) return error.TransferTestIdentity;
-                try t.poweroff(name);
-            }
-            if (cloud_provider and online and which == 0) try t.rejectHostBacking(name);
-            if (cloud.supported(t.on)) try t.removeCompleted(name, try c.gpa.print("{s}-{d}-delete", .{ prefix, which }));
-            c.say("pass: {s} case {d}, pre-start bytes and restored PostgreSQL queries", .{ prefix, which });
-        }
-    }
-
-    // Explicitly resume this run's private disposable fixtures after diagnosing
-    // a provider failure. Never discover or adopt unrelated machine names.
-    fn resumeCloud(t: *Test, nonce: []const u8) !void {
-        const c = t.c;
-        if (nonce.len != 12 or c.args.len != 3) return error.TransferTestArguments;
-        for (nonce) |ch| if (!std.ascii.isHex(ch)) return error.TransferTestArguments;
-        t.on = std.meta.stringToEnum(howl.Platform, c.env.get("DATA_TRANSFER_PROVIDER") orelse "") orelse return error.TransferTestProvider;
-        if (!cloud.supported(t.on)) return error.TransferTestProvider;
-        t.binary = try c.absolute(c.args[1]);
-        try c.setWork(try c.gpa.print("build/check/data-transfer/{s}", .{nonce}));
-        try c.env.put("XDG_DATA_HOME", try c.path("credentials"));
-        try c.env.put("SSH_AUTH_SOCK", "");
-        t.key = try c.path("owner.key");
-        try Dir.cwd().access(c.io, t.key, .{});
-        t.form = try c.path(try c.gpa.print("transfer-fixture-{s}", .{nonce}));
-        const source = try c.gpa.print("transfer-src-{s}", .{nonce});
-        const source_file = try c.gpa.print("{s}/authority/profile.json", .{try howl.machineDir(c.gpa, source)});
-        if (Dir.cwd().access(c.io, source_file, .{})) |_| {
-            try t.names.append(c.gpa, source);
-            if (try t.running(source)) return error.TransferStorageInUse;
-            for ([_][]const u8{ "full", "postgres" }) |scope| {
-                const archive = try c.path(try c.gpa.print("offline-{s}.tar.zst", .{scope}));
-                if (Dir.cwd().access(c.io, archive, .{})) |_| {} else |err| {
-                    if (err != error.FileNotFound) return err;
-                    try t.exportData(source, archive, if (mem.eql(u8, scope, "full")) null else "postgres", true, try c.gpa.print("resume-{s}-export", .{scope}));
-                }
-            }
-            try t.removeCompleted(source, "resume-source-delete");
-        } else |err| if (err != error.FileNotFound) return err;
-        const full = try c.path("online-full.tar.zst");
-        const selected = try c.path("online-postgres.tar.zst");
-        if (!mem.eql(u8, c.env.get("DATA_TRANSFER_RESUME_DISK_ONLY") orelse "", "1")) try t.onlineImports(full, selected, nonce);
-        const config = try t.configuration("target");
-        try t.diskImports(full, selected, nonce, true, config);
-        try t.diskImports(try c.path("offline-full.tar.zst"), try c.path("offline-postgres.tar.zst"), nonce, false, config);
-        c.say("pass: resumed cloud disk full/service imports, pre-start bytes, PostgreSQL queries and host-backing refusal", .{});
-    }
-
-    fn onlineImports(t: *Test, full: []const u8, selected: []const u8, suffix: []const u8) !void {
-        const c = t.c;
-        const config = try t.configuration("empty");
-        const corrupt = try c.path("truncated.tar.zst");
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = corrupt, .data = "\x28\xb5\x2f\xfd" });
-        const first = std.fmt.parseUnsigned(usize, c.env.get("DATA_TRANSFER_SSH_FROM") orelse "0", 10) catch return error.TransferTestArguments;
-        if (first > 3) return error.TransferTestArguments;
-        for (first..3) |which| {
-            const name = try t.own(try c.gpa.print("transfer-ssh-{d}-{s}", .{ which, suffix }));
-            try t.create(name, config, try c.gpa.print("ssh-{d}-create", .{which}));
-            try t.pin(name);
-            const scope: ?[]const u8 = if (which == 2) "postgres" else null;
-            const archive = if (which == 1) selected else full;
-            try t.importOnline(name, archive, scope, false, try c.gpa.print("ssh-{d}-wanted-up-refused", .{which}));
-            try t.stopApplications(name, try c.gpa.print("ssh-{d}-down", .{which}));
-            try t.importOnline(name, corrupt, scope, false, try c.gpa.print("ssh-{d}-truncated-refused", .{which}));
-            try t.importOnline(name, archive, scope, true, try c.gpa.print("ssh-{d}-import", .{which}));
-            if (!try t.running(name)) return error.ImportStoppedTarget;
-            const captured = try c.path(try c.gpa.print("ssh-{d}-restored.tar.zst", .{which}));
-            try t.exportData(name, captured, if (which == 0) null else "postgres", true, try c.gpa.print("ssh-{d}-verify", .{which}));
-            if (!mem.eql(u8, &try t.plainHash(if (which == 0) full else selected), &try t.plainHash(captured))) return error.RestoredBytes;
-            try t.importOnline(name, archive, scope, false, try c.gpa.print("ssh-{d}-overwrite-refused", .{which}));
-            try t.poweroff(name);
-            try t.startMachine(name, try c.gpa.print("ssh-{d}-restart", .{which}));
-            // The same image's fixture verifies all restored PostgreSQL invariants.
-            _ = try t.consoleUntil(name, "transfer-fixture: database verified", 180);
-            const console = try t.consoleUntil(name, "transfer-host-key: ", 60);
-            if (mem.find(u8, console, "transfer-fixture: Rows") != null) return error.RestoredDatabase;
-            try t.poweroff(name);
-            if (cloud.supported(t.on)) try t.removeCompleted(name, try c.gpa.print("ssh-{d}-delete", .{which}));
-            c.say("pass: SSH import case {d}, truncated-input retry, occupied-root refusal and restored bytes", .{which});
-        }
-    }
-
-    fn importOnline(t: *Test, name: []const u8, archive: []const u8, service: ?[]const u8, success: bool, label: []const u8) !void {
-        const c = t.c;
-        var args: std.ArrayList([]const u8) = .empty;
-        try args.appendSlice(c.gpa, &.{ t.binary, "import", name, archive, "--identity", t.key });
-        if (service) |s| try args.appendSlice(c.gpa, &.{ "--service", s });
-        const result = try c.run(args.items, label, .{ .timeout = .fromSeconds(900) });
-        if (result.ok() != success) return c.fail("{s}: SSH import: {s}", .{ label, result.stderr });
-        if (mem.endsWith(u8, label, "wanted-up-refused") and mem.find(u8, result.stderr, "TransferWritersRunning") == null)
-            return error.ImportWriterCheckMissing;
-        if (mem.endsWith(u8, label, "overwrite-refused") and mem.find(u8, result.stderr, "TransferConflict") == null)
-            return error.ImportConflictCheckMissing;
+        c.say(
+            "pass: real PostgreSQL full/service imports, both source states, shell-free SSH and " ++
+                "stopped destinations",
+            .{},
+        );
     }
 
     fn configuration(t: *Test, role: []const u8) ![]const u8 {
         const c = t.c;
         const path = try c.path(try c.gpa.print("config-{s}", .{role}));
-        try Dir.cwd().createDirPath(c.io, path);
-        try Dir.cwd().setFilePermissions(c.io, path, .fromMode(0o700), .{});
-        try Dir.cwd().copyFile(try c.gpa.print("{s}.pub", .{t.key}), .cwd(), try c.gpa.print("{s}/authorized_keys", .{path}), c.io, .{});
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.gpa.print("{s}/transfer-role", .{path}), .data = role });
+        try Dir.cwd().createDir(c.io, path, .fromMode(0o700));
+        try Dir.cwd().copyFile(
+            try c.gpa.print("{s}.pub", .{t.key}),
+            .cwd(),
+            try c.gpa.print("{s}/authorized_keys", .{path}),
+            c.io,
+            .{},
+        );
+        try Dir.cwd().writeFile(
+            c.io,
+            .{ .sub_path = try c.gpa.print("{s}/transfer-role", .{path}), .data = role },
+        );
         return path;
     }
 
@@ -325,15 +326,25 @@ const Test = struct {
 
     fn create(t: *Test, name: []const u8, config: []const u8, label: []const u8) !void {
         const c = t.c;
-        var args: std.ArrayList([]const u8) = .empty;
-        try args.appendSlice(c.gpa, &.{ t.binary, "create", name, "--with", t.form, "--on", @tagName(t.on), "--build", "--config", config, "--add-current-user", "no", "--yes" });
-        if (t.on == .bhyve) try args.appendSlice(c.gpa, &.{ "--network", "slirp" });
-        if (cloud.supported(t.on)) {
-            try args.appendSlice(c.gpa, &.{ "--allow-from", "me" });
-            if (c.env.get("DATA_TRANSFER_SIZE")) |size| try args.appendSlice(c.gpa, &.{ "--size", size });
-        }
-        _ = try c.must(args.items, label, .{ .timeout = .fromSeconds(1800) });
-        try t.rememberDisk(name);
+        _ = try c.must(
+            &.{
+                t.binary,
+                "create",
+                name,
+                "--with",
+                t.form,
+                "--on",
+                @tagName(t.on),
+                "--build",
+                "--config",
+                config,
+                "--add-current-user",
+                "no",
+                "--yes",
+            },
+            label,
+            .{ .timeout = .fromSeconds(1800) },
+        );
         // A successful startup must also preserve the real database invariants.
         _ = try t.consoleUntil(name, "transfer-fixture: ready", 180);
         const console = try t.consoleUntil(name, "posture: fail=", 90);
@@ -341,23 +352,34 @@ const Test = struct {
     }
 
     fn instance(t: *Test, name: []const u8) ![]const u8 {
-        return if (t.on == .lima) try lima.dir(t.c.io, t.c.gpa, name) orelse error.MissingLimaInstance else try howl.machineDir(t.c.gpa, name);
+        return if (t.on == .lima)
+            try lima.dir(t.c.io, t.c.gpa, name) orelse error.MissingLimaInstance
+        else
+            try howl.machineDir(t.c.gpa, name);
     }
 
     fn consoleUntil(t: *Test, name: []const u8, needle: []const u8, seconds: usize) ![]const u8 {
         const c = t.c;
-        const file = try c.gpa.print("{s}/{s}", .{ try t.instance(name), if (t.on == .lima) "serial.log" else "console.log" });
+        const file = try c.gpa.print(
+            "{s}/{s}",
+            .{ try t.instance(name), if (t.on == .lima) "serial.log" else "console.log" },
+        );
         for (0..seconds) |_| {
-            const raw = if (cloud.supported(t.on)) try t.cloudConsole(name) else Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
-            if (cloud.supported(t.on)) try Dir.cwd().writeFile(c.io, .{ .sub_path = file, .data = raw });
-            const fresh = if (t.boot_markers.get(name)) |marker| @import("azure.zig").since(raw, marker) else raw;
-            const text = try host.qemu.clean(c.gpa, fresh);
-            if (mem.find(u8, text, needle) != null) return text;
-            if (mem.find(u8, text, "transfer-fixture: Sql") != null or mem.find(u8, text, "transfer-fixture: Rows") != null)
+            const raw = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+            const text = try host.qemu.clean(c.gpa, raw);
+            // A serial read can end halfway through a marker or host key.
+            if (mem.find(u8, text, needle)) |start| {
+                if (mem.findScalarPos(u8, text, start + needle.len, '\n') != null) return text;
+            }
+            if (mem.find(u8, text, "transfer-fixture: Sql") != null or
+                mem.find(u8, text, "transfer-fixture: Rows") != null)
                 return c.fail("database fixture failed; see {s}", .{file});
             try c.io.sleep(.fromSeconds(1), .awake);
         }
-        return c.fail("missing {s}; see {s}", .{ needle, file });
+        const text = Dir.cwd().readFileAlloc(c.io, file, c.gpa, .limited(4 << 20)) catch "";
+        return c.fail("missing {s}; see {s}\n{s}", .{
+            needle, file, text[text.len -| (16 << 10)..],
+        });
     }
 
     fn pin(t: *Test, name: []const u8) !void {
@@ -367,19 +389,67 @@ const Test = struct {
         const end = mem.findScalarPos(u8, text, start, '\n') orelse return error.MissingHostKey;
         const key = mem.trim(u8, text[start..end], "\r");
         if (!mem.startsWith(u8, key, "ssh-ed25519 ")) return error.HostKey;
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.gpa.print("{s}/known_hosts", .{try howl.machineDir(c.gpa, name)}), .data = try c.gpa.print("{s} {s}\n", .{ name, key }), .flags = .{ .permissions = .fromMode(0o600) } });
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.gpa.print("{s}/known_hosts", .{try howl.machineDir(c.gpa, name)}),
+                .data = try c.gpa.print("{s} {s}\n", .{ name, key }),
+                .flags = .{ .permissions = .fromMode(0o600) },
+            },
+        );
     }
 
-    fn ssh(t: *Test, name: []const u8, command: []const []const u8, label: []const u8, success: bool) !void {
+    fn ssh(
+        t: *Test,
+        name: []const u8,
+        command: []const []const u8,
+        label: []const u8,
+        success: bool,
+    ) !void {
         return t.sshRequest(name, .command, command, label, success);
     }
 
-    fn sshRequest(t: *Test, name: []const u8, kind: enum { command, pty, forward, subsystem, shutdown }, command: []const []const u8, label: []const u8, success: bool) !void {
+    fn sshRequest(
+        t: *Test,
+        name: []const u8,
+        kind: enum { command, pty, forward, subsystem },
+        command: []const []const u8,
+        label: []const u8,
+        success: bool,
+    ) !void {
         const c = t.c;
         const at = try howl.machineDir(c.gpa, name);
-        const port = try t.sshPort(name);
+        const port = if (t.on == .lima)
+            lima.sshPort(c.io, c.gpa, name) orelse return error.SshPort
+        else
+            @import("qemu.zig").record(c.io, c.gpa, at, "ssh") orelse return error.SshPort;
         var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(c.gpa, &.{ "ssh", "-F", "/dev/null", "-S", "none", "-T", "-a", "-p", port, "-i", t.key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", try c.gpa.print("HostKeyAlias={s}", .{name}), "-o", try c.gpa.print("UserKnownHostsFile={s}/known_hosts", .{at}) });
+        try argv.appendSlice(
+            c.gpa,
+            &.{
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-S",
+                "none",
+                "-T",
+                "-a",
+                "-p",
+                port,
+                "-i",
+                t.key,
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                try c.gpa.print("HostKeyAlias={s}", .{name}),
+                "-o",
+                try c.gpa.print("UserKnownHostsFile={s}/known_hosts", .{at}),
+            },
+        );
         switch (kind) {
             .command, .shutdown => {},
             .pty => try argv.append(c.gpa, "-tt"),
@@ -389,17 +459,45 @@ const Test = struct {
         try argv.append(c.gpa, try c.gpa.print("root@{s}", .{try t.sshHost(name)}));
         try argv.appendSlice(c.gpa, command);
         const r = try c.run(argv.items, label, .{ .timeout = .fromSeconds(100) });
-        if (kind != .shutdown and r.ok() != success) return c.fail("{s}: unexpected SSH result: {s}", .{ label, r.stderr });
-        if (mem.eql(u8, label, "shell-command-refused") and mem.find(u8, r.stderr, "TransferInvocation") == null) return error.CommandNotRefused;
-        if ((mem.eql(u8, label, "system-control-refused") or mem.eql(u8, label, "scope-path-refused")) and
+        if (r.ok() != success) return c.fail(
+            "{s}: unexpected SSH result: {s}",
+            .{ label, r.stderr },
+        );
+        if (mem.eql(u8, label, "shell-command-refused") and
+            mem.find(u8, r.stderr, "TransferInvocation") == null) return error.CommandNotRefused;
+        if ((mem.eql(u8, label, "system-control-refused") or
+            mem.eql(u8, label, "scope-path-refused")) and
             mem.find(u8, r.stderr, "TransferService") == null) return error.ScopeNotRefused;
-        if (mem.eql(u8, label, "unauthorized-key-refused") and mem.find(u8, r.stderr, "Permission denied") == null) return error.AuthenticationNotRefused;
-        if (kind == .pty and mem.find(u8, r.stderr, "PTY allocation request failed") == null) return error.TerminalNotRefused;
-        if (kind == .forward and mem.find(u8, r.stderr, "administratively prohibited") == null) return error.ForwardingNotRefused;
-        if (kind == .subsystem and mem.find(u8, r.stderr, "subsystem request failed") == null and mem.find(u8, r.stderr, "TransferInvocation") == null) return error.SubsystemNotRefused;
+        if (mem.eql(u8, label, "unauthorized-key-refused") and
+            mem.find(
+                u8,
+                r.stderr,
+                "Permission denied",
+            ) == null) return error.AuthenticationNotRefused;
+        if (kind == .pty and
+            mem.find(
+                u8,
+                r.stderr,
+                "PTY allocation request failed",
+            ) == null) return error.TerminalNotRefused;
+        if (kind == .forward and
+            mem.find(
+                u8,
+                r.stderr,
+                "administratively prohibited",
+            ) == null) return error.ForwardingNotRefused;
+        if (kind == .subsystem and mem.find(u8, r.stderr, "subsystem request failed") == null and
+            mem.find(u8, r.stderr, "TransferInvocation") == null) return error.SubsystemNotRefused;
     }
 
-    fn exportData(t: *Test, name: []const u8, archive: []const u8, service: ?[]const u8, success: bool, label: []const u8) !void {
+    fn exportData(
+        t: *Test,
+        name: []const u8,
+        archive: []const u8,
+        service: ?[]const u8,
+        success: bool,
+        label: []const u8,
+    ) !void {
         const c = t.c;
         // Resume rechecks current bytes; never mistake a previous successful
         // fixture capture for the output of this invocation.
@@ -407,33 +505,52 @@ const Test = struct {
             if (err != error.FileNotFound) return err;
         };
         var args: std.ArrayList([]const u8) = .empty;
-        try args.appendSlice(c.gpa, &.{ t.binary, "export", name, "--identity", t.key, "--output", archive });
+        try args.appendSlice(
+            c.gpa,
+            &.{ t.binary, "export", name, "--identity", t.key, "--output", archive },
+        );
         if (service) |s| try args.appendSlice(c.gpa, &.{ "--service", s });
         if (mem.eql(u8, label, "online-service-export")) {
-            const port = try t.sshPort(name);
-            try args.appendSlice(c.gpa, &.{ "--host", try t.sshHost(name), "--port", port });
+            const port = if (t.on == .lima)
+                lima.sshPort(c.io, c.gpa, name) orelse return error.SshPort
+            else
+                @import("qemu.zig").record(
+                    c.io,
+                    c.gpa,
+                    try howl.machineDir(c.gpa, name),
+                    "ssh",
+                ) orelse return error.SshPort;
+            try args.appendSlice(c.gpa, &.{ "--host", "127.0.0.1", "--port", port });
         }
         const r = try c.run(args.items, label, .{ .timeout = .fromSeconds(if (cloud.supported(t.on)) 7200 else 900) });
         if (r.ok() != success) return c.fail("{s}: export result: {s}", .{ label, r.stderr });
-        if ((mem.eql(u8, label, "live-refused") or mem.eql(u8, label, "restarted-writer-refused")) and
-            mem.find(u8, r.stderr, "TransferWritersRunning") == null) return c.fail("{s}: writers were not checked: {s}", .{ label, r.stderr });
-        if (mem.eql(u8, label, "wrong-pin-refused") and mem.find(u8, r.stderr, "Host key verification failed") == null)
+        if ((mem.eql(u8, label, "live-refused") or
+            mem.eql(u8, label, "restarted-writer-refused")) and
+            mem.find(
+                u8,
+                r.stderr,
+                "TransferWritersRunning",
+            ) == null) return c.fail("{s}: writers were not checked: {s}", .{ label, r.stderr });
+        if (mem.eql(u8, label, "wrong-pin-refused") and
+            mem.find(u8, r.stderr, "Host key verification failed") == null)
             return error.HostIdentityNotRefused;
         if (!success) {
-            if (Dir.cwd().access(c.io, archive, .{})) |_| return error.PublishedFailedCapture else |err| if (err != error.FileNotFound) return err;
+            if (Dir.cwd().access(c.io, archive, .{})) |_|
+                return error.PublishedFailedCapture
+            else |err| if (err != error.FileNotFound)
+                return err;
         }
     }
 
     fn running(t: *Test, name: []const u8) !bool {
-        if (t.on == .firecracker) return try @import("firecracker.zig").supervised(t.c.io, t.c.gpa, try t.instance(name)) or
-            @import("firecracker.zig").running(t.c.io, t.c.gpa, try t.instance(name)) != null;
-        if (cloud.supported(t.on)) {
-            if ((try t.profile(name)).cloud_staged) return false;
-            return (try @import("data-cloud.zig").state(t.c.io, t.c.gpa, name, try t.cloudContext(name))).running;
-        }
-        if (t.on == .bhyve) return try @import("bhyve.zig").supervised(t.c.io, t.c.gpa, try howl.machineDir(t.c.gpa, name)) or
-            try @import("bhyve.zig").exists(t.c.io, t.c.gpa, name);
-        return if (t.on == .lima) lima.running(t.c.io, t.c.gpa, name) else @import("qemu.zig").running(t.c.io, t.c.gpa, try howl.machineDir(t.c.gpa, name)) != null;
+        return if (t.on == .lima)
+            lima.running(t.c.io, t.c.gpa, name)
+        else
+            @import("qemu.zig").running(
+                t.c.io,
+                t.c.gpa,
+                try howl.machineDir(t.c.gpa, name),
+            ) != null;
     }
 
     fn sshHost(t: *Test, name: []const u8) ![]const u8 {
@@ -561,9 +678,20 @@ const Test = struct {
 
     fn plainHash(t: *Test, path: []const u8) ![32]u8 {
         const io = t.c.io;
-        const a = t.c.gpa;
-        const file = try Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        var child = try std.process.spawn(
+            io,
+            .{
+                .argv = &.{ "zstd", "-d", "-q", "-c", "--", path },
+                .stdin = .ignore,
+                .stdout = .pipe,
+                .stderr = .ignore,
+            },
+        );
+        defer child.kill(io);
+        const pipe = child.stdout.?;
+        child.stdout = null;
+        defer pipe.close(io);
+        var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
         var buffer: [64 << 10]u8 = undefined;
         var reader = file.reader(io, &buffer);
         const manifest = try data.zstd.manifest(a, &reader.interface);
@@ -608,25 +736,22 @@ const Test = struct {
     fn poweroff(t: *Test, name: []const u8) !void {
         const c = t.c;
         const at = try t.instance(name);
-        if (t.on == .firecracker) {
-            try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.gpa.print("{s}/stop-request", .{at}), .data = "", .flags = .{ .permissions = .fromMode(0o600) } });
-            try t.ssh(name, &.{ "service-down-v1", "transfer-stop" }, "fixture-stop-arm", true);
-            try c.io.sleep(.fromMilliseconds(300), .awake);
-            try t.sshRequest(name, .shutdown, &.{ "service-up-v1", "transfer-stop" }, "fixture-stop", true);
-        } else if (cloud.supported(t.on)) {
-            try t.cloudPower(name, false, "cloud-poweroff");
-        } else if (t.on == .bhyve) {
-            const root = try @import("bhyve.zig").asRoot(c.io);
-            const found = try c.must(try mem.concat(c.gpa, []const u8, &.{ root, &.{ "/bin/pgrep", "-u", "0", "-f", "-x", try c.gpa.print("bhyve: {s}", .{name}) } }), "bhyve-poweroff-pid", .{});
-            const pid_text = mem.trim(u8, found.stdout, " \r\n");
-            const pid = try std.fmt.parseUnsigned(u32, pid_text, 10);
-            if (pid <= 1) return error.PoweroffPid;
-            _ = try c.must(try mem.concat(c.gpa, []const u8, &.{ root, &.{ "/bin/kill", "-TERM", pid_text } }), "bhyve-poweroff", .{});
-        } else if (t.on == .lima) _ = try host.qmp.command(c.io, c.gpa, try c.gpa.print("{s}/qmp.sock", .{at}), "system_powerdown", null) else {
+        if (t.on == .lima)
+            _ = try host.qmp.command(
+                c.io,
+                c.gpa,
+                try c.gpa.print("{s}/qmp.sock", .{at}),
+                "system_powerdown",
+                null,
+            )
+        else {
             const address = try Io.net.UnixAddress.init(try c.gpa.print("{s}/monitor.sock", .{at}));
             const stream = try address.connect(c.io);
             defer stream.close(c.io);
-            const f: Io.File = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } };
+            const f: Io.File = .{
+                .handle = stream.socket.handle,
+                .flags = .{ .nonblocking = false },
+            };
             try f.writeStreamingAll(c.io, "system_powerdown\n");
         }
         for (0..120) |_| {
@@ -654,18 +779,28 @@ const Test = struct {
         for (t.names.items) |name| {
             if (name.len == 0) continue;
             if (t.instance(name)) |at| {
-                const file = c.gpa.print("{s}/{s}", .{ at, if (t.on == .lima) "serial.log" else "console.log" }) catch continue;
-                const kept = c.path(c.gpa.print("{s}-console.log", .{name}) catch continue) catch continue;
+                const file = c.gpa.print(
+                    "{s}/{s}",
+                    .{ at, if (t.on == .lima) "serial.log" else "console.log" },
+                ) catch continue;
+                const kept = c.path(c.gpa.print(
+                    "{s}-console.log",
+                    .{name},
+                ) catch continue) catch continue;
                 Dir.cwd().copyFile(file, .cwd(), kept, c.io, .{}) catch {};
+                // The catalog uploader collects architecture-specific check
+                // logs; keep the console before delete removes the machine.
+                const catalog = c.gpa.print("build/{s}/check/data-transfer-{s}.log", .{
+                    @tagName(@import("builtin").cpu.arch), name,
+                }) catch continue;
+                Dir.cwd().createDirPath(c.io, std.fs.path.dirname(catalog).?) catch {};
+                Dir.cwd().copyFile(file, .cwd(), catalog, c.io, .{}) catch {};
             } else |_| {}
-            const removed = c.run(&.{ t.binary, "delete", name, "--on", @tagName(t.on) }, "cleanup", .{ .timeout = .fromSeconds(600) }) catch {
-                failed = true;
-                continue;
-            };
-            if (!removed.ok()) {
-                c.say("cleanup failed for owned fixture {s}", .{name});
-                failed = true;
-            }
+            _ = c.run(
+                &.{ t.binary, "delete", name, "--on", @tagName(t.on) },
+                "cleanup",
+                .{ .timeout = .fromSeconds(120) },
+            ) catch {};
         }
         if (failed) return error.TransferTestCleanup;
         try t.cleanupDisks();

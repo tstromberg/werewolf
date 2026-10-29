@@ -22,7 +22,7 @@ services:
     user: valkey
     pledge: stdio rpath wpath unix inet listen proc
     listen: [tcp/6379]
-    read: /etc/valkey /run/werewolf/import
+    read: /etc/valkey
     share: shared
     nofile: 10240
     secret: VALKEY_PASSWORD /run/config/valkey/password

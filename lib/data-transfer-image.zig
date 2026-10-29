@@ -12,7 +12,11 @@ pub const record_path = ".werewolf/data-image";
 pub fn requireBarrier(io: Io, image: Dir) !void {
     var parent = data.parentDir(io, image, barrier) catch return error.TransferBootBarrier;
     defer parent.close(io);
-    const f = data.openRegular(io, parent, std.fs.path.basename(barrier)) catch return error.TransferBootBarrier;
+    const f = data.openRegular(
+        io,
+        parent,
+        std.fs.path.basename(barrier),
+    ) catch return error.TransferBootBarrier;
     defer f.close(io);
     var bytes: [3]u8 = undefined;
     if ((try f.stat(io)).size != 2 or try f.readPositionalAll(io, &bytes, 0) != 2 or
@@ -34,7 +38,13 @@ pub fn requireRecorded(io: Io, root: Dir, image: []const u8) !void {
     if (@import("builtin").os.tag == .linux) {
         const linux = std.os.linux;
         var st: linux.Statx = undefined;
-        if (linux.errno(linux.statx(f.handle, "", linux.AT.EMPTY_PATH, .{ .UID = true, .GID = true }, &st)) != .SUCCESS or
+        if (linux.errno(linux.statx(
+            f.handle,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .UID = true, .GID = true },
+            &st,
+        )) != .SUCCESS or
             st.uid != 0 or st.gid != 0) return error.TransferState;
     }
     var bytes: [66]u8 = undefined;
@@ -50,7 +60,11 @@ pub fn record(io: Io, root: Dir, image: []const u8) !void {
     var machine = try data.install.openMachine(io, root);
     defer machine.close(io);
     machine.deleteFile(io, "data-image-part") catch |err| if (err != error.FileNotFound) return err;
-    const f = try machine.createFile(io, "data-image-part", .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const f = try machine.createFile(
+        io,
+        "data-image-part",
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
     defer f.close(io);
     try f.writeStreamingAll(io, image);
     try f.writeStreamingAll(io, "\n");
@@ -68,8 +82,23 @@ test "image declarations fail closed when absent, mismatched or linked" {
     const image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     try t.expectError(error.TransferImageUnrecorded, requireRecorded(io, tmp.dir, image));
     try record(io, tmp.dir, image);
-    try requireRecorded(io, tmp.dir, image);
-    try t.expectError(error.TransferImage, requireRecorded(io, tmp.dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    // Unprivileged Linux tests cannot create root-owned records. Exercise that
+    // refusal here; the root-run transfer boundary suite checks the valid record.
+    const unprivileged = @import("builtin").os.tag == .linux and
+        (std.os.linux.getuid() != 0 or std.os.linux.getgid() != 0);
+    if (unprivileged) {
+        try t.expectError(error.TransferState, requireRecorded(io, tmp.dir, image));
+    } else {
+        try requireRecorded(io, tmp.dir, image);
+        try t.expectError(
+            error.TransferImage,
+            requireRecorded(
+                io,
+                tmp.dir,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        );
+    }
     try tmp.dir.deleteFile(io, record_path);
     try tmp.dir.symLink(io, "missing", record_path, .{});
     if (requireRecorded(io, tmp.dir, image)) |_| return error.AcceptedLinkedIdentity else |_| {}

@@ -32,8 +32,8 @@ suites:
         steps:
           - exec:
               argv: [/usr/bin/mariadb, --no-defaults, --batch, --skip-column-names, --raw,
-                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root]
-              stdin: SELECT 1;
+                     --connect-timeout=3, --socket=/run/svc/mariadb/mariadb.sock, --user=root,
+                     '--execute=SELECT 1']
               env:
                 LC_ALL: C
               readonly: true

@@ -325,7 +325,13 @@ fn fetchBytes(io: Io, gpa: Allocator, url: []const u8, limit: usize, why: *Why) 
     for (0..bd.fetch_attempts) |attempt| {
         return fetchOnce(io, gpa, url, buf, why) catch |err| {
             if (err == error.Refused) return err;
-            if (attempt + 1 < bd.fetch_attempts and bd.retryable(err)) {
+            // Zig's HTTP client collapses handshake errors into this one
+            // error, including temporary disconnects and certificate errors.
+            // A retry never changes certificate verification or accepts data.
+            if (attempt + 1 < bd.fetch_attempts and
+                (bd.retryable(err) or err == error.TlsInitializationFailed or
+                    err == error.NameServerFailure))
+            {
                 try Io.sleep(io, .fromSeconds(@intCast(attempt + 1)), .awake);
                 continue;
             }
@@ -372,9 +378,10 @@ fn fetchOnce(io: Io, gpa: Allocator, url: []const u8, buf: []u8, why: *Why) ![]c
 }
 
 const testing = std.testing;
+const test_host = @import("host");
 
 test "index downloads retry interrupted bodies without retaining partial bytes" {
-    const host = @import("host");
+    const host = test_host;
     const io = testing.io;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -430,6 +437,42 @@ test "index downloads retry interrupted bodies without retaining partial bytes" 
     source.mutex.lockUncancelable(io);
     defer source.mutex.unlock(io);
     try testing.expectEqualSlices(usize, &.{ 2, bd.fetch_attempts, 1, 1 }, &source.calls);
+}
+
+test "index TLS retries still refuse an untrusted certificate" {
+    const host = test_host;
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const ca = try host.tls.Authority.init(io, gpa, "untrusted index authority");
+    const identity = try ca.issue(io, gpa, &.{"127.0.0.1"});
+    const Handler = struct {
+        fn serve(
+            _: *anyopaque,
+            _: Allocator,
+            _: *const host.http.Request,
+            response: *host.http.Response,
+        ) !void {
+            try response.send(200, &.{}, "untrusted index");
+        }
+    };
+    var context: u8 = 0;
+    var server: host.http.Server = undefined;
+    try server.start(io, testing.allocator, .{
+        .identity = &identity,
+        .handler = .{ .context = &context, .serve = Handler.serve },
+    });
+    defer server.stop();
+    var why: Why = .{};
+    try testing.expectError(error.Refused, get(
+        io,
+        gpa,
+        try gpa.print("https://127.0.0.1:{d}/index", .{server.port()}),
+        1024,
+        &why,
+    ));
+    try testing.expect(mem.find(u8, why.text, "TlsInitializationFailed") != null);
 }
 
 test pick {

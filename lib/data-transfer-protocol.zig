@@ -13,7 +13,8 @@ pub fn write(w: *Io.Writer, result: data.Result) !void {
     var size: usize = magic.len + 64 + 32 + 1 + 1 + 4 + end.len;
     size += if (m.service) |s| s.len else 0;
     for (m.entries) |e| size += 29 + e.path.len + e.owner.len + e.group.len;
-    if (size > data.limits.manifest or m.entries.len > data.limits.entries) return error.TransferLimit;
+    if (size > data.limits.manifest or
+        m.entries.len > data.limits.entries) return error.TransferLimit;
     try w.writeAll(magic);
     try w.writeAll(&result.sha256);
     var image: [32]u8 = undefined;
@@ -57,7 +58,9 @@ pub fn read(a: Allocator, reader: *Io.Reader, p: data.Policy, scope: ?[]const u8
     if (!mem.eql(u8, &marker, magic)) return error.TransferProtocol;
     var sha256: [64]u8 = undefined;
     try r.take(&sha256);
-    for (sha256) |c| if (!std.ascii.isDigit(c) and (c < 'a' or c > 'f')) return error.TransferProtocol;
+    for (sha256) |c| if (!std.ascii.isDigit(
+        c,
+    ) and (c < 'a' or c > 'f')) return error.TransferProtocol;
     var image: [32]u8 = undefined;
     try r.take(&image);
     if (!mem.eql(u8, &std.fmt.bytesToHex(image, .lower), p.image)) return error.TransferImage;
@@ -74,7 +77,8 @@ pub fn read(a: Allocator, reader: *Io.Reader, p: data.Policy, scope: ?[]const u8
         const path_len = try r.number(u16);
         const owner_len = try r.number(u8);
         const group_len = try r.number(u8);
-        if (path_len == 0 or path_len > data.limits.path or owner_len == 0 or owner_len > 31 or group_len == 0 or group_len > 31)
+        if (path_len == 0 or path_len > data.limits.path or owner_len == 0 or owner_len > 31 or
+            group_len == 0 or group_len > 31)
             return error.TransferLimit;
         const kind = try r.number(u8);
         if (kind > @backingInt(data.Kind.directory)) return error.TransferProtocol;
@@ -93,14 +97,25 @@ pub fn read(a: Allocator, reader: *Io.Reader, p: data.Policy, scope: ?[]const u8
             .mode = mode,
             .size = size,
             .mtime_ns = mtime,
-            .default_acl = if (acl[0] == 0) null else .{ .user = @intCast(acl[1]), .group = @intCast(acl[2]), .other = @intCast(acl[3]) },
+            .default_acl = if (acl[0] == 0)
+                null
+            else
+                .{ .user = @intCast(acl[1]), .group = @intCast(acl[2]), .other = @intCast(acl[3]) },
         };
         total = std.math.add(u64, total, size) catch return error.TransferLimit;
     }
     try r.take(&marker);
     if (!mem.eql(u8, &marker, end)) return error.TransferProtocol;
-    if (reader.takeByte()) |_| return error.TransferTrailing else |err| if (err != error.EndOfStream) return err;
-    const m: data.Manifest = .{ .image = p.image, .arch = p.arch, .service = service, .entries = entries };
+    if (reader.takeByte()) |_|
+        return error.TransferTrailing
+    else |err| if (err != error.EndOfStream)
+        return err;
+    const m: data.Manifest = .{
+        .image = p.image,
+        .arch = p.arch,
+        .service = service,
+        .entries = entries,
+    };
     try data.check(a, m, p, scope);
     return .{ .manifest = m, .sha256 = sha256, .bytes = total };
 }
@@ -130,8 +145,18 @@ test "publisher protocol rejects truncation, trailing bytes and widened scope" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const p: data.Policy = .{ .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .arch = .aarch64, .services = &.{"plex"}, .users = &.{}, .groups = &.{} };
-    const result: data.Result = .{ .manifest = .{ .image = p.image, .arch = p.arch, .entries = &.{} }, .sha256 = @splat('a'), .bytes = 0 };
+    const p: data.Policy = .{
+        .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .arch = .aarch64,
+        .services = &.{"plex"},
+        .users = &.{},
+        .groups = &.{},
+    };
+    const result: data.Result = .{
+        .manifest = .{ .image = p.image, .arch = p.arch, .entries = &.{} },
+        .sha256 = @splat('a'),
+        .bytes = 0,
+    };
     var out: Io.Writer.Allocating = .init(a);
     try write(&out.writer, result);
     var reader: Io.Reader = .fixed(out.written());

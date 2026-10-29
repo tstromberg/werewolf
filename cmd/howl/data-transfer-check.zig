@@ -20,7 +20,12 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const cwd = try std.process.currentPathAlloc(io, a);
     const arch = howl.hostArch() orelse return error.UnsupportedHostArch;
-    const verity = try @import("verity").Params.parse(try Dir.cwd().readFileAlloc(io, args[4], a, .limited(4096)));
+    const verity = try @import("verity").Params.parse(try Dir.cwd().readFileAlloc(
+        io,
+        args[4],
+        a,
+        .limited(4096),
+    ));
     const image = std.fmt.bytesToHex(verity.root, .lower);
     const guest: helper.Guest = .{
         .arch = arch,
@@ -31,19 +36,34 @@ pub fn main(init: std.process.Init) !void {
     };
     var nonce: [12]u8 = undefined;
     try io.randomSecure(&nonce);
-    const work = try a.print("/tmp/werewolf-transfer-check-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    const work = try a.print(
+        "/tmp/werewolf-transfer-check-{s}",
+        .{std.fmt.bytesToHex(nonce, .lower)},
+    );
     try Dir.cwd().createDir(io, work, .fromMode(0o700));
     var check: Check = .{ .io = io, .a = a, .work = work, .guest = guest, .image = &image };
-    errdefer howl.say(io, "transfer-check failed in {s}; public fixture kept at {s}", .{ check.phase, work });
+    errdefer howl.say(
+        io,
+        "transfer-check failed in {s}; public fixture kept at {s}",
+        .{ check.phase, work },
+    );
     if (args.len >= 6) try check.boundaries(try std.fs.path.resolveAlloc(a, &.{ cwd, args[5] }));
     try check.run();
     if (args.len >= 7) try check.cli(try std.fs.path.resolveAlloc(a, &.{ cwd, args[6] }));
     if (args.len == 8) {
         try check.encrypted(try std.fs.path.resolveAlloc(a, &.{ cwd, args[7] }));
-        try File.stdout().writeStreamingAll(io, "data-transfer: encrypted source/destination, wrong-key rejection and plaintext restore passed\n");
+        try File.stdout().writeStreamingAll(
+            io,
+            "data-transfer: encrypted source/destination, wrong-key rejection and plaintext " ++
+                "restore passed\n",
+        );
     }
     try Dir.cwd().deleteTree(io, work);
-    try File.stdout().writeStreamingAll(io, "data-transfer: offline full/service round trips, source immutability, exclusions, corruption, conflict and dirty-source checks passed\n");
+    try File.stdout().writeStreamingAll(
+        io,
+        "data-transfer: offline full/service round trips, source immutability, exclusions, " ++
+            "corruption, conflict and dirty-source checks passed\n",
+    );
 }
 
 const Check = struct {
@@ -66,21 +86,37 @@ const Check = struct {
         const output = try c.path("boundaries.out");
         var guest = c.guest;
         guest.initramfs = initramfs;
-        try helper.execute(c.io, try helper.argv(c.a, guest, .{ .data = guest.image, .control = guest.image }, console, output), .fromSeconds(120));
+        try helper.execute(
+            c.io,
+            try helper.argv(
+                c.io,
+                c.a,
+                guest,
+                .{ .data = guest.image, .control = guest.image },
+                console,
+                output,
+            ),
+            .fromSeconds(120),
+        );
         const log = try Dir.cwd().readFileAlloc(c.io, console, c.a, .limited(1 << 20));
-        if (mem.find(u8, log, "transfer-boundaries-passed") == null or mem.find(u8, log, "SKIP") != null)
+        if (mem.find(u8, log, "transfer-boundaries-passed") == null or
+            mem.find(u8, log, "SKIP") != null)
             return error.TransferTestBoundary;
     }
 
     fn guard(c: *Check) !void {
         c.phase = "helper retains lifecycle lock after its parent closes it";
         const guard_path = try c.path("guard.lock");
-        const held = try Dir.cwd().createFile(c.io, guard_path, .{ .permissions = .fromMode(0o600) });
+        const held = try Dir.cwd().createFile(
+            c.io,
+            guard_path,
+            .{ .permissions = .fromMode(0o600) },
+        );
         var held_open = true;
         defer if (held_open) held.close(c.io);
         try held.lock(c.io, .exclusive);
         var args: std.ArrayList([]const u8) = .empty;
-        try args.appendSlice(c.a, try helper.argv(c.a, c.guest, .{
+        try args.appendSlice(c.a, try helper.argv(c.io, c.a, c.guest, .{
             .data = c.guest.image,
             .control = c.guest.image,
             .guard = held,
@@ -107,16 +143,32 @@ const Check = struct {
         probe.unlock(c.io);
     }
     fn command(c: *Check, args: []const []const u8) ![]const u8 {
-        const r = try std.process.run(c.a, c.io, .{ .argv = args, .stdout_limit = .limited(4 << 20), .stderr_limit = .limited(16 << 10) });
+        const r = try std.process.run(
+            c.a,
+            c.io,
+            .{
+                .argv = args,
+                .stdout_limit = .limited(4 << 20),
+                .stderr_limit = .limited(16 << 10),
+            },
+        );
         if (!r.term.success()) return error.TransferTestTool;
         return r.stdout;
     }
     fn debug(c: *Check, disk: []const u8, command_text: []const u8, write: bool) ![]const u8 {
         const mk = @import("ext4.zig").findMke2fs(c.io, c.a) orelse return error.TransferTestTool;
         const bin = try c.a.print("{s}/debugfs", .{std.fs.path.dirname(mk).?});
-        return c.command(if (write) &.{ bin, "-w", "-R", command_text, disk } else &.{ bin, "-R", command_text, disk });
+        return c.command(if (write)
+            &.{ bin, "-w", "-R", command_text, disk }
+        else
+            &.{ bin, "-R", command_text, disk });
     }
-    fn volume(c: *Check, name: []const u8, files: []const []const u8, contents: []const []const u8) ![]const u8 {
+    fn volume(
+        c: *Check,
+        name: []const u8,
+        files: []const []const u8,
+        contents: []const []const u8,
+    ) ![]const u8 {
         const tree = try c.path(try c.a.print("{s}-tree", .{name}));
         try Dir.cwd().createDir(c.io, tree, .fromMode(0o755));
         for (files, contents) |path_name, bytes| {
@@ -125,16 +177,46 @@ const Check = struct {
             try Dir.cwd().writeFile(c.io, .{ .sub_path = dest, .data = bytes });
         }
         try Dir.cwd().createDirPath(c.io, try c.a.print("{s}/.werewolf", .{tree}));
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.a.print("{s}/.werewolf/data-image", .{tree}), .data = try c.a.print("{s}\n", .{c.image}), .flags = .{ .permissions = .fromMode(0o600) } });
-        Dir.cwd().setFilePermissions(c.io, try c.a.print("{s}/.werewolf", .{tree}), .fromMode(0o700), .{ .follow_symlinks = false }) catch |err|
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.a.print("{s}/.werewolf/data-image", .{tree}),
+                .data = try c.a.print("{s}\n", .{c.image}),
+                .flags = .{ .permissions = .fromMode(0o600) },
+            },
+        );
+        Dir.cwd().setFilePermissions(
+            c.io,
+            try c.a.print("{s}/.werewolf", .{tree}),
+            .fromMode(0o700),
+            .{ .follow_symlinks = false },
+        ) catch |err|
             if (err != error.FileNotFound) return err;
         const disk = try c.path(try c.a.print("{s}.img", .{name}));
-        const f = try Dir.cwd().createFile(c.io, disk, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        const f = try Dir.cwd().createFile(
+            c.io,
+            disk,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
         defer f.close(c.io);
         try f.setLength(c.io, 96 << 20);
         const mk = @import("ext4.zig").findMke2fs(c.io, c.a) orelse return error.TransferTestTool;
-        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-o", "Linux", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", "-d", tree, disk });
-        // mke2fs preserves host ownership. Normalize this disposable fixture
+        _ = try c.command(&.{
+            mk,
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-m",
+            "0",
+            "-E",
+            "lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0,no_copy_xattrs",
+            "-d",
+            tree,
+            disk,
+        });
+        // Host SELinux labels are not guest fixture metadata. mke2fs omits
+        // those xattrs above, but preserves ownership. Normalize this fixture
         // to the image's approved root identity, never change source VMs.
         var dir = try Dir.cwd().openDir(c.io, tree, .{ .iterate = true });
         defer dir.close(c.io);
@@ -142,14 +224,31 @@ const Check = struct {
         defer walker.deinit();
         while (try walker.next(c.io)) |entry| {
             for ([_][]const u8{ "uid", "gid" }) |field|
-                _ = try c.debug(disk, try c.a.print("set_inode_field /{s} {s} 0", .{ entry.path, field }), true);
+                _ = try c.debug(
+                    disk,
+                    try c.a.print("set_inode_field /{s} {s} 0", .{ entry.path, field }),
+                    true,
+                );
         }
         return disk;
     }
-    fn invoke(c: *Check, label: []const u8, disk: []const u8, archive: ?[]const u8, scope: ?[]const u8) !Captured {
+    fn invoke(
+        c: *Check,
+        label: []const u8,
+        disk: []const u8,
+        archive: ?[]const u8,
+        scope: ?[]const u8,
+    ) !Captured {
         return c.withKey(label, disk, archive, scope, null);
     }
-    fn withKey(c: *Check, label: []const u8, disk: []const u8, archive: ?[]const u8, scope: ?[]const u8, key: ?[]const u8) !Captured {
+    fn withKey(
+        c: *Check,
+        label: []const u8,
+        disk: []const u8,
+        archive: ?[]const u8,
+        scope: ?[]const u8,
+        key: ?[]const u8,
+    ) !Captured {
         c.phase = label;
         const work = try c.path(label);
         try Dir.cwd().createDir(c.io, work, .fromMode(0o700));
@@ -164,11 +263,23 @@ const Check = struct {
             .initialize = archive != null,
             .replay_journal_on_copy = c.replay_copy,
         }, archive, key, &c.why);
-        const policy = try helper.run(c.io, c.a, c.guest, .{ .data = disk, .control = control, .writable = archive != null or c.replay_copy }, work);
+        const policy = try helper.run(
+            c.io,
+            c.a,
+            c.guest,
+            .{ .data = disk, .control = control, .writable = archive != null },
+            work,
+        );
         return .{ .policy = policy, .archive = try c.a.print("{s}/archive.tar.zst", .{work}) };
     }
 
-    fn encryptedVolume(c: *Check, initramfs: []const u8, label: []const u8, key: []const u8, empty: bool) ![]const u8 {
+    fn encryptedVolume(
+        c: *Check,
+        initramfs: []const u8,
+        label: []const u8,
+        key: []const u8,
+        empty: bool,
+    ) ![]const u8 {
         c.phase = label;
         const work = try c.path(label);
         try Dir.cwd().createDir(c.io, work, .fromMode(0o700));
@@ -188,21 +299,56 @@ const Check = struct {
         var guest = c.guest;
         guest.initramfs = initramfs;
         const console = try c.a.print("{s}/prepare.log", .{work});
-        try helper.execute(c.io, try helper.argv(c.a, guest, .{ .data = disk, .control = control, .writable = true }, console, try c.a.print("{s}/prepare.out", .{work})), .fromSeconds(120));
+        try helper.execute(
+            c.io,
+            try helper.argv(
+                c.io,
+                c.a,
+                guest,
+                .{ .data = disk, .control = control, .writable = true },
+                console,
+                try c.a.print("{s}/prepare.out", .{work}),
+            ),
+            .fromSeconds(120),
+        );
         const text = try Dir.cwd().readFileAlloc(c.io, console, c.a, .limited(1 << 20));
-        if (mem.find(u8, text, "encrypted-fixture-ready") == null) return error.TransferTestEncryption;
+        if (mem.find(
+            u8,
+            text,
+            "encrypted-fixture-ready",
+        ) == null) return error.TransferTestEncryption;
         return disk;
     }
 
     fn encrypted(c: *Check, initramfs: []const u8) !void {
         const key = try c.path("fixture.key");
         const wrong = try c.path("wrong.key");
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = key, .data = "public fixture key 0123456789abcdef", .flags = .{ .permissions = .fromMode(0o600) } });
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = wrong, .data = "wrong fixture key 0123456789abcdef!", .flags = .{ .permissions = .fromMode(0o600) } });
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = key,
+                .data = "public fixture key 0123456789abcdef",
+                .flags = .{ .permissions = .fromMode(0o600) },
+            },
+        );
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = wrong,
+                .data = "wrong fixture key 0123456789abcdef!",
+                .flags = .{ .permissions = .fromMode(0o600) },
+            },
+        );
         const source = try c.encryptedVolume(initramfs, "encrypted-source", key, false);
         const before = (try @import("prebuilt").hashFile(c.io, c.a, source)).sha256;
         for ([_]?[]const u8{ null, wrong }, 0..) |bad_key, n| {
-            if (c.withKey(try c.a.print("encrypted-refused-{d}", .{n}), source, null, null, bad_key)) |_|
+            if (c.withKey(
+                try c.a.print("encrypted-refused-{d}", .{n}),
+                source,
+                null,
+                null,
+                bad_key,
+            )) |_|
                 return error.TransferTestKeyAccepted
             else |err| if (err != error.TransferKey) return err;
         }
@@ -221,9 +367,17 @@ const Check = struct {
         if (result.manifest.entries.len != 3) return error.TransferTestEncryption;
         const plain = try c.volume("encrypted-plain-target", &.{}, &.{});
         _ = try c.invoke("encrypted-to-plain", plain, restored.archive, null);
-        try c.equal("encrypted public fixture\n", try c.debug(plain, "cat /svc/postgres/payload", false));
+        try c.equal(
+            "encrypted public fixture\n",
+            try c.debug(plain, "cat /svc/postgres/payload", false),
+        );
     }
-    fn validate(c: *Check, filename: []const u8, policy: data.Policy, scope: ?[]const u8) !data.Result {
+    fn validate(
+        c: *Check,
+        filename: []const u8,
+        policy: data.Policy,
+        scope: ?[]const u8,
+    ) !data.Result {
         c.phase = "host archive validation";
         const f = try Dir.cwd().openFile(c.io, filename, .{});
         defer f.close(c.io);
@@ -243,20 +397,70 @@ const Check = struct {
     fn bootVolume(c: *Check, at: []const u8, occupied: bool) !void {
         const tree = try c.a.print("{s}/tree", .{at});
         try Dir.cwd().createDirPath(c.io, try c.a.print("{s}/slot/a", .{tree}));
-        try Dir.cwd().copyFile(c.guest.image, .cwd(), try c.a.print("{s}/slot/a/root.erofs", .{tree}), c.io, .{});
+        try Dir.cwd().copyFile(
+            c.guest.image,
+            .cwd(),
+            try c.a.print("{s}/slot/a/root.erofs", .{tree}),
+            c.io,
+            .{},
+        );
         try Dir.cwd().createDirPath(c.io, try c.a.print("{s}/data/.werewolf", .{tree}));
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.a.print("{s}/data/.werewolf/data-image", .{tree}), .data = try c.a.print("{s}\n", .{c.image}), .flags = .{ .permissions = .fromMode(0o600) } });
-        try Dir.cwd().setFilePermissions(c.io, try c.a.print("{s}/data/.werewolf", .{tree}), .fromMode(0o700), .{});
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.a.print("{s}/data/.werewolf/data-image", .{tree}),
+                .data = try c.a.print("{s}\n", .{c.image}),
+                .flags = .{ .permissions = .fromMode(0o600) },
+            },
+        );
+        try Dir.cwd().setFilePermissions(
+            c.io,
+            try c.a.print("{s}/data/.werewolf", .{tree}),
+            .fromMode(0o700),
+            .{},
+        );
         if (occupied) {
             try Dir.cwd().createDirPath(c.io, try c.a.print("{s}/data/svc/postgres", .{tree}));
-            try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.a.print("{s}/data/svc/postgres/payload", .{tree}), .data = "CLI archive bytes\n" });
-            try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.a.print("{s}/data/.hidden", .{tree}), .data = "hidden CLI bytes\n" });
+            try Dir.cwd().writeFile(
+                c.io,
+                .{
+                    .sub_path = try c.a.print("{s}/data/svc/postgres/payload", .{tree}),
+                    .data = "CLI archive bytes\n",
+                },
+            );
+            try Dir.cwd().writeFile(
+                c.io,
+                .{
+                    .sub_path = try c.a.print("{s}/data/.hidden", .{tree}),
+                    .data = "hidden CLI bytes\n",
+                },
+            );
         }
         const disk = try c.a.print("{s}/disk.img", .{at});
         const layout = try @import("gpt").layout(512, 16);
         try @import("gpt").create(c.io, disk, layout);
         const mk = @import("ext4.zig").findMke2fs(c.io, c.a) orelse return error.TransferTestTool;
-        _ = try c.command(&.{ mk, "-q", "-F", "-t", "ext4", "-o", "Linux", "-b", "4096", "-m", "0", "-E", try c.a.print("offset={d},lazy_itable_init=0,lazy_journal_init=0,root_owner=0:0", .{layout.root_first * 512}), "-d", tree, disk, try c.a.print("{d}", .{(layout.root_last + 1 - layout.root_first) / 8}) });
+        _ = try c.command(&.{
+            mk,
+            "-q",
+            "-F",
+            "-t",
+            "ext4",
+            "-b",
+            "4096",
+            "-m",
+            "0",
+            "-E",
+            try c.a.print(
+                "offset={d},lazy_itable_init=0,lazy_journal_init=0," ++
+                    "root_owner=0:0,no_copy_xattrs",
+                .{layout.root_first * 512},
+            ),
+            "-d",
+            tree,
+            disk,
+            try c.a.print("{d}", .{(layout.root_last + 1 - layout.root_first) / 8}),
+        });
         const view = try c.a.print("{s}?offset={d}", .{ disk, layout.root_first * 512 });
         var dir = try Dir.cwd().openDir(c.io, tree, .{ .iterate = true });
         defer dir.close(c.io);
@@ -269,11 +473,23 @@ const Check = struct {
         try Dir.cwd().createDirPath(c.io, try c.a.print("{s}/authority", .{at}));
         const image_out = std.fs.path.dirname(std.fs.path.dirname(c.guest.image).?).?;
         const profile: @import("local-secure.zig").Profile = .{
-            .spec = .{ .form = std.fs.path.basename(image_out), .arch = c.guest.arch, .build = std.fs.path.dirname(image_out), .disk_path = disk, .boot_cert = try c.path("fixture-public.crt") },
+            .spec = .{
+                .form = std.fs.path.basename(image_out),
+                .arch = c.guest.arch,
+                .build = std.fs.path.dirname(image_out),
+                .disk_path = disk,
+                .boot_cert = try c.path("fixture-public.crt"),
+            },
             .provider = .qemu,
             .managed = false,
         };
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.a.print("{s}/authority/profile.json", .{at}), .data = try std.json.Stringify.valueAlloc(c.a, profile, .{}) });
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.a.print("{s}/authority/profile.json", .{at}),
+                .data = try std.json.Stringify.valueAlloc(c.a, profile, .{}),
+            },
+        );
     }
 
     fn cliCommand(c: *Check, binary: []const u8, args: []const []const u8, success: bool) !void {
@@ -283,7 +499,16 @@ const Check = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.append(c.a, binary);
         try argv.appendSlice(c.a, args);
-        const result = try std.process.run(c.a, c.io, .{ .argv = argv.items, .environ_map = &env, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(1 << 20) });
+        const result = try std.process.run(
+            c.a,
+            c.io,
+            .{
+                .argv = argv.items,
+                .environ_map = &env,
+                .stdout_limit = .limited(1 << 20),
+                .stderr_limit = .limited(1 << 20),
+            },
+        );
         if (result.term.success() != success) {
             howl.say(c.io, "CLI {s}: {s}{s}", .{ args[0], result.stdout, result.stderr });
             return error.TransferTestCli;
@@ -298,20 +523,45 @@ const Check = struct {
             try c.a.print("transfer-target-{s}", .{suffix}),
             try c.a.print("transfer-service-{s}", .{suffix}),
         };
-        try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.path("fixture-public.crt"), .data = "public storage fixture; never enrolled or booted\n" });
+        try Dir.cwd().writeFile(
+            c.io,
+            .{
+                .sub_path = try c.path("fixture-public.crt"),
+                .data = "public storage fixture; never enrolled or booted\n",
+            },
+        );
         for (names, 0..) |name, i| {
             const at = try howl.machineDir(c.a, name);
             try Dir.cwd().createDirPath(c.io, at);
             try c.bootVolume(at, i == 0);
         }
-        defer for (names) |name| Dir.cwd().deleteTree(c.io, howl.machineDir(c.a, name) catch continue) catch {};
+        defer for (names) |name| Dir.cwd().deleteTree(
+            c.io,
+            howl.machineDir(c.a, name) catch continue,
+        ) catch {};
         const archive = try c.path("cli.tar.zst");
         const source_disk = try c.a.print("{s}/disk.img", .{try howl.machineDir(c.a, names[0])});
         const before = try c.hash(source_disk);
         // A missing PID file must not bypass the hypervisor's storage lock.
         // This paused process never executes a guest instruction or writes data.
         var holder = try std.process.spawn(c.io, .{
-            .argv = &.{ if (c.guest.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64", "-M", if (c.guest.arch == .aarch64) "virt" else "q35", "-S", "-nodefaults", "-display", "none", "-monitor", "none", "-nic", "none", "-drive", try c.a.print("if=none,id=data,format=raw,file={s}", .{source_disk}), "-device", "virtio-blk-pci,drive=data" },
+            .argv = &.{
+                if (c.guest.arch == .aarch64) "qemu-system-aarch64" else "qemu-system-x86_64",
+                "-M",
+                if (c.guest.arch == .aarch64) "virt" else "q35",
+                "-S",
+                "-nodefaults",
+                "-display",
+                "none",
+                "-monitor",
+                "none",
+                "-nic",
+                "none",
+                "-drive",
+                try c.a.print("if=none,id=data,format=raw,file={s}", .{source_disk}),
+                "-device",
+                "virtio-blk-pci,drive=data",
+            },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
@@ -320,7 +570,11 @@ const Check = struct {
         // Observe the storage lock rather than assuming the child has started.
         var locked = false;
         for (0..100) |_| {
-            const probe = try std.process.run(c.a, c.io, .{ .argv = &.{ "lsof", "-Fpcfn", "--", source_disk } });
+            const probe = try std.process.run(
+                c.a,
+                c.io,
+                .{ .argv = &.{ "lsof", "-Fpcfn", "--", source_disk } },
+            );
             if (probe.term.success() and probe.stdout.len > 0) {
                 locked = true;
                 break;
@@ -352,7 +606,25 @@ const Check = struct {
     fn run(c: *Check) !void {
         const payload = try c.a.alloc(u8, 33 << 20);
         Io.random(c.io, payload);
-        const source = try c.volume("source", &.{ "extra", ".hidden", "svc/postgres/payload", ".werewolf/source-identity", "svc/sshd/host-key", "log/current" }, &.{ "outside services\n", "", payload, "source authority", "source SSH key", "source audit trail" });
+        const source = try c.volume(
+            "source",
+            &.{
+                "extra",
+                ".hidden",
+                "svc/postgres/payload",
+                ".werewolf/source-identity",
+                "svc/sshd/host-key",
+                "log/current",
+            },
+            &.{
+                "outside services\n",
+                "",
+                payload,
+                "source authority",
+                "source SSH key",
+                "source audit trail",
+            },
+        );
         const before = try c.hash(source);
         const full = try c.invoke("full-export", source, null, null);
         const inventory = try c.validate(full.archive, full.policy, null);
@@ -363,44 +635,75 @@ const Check = struct {
             };
         if (!has_log) return error.TransferTestMissingLogs;
         try c.equal(before, try c.hash(source));
-        {
-            const replay = try c.path("journal-copy.raw");
-            try Dir.cwd().copyFile(source, .cwd(), replay, c.io, .{});
-            _ = try c.debug(replay, "feature needs_recovery", true);
-            c.replay_copy = true;
-            defer c.replay_copy = false;
-            const recovered = try c.invoke("journal-copy-export", replay, null, null);
-            _ = try c.validate(recovered.archive, recovered.policy, null);
-            try c.equal(before, try c.hash(source));
-        }
-        for (inventory.manifest.entries) |e| if (data.excluded(e.path)) return error.TransferTestExclusion;
+        for (inventory.manifest.entries) |e| if (data.excluded(
+            e.path,
+        )) return error.TransferTestExclusion;
         const selected = try c.invoke("service-export", source, null, "postgres");
         const selected_inventory = try c.validate(selected.archive, selected.policy, "postgres");
         for (selected_inventory.manifest.entries) |e|
             if (!data.selected(e.path, "postgres")) return error.TransferTestScope;
         try c.equal(before, try c.hash(source));
-        const destination = try c.volume("destination", &.{ ".werewolf/destination-identity", "log/current" }, &.{ "destination authority", "destination audit trail" });
+        const destination = try c.volume(
+            "destination",
+            &.{ ".werewolf/destination-identity", "log/current" },
+            &.{ "destination authority", "destination audit trail" },
+        );
         _ = try c.invoke("full-import", destination, full.archive, null);
         try c.equal("outside services\n", try c.debug(destination, "cat /extra", false));
-        try c.equal("destination authority", try c.debug(destination, "cat /.werewolf/destination-identity", false));
+        try c.equal(
+            "destination authority",
+            try c.debug(destination, "cat /.werewolf/destination-identity", false),
+        );
         try c.equal("destination audit trail", try c.debug(destination, "cat /log/current", false));
         const restored = try c.path("restored");
-        _ = try c.debug(destination, try c.a.print("dump /svc/postgres/payload {s}", .{restored}), false);
-        try c.equal(payload, try Dir.cwd().readFileAlloc(c.io, restored, c.a, .limited(payload.len + 1)));
+        _ = try c.debug(
+            destination,
+            try c.a.print("dump /svc/postgres/payload {s}", .{restored}),
+            false,
+        );
+        try c.equal(
+            payload,
+            try Dir.cwd().readFileAlloc(c.io, restored, c.a, .limited(payload.len + 1)),
+        );
         const fresh = try c.volume("fresh", &.{}, &.{});
         _ = try c.debug(fresh, "rm /.werewolf/data-image", true);
         _ = try c.invoke("fresh-import", fresh, selected.archive, null);
-        try c.equal(try c.a.print("{s}\n", .{c.image}), try c.debug(fresh, "cat /.werewolf/data-image", false));
-        if (c.invoke("fresh-import-repeat", fresh, selected.archive, null)) |_| return error.TransferTestConflict else |err| if (err != error.TransferInstall) return err;
+        try c.equal(
+            try c.a.print("{s}\n", .{c.image}),
+            try c.debug(fresh, "cat /.werewolf/data-image", false),
+        );
+        if (c.invoke("fresh-import-repeat", fresh, selected.archive, null)) |_|
+            return error.TransferTestConflict
+        else |err| if (err != error.TransferInstall)
+            return err;
         for ([_]?[]const u8{ "postgres", null }, 0..) |scope, i| {
-            const dest = try c.volume(try c.a.print("selected-{d}", .{i}), &.{ "svc/plex/sentinel", ".werewolf/destination-identity" }, &.{ "keep Plex", "destination authority" });
-            _ = try c.invoke(try c.a.print("selected-import-{d}", .{i}), dest, if (scope == null) selected.archive else full.archive, scope);
+            const dest = try c.volume(
+                try c.a.print("selected-{d}", .{i}),
+                &.{ "svc/plex/sentinel", ".werewolf/destination-identity" },
+                &.{ "keep Plex", "destination authority" },
+            );
+            _ = try c.invoke(
+                try c.a.print("selected-import-{d}", .{i}),
+                dest,
+                if (scope == null) selected.archive else full.archive,
+                scope,
+            );
             try c.equal("keep Plex", try c.debug(dest, "cat /svc/plex/sentinel", false));
             const output = try c.path(try c.a.print("restored-{d}", .{i}));
-            _ = try c.debug(dest, try c.a.print("dump /svc/postgres/payload {s}", .{output}), false);
-            try c.equal(payload, try Dir.cwd().readFileAlloc(c.io, output, c.a, .limited(payload.len + 1)));
+            _ = try c.debug(
+                dest,
+                try c.a.print("dump /svc/postgres/payload {s}", .{output}),
+                false,
+            );
+            try c.equal(
+                payload,
+                try Dir.cwd().readFileAlloc(c.io, output, c.a, .limited(payload.len + 1)),
+            );
         }
-        if (c.invoke("occupied-import", destination, full.archive, null)) |_| return error.TransferTestConflict else |err| if (err != error.TransferInstall) return err;
+        if (c.invoke("occupied-import", destination, full.archive, null)) |_|
+            return error.TransferTestConflict
+        else |err| if (err != error.TransferInstall)
+            return err;
         try c.equal("outside services\n", try c.debug(destination, "cat /extra", false));
         const corrupt = try c.path("corrupt.tar.zst");
         try Dir.cwd().copyFile(full.archive, Dir.cwd(), corrupt, c.io, .{});
@@ -408,13 +711,16 @@ const Check = struct {
         try damaged.writePositionalAll(c.io, "\x00\x00\x00\x00", 0);
         damaged.close(c.io);
         const empty = try c.volume("empty", &.{}, &.{});
-        if (c.invoke("corrupt-import", empty, corrupt, null)) |_| return error.TransferTestCorruption else |err| if (err != error.TransferInstall) return err;
+        if (c.invoke("corrupt-import", empty, corrupt, null)) |_|
+            return error.TransferTestCorruption
+        else |err| if (err != error.TransferInstall)
+            return err;
         _ = try c.debug(source, "set_super_value state 2", true);
         const dirty_hash = try c.hash(source);
-        if (c.invoke("dirty-export", source, null, null)) |_| return error.TransferTestDirty else |err| if (err != error.TransferFilesystem) return err;
-        c.replay_copy = true;
-        if (c.invoke("damaged-copy-refused", source, null, null)) |_| return error.TransferTestDirty else |err| if (err != error.TransferFilesystem) return err;
-        c.replay_copy = false;
+        if (c.invoke("dirty-export", source, null, null)) |_|
+            return error.TransferTestDirty
+        else |err| if (err != error.TransferUnclean)
+            return err;
         try c.equal(dirty_hash, try c.hash(source));
     }
 };

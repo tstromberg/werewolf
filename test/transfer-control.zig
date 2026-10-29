@@ -44,7 +44,10 @@ fn control(io: Io, a: std.mem.Allocator) !void {
         (if (Dir.cwd().access(io, "/data/svc/postgres/data/PG_VERSION", .{})) |_| false else |_| true);
     if (!empty) try ready(io, a, id);
     if (std.mem.eql(u8, std.mem.trim(u8, role, "\r\n"), "source") and
-        (if (sql(io, a, id, "SELECT value FROM transfer_rows WHERE id=7", "acknowledged")) |_| false else |_| true))
+        (if (sql(io, a, id, "SELECT value FROM transfer_rows WHERE id=7", "acknowledged")) |_|
+            false
+        else |_|
+            true))
     {
         try sql(io, a, id, "CREATE DATABASE transfer_a", null);
         try sql(io, a, id, "CREATE ROLE transfer_role; " ++
@@ -54,7 +57,15 @@ fn control(io: Io, a: std.mem.Allocator) !void {
             "CREATE SEQUENCE transfer_seq START 83; " ++
             "CREATE EXTENSION pgcrypto; " ++
             "SELECT lo_from_bytea(195001,decode('001122aaff','hex'));", null);
-        try sqlAt(io, a, id, "transfer_a", "CREATE TABLE other_rows(value text); INSERT INTO other_rows VALUES('second database');", null);
+        try sqlAt(
+            io,
+            a,
+            id,
+            "transfer_a",
+            "CREATE TABLE other_rows(value text); INSERT INTO other_rows VALUES('second " ++
+                "database');",
+            null,
+        );
     }
     if (!empty) {
         try verify(io, a, id);
@@ -105,9 +116,29 @@ fn sql(io: Io, a: std.mem.Allocator, id: u32, query: []const u8, expected: ?[]co
     return sqlAt(io, a, id, "postgres", query, expected);
 }
 
-fn sqlAt(io: Io, a: std.mem.Allocator, id: u32, database: []const u8, query: []const u8, expected: ?[]const u8) !void {
+fn sqlAt(
+    io: Io,
+    a: std.mem.Allocator,
+    id: u32,
+    database: []const u8,
+    query: []const u8,
+    expected: ?[]const u8,
+) !void {
     var child = try std.process.spawn(io, .{
-        .argv = &.{ "/usr/bin/psql", "-XAt", "-v", "ON_ERROR_STOP=1", "-h", "/run/svc/postgres", "-U", "postgres", "-d", database, "-c", query },
+        .argv = &.{
+            "/usr/bin/psql",
+            "-XAt",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-h",
+            "/run/svc/postgres",
+            "-U",
+            "postgres",
+            "-d",
+            database,
+            "-c",
+            query,
+        },
         .uid = id,
         .gid = id,
         .stdin = .ignore,
@@ -123,7 +154,11 @@ fn sqlAt(io: Io, a: std.mem.Allocator, id: u32, database: []const u8, query: []c
     const text = try output.interface.allocRemaining(a, .limited(64 << 10));
     defer a.free(text);
     if (!(try child.wait(io)).success()) return error.Sql;
-    if (expected) |want| if (!std.mem.eql(u8, std.mem.trim(u8, text, "\r\n"), want)) return error.Rows;
+    if (expected) |want| if (!std.mem.eql(
+        u8,
+        std.mem.trim(u8, text, "\r\n"),
+        want,
+    )) return error.Rows;
 }
 
 fn ready(io: Io, a: std.mem.Allocator, id: u32) !void {

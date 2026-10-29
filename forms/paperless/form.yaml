@@ -275,5 +275,4 @@ services:
       - /usr/bin/initdb
       - /usr/lib/werewolf/sh-shim
       - /usr/bin/locale
-    read: /run/werewolf/import
     share: shared

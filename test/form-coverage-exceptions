@@ -7,3 +7,5 @@ python     0        Runtime only; make check-python runs the Python hello-world 
 ruby       0        Runtime only; make check-ruby runs the Ruby hello-world on ruby-app (test/app-fixtures).
 jre        0        Runtime only; make check-jre runs the Java hello-world on jre-app (test/app-fixtures).
 onnx-minilm 0 Read-only model data; both Langflow native suites verify offline embeddings with these assets
+data-export 0 Fixed export endpoint; check-data-transfer exercises authorized and refused SSH export with PostgreSQL in the IPE workflow.
+data-transfer-helper 0 Private runtime with a replacement init and no network; check-data-transfer-helper checks storage isolation, encrypted data and restore in the IPE workflow.

@@ -33,7 +33,11 @@ fn request(command: []const u8) !Request {
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         var line: [256]u8 = undefined;
-        const message = std.mem.print(&line, "data-export: {s}: {s}; keep application writers down until transfer exits\n", .{ phase, @errorName(err) }) catch unreachable;
+        const message = std.mem.print(
+            &line,
+            "data-export: {s}: {s}; keep application writers down until export exits\n",
+            .{ phase, @errorName(err) },
+        ) catch unreachable;
         File.stderr().writeStreamingAll(init.io, message) catch {};
         std.process.exit(1);
     };
@@ -56,13 +60,25 @@ fn run(init: std.process.Init) !void {
     if (args.len != 3 or !mem.eql(u8, args[1], "-c") or
         !mem.eql(u8, args[2], "export-v1") or linux.getuid() != 0)
         return error.TransferInvocation;
-    const operation = try request(init.environ_map.get("SSH_ORIGINAL_COMMAND") orelse return error.TransferInvocation);
+    const operation = try request(
+        init.environ_map.get("SSH_ORIGINAL_COMMAND") orelse return error.TransferInvocation,
+    );
     const service = operation.service;
     sandbox.tieTo(linux.getppid());
     try sandbox.limit(.AS, 1 << 30);
     // A stalled connection cannot retain this reader indefinitely. setitimer
     // uses seconds here (the fractional fields are zero on both supported ABIs).
-    _ = try sandbox.sys(linux.setitimer(0, &.{ .it_interval = .{ .sec = 0, .nsec = 0 }, .it_value = .{ .sec = 12 * 3600, .nsec = 0 } }, null), "export deadline");
+    _ = try sandbox.sys(
+        linux.setitimer(
+            0,
+            &.{
+                .it_interval = .{ .sec = 0, .nsec = 0 },
+                .it_value = .{ .sec = 12 * 3600, .nsec = 0 },
+            },
+            null,
+        ),
+        "export deadline",
+    );
     phase = "transfer lock";
     const lock_fd = try std.posix.openat(linux.AT.FDCWD, "/run/runit/data-export.lock", .{
         .ACCMODE = .RDONLY,
@@ -73,7 +89,8 @@ fn run(init: std.process.Init) !void {
     const lock: File = .{ .handle = lock_fd, .flags = .{ .nonblocking = false } };
     defer lock.close(io);
     const lock_stat = try lock.stat(io);
-    if (lock_stat.kind != .file or lock_stat.nlink != 1 or lock_stat.permissions.toMode() & 0o7777 != 0o600)
+    if (lock_stat.kind != .file or lock_stat.nlink != 1 or
+        lock_stat.permissions.toMode() & 0o7777 != 0o600)
         return error.TransferLock;
     const lock_owner = try data.metadata.owner(null, lock);
     if (lock_owner.uid != 0 or lock_owner.gid != 0) return error.TransferLock;
@@ -232,7 +249,10 @@ fn serviceRequest(io: Io, a: mem.Allocator, supervision: Dir, name: []const u8, 
         }
         if (!stopped_cleanly) return error.TransferServiceTimeout;
     }
-    try File.stdout().writeStreamingAll(io, if (down) "service stopped\n" else "service start requested\n");
+    try File.stdout().writeStreamingAll(
+        io,
+        if (down) "service stopped\n" else "service start requested\n",
+    );
 }
 
 fn currentPolicy(io: Io, a: mem.Allocator, root: Dir) !data.Policy {
@@ -260,7 +280,13 @@ test "forced command accepts only one exact export scope" {
     const t = std.testing;
     try t.expectEqual(@as(?[]const u8, null), try scope("export-v1"));
     try t.expectEqualStrings("plex", (try scope("export-v1 plex")).?);
-    for ([_][]const u8{ "sh", "export-v1;id", "export-v1 ../plex", "export-v1 plex extra", "export-v1\n" }) |word|
+    for ([_][]const u8{
+        "sh",
+        "export-v1;id",
+        "export-v1 ../plex",
+        "export-v1 plex extra",
+        "export-v1\n",
+    }) |word|
         if (scope(word)) |_| return error.AcceptedCommand else |_| {};
 }
 
@@ -269,7 +295,14 @@ test "manual service requests accept exactly one bounded name" {
     try t.expectEqual(.down, (try request("service-down-v1 postgres")).action);
     try t.expectEqual(.up, (try request("service-up-v1 plex")).action);
     try t.expectEqualStrings("plex", (try request("service-up-v1 plex")).service.?);
-    for ([_][]const u8{ "service-down-v1", "service-up-v1 ", "service-down-v1 ../plex", "service-up-v1 plex;id", "service-up-v1 plex extra", "service-down-v1 plex\n" }) |word|
+    for ([_][]const u8{
+        "service-down-v1",
+        "service-up-v1 ",
+        "service-down-v1 ../plex",
+        "service-up-v1 plex;id",
+        "service-up-v1 plex extra",
+        "service-down-v1 plex\n",
+    }) |word|
         if (request(word)) |_| return error.AcceptedCommand else |_| {};
 }
 

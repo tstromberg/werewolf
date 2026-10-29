@@ -108,7 +108,13 @@ pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
 /// never chooses this account, its numeric identity or its credentials.
 pub fn dataIdentity(io: Io, gpa: Allocator, name: []const u8) !@import("people").NoCloud {
     const r = try std.process.run(gpa, io, .{
-        .argv = &.{ "limactl", "list", name, "--format", "{{.Config.User.Name}}|{{.Config.User.UID}}" },
+        .argv = &.{
+            "limactl",
+            "list",
+            name,
+            "--format",
+            "{{.Config.User.Name}}|{{.Config.User.UID}}",
+        },
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(4096),
     });
@@ -116,8 +122,13 @@ pub fn dataIdentity(io: Io, gpa: Allocator, name: []const u8) !@import("people")
     const line = std.mem.trim(u8, r.stdout, " \r\n");
     var fields = std.mem.splitScalar(u8, line, '|');
     const user = fields.next() orelse return error.LimaUnknownUser;
-    const id = try std.fmt.parseUnsigned(u32, fields.next() orelse return error.LimaUnknownUser, 10);
-    if (!@import("people").validNoCloudName(user) or fields.next() != null or id < 500 or id > 60000)
+    const id = try std.fmt.parseUnsigned(
+        u32,
+        fields.next() orelse return error.LimaUnknownUser,
+        10,
+    );
+    if (!@import("people").validNoCloudName(user) or fields.next() != null or id < 500 or
+        id > 60000)
         return error.LimaUnknownUser;
     return .{ .name = try gpa.dupe(u8, user), .id = id, .keys = "" };
 }

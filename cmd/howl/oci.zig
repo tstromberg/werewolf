@@ -177,6 +177,10 @@ fn rateLimited(stderr: []const u8) bool {
     return false;
 }
 
+fn tlsRecordCorrupt(stderr: []const u8) bool {
+    return std.mem.find(u8, stderr, "tls: bad record MAC") != null;
+}
+
 test "crane retries burst limits, bounds repeated limits, and preserves other refusals" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -292,14 +296,15 @@ fn pullWith(
         const stderr = try Dir.cwd().readFileAlloc(io, diagnostics, gpa, .limited(64 << 10));
         if (stderr.len > 0) Io.File.stderr().writeStreamingAll(io, stderr) catch {};
         if ((result.exported != .exited or result.exported.exited != 0) and
-            !existed and attempt < 3 and rateLimited(stderr))
+            !existed and attempt < 3 and (rateLimited(stderr) or tlsRecordCorrupt(stderr)))
         {
             try Dir.cwd().deleteTree(io, dir);
             try io.sleep(.fromSeconds(backoff[attempt]), .awake);
             continue;
         }
         // An unpacker refusal can make crane fail with a broken pipe. It
-        // remains the primary error unless the registry explicitly throttled.
+        // remains the primary error unless the registry explicitly throttled
+        // or reported a corrupt TLS record while exporting.
         if (result.unpacked != .exited or result.unpacked.exited != 0)
             return why.refuse("{s}: the image was refused, as said above", .{ref});
         if (result.exported != .exited or result.exported.exited != 0)
@@ -351,7 +356,7 @@ test "export retries clean partial images, isolate credentials and preserve refu
         .flags = .{ .permissions = .fromMode(0o755) },
         .data = "#!/bin/sh\n[ -z \"${SECRET_MARKER+x}\" ] || exit 19\n" ++
             "data=$(/bin/cat); /bin/mkdir -p \"$1\"\n" ++
-            "if [ \"$data\" = incomplete ]; then printf bad >\"$1/partial\"; exit 0; fi\n" ++
+            "if [ \"$data\" = incomplete ]; then printf bad >\"$1/partial\"; exit 7; fi\n" ++
             "[ ! -e \"$1/partial\" ] || exit 23\n" ++
             "[ \"${2:-}\" != refuse ] || exit 31\n" ++
             "printf final >\"$1/final\"; printf '1 5 0\\n'\n",
@@ -363,7 +368,9 @@ test "export retries clean partial images, isolate credentials and preserve refu
     howl.environ = &env;
     const cases = .{
         .{ "recover", "TOOMANYREQUESTS: retry-after: 364.243us", "2", "", false },
+        .{ "recover", "local error: tls: bad record MAC", "2", "", false },
         .{ "limited", "unexpected status code 429", "4", "", false },
+        .{ "limited", "local error: tls: bad record MAC", "4", "", false },
         .{ "unauthorized", "UNAUTHORIZED: authentication required", "1", "", false },
         .{ "valid", "", "1", "refuse", false },
         .{ "existing", "TOOMANYREQUESTS", "1", "", true },
@@ -393,7 +400,7 @@ test "export retries clean partial images, isolate credentials and preserve refu
             .{ 0, 0, 0 },
             &why,
         );
-        if (n == 0) {
+        if (comptime std.mem.eql(u8, case[0], "recover")) {
             const unpacked = try result;
             try std.testing.expectEqual(1, unpacked.files);
             try std.testing.expectEqualStrings(
@@ -658,7 +665,10 @@ const Tar = struct {
             const n = t.r.readSliceShort(&hdr) catch return why.refuse("the tar ends early", .{});
             if (n == 0) return null;
             if (n < hdr.len) return why.refuse("the tar ends inside a header", .{});
-            if (std.mem.allEqual(u8, &hdr, 0)) return null;
+            if (std.mem.allEqual(u8, &hdr, 0)) {
+                try t.finish(why);
+                return null;
+            }
             if (!checksumOk(&hdr)) return why.refuse(
                 "not a tar, or damaged: a header's checksum is wrong",
                 .{},
@@ -749,6 +759,23 @@ const Tar = struct {
                     };
                 },
             }
+        }
+    }
+
+    fn finish(t: *Tar, why: *Why) !void {
+        // Read through EOF so crane can finish writing the archive footer
+        // without SIGPIPE. Only bounded zero padding may follow the end.
+        var buf: [4096]u8 = undefined;
+        var total: usize = 0;
+        while (true) {
+            const n = t.r.readSliceShort(&buf) catch
+                return why.refuse("cannot read the tar's final padding", .{});
+            if (n == 0) return;
+            total += n;
+            if (total > 1 << 20)
+                return why.refuse("more than 1 MiB of tar end padding", .{});
+            if (!std.mem.allEqual(u8, buf[0..n], 0))
+                return why.refuse("nonzero data after the end of the tar", .{});
         }
     }
 };
@@ -1293,6 +1320,27 @@ test "unpack: files, directories, links; refusals" {
         var br: Io.Reader = .fixed(try tarOf(gpa, &.{bad}));
         try testing.expectError(error.Refused, unpack(io, &br, tmp.dir, &bw));
     }
+}
+
+test "unpack consumes bounded zero padding and refuses trailing payloads" {
+    const io = testing.io;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try gpa.alloc(u8, (1 << 20) + 1024);
+    defer gpa.free(bytes);
+    @memset(bytes, 0);
+    var why: Why = .{};
+    var good: Io.Reader = .fixed(bytes[0 .. 256 << 10]);
+    _ = try unpack(io, &good, tmp.dir, &why);
+    try testing.expectEqual(good.end, good.seek);
+
+    bytes[1024] = 'x';
+    var payload: Io.Reader = .fixed(bytes[0..1536]);
+    try testing.expectError(error.Refused, unpack(io, &payload, tmp.dir, &why));
+    @memset(bytes, 0);
+    var excessive: Io.Reader = .fixed(bytes);
+    try testing.expectError(error.Refused, unpack(io, &excessive, tmp.dir, &why));
 }
 
 test "unpack refuses a hardlink through an archive symlink" {

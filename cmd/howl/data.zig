@@ -51,8 +51,9 @@ fn parse(op: Operation, args: []const []const u8) !Options {
             o.output = value;
         } else if (mem.eql(u8, flag, "--identity") and o.identity == null) {
             o.identity = value;
-        } else if (mem.eql(u8, flag, "--host") and o.host == null) {
-            for (value) |c| if (!std.ascii.isAlphanumeric(c) and mem.findScalar(u8, ".-:[]%", c) == null)
+        } else if (op == .@"export" and mem.eql(u8, flag, "--host") and o.host == null) {
+            for (value) |c| if (!std.ascii.isAlphanumeric(c) and
+                mem.findScalar(u8, ".-:[]%", c) == null)
                 return error.TransferArguments;
             if (value[0] == '-') return error.TransferArguments;
             o.host = value;
@@ -60,7 +61,10 @@ fn parse(op: Operation, args: []const []const u8) !Options {
             o.port = std.fmt.parseUnsigned(u16, value, 10) catch return error.TransferArguments;
             if (o.port.? == 0) return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--on") and o.on == null) {
-            o.on = std.meta.stringToEnum(howl.Platform, value) orelse return error.TransferArguments;
+            o.on = std.meta.stringToEnum(
+                howl.Platform,
+                value,
+            ) orelse return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--data-key") and o.key == null) {
             o.key = value;
         } else if (mem.eql(u8, flag, "--disk") and o.disk == null) {
@@ -83,8 +87,9 @@ fn parse(op: Operation, args: []const []const u8) !Options {
 
 pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl.Why) !void {
     const o = parse(op, args) catch return why.refuse(
-        "howl export NAME [--service NAME] [--output FILE] [--disk RAW] [--data-key FILE]; " ++
-            "howl import NAME ARCHIVE [--service NAME] [--on TARGET] [--config DIR] [--disk RAW] [--data-key FILE]",
+        "howl export NAME [--service NAME] [--output FILE] [--data-key FILE]; " ++
+            "howl import NAME ARCHIVE [--service NAME] [--on qemu|lima] [--config DIR] " ++
+            "[--data-key FILE]",
         .{},
     );
     const cwd = try std.process.currentPathAlloc(io, a);
@@ -101,26 +106,46 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
     var nonce: [12]u8 = undefined;
     try io.randomSecure(&nonce);
     const suffix = std.fmt.bytesToHex(nonce, .lower);
-    const destination = if (op == .@"export") try std.fs.path.resolveAlloc(a, &.{ cwd, o.output orelse
-        try a.print("{s}-export-{d}-{s}.tar.zst", .{ o.name, @divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s), suffix }) }) else null;
+    const destination = if (op == .@"export")
+        try std.fs.path.resolveAlloc(a, &.{ cwd, o.output orelse
+            try a.print(
+                "{s}-export-{d}-{s}.tar.zst",
+                .{
+                    o.name,
+                    @divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s),
+                    suffix,
+                },
+            ) })
+    else
+        null;
     const work = try a.print("{s}/.werewolf-transfer-{s}", .{
         if (destination) |path| std.fs.path.dirname(path).? else at, suffix,
     });
     try Dir.cwd().createDir(io, work, .fromMode(0o700));
     defer Dir.cwd().deleteTree(io, work) catch {};
     if (o.host) |host| {
-        if (o.disk != null) return error.TransferArguments;
-        if (op == .import) {
-            if (o.config != null or o.form != null or o.key != null) return error.TransferArguments;
-            try @import("data-ssh.zig").restore(io, a, o.name, at, o.on orelse .qemu, o.service, o.identity, .{ .host = host, .port = o.port orelse 22 }, o.archive.?, why);
-            return;
-        }
-        const approved = try @import("data-ssh.zig").capture(io, a, o.name, at, o.on orelse .qemu, o.service, o.identity, .{ .host = host, .port = o.port orelse 22 }, work, why);
+        const approved = try @import("data-ssh.zig").capture(
+            io,
+            a,
+            o.name,
+            at,
+            o.on orelse .qemu,
+            o.service,
+            o.identity,
+            .{ .host = host, .port = o.port orelse 22 },
+            work,
+            why,
+        );
         try publish(io, a, work, destination.?, approved, o.service);
         return;
     }
     const file = try a.print("{s}/authority/profile.json", .{at});
-    const saved = Dir.cwd().readFileAlloc(io, file, a, .limited(256 << 10)) catch |err| switch (err) {
+    const saved = Dir.cwd().readFileAlloc(
+        io,
+        file,
+        a,
+        .limited(256 << 10),
+    ) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
@@ -129,27 +154,39 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
     var image: []const u8 = undefined;
     var users: []const u8 = "";
     if (saved) |text| {
-        if (o.form != null) return why.refuse("existing destinations retain their approved image; omit --with", .{});
+        if (o.form != null) return why.refuse(
+            "existing destinations retain their approved image; omit --with",
+            .{},
+        );
         profile = try secure.parseProfile(a, text);
         if (o.size != null) return why.refuse("existing destinations retain their size; omit --size", .{});
         if (o.on) |on| if (on != profile.provider) return error.TransferProvider;
-        if (profile.cloud_staged) {
-            if (profile.cloud != null) return error.TransferAwaitingStart;
-        } else if (try machineRunning(io, a, o.name, at, profile.provider, why)) {
-            if (o.disk != null) return error.TransferStorageInUse;
-            if (op == .import) {
-                if (o.config != null or o.key != null) return error.TransferArguments;
-                try @import("data-ssh.zig").restore(io, a, o.name, at, profile.provider, o.service, o.identity, null, o.archive.?, why);
-                return;
-            }
-            const approved = try @import("data-ssh.zig").capture(io, a, o.name, at, profile.provider, o.service, o.identity, null, work, why);
+        if (op == .@"export" and try machineRunning(io, a, o.name, at, profile.provider, why)) {
+            const approved = try @import("data-ssh.zig").capture(
+                io,
+                a,
+                o.name,
+                at,
+                profile.provider,
+                o.service,
+                o.identity,
+                null,
+                work,
+                why,
+            );
             try publish(io, a, work, destination.?, approved, o.service);
             return;
         }
-        if (!profile.cloud_staged) try requireStopped(io, a, o.name, at, profile.provider, why);
-        record = if (profile.data_image) |approved_image| try images.read(io, a, approved_image) else try images.approve(io, a, profile, false, why);
+        try requireStopped(io, a, o.name, at, profile.provider, why);
+        record = if (profile.data_image) |approved_image|
+            try images.read(io, a, approved_image)
+        else
+            try images.approve(io, a, profile, false, why);
         image = try a.dupe(u8, &std.fmt.bytesToHex(record.verity.root, .lower));
-        if (o.config != null) return why.refuse("existing destinations retain their configuration; omit --config", .{});
+        if (o.config != null) return why.refuse(
+            "existing destinations retain their configuration; omit --config",
+            .{},
+        );
     } else {
         if (o.disk != null) return error.TransferArguments;
         if (op != .import) return why.refuse("{s}: no enrolled machine", .{o.name});
@@ -164,10 +201,15 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
             try images.published(io, a, form_name, on, arch, o.version, image, why)
         else
             images.read(io, a, image) catch |err| switch (err) {
-                error.FileNotFound => return why.refuse("matching image {s} is unavailable; select its approved published release with --with FORM --version SERIAL", .{image}),
+                error.FileNotFound => return why.refuse(
+                    "matching image {s} is unavailable; select its approved published release " ++
+                        "with --with FORM --version SERIAL",
+                    .{image},
+                ),
                 else => return err,
             };
-        const definition = record.profile.configuration orelse return error.MissingBootConfiguration;
+        const definition = record.profile.configuration orelse
+            return error.MissingBootConfiguration;
         const previous = @import("boot-config.zig").current;
         @import("boot-config.zig").current = definition;
         defer @import("boot-config.zig").current = previous;
@@ -184,10 +226,15 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
         };
         // The helper validates with approved destination identities before
         // publishing any data. Provisioning does not start applications.
-        profile = if (cloud.supported(on))
-            try @import("data-cloud-target.zig").prepare(io, a, at, on, o.size, record, try howl.writeTar(a, entries), why)
-        else
-            try secure.transferTarget(io, a, o.name, on, record, try howl.writeTar(a, entries), why);
+        profile = try secure.transferTarget(
+            io,
+            a,
+            o.name,
+            on,
+            record,
+            try howl.writeTar(a, entries),
+            why,
+        );
     }
     const remote = !profile.cloud_staged and (cloud.supported(profile.provider));
     if (op == .import and remote and o.disk == null) return why.refuse("offline cloud import requires a new machine name; use --disk RAW for manual staging on an existing VM", .{});
@@ -228,48 +275,27 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
         else
             @as(?@import("people").NoCloud, null),
     }, o.archive, o.key, why);
-    const policy = try helper.run(io, a, guest, .{ .data = source, .control = control, .writable = op == .import or (op == .@"export" and !profile.cloud_staged), .guard = lock }, work);
-    if (op == .import and profile.cloud_staged) try images.replaceRecord(io, a, try a.print("{s}/authority/import-ready", .{at}), image);
-    if (op == .import and o.disk != null) {
-        howl.say(io, "{s}: staged disk import complete; publish {s} with the provider CLI; VM storage was not changed", .{ o.name, disk });
-        return;
-    }
-    if (destination) |path| try publish(io, a, work, path, policy, o.service) else howl.say(io, "{s}: import complete; destination remains stopped", .{o.name});
+    const policy = try helper.run(
+        io,
+        a,
+        guest,
+        .{ .data = source, .control = control, .writable = op == .import, .guard = lock },
+        work,
+    );
+    if (destination) |path|
+        try publish(io, a, work, path, policy, o.service)
+    else
+        howl.say(io, "{s}: import complete; destination remains stopped", .{o.name});
 }
 
-fn copyRaw(io: Io, source: []const u8, destination: []const u8, why: *howl.Why) !void {
-    try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "raw", "-O", "raw", source, destination });
-}
-
-test "raw transport copies a forged qcow2 header instead of following its host backing path" {
-    const t = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const at = try tmp.dir.realPathFileAlloc(t.io, ".", a);
-    var secret: [4096]u8 = @splat(0);
-    @memcpy(secret[0..11], "host secret");
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "private.raw", .data = &secret });
-    const forged = try a.print("{s}/forged.qcow2", .{at});
-    const create = std.process.run(a, t.io, .{ .argv = &.{ "qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", try a.print("{s}/private.raw", .{at}), forged } }) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    try t.expect(create.term.success());
-    const expected = try tmp.dir.readFileAlloc(t.io, "forged.qcow2", a, .limited(4 << 20));
-    var why: howl.Why = .{};
-    try copyRaw(t.io, forged, try a.print("{s}/copy.raw", .{at}), &why);
-    const copied = try tmp.dir.readFileAlloc(t.io, "copy.raw", a, .limited(4 << 20));
-    // QEMU rounds a raw image's final sector up to 512 bytes.
-    try t.expect(copied.len >= expected.len and copied.len < expected.len + 512);
-    try t.expectEqualSlices(u8, expected, copied[0..expected.len]);
-    try t.expect(std.mem.allEqual(u8, copied[expected.len..], 0));
-    try t.expectEqualSlices(u8, &secret, try tmp.dir.readFileAlloc(t.io, "private.raw", a, .limited(8192)));
-}
-
-fn publish(io: Io, a: A, work: []const u8, path: []const u8, policy: data.Policy, service: ?[]const u8) !void {
+fn publish(
+    io: Io,
+    a: A,
+    work: []const u8,
+    path: []const u8,
+    policy: data.Policy,
+    service: ?[]const u8,
+) !void {
     const archive = try a.print("{s}/archive.tar.zst", .{work});
     const input = try Dir.cwd().openFile(io, archive, .{});
     defer input.close(io);
@@ -335,20 +361,23 @@ fn archiveHint(io: Io, a: A, path: []const u8) !data.Manifest {
     return data.zstd.manifest(a, &reader.interface);
 }
 
-fn machineRunning(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform, why: *howl.Why) !bool {
+fn machineRunning(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    why: *howl.Why,
+) !bool {
     return switch (on) {
         .lima => try @import("lima.zig").running(io, a, name),
-        .aws, .gcp, .azure => (try @import("data-cloud.zig").state(io, a, name, try @import("data-cloud.zig").load(io, a, at, on))).running,
-        .bhyve => if (@import("builtin").os.tag == .freebsd)
-            try @import("bhyve.zig").supervised(io, a, at) or try @import("bhyve.zig").exists(io, a, name)
-        else
-            error.TransferProvider,
-        .qemu, .firecracker => blk: {
-            if (on == .firecracker) {
-                if (@import("builtin").os.tag != .linux) return error.TransferProvider;
-                if (try @import("firecracker.zig").supervised(io, a, at)) break :blk true;
-            }
-            const text = Dir.cwd().readFileAlloc(io, try a.print("{s}/{s}.pid", .{ at, if (on == .qemu) "qemu" else "firecracker" }), a, .limited(64)) catch |err| switch (err) {
+        .qemu => blk: {
+            const text = Dir.cwd().readFileAlloc(
+                io,
+                try a.print("{s}/qemu.pid", .{at}),
+                a,
+                .limited(64),
+            ) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
@@ -364,14 +393,35 @@ fn machineRunning(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platf
     };
 }
 
-fn requireStopped(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform, why: *howl.Why) !void {
-    if (try machineRunning(io, a, name, at, on, why)) return why.refuse("{s}: data transfer requires cleanly stopped applications; the offline path refuses running storage", .{name});
+fn requireStopped(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    why: *howl.Why,
+) !void {
+    if (try machineRunning(
+        io,
+        a,
+        name,
+        at,
+        on,
+        why,
+    )) return why.refuse(
+        "{s}: data transfer requires cleanly stopped applications; the offline path refuses " ++
+            "running storage",
+        .{name},
+    );
 }
 
 fn storage(io: Io, a: A, name: []const u8, at: []const u8, on: howl.Platform) ![]const u8 {
     return switch (on) {
-        .qemu, .bhyve, .firecracker, .aws, .gcp, .azure => a.print("{s}/disk.img", .{at}),
-        .lima => a.print("{s}/disk", .{try @import("lima.zig").dir(io, a, name) orelse return error.MissingLimaInstance}),
+        .qemu => a.print("{s}/disk.img", .{at}),
+        .lima => a.print(
+            "{s}/disk",
+            .{try @import("lima.zig").dir(io, a, name) orelse return error.MissingLimaInstance},
+        ),
         else => error.TransferProvider,
     };
 }
@@ -381,16 +431,40 @@ test "one archive syntax rejects legacy inputs and scope escalation" {
     const o = try parse(.import, &.{ "target", "backup.tar.zst", "--service", "plex" });
     try t.expectEqualStrings("plex", o.service.?);
     try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "--retry", "abc" }));
-    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "source", "--service", "../plex" }));
-    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "source", "--service", "plex", "--service", "postgres" }));
-    try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--output", "elsewhere" }));
-    const remote = try parse(.@"export", &.{ "remote", "--host", "backup.example", "--port", "2222" });
+    try t.expectError(
+        error.TransferArguments,
+        parse(.@"export", &.{ "source", "--service", "../plex" }),
+    );
+    try t.expectError(
+        error.TransferArguments,
+        parse(.@"export", &.{ "source", "--service", "plex", "--service", "postgres" }),
+    );
+    try t.expectError(
+        error.TransferArguments,
+        parse(.import, &.{ "target", "backup", "--output", "elsewhere" }),
+    );
+    const remote = try parse(
+        .@"export",
+        &.{ "remote", "--host", "backup.example", "--port", "2222" },
+    );
     try t.expectEqual(@as(u16, 2222), remote.port.?);
     try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--port", "2222" }));
-    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--host", "-oProxyCommand=sh" }));
-    try t.expectError(error.TransferArguments, parse(.@"export", &.{ "remote", "--host", "backup.example", "--port", "0" }));
-    try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--version", "20261027T000000Z" }));
-    try t.expectError(error.TransferArguments, parse(.import, &.{ "target", "backup", "--with", "../untrusted" }));
+    try t.expectError(
+        error.TransferArguments,
+        parse(.@"export", &.{ "remote", "--host", "-oProxyCommand=sh" }),
+    );
+    try t.expectError(
+        error.TransferArguments,
+        parse(.@"export", &.{ "remote", "--host", "backup.example", "--port", "0" }),
+    );
+    try t.expectError(
+        error.TransferArguments,
+        parse(.import, &.{ "target", "backup", "--version", "20261027T000000Z" }),
+    );
+    try t.expectError(
+        error.TransferArguments,
+        parse(.import, &.{ "target", "backup", "--with", "../untrusted" }),
+    );
 }
 
 test "FreeBSD file-use probe requires a complete header and no open files" {

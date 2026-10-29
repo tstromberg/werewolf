@@ -53,7 +53,9 @@ machine as the service that queries it.
 
 Use a physical archive from the same image and architecture. The service scope is
 `postgres`; full transfer also includes companion service data. The destination
-must have empty selected data and remains stopped after import. See [data storage](../../docs/data.md) for supported adapters and consistency requirements.
+must have empty selected data and remains stopped after import. See
+[data storage](../../docs/data.md) for supported adapters and consistency
+requirements.
 
 ```sh
 howl export source --service postgres --output backup.tar.zst

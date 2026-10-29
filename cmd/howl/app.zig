@@ -68,14 +68,35 @@ pub fn compile(b: *B) !void {
         },
         .rust => {
             try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
-            try b.run(try std.mem.concat(b.gpa, []const u8, &.{ try rustc(b.gpa), &.{
+            const compiler = try rustc(b.gpa);
+            const triple = try b.path("{t}-unknown-linux-musl", .{b.spec.arch});
+            const libdir = std.mem.trim(u8, try b.capture(target, try std.mem.concat(
+                b.gpa,
+                []const u8,
+                &.{ compiler, &.{ "--print", "target-libdir", "--target", triple } },
+            )), " \r\n");
+            // Rust's musl target defaults to a fixed-address static binary.
+            // Use musl's self-relocating startup, so a static PIE can start
+            // without a dynamic loader while ASLR moves its code.
+            const crt = try b.path("{s}/self-contained", .{libdir});
+            try b.run(try std.mem.concat(b.gpa, []const u8, &.{ compiler, &.{
                 "--edition=2021",
                 "--target",
-                try b.path("{t}-unknown-linux-musl", .{b.spec.arch}),
+                triple,
                 "-C",
                 "linker=rust-lld",
                 "-C",
                 "target-feature=+crt-static",
+                "-C",
+                "relocation-model=pic",
+                "-C",
+                "link-self-contained=no",
+                "-L",
+                crt,
+                "-C",
+                try b.path("link-arg={s}/rcrt1.o", .{crt}),
+                "-C",
+                "link-arg=-pie",
                 "-C",
                 "opt-level=2",
                 "-C",

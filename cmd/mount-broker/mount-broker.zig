@@ -1329,7 +1329,10 @@ fn shutdown(log: *Log) void {
             if (result == .SUCCESS) {
                 log.event("shutdown", .{ .data = "busy; read-only" });
             } else {
-                log.event("shutdown", .{ .data = "busy; still writable", .errno = @tagName(result) });
+                log.event(
+                    "shutdown",
+                    .{ .data = "busy; still writable", .errno = @tagName(result) },
+                );
             }
         }
     }
@@ -1341,7 +1344,14 @@ fn shutdown(log: *Log) void {
     if (isMounted(mounts, "/boot")) {
         const result = remountReadOnly("/boot");
         const unmounted = linux.errno(linux.umount2("/boot", 0)) == .SUCCESS;
-        log.event("shutdown", .{ .boot_read_only = result == .SUCCESS, .boot_unmounted = unmounted, .errno = @tagName(result) });
+        log.event(
+            "shutdown",
+            .{
+                .boot_read_only = result == .SUCCESS,
+                .boot_unmounted = unmounted,
+                .errno = @tagName(result),
+            },
+        );
     }
 }
 
@@ -1355,7 +1365,10 @@ fn stopAge(log: *Log) void {
         .CLOEXEC = true,
     }, 0);
     if (linux.errno(fd) != .SUCCESS) {
-        if (linux.errno(fd) != .NOENT) log.event("shutdown-age", .{ .errno = @tagName(linux.errno(fd)) });
+        if (linux.errno(fd) != .NOENT) log.event(
+            "shutdown-age",
+            .{ .errno = @tagName(linux.errno(fd)) },
+        );
         return;
     }
     const written = linux.write(@intCast(fd), "1", 1);
@@ -1365,7 +1378,12 @@ fn stopAge(log: *Log) void {
         return;
     }
     for (0..200) |_| {
-        const procs = linux.openat(linux.AT.FDCWD, "/run/cgroup/unwound-age/cgroup.procs", .{ .NOFOLLOW = true, .CLOEXEC = true }, 0);
+        const procs = linux.openat(
+            linux.AT.FDCWD,
+            "/run/cgroup/unwound-age/cgroup.procs",
+            .{ .NOFOLLOW = true, .CLOEXEC = true },
+            0,
+        );
         if (linux.errno(procs) != .SUCCESS) break;
         var buffer: [128]u8 = undefined;
         const n = linux.read(@intCast(procs), &buffer, buffer.len);

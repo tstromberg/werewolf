@@ -1080,7 +1080,12 @@ pub fn create(
     if (!kept) {
         const approved = try @import("data-image.zig").approve(io, gpa, profile, true, why);
         profile.data_image = try gpa.dupe(u8, &std.fmt.bytesToHex(approved.verity.root, .lower));
-        try @import("data-image.zig").replaceRecord(io, gpa, profile_file, try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+        try @import("data-image.zig").replaceRecord(
+            io,
+            gpa,
+            profile_file,
+            try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+        );
     }
     try startEnrolled(io, gpa, profile, name, at, tell, &steps, w, why);
 }
@@ -1090,51 +1095,67 @@ pub fn create(
 pub fn start(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
     if (args.len != 1 or !howl.isMachineName(args[0])) return why.refuse("howl start NAME", .{});
     const name = args[0];
-    const at = try std.fs.path.resolveAlloc(gpa, &.{ try std.process.currentPathAlloc(io, gpa), try howl.machineDir(gpa, name) });
-    const guard = try Dir.cwd().openFile(io, try gpa.print("{s}/secure.lock", .{at}), .{ .mode = .read_write });
+    const at = try std.fs.path.resolveAlloc(
+        gpa,
+        &.{ try std.process.currentPathAlloc(io, gpa), try howl.machineDir(gpa, name) },
+    );
+    const guard = try Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/secure.lock", .{at}),
+        .{ .mode = .read_write },
+    );
     defer guard.close(io);
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
-    var profile = try parseProfile(gpa, try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/authority/profile.json", .{at}), gpa, .limited(256 << 10)));
-    if (profile.cloud_staged) return @import("data-cloud-target.zig").start(io, gpa, name, at, profile, why);
-    if (cloud.supported(profile.provider)) {
-        const context = try @import("data-cloud.zig").load(io, gpa, at, profile.provider);
-        if ((try @import("data-cloud.zig").state(io, gpa, name, context)).running) return why.refuse("{s}: already running", .{name});
-        const argv: []const []const u8 = switch (context) {
-            .aws => |p| &.{ "aws", "--region", p.region, "ec2", "start-instances", "--instance-ids", p.id },
-            .gcp => |p| &.{ "gcloud", "--quiet", "--project", p.project, "compute", "instances", "start", name, "--zone", p.zone },
-            .azure => |p| &.{ "az", "vm", "start", "-g", p.group, "-n", name, "-o", "none" },
-        };
-        return howl.run(io, why, argv);
-    }
-    if (profile.provider == .firecracker) {
-        if (@import("builtin").os.tag != .linux or profile.spec.arch != howl.hostArch()) return error.TransferArchitecture;
-        if (try @import("firecracker.zig").supervised(io, gpa, at)) return why.refuse("{s}: already running", .{name});
-        const spec = profile.local orelse return error.MissingBootImage;
-        const definition = profile.configuration orelse return error.MissingBootConfiguration;
-        const saved_definition = @import("boot-config.zig").current;
-        @import("boot-config.zig").current = definition;
-        defer @import("boot-config.zig").current = saved_definition;
-        const tar = try Dir.cwd().readFileAlloc(io, try gpa.print("{s}/config.tar", .{at}), gpa, .limited(64 << 20));
-        const tell: howl.Tell = .{ .verbose = false, .command = try gpa.print("howl start {s}", .{name}), .began = Io.Clock.awake.now(io) };
-        return @import("local.zig").createFirecrackerLocked(io, gpa, .{ .form = definition.form, .local = true, .on = .firecracker, .disabled = spec.disabled }, name, tar, null, tell, guard, why);
-    }
+    var profile = try parseProfile(
+        gpa,
+        try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/authority/profile.json", .{at}),
+            gpa,
+            .limited(256 << 10),
+        ),
+    );
     profile.spec.form = (profile.configuration orelse return error.MissingBootConfiguration).form;
-    if (profile.spec.arch != try admit(io, gpa, profile.provider, false, why)) return error.TransferArchitecture;
+    if (profile.spec.arch != try admit(
+        io,
+        gpa,
+        profile.provider,
+        false,
+        why,
+    )) return error.TransferArchitecture;
     if (profile.bundle) |request| {
         const approved = try bundle.verify(io, gpa, request, profile.spec.arch);
-        if (!std.mem.eql(u8, approved.manifest.image.build, profile.imported orelse return error.MissingBootImage)) return error.ExistingImageAuthorityMismatch;
+        if (!std.mem.eql(
+            u8,
+            approved.manifest.image.build,
+            profile.imported orelse return error.MissingBootImage,
+        )) return error.ExistingImageAuthorityMismatch;
     } else if (profile.local == null) return error.MissingBootImage;
     const previous = @import("boot-config.zig").current;
     @import("boot-config.zig").current = profile.configuration;
     defer @import("boot-config.zig").current = previous;
-    const tell: howl.Tell = .{ .verbose = false, .command = try gpa.print("howl start {s}", .{name}), .began = Io.Clock.awake.now(io) };
+    const tell: howl.Tell = .{
+        .verbose = false,
+        .command = try gpa.print("howl start {s}", .{name}),
+        .began = Io.Clock.awake.now(io),
+    };
     var steps = try progress.Steps.init(io, gpa, why, try tell.step(gpa, at));
     var out = Io.File.stdout().writerStreaming(io, &.{});
     try startEnrolled(io, gpa, profile, name, at, tell, &steps, &out.interface, why);
 }
 
-fn startEnrolled(io: Io, gpa: Allocator, profile: Profile, name: []const u8, at: []const u8, tell: howl.Tell, steps: *progress.Steps, w: *Io.Writer, why: *howl.Why) !void {
+fn startEnrolled(
+    io: Io,
+    gpa: Allocator,
+    profile: Profile,
+    name: []const u8,
+    at: []const u8,
+    tell: howl.Tell,
+    steps: *progress.Steps,
+    w: *Io.Writer,
+    why: *howl.Why,
+) !void {
     const provider = profile.provider;
     const on_lima = provider == .lima;
     const authority = try gpa.print("{s}/authority", .{at});
@@ -1168,10 +1189,20 @@ fn startEnrolled(io: Io, gpa: Allocator, profile: Profile, name: []const u8, at:
         // Howl's explicit, pinned SSH connections use a separate process.
         const probes = try gpa.print("{s}/lima-probes", .{at});
         try Dir.cwd().createDirPath(io, probes);
-        const no_connect = try Dir.cwd().createFile(io, try gpa.print("{s}/ssh", .{probes}), .{ .permissions = .fromMode(0o700) });
+        const no_connect = try Dir.cwd().createFile(
+            io,
+            try gpa.print("{s}/ssh", .{probes}),
+            .{ .permissions = .fromMode(0o700) },
+        );
         defer no_connect.close(io);
-        try no_connect.writeStreamingAll(io, "#!/bin/sh\nexec /usr/bin/ssh -o ProxyCommand=/usr/bin/false \"$@\"\n");
-        try env.put("PATH", try gpa.print("{s}:{s}", .{ probes, howl.environ.get("PATH") orelse "/usr/bin:/bin" }));
+        try no_connect.writeStreamingAll(
+            io,
+            "#!/bin/sh\nexec /usr/bin/ssh -o ProxyCommand=/usr/bin/false \"$@\"\n",
+        );
+        try env.put(
+            "PATH",
+            try gpa.print("{s}:{s}", .{ probes, howl.environ.get("PATH") orelse "/usr/bin:/bin" }),
+        );
         var starter = try std.process.spawn(io, .{
             .argv = &.{ "limactl", "start", "--tty=false", name },
             .environ_map = &env,
@@ -1190,13 +1221,27 @@ fn startEnrolled(io: Io, gpa: Allocator, profile: Profile, name: []const u8, at:
             .{ name, console },
         );
     }
-    try @import("data-image.zig").replaceRecord(io, gpa, try gpa.print("{s}/ready", .{authority}), "verified\n");
+    try @import("data-image.zig").replaceRecord(
+        io,
+        gpa,
+        try gpa.print("{s}/ready", .{authority}),
+        "verified\n",
+    );
     _ = try steps.finish();
     if (tell.milestones) |m| m.done(.{
         .name = try gpa.print("{s} running; total", .{name}),
         .short = "ready",
     });
-    try @import("local.zig").protectedReady(io, gpa, name, profile.spec.form, provider, false, w, why);
+    try @import("local.zig").protectedReady(
+        io,
+        gpa,
+        name,
+        profile.spec.form,
+        provider,
+        false,
+        w,
+        why,
+    );
 }
 
 fn emptyAuthority(io: Io, path: []const u8) !bool {

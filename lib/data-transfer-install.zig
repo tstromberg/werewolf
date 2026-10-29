@@ -20,7 +20,11 @@ pub fn blocked(io: Io, root: Dir) !bool {
         else => return err,
     };
     defer parent.close(io);
-    _ = parent.statFile(io, "pending.json", .{ .follow_symlinks = false }) catch |err| switch (err) {
+    _ = parent.statFile(
+        io,
+        "pending.json",
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -39,7 +43,12 @@ pub const Options = struct {
         if (o.boundary) |f| try f(o.context, b);
     }
 };
-const Unit = struct { path: []const u8, inode: ?u64 = null, installed: bool = false, sequence: u64 = 0, entry: ?data.Entry = null };
+const Unit = struct {
+    path: []const u8,
+    inode: ?u64 = null,
+    installed: bool = false,
+    sequence: u64 = 0,
+};
 const Receipt = struct {
     version: u8 = 2,
     archive: []const u8,
@@ -51,11 +60,26 @@ const Receipt = struct {
     parent_mtime_ns: ?i64 = null,
 };
 
-pub fn apply(io: Io, a: Allocator, input: *Io.Reader, target: Dir, p: data.Policy, o: Options) !data.Result {
+pub fn apply(
+    io: Io,
+    a: Allocator,
+    input: *Io.Reader,
+    target: Dir,
+    p: data.Policy,
+    o: Options,
+) !data.Result {
     return applyInner(io, a, input, target, p, o, true);
 }
 
-fn applyInner(io: Io, a: Allocator, input: *Io.Reader, target: Dir, p: data.Policy, o: Options, compressed: bool) !data.Result {
+fn applyInner(
+    io: Io,
+    a: Allocator,
+    input: *Io.Reader,
+    target: Dir,
+    p: data.Policy,
+    o: Options,
+    compressed: bool,
+) !data.Result {
     var session = try Session.init(io, target);
     defer session.deinit(io);
     var staging: Staging = .{ .io = io, .allocator = a, .root = session.stage };
@@ -96,8 +120,18 @@ pub const Session = struct {
         try lock.lock(io, .exclusive);
         try cleanIncoming(io, state);
         try state.createDir(io, "incoming", .fromMode(0o700));
-        const stage = try state.openDir(io, "incoming", .{ .iterate = true, .follow_symlinks = false });
-        return .{ .target = target, .machine = machine, .state = state, .lock = lock, .stage = stage };
+        const stage = try state.openDir(
+            io,
+            "incoming",
+            .{ .iterate = true, .follow_symlinks = false },
+        );
+        return .{
+            .target = target,
+            .machine = machine,
+            .state = state,
+            .lock = lock,
+            .stage = stage,
+        };
     }
 
     pub fn deinit(s: *Session, io: Io) void {
@@ -110,9 +144,14 @@ pub const Session = struct {
 
     /// Validate the decoder's bounded inventory and its actual staging tree
     /// independently before applying ownership or publishing a directory.
-    pub fn publish(s: *Session, io: Io, a: Allocator, result: data.Result, p: data.Policy, o: Options) !void {
-        var phase: []const u8 = "policy";
-        errdefer std.debug.print("data-transfer publication: {s}\n", .{phase});
+    pub fn publish(
+        s: *Session,
+        io: Io,
+        a: Allocator,
+        result: data.Result,
+        p: data.Policy,
+        o: Options,
+    ) !void {
         if (o.target.len == 0 or o.target.len > 256) return error.TransferTarget;
         try data.check(a, result.manifest, p, o.service);
         const target = s.target;
@@ -144,7 +183,8 @@ pub const Session = struct {
         var units: std.ArrayList(Unit) = .empty;
         defer units.deinit(a);
         for (result.manifest.entries) |e| {
-            if (data.importSelected(e.path, scope) and isUnit(e.path)) try units.append(a, .{ .path = e.path, .entry = e });
+            if (data.selected(e.path, scope) and
+                isUnit(e.path)) try units.append(a, .{ .path = e.path });
         }
         const paths = try a.alloc([]const u8, units.items.len);
         defer a.free(paths);
@@ -164,7 +204,10 @@ pub const Session = struct {
             if (st) |parent| {
                 if (parent.kind != .directory) return error.TransferConflict;
                 receipt.parent_inode = parent.inode;
-                receipt.parent_mtime_ns = std.math.cast(i64, parent.mtime.nanoseconds) orelse return error.TransferMetadata;
+                receipt.parent_mtime_ns = std.math.cast(
+                    i64,
+                    parent.mtime.nanoseconds,
+                ) orelse return error.TransferMetadata;
             }
         }
         if (old) |previous| {
@@ -187,12 +230,18 @@ pub const Session = struct {
             for (units.items) |*unit| if (unit.inode) |inode| {
                 var parent = try data.parentDir(io, target, unit.path);
                 defer parent.close(io);
-                const st = parent.statFile(io, std.fs.path.basename(unit.path), .{ .follow_symlinks = false }) catch |err| {
+                const st = parent.statFile(
+                    io,
+                    std.fs.path.basename(unit.path),
+                    .{ .follow_symlinks = false },
+                ) catch |err| {
                     if (err == error.FileNotFound and !unit.installed) continue;
                     return error.TransferState;
                 };
                 if (st.inode != inode) {
-                    if (!unit.installed and st.kind == .directory and try empty(io, parent, std.fs.path.basename(unit.path))) {
+                    if (!unit.installed and st.kind == .directory and
+                        try empty(io, parent, std.fs.path.basename(unit.path)))
+                    {
                         unit.inode = null;
                         continue;
                     }
@@ -236,7 +285,10 @@ pub const Session = struct {
             try progress.record(io, index, unit);
             try o.hit(.before_move);
             // Only an empty, preflighted scaffold directory may be removed.
-            to.deleteDir(io, base) catch |err| if (err != error.FileNotFound) return error.TransferConflict;
+            to.deleteDir(
+                io,
+                base,
+            ) catch |err| if (err != error.FileNotFound) return error.TransferConflict;
             try from.renamePreserve(base, to, base, io);
             if (unit.entry.?.kind == .directory) try applyMetadata(io, target, unit.entry.?, p);
             try syncDir(io, from);
@@ -250,17 +302,35 @@ pub const Session = struct {
         // import must never change its shared parent's modes, owner or timestamps.
         if (scope == null) for (result.manifest.entries) |e| {
             if (isContainer(e.path)) {
-                target.createDir(io, e.path, .fromMode(0o755)) catch |err| if (err != error.PathAlreadyExists) return err;
+                target.createDir(
+                    io,
+                    e.path,
+                    .fromMode(0o755),
+                ) catch |err| if (err != error.PathAlreadyExists) return err;
                 try applyMetadata(io, target, e, p);
             }
         };
         phase = "container metadata";
         if (receipt.parent_inode) |inode| {
-            var parent = try target.openDir(io, "svc", .{ .iterate = true, .follow_symlinks = false });
+            var parent = try target.openDir(
+                io,
+                "svc",
+                .{ .iterate = true, .follow_symlinks = false },
+            );
             defer parent.close(io);
             if ((try parent.stat(io)).inode != inode) return error.TransferConflict;
             const f: File = .{ .handle = parent.handle, .flags = .{ .nonblocking = false } };
-            try f.setTimestamps(io, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = receipt.parent_mtime_ns orelse return error.TransferState } } });
+            try f.setTimestamps(
+                io,
+                .{
+                    .modify_timestamp = .{
+                        .new = .{
+                            .nanoseconds = receipt.parent_mtime_ns orelse
+                                return error.TransferState,
+                        },
+                    },
+                },
+            );
             try f.sync(io);
         }
         try syncDir(io, target);
@@ -307,22 +377,39 @@ const Progress = struct {
 
     fn open(io: Io, state: Dir, units: []Unit, resume_pending: bool) !Progress {
         if (!resume_pending) {
-            state.deleteFile(io, "progress-part") catch |err| if (err != error.FileNotFound) return err;
-            const f = try state.createFile(io, "progress-part", .{ .exclusive = true, .permissions = .fromMode(0o600) });
+            state.deleteFile(
+                io,
+                "progress-part",
+            ) catch |err| if (err != error.FileNotFound) return err;
+            const f = try state.createFile(
+                io,
+                "progress-part",
+                .{ .exclusive = true, .permissions = .fromMode(0o600) },
+            );
             defer f.close(io);
             try f.setLength(io, units.len * unit_size);
             try f.sync(io);
             try state.rename("progress-part", state, "progress", io);
             try syncDir(io, state);
         }
-        const fd = try std.posix.openat(state.handle, "progress", .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        const fd = try std.posix.openat(
+            state.handle,
+            "progress",
+            .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
         const f: File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
         errdefer f.close(io);
         const st = try f.stat(io);
-        if (st.kind != .file or st.nlink != 1 or st.size != units.len * unit_size) return error.TransferState;
+        if (st.kind != .file or st.nlink != 1 or
+            st.size != units.len * unit_size) return error.TransferState;
         for (units, 0..) |*unit, index| {
             var bytes: [unit_size]u8 = undefined;
-            if (try f.readPositionalAll(io, &bytes, index * unit_size) != bytes.len) return error.TransferState;
+            if (try f.readPositionalAll(
+                io,
+                &bytes,
+                index * unit_size,
+            ) != bytes.len) return error.TransferState;
             const first = Progress.decode(bytes[0..record_size], index);
             const second = Progress.decode(bytes[record_size..], index);
             const chosen = if (first) |one| if (second) |two|
@@ -363,7 +450,11 @@ const Progress = struct {
         mem.writeInt(u64, bytes[8..16], inode, .little);
         bytes[16] = @intFromBool(unit.installed);
         bytes[24..].* = digest(bytes[0..24], index);
-        try p.file.writePositionalAll(io, &bytes, index * unit_size + (unit.sequence % 2) * record_size);
+        try p.file.writePositionalAll(
+            io,
+            &bytes,
+            index * unit_size + (unit.sequence % 2) * record_size,
+        );
         try p.file.sync(io);
     }
 };
@@ -382,10 +473,17 @@ fn isUnit(path: []const u8) bool {
 }
 
 fn privateDir(io: Io, parent: Dir, name: []const u8) !Dir {
-    parent.createDir(io, name, .fromMode(0o700)) catch |err| if (err != error.PathAlreadyExists) return err;
+    parent.createDir(
+        io,
+        name,
+        .fromMode(0o700),
+    ) catch |err| if (err != error.PathAlreadyExists) return err;
     const dir = try parent.openDir(io, name, .{ .iterate = true, .follow_symlinks = false });
     errdefer dir.close(io);
-    const owner = try currentOwner(null, .{ .handle = dir.handle, .flags = .{ .nonblocking = false } });
+    const owner = try currentOwner(
+        null,
+        .{ .handle = dir.handle, .flags = .{ .nonblocking = false } },
+    );
     const me = if (@import("builtin").os.tag == .linux) std.os.linux.geteuid() else std.c.geteuid();
     if ((try dir.stat(io)).permissions.toMode() & 0o7777 != 0o700 or owner.uid != me)
         return error.TransferState;
@@ -437,7 +535,8 @@ fn readReceipt(io: Io, a: Allocator, state: Dir) !?Receipt {
     var reader = file.readerStreaming(io, &buf);
     const json = try reader.interface.allocRemaining(a, .limited(data.limits.manifest));
     const r = try std.json.parseFromSliceLeaky(Receipt, a, json, .{});
-    if (r.version != 2 or r.archive.len != 64 or r.units.len > data.limits.entries) return error.TransferState;
+    if (r.version != 2 or r.archive.len != 64 or
+        r.units.len > data.limits.entries) return error.TransferState;
     return r;
 }
 
@@ -445,7 +544,11 @@ fn writeReceipt(io: Io, a: Allocator, state: Dir, receipt: Receipt) !void {
     const json = try std.json.Stringify.valueAlloc(a, receipt, .{});
     defer a.free(json);
     state.deleteFile(io, "receipt-part") catch |err| if (err != error.FileNotFound) return err;
-    const f = try state.createFile(io, "receipt-part", .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const f = try state.createFile(
+        io,
+        "receipt-part",
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
     defer f.close(io);
     try f.writeStreamingAll(io, json);
     try f.sync(io);
@@ -454,7 +557,11 @@ fn writeReceipt(io: Io, a: Allocator, state: Dir, receipt: Receipt) !void {
 }
 
 fn empty(io: Io, parent: Dir, name: []const u8) !bool {
-    var d = parent.openDir(io, name, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+    var d = parent.openDir(
+        io,
+        name,
+        .{ .iterate = true, .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return true,
         else => return error.TransferConflict,
     };
@@ -468,7 +575,11 @@ fn preflight(io: Io, a: Allocator, target: Dir, scope: ?[]const u8, units: []con
         const path = try a.print("svc/{s}", .{service});
         defer a.free(path);
         if (done(units, path)) return;
-        var svc = target.openDir(io, "svc", .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+        var svc = target.openDir(
+            io,
+            "svc",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
@@ -489,10 +600,19 @@ fn done(units: []const Unit, path: []const u8) bool {
     return false;
 }
 
-fn emptyTree(io: Io, a: Allocator, dir: Dir, prefix: []const u8, installed: *const std.StringHashMapUnmanaged(void)) anyerror!void {
+fn emptyTree(
+    io: Io,
+    a: Allocator,
+    dir: Dir,
+    prefix: []const u8,
+    installed: *const std.StringHashMapUnmanaged(void),
+) anyerror!void {
     var it = dir.iterate();
     while (try it.next(io)) |e| {
-        const path = if (prefix.len == 0) try a.dupe(u8, e.name) else try a.print("{s}/{s}", .{ prefix, e.name });
+        const path = if (prefix.len == 0)
+            try a.dupe(u8, e.name)
+        else
+            try a.print("{s}/{s}", .{ prefix, e.name });
         defer a.free(path);
         if (data.excluded(path) or data.beneath(path, "log") or installed.contains(path)) continue;
         const st = try dir.statFile(io, e.name, .{ .follow_symlinks = false });
@@ -512,11 +632,22 @@ fn emptyTree(io: Io, a: Allocator, dir: Dir, prefix: []const u8, installed: *con
 fn ensureContainer(io: Io, target: Dir, path: []const u8) !void {
     if (std.fs.path.dirname(path)) |parent| {
         if (!isContainer(parent)) return error.TransferPath;
-        target.createDir(io, parent, .fromMode(0o755)) catch |err| if (err != error.PathAlreadyExists) return err;
+        target.createDir(
+            io,
+            parent,
+            .fromMode(0o755),
+        ) catch |err| if (err != error.PathAlreadyExists) return err;
     }
 }
 
-pub fn decode(io: Io, a: Allocator, input: *Io.Reader, stage: Dir, p: data.Policy, scope: ?[]const u8) !data.Result {
+pub fn decode(
+    io: Io,
+    a: Allocator,
+    input: *Io.Reader,
+    stage: Dir,
+    p: data.Policy,
+    scope: ?[]const u8,
+) !data.Result {
     var staging: Staging = .{ .io = io, .allocator = a, .root = stage };
     defer staging.close();
     return data.zstd.validate(a, input, p, scope, staging.sink());
@@ -540,15 +671,27 @@ fn verifyStage(io: Io, a: Allocator, stage: Dir, m: data.Manifest, scope: ?[]con
         const entry = expected.get(item.path) orelse return error.TransferStaging;
         var parent = try data.parentDir(io, stage, entry.path);
         defer parent.close(io);
-        const st = try parent.statFile(io, std.fs.path.basename(entry.path), .{ .follow_symlinks = false });
+        const st = try parent.statFile(
+            io,
+            std.fs.path.basename(entry.path),
+            .{ .follow_symlinks = false },
+        );
         if (entry.kind == .directory) {
             if (st.kind != .directory) return error.TransferFileType;
-        } else if (st.kind != .file or st.nlink != 1 or st.size != entry.size) return error.TransferFileType;
+        } else if (st.kind != .file or st.nlink != 1 or
+            st.size != entry.size) return error.TransferFileType;
         if (@import("builtin").os.tag == .linux) {
             const file: File = if (entry.kind == .file)
                 try data.openRegular(io, parent, std.fs.path.basename(entry.path))
             else
-                .{ .handle = (try parent.openDir(io, std.fs.path.basename(entry.path), .{ .iterate = true, .follow_symlinks = false })).handle, .flags = .{ .nonblocking = false } };
+                .{
+                    .handle = (try parent.openDir(
+                        io,
+                        std.fs.path.basename(entry.path),
+                        .{ .iterate = true, .follow_symlinks = false },
+                    )).handle,
+                    .flags = .{ .nonblocking = false },
+                };
             defer file.close(io);
             _ = try data.metadata.owner(null, file);
         }
@@ -575,13 +718,21 @@ const Staging = struct {
         // Only the optional service container is implicit; all other parents
         // were declared and created by earlier validated inventory entries.
         if (mem.startsWith(u8, e.path, "svc/"))
-            s.root.createDir(s.io, "svc", .fromMode(0o700)) catch |err| if (err != error.PathAlreadyExists) return err;
+            s.root.createDir(
+                s.io,
+                "svc",
+                .fromMode(0o700),
+            ) catch |err| if (err != error.PathAlreadyExists) return err;
         var parent = try data.parentDir(s.io, s.root, e.path);
         defer parent.close(s.io);
         const base = std.fs.path.basename(e.path);
         if (e.kind == .directory) {
             try parent.createDir(s.io, base, .fromMode(0o700));
-        } else s.file = try parent.createFile(s.io, base, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        } else s.file = try parent.createFile(
+            s.io,
+            base,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
     }
     fn write(context: *anyopaque, bytes: []const u8) !void {
         const s: *Staging = @ptrCast(@alignCast(context));
@@ -596,7 +747,12 @@ const Staging = struct {
             s.file = null;
         }
     }
-    fn metadata(s: *Staging, manifest: data.Manifest, policy: data.Policy, scope: ?[]const u8) !void {
+    fn metadata(
+        s: *Staging,
+        manifest: data.Manifest,
+        policy: data.Policy,
+        scope: ?[]const u8,
+    ) !void {
         // Children first: applying a readonly directory mode cannot prevent
         // subsequent creation, and directory timestamps are restored last.
         var i = manifest.entries.len;
@@ -616,7 +772,12 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
     defer parent.close(io);
     const base = std.fs.path.basename(e.path);
     const file: File = if (e.kind == .file) blk: {
-        const fd = try std.posix.openat(parent.handle, base, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        const fd = try std.posix.openat(
+            parent.handle,
+            base,
+            .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
         break :blk .{ .handle = fd, .flags = .{ .nonblocking = true } };
     } else blk: {
         const dir = try parent.openDir(io, base, .{ .iterate = true, .follow_symlinks = false });
@@ -626,15 +787,11 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
     const st = try file.stat(io);
     if ((e.kind == .file and (st.kind != .file or st.nlink != 1)) or
         (e.kind == .directory and st.kind != .directory)) return error.TransferFileType;
-    phase = "owner";
-    const uid = try data.identityByName(p.users, e.owner);
-    const gid = try data.identityByName(p.groups, e.group);
-    const setgid_directory = @import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and
-        e.kind == .directory and e.mode & 0o2000 != 0;
-    // Linux preserves a directory's setgid bit across chown, but chmod clears
-    // it for a foreign group without FSETID. Set it under our group first.
-    if (setgid_directory) try file.setOwner(io, 0, std.os.linux.getegid()) else try file.setOwner(io, uid, gid);
-    phase = "mode";
+    try file.setOwner(
+        io,
+        try data.identityByName(p.users, e.owner),
+        try data.identityByName(p.groups, e.group),
+    );
     try file.setPermissions(io, .fromMode(@intCast(e.mode)));
     if (setgid_directory) try file.setOwner(io, uid, gid);
     phase = "ACL";
@@ -651,7 +808,13 @@ fn currentOwner(_: ?*anyopaque, f: File) !data.Owner {
     if (@import("builtin").os.tag == .linux) {
         const linux = std.os.linux;
         var st: linux.Statx = undefined;
-        if (linux.errno(linux.statx(f.handle, "", linux.AT.EMPTY_PATH, .{ .UID = true, .GID = true }, &st)) != .SUCCESS)
+        if (linux.errno(linux.statx(
+            f.handle,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .UID = true, .GID = true },
+            &st,
+        )) != .SUCCESS)
             return error.TransferOwner;
         return .{ .uid = st.uid, .gid = st.gid };
     } else {
@@ -677,7 +840,10 @@ test "empty svc and home containers publish and recover from a pending import" {
         var target = try tmp.dir.openDir(io, "target", .{ .iterate = true });
         defer target.close(io);
         try source.createDir(io, name, .fromMode(0o750));
-        const owner = try currentOwner(null, .{ .handle = source.handle, .flags = .{ .nonblocking = false } });
+        const owner = try currentOwner(
+            null,
+            .{ .handle = source.handle, .flags = .{ .nonblocking = false } },
+        );
         const policy: data.Policy = .{
             .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             .arch = .aarch64,
@@ -740,7 +906,11 @@ test "publisher refuses decoder files absent from its checked inventory" {
     var tmp = t.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "undeclared", .data = "no" });
-    const m: data.Manifest = .{ .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .arch = .aarch64, .entries = &.{} };
+    const m: data.Manifest = .{
+        .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .arch = .aarch64,
+        .entries = &.{},
+    };
     try t.expectError(error.TransferStaging, verifyStage(io, t.allocator, tmp.dir, m, null));
 }
 
@@ -761,13 +931,26 @@ test "service import recovers every publication boundary without changing compan
         defer target.close(io);
         try source.createDirPath(io, "svc/plex");
         try source.createDirPath(io, "svc/plex-media");
-        try source.writeFile(io, .{ .sub_path = "svc/plex/db", .data = "database", .flags = .{ .permissions = .fromMode(0o640) } });
+        try source.writeFile(
+            io,
+            .{
+                .sub_path = "svc/plex/db",
+                .data = "database",
+                .flags = .{ .permissions = .fromMode(0o640) },
+            },
+        );
         try source.writeFile(io, .{ .sub_path = "svc/plex-media/movie", .data = "source media" });
         try target.createDirPath(io, "svc/plex-media");
         try target.createDirPath(io, "svc/plex");
-        try target.writeFile(io, .{ .sub_path = "svc/plex-media/movie", .data = "keep destination media" });
+        try target.writeFile(
+            io,
+            .{ .sub_path = "svc/plex-media/movie", .data = "keep destination media" },
+        );
         const parent_before = try target.statFile(io, "svc", .{});
-        const owner = try currentOwner(null, .{ .handle = source.handle, .flags = .{ .nonblocking = false } });
+        const owner = try currentOwner(
+            null,
+            .{ .handle = source.handle, .flags = .{ .nonblocking = false } },
+        );
         const policy: data.Policy = .{
             .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             .arch = .aarch64,
@@ -786,23 +969,84 @@ test "service import recovers every publication boundary without changing compan
                 if (b == at.*) return error.SimulatedCrash;
             }
         }.hit;
-        try t.expectError(error.SimulatedCrash, applyInner(io, a, &reader, target, policy, .{ .target = "destination", .service = "plex", .boundary = crash, .context = @constCast(&fault) }, false));
+        try t.expectError(
+            error.SimulatedCrash,
+            applyInner(
+                io,
+                a,
+                &reader,
+                target,
+                policy,
+                .{
+                    .target = "destination",
+                    .service = "plex",
+                    .boundary = crash,
+                    .context = @constCast(&fault),
+                },
+                false,
+            ),
+        );
         try t.expect(try blocked(io, target));
         reader = .fixed(archive.written());
-        try t.expectError(error.TransferPending, applyInner(io, a, &reader, target, policy, .{ .target = "other", .service = "plex" }, false));
+        try t.expectError(
+            error.TransferPending,
+            applyInner(
+                io,
+                a,
+                &reader,
+                target,
+                policy,
+                .{ .target = "other", .service = "plex" },
+                false,
+            ),
+        );
         reader = .fixed(archive.written());
-        _ = try applyInner(io, a, &reader, target, policy, .{ .target = "destination", .service = "plex" }, false);
+        _ = try applyInner(
+            io,
+            a,
+            &reader,
+            target,
+            policy,
+            .{ .target = "destination", .service = "plex" },
+            false,
+        );
         try t.expect(!try blocked(io, target));
-        try t.expectEqual(parent_before.mtime.nanoseconds, (try target.statFile(io, "svc", .{})).mtime.nanoseconds);
-        try t.expectEqualStrings("database", try target.readFileAlloc(io, "svc/plex/db", a, .limited(1024)));
-        try t.expectEqualStrings("keep destination media", try target.readFileAlloc(io, "svc/plex-media/movie", a, .limited(1024)));
+        try t.expectEqual(
+            parent_before.mtime.nanoseconds,
+            (try target.statFile(io, "svc", .{})).mtime.nanoseconds,
+        );
+        try t.expectEqualStrings(
+            "database",
+            try target.readFileAlloc(io, "svc/plex/db", a, .limited(1024)),
+        );
+        try t.expectEqualStrings(
+            "keep destination media",
+            try target.readFileAlloc(io, "svc/plex-media/movie", a, .limited(1024)),
+        );
         const before = try source.statFile(io, "svc/plex/db", .{});
         const after = try target.statFile(io, "svc/plex/db", .{});
-        try t.expectEqual(before.permissions.toMode() & 0o7777, after.permissions.toMode() & 0o7777);
+        try t.expectEqual(
+            before.permissions.toMode() & 0o7777,
+            after.permissions.toMode() & 0o7777,
+        );
         try t.expectEqual(before.mtime.nanoseconds, after.mtime.nanoseconds);
-        try t.expectError(error.FileNotFound, target.access(io, state_path ++ "/pending.json", .{}));
+        try t.expectError(
+            error.FileNotFound,
+            target.access(io, state_path ++ "/pending.json", .{}),
+        );
         reader = .fixed(archive.written());
-        try t.expectError(error.TransferConflict, applyInner(io, a, &reader, target, policy, .{ .target = "destination", .service = "plex" }, false));
+        try t.expectError(
+            error.TransferConflict,
+            applyInner(
+                io,
+                a,
+                &reader,
+                target,
+                policy,
+                .{ .target = "destination", .service = "plex" },
+                false,
+            ),
+        );
     }
 }
 
@@ -832,8 +1076,14 @@ test "full compressed import preserves data and machine exclusions and rejects o
     try target.createDir(io, ".werewolf", .fromMode(0o700));
     try target.createDir(io, "log", .fromMode(0o700));
     try target.writeFile(io, .{ .sub_path = "log/current", .data = "destination audit trail" });
-    try target.writeFile(io, .{ .sub_path = ".werewolf/identities", .data = "destination authority" });
-    const owner = try currentOwner(null, .{ .handle = source.handle, .flags = .{ .nonblocking = false } });
+    try target.writeFile(
+        io,
+        .{ .sub_path = ".werewolf/identities", .data = "destination authority" },
+    );
+    const owner = try currentOwner(
+        null,
+        .{ .handle = source.handle, .flags = .{ .nonblocking = false } },
+    );
     const policy: data.Policy = .{
         .image = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         .arch = .aarch64,
@@ -848,19 +1098,27 @@ test "full compressed import preserves data and machine exclusions and rejects o
     try t.expect(mem.find(u8, tar.written(), "source audit trail") != null);
     try tmp.dir.writeFile(io, .{ .sub_path = "archive.tar", .data = tar.written() });
     const path = try tmp.dir.realPathFileAlloc(io, "archive.tar", a);
-    const compressed = try std.process.run(a, io, .{ .argv = &.{ "zstd", "-1", "-q", "-c", "--", path }, .stdout_limit = .limited(1 << 20), .stderr_limit = .limited(4096) });
+    const compressed = try std.process.run(
+        a,
+        io,
+        .{
+            .argv = &.{ "zstd", "-1", "-q", "-c", "--", path },
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(4096),
+        },
+    );
     try t.expect(compressed.term == .exited and compressed.term.exited == 0);
     var input: Io.Reader = .fixed(compressed.stdout);
     const result = try apply(io, a, &input, target, policy, .{ .target = "new-machine" });
     try t.expect(result.manifest.service == null);
-    try t.expectEqualStrings("destination authority", try target.readFileAlloc(io, ".werewolf/identities", a, .limited(1024)));
-    try t.expectEqualStrings("destination audit trail", try target.readFileAlloc(io, "log/current", a, .limited(1024)));
-    try tmp.dir.createDir(io, "fresh", .fromMode(0o700));
-    var fresh = try tmp.dir.openDir(io, "fresh", .{ .iterate = true });
-    defer fresh.close(io);
-    var fresh_input: Io.Reader = .fixed(compressed.stdout);
-    _ = try apply(io, a, &fresh_input, fresh, policy, .{ .target = "fresh-machine" });
-    try t.expectError(error.FileNotFound, fresh.access(io, "log", .{}));
+    try t.expectEqualStrings(
+        "destination authority",
+        try target.readFileAlloc(io, ".werewolf/identities", a, .limited(1024)),
+    );
+    try t.expectEqualStrings(
+        "destination audit trail",
+        try target.readFileAlloc(io, "log/current", a, .limited(1024)),
+    );
     for (manifest.entries) |e| {
         if (data.beneath(e.path, "log")) continue;
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });
@@ -872,8 +1130,14 @@ test "full compressed import preserves data and machine exclusions and rejects o
         );
     }
     input = .fixed(compressed.stdout);
-    try t.expectError(error.TransferConflict, apply(io, a, &input, target, policy, .{ .target = "new-machine" }));
-    try t.expectEqualStrings("cluster", try target.readFileAlloc(io, "svc/postgres/data", a, .limited(1024)));
+    try t.expectError(
+        error.TransferConflict,
+        apply(io, a, &input, target, policy, .{ .target = "new-machine" }),
+    );
+    try t.expectEqualStrings(
+        "cluster",
+        try target.readFileAlloc(io, "svc/postgres/data", a, .limited(1024)),
+    );
 }
 
 test "boot barrier fails closed on linked machine state" {
