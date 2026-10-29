@@ -429,7 +429,7 @@ pub fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void
 /// or tag is missing: howl create did not make it, so it is not howl's.
 pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why) !void {
     const dir = try machineDir(gpa, name);
-    const cloud_guard = if (cloud.supported(on) or on == .aws or on == .firecracker)
+    const cloud_guard = if (cloud.supported(on) or on == .firecracker)
         try @import("data-cloud.zig").guard(io, gpa, dir)
     else
         @as(?Io.File, null);
@@ -470,9 +470,12 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
         },
         .aws => {
             // Delete the instance, its volume and security group, not the AMI.
-            const p = try aws.place(io, gpa, why);
+            const p: aws.Place = if (cloud_context) |ctx| .{ .region = ctx.aws.region } else try aws.place(io, gpa, why);
             const i = try aws.find(io, gpa, p, name, why);
             if (i) |m| if (m.form.len == 0) return notMade(name, .aws, why);
+            if (i != null) if (cloud_context) |ctx| {
+                _ = try cloud.state(io, gpa, name, ctx);
+            };
             try aws.delete(io, gpa, p, name, i, why);
         },
         .azure => {

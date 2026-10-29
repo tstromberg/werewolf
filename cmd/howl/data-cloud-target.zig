@@ -68,6 +68,10 @@ fn activate(io: Io, a: A, name: []const u8, at: []const u8, staged: secure.Profi
     if (staged.cloud) |context| {
         // Capture succeeded before an interrupted final local publication.
         if (!(try cloud.state(io, a, name, context)).running) switch (context) {
+            .aws => |p| {
+                _ = try transport.aws(io, a, p.region, &.{ "ec2", "start-instances", "--instance-ids", p.id });
+                _ = try transport.aws(io, a, p.region, &.{ "ec2", "wait", "instance-running", "--instance-ids", p.id });
+            },
             .gcp => |p| {
                 _ = try transport.gcp(io, a, p.project, &.{ "compute", "instances", "start", name, "--zone", p.zone });
             },
@@ -89,6 +93,21 @@ fn activate(io: Io, a: A, name: []const u8, at: []const u8, staged: secure.Profi
         const form = (staged.local orelse staged.spec).form;
         const tar = try a.print("{s}/config.tar", .{at});
         switch (staged.provider) {
+            .aws => {
+                const api = @import("aws.zig");
+                const p = try api.place(io, a, why);
+                if (try api.find(io, a, p, name, why) != null) return error.TransferTargetExists;
+                // A new AMI enrolls only the approved signer. EC2 initializes
+                // fresh firmware variables and NitroTPM for the new instance.
+                const image = try api.ensureImage(io, a, p, form, staged.spec.arch, disk, work, why);
+                defer cleanupAwsImage(io, a, p.region, image);
+                const bytes = try Dir.cwd().readFileAlloc(io, tar, a, .limited(64 << 20));
+                const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+                const b64 = try a.print("{s}/config.b64", .{work});
+                try @import("boot-image.zig").durable(io, b64, std.base64.standard.Encoder.encode(encoded, bytes));
+                const id = try api.create(io, a, p, name, form, staged.spec.arch, staged.cloud_size, image, b64, why);
+                try cloud.capture(io, a, name, .{ .aws = .{ .region = p.region, .id = id } });
+            },
             .gcp => {
                 const api = @import("gcp.zig");
                 const p = try api.place(io, a, why);
@@ -135,6 +154,19 @@ fn activate(io: Io, a: A, name: []const u8, at: []const u8, staged: secure.Profi
     profile.cloud_staged = false;
     try images.replaceRecord(io, a, path, try std.json.Stringify.valueAlloc(a, profile, .{}));
     howl.say(io, "{s}: restored VM started", .{name});
+}
+
+fn cleanupAwsImage(io: Io, a: A, region: []const u8, image: []const u8) void {
+    const snapshot = transport.aws(io, a, region, &.{ "ec2", "describe-images", "--image-ids", image, "--query", "Images[0].BlockDeviceMappings[].Ebs.SnapshotId" }) catch return;
+    const ids = std.json.parseFromSliceLeaky([]const []const u8, a, snapshot, .{}) catch return;
+    if (ids.len != 1) return;
+    _ = transport.aws(io, a, region, &.{ "ec2", "deregister-image", "--image-id", image }) catch {
+        howl.say(io, "temporary AMI {s} remains in {s}", .{ image, region });
+        return;
+    };
+    _ = transport.aws(io, a, region, &.{ "ec2", "delete-snapshot", "--snapshot-id", ids[0] }) catch {
+        howl.say(io, "temporary snapshot {s} remains in {s}", .{ ids[0], region });
+    };
 }
 
 fn cleanupAzureImage(io: Io, a: A, group: []const u8, image: []const u8) void {

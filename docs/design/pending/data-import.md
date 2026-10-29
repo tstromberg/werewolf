@@ -42,7 +42,7 @@ configuration separately; `--with FORM --version SERIAL` selects a trusted relea
 **Delivery.** Disk-based import requires a confirmed stopped VM and private transfer
 storage. A networkless Linux helper installs it without host shares or guest SSH.
 Cloud import uses new names: stage locally, publish a fresh VM on explicit start.
-Use `gcloud`/`az` authentication; never swap an existing VM's disk or VMGS.
+Use `aws`/`gcloud`/`az` authentication; never swap an existing VM's disk or VMGS.
 Create empty Firecracker targets first; document manual `--disk` staging.
 Online import uses opt-in SSH with pinned host identity and owner grants; its
 fixed native command needs no shell. Hold lifecycle/transfer locks; require every

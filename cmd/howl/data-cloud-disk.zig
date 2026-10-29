@@ -16,6 +16,7 @@ pub fn copy(io: Io, a: A, name: []const u8, context: cloud.Context, arch: howl.A
     const temporary = try a.print("ww-data-{s}", .{nonce});
     const raw = try a.print("{s}/cloud.raw", .{work});
     switch (context) {
+        .aws => |c| try @import("data-aws.zig").copy(io, a, c.region, before.disk, temporary, raw, work),
         .azure => |c| {
             const snapshot = try azure(io, a, c.group, &.{ "snapshot", "create", "-n", temporary, "-l", c.location, "--source", before.disk, "--tags", "werewolf=transfer", "--query", "id", "-o", "tsv" });
             var deleted = false;
@@ -111,6 +112,14 @@ pub fn gcp(io: Io, a: A, project: []const u8, args: []const []const u8) ![]const
     return call(io, a, try mem.concat(a, []const u8, &.{ &.{ "gcloud", "--quiet", "--project", project }, args }));
 }
 
+pub fn awsArgs(a: A, region: []const u8, args: []const []const u8) ![]const []const u8 {
+    return mem.concat(a, []const u8, &.{ &.{ "aws", "--region", region, "--output", "json", "--no-cli-pager", "--no-cli-auto-prompt" }, args });
+}
+
+pub fn aws(io: Io, a: A, region: []const u8, args: []const []const u8) ![]const u8 {
+    return call(io, a, try awsArgs(a, region, args));
+}
+
 pub fn azure(io: Io, a: A, group: []const u8, args: []const []const u8) ![]const u8 {
     for (args) |arg| if (mem.eql(u8, arg, "--ids")) return call(io, a, try mem.concat(a, []const u8, &.{ &.{"az"}, args }));
     return call(io, a, try mem.concat(a, []const u8, &.{ &.{"az"}, args, &.{ "--resource-group", group } }));
@@ -121,7 +130,7 @@ pub fn call(io: Io, a: A, args: []const []const u8) ![]const u8 {
     if (!result.term.success()) {
         // Command verbs diagnose the failing stage without exposing grant
         // responses, signed URLs, access tokens or provider response bodies.
-        const start: usize = if (mem.eql(u8, args[0], "gcloud")) 4 else 1;
+        const start: usize = if (mem.eql(u8, args[0], "gcloud")) 4 else if (mem.eql(u8, args[0], "aws")) 7 else 1;
         howl.say(io, "{s} {s} {s}: cloud operation failed ({t}); provider response withheld", .{ args[0], args[start], args[start + 1], result.term });
         return error.TransferCloudOperation;
     }

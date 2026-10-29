@@ -79,7 +79,7 @@ and never merges occupied data. Fence the source before starting a replacement t
 shares identity. Plex state (`plex`) and media (`plex-media`) are separate.
 
 The storage adapter accepts stopped QEMU, Lima, Firecracker and x86_64 bhyve
-machines, plus enrolled Azure and GCP VMs. Local destinations need standalone raw
+machines, plus enrolled AWS, Azure and GCP VMs. Local targets need standalone raw
 disks. Create empty Firecracker destinations first; use new names for cloud import.
 Running storage is refused. V1 keeps the approved disk size. A networkless appliance
 reads an export copy or installs onto a stopped disk. Only export copies replay
@@ -117,7 +117,7 @@ with a pending receipt requires offline recovery before applications may start.
 
 ## Cloud disks and manual transfer
 
-Cloud disk transfer uses authenticated `gcloud`/`az` in a private cloud project.
+Cloud disk transfer uses logged-in `aws`, `gcloud` or `az` and private storage.
 Keep the VM cleanly stopped; fence other operators and automation during transfer.
 Howl checks the saved VM identity, location, power state and boot disk. GCP export
 requires `cloudbuild.googleapis.com` and the export worker's documented permissions;
@@ -132,8 +132,8 @@ can import over SSH. Existing stopped cloud VMs require manual `--disk` staging.
 Failed publication retains local staging. If a cloud VM exists before its identity
 was recorded, start refuses to adopt it; inspect it through the provider CLI.
 
-For manual transport, download the stopped disk with the provider CLI; convert
-Azure's fixed VHD or GCP's `disk.raw` into a private standalone raw staging file.
+For manual transport, download the stopped disk with the provider CLI. AWS snapshot
+blocks form raw disks; convert Azure's fixed VHD or GCP's `disk.raw` to raw disks.
 Keep it unmounted on the host and use the enrolled VM:
 
 ```sh
@@ -155,7 +155,7 @@ interrupted input, occupied roots, metadata and database queries.
 
 The VM runner defaults to Lima on macOS, QEMU on Linux and bhyve on FreeBSD.
 Run `build/host/data-app-check build/host/howl build/ARCH/transfer-control` after
-building those tools to select a provider with `DATA_TRANSFER_PROVIDER`. GCP and
+building those tools to select a provider with `DATA_TRANSFER_PROVIDER`. AWS, GCP and
 Azure also accept `DATA_TRANSFER_SIZE`; the provider CLI's environment selects the
 test project, zone or resource group. `DATA_TRANSFER_PATH=ssh` selects only online
 SSH cases and does not qualify disk support. The default, `all`, requires both

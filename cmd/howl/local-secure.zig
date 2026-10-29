@@ -1101,6 +1101,7 @@ pub fn start(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
         const context = try @import("data-cloud.zig").load(io, gpa, at, profile.provider);
         if ((try @import("data-cloud.zig").state(io, gpa, name, context)).running) return why.refuse("{s}: already running", .{name});
         const argv: []const []const u8 = switch (context) {
+            .aws => |p| &.{ "aws", "--region", p.region, "ec2", "start-instances", "--instance-ids", p.id },
             .gcp => |p| &.{ "gcloud", "--quiet", "--project", p.project, "compute", "instances", "start", name, "--zone", p.zone },
             .azure => |p| &.{ "az", "vm", "start", "-g", p.group, "-n", name, "-o", "none" },
         };

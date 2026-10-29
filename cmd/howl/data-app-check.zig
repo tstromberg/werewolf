@@ -59,6 +59,10 @@ const Test = struct {
         try Dir.cwd().setFilePermissions(c.io, c.work, .fromMode(0o700), .{});
         try c.env.put("XDG_DATA_HOME", try c.path("credentials"));
         try c.env.put("SSH_AUTH_SOCK", "");
+        // Existing destination directories prevent legacy signing-key
+        // migration from taking the owner's keys into disposable credentials.
+        for ([_][]const u8{ "ipe", "boot/aarch64", "boot/x86_64" }) |sub|
+            try Dir.cwd().createDirPath(c.io, try c.path(try c.gpa.print("credentials/howl/keys/{s}", .{sub})));
         t.key = try c.path("owner.key");
         _ = try c.must(&.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "data-transfer-fixture", "-f", t.key }, "identity", .{});
         t.form = try c.path(try c.gpa.print("transfer-fixture-{s}", .{suffix}));
@@ -485,6 +489,13 @@ const Test = struct {
         // Only exact disk IDs observed on this run's randomly named fixtures.
         // A VM must be deleted successfully before any retained disk is removed.
         for (t.disks.items) |disk| switch (disk.context) {
+            .aws => |p| {
+                const found = try disk_api.aws(c.io, c.gpa, p.region, &.{ "ec2", "describe-volumes", "--filters", try c.gpa.print("Name=volume-id,Values={s}", .{disk.id}), "--query", "Volumes[].{id:VolumeId,state:State}" });
+                const volumes = try std.json.parseFromSliceLeaky([]const struct { id: []const u8, state: []const u8 }, c.gpa, found, .{});
+                if (volumes.len == 0) continue;
+                if (volumes.len != 1 or !mem.eql(u8, volumes[0].id, disk.id) or !mem.eql(u8, volumes[0].state, "available")) return error.TransferTestCleanup;
+                _ = try disk_api.aws(c.io, c.gpa, p.region, &.{ "ec2", "delete-volume", "--volume-id", disk.id });
+            },
             .gcp => |p| {
                 const found = try disk_api.gcp(c.io, c.gpa, p.project, &.{ "compute", "disks", "list", "--zones", p.zone, "--filter", try c.gpa.print("name={s}", .{std.fs.path.basename(disk.id)}), "--format=value(selfLink)" });
                 if (found.len == 0) continue;
@@ -502,6 +513,7 @@ const Test = struct {
 
     fn cloudConsole(t: *Test, name: []const u8) ![]const u8 {
         return switch (try t.cloudContext(name)) {
+            .aws => |p| @import("aws.zig").console(t.c.io, t.c.gpa, .{ .region = p.region }, p.id),
             .gcp => |p| @import("gcp.zig").console(t.c.io, t.c.gpa, .{ .project = p.project, .zone = p.zone }, name),
             .azure => |p| @import("azure.zig").console(t.c.io, t.c.gpa, .{ .group = p.group, .location = p.location }, name),
         } orelse "";
@@ -513,10 +525,12 @@ const Test = struct {
         _ = try @import("data-cloud.zig").state(c.io, c.gpa, name, context);
         if (up) try t.boot_markers.put(c.gpa, name, @import("azure.zig").mark(try t.cloudConsole(name)));
         const args: []const []const u8 = switch (context) {
+            .aws => |p| &.{ "aws", "--region", p.region, "ec2", if (up) "start-instances" else "stop-instances", "--instance-ids", p.id },
             .gcp => |p| &.{ "gcloud", "--quiet", "--project", p.project, "compute", "instances", if (up) "start" else "stop", name, "--zone", p.zone },
             .azure => |p| &.{ "az", "vm", if (up) "start" else "deallocate", "-g", p.group, "-n", name, "-o", "none" },
         };
         _ = try c.must(args, label, .{ .timeout = .fromSeconds(600) });
+        if (context == .aws) _ = try c.must(&.{ "aws", "--region", context.aws.region, "ec2", "wait", if (up) "instance-running" else "instance-stopped", "--instance-ids", context.aws.id }, try c.gpa.print("{s}-wait", .{label}), .{ .timeout = .fromSeconds(600) });
     }
 
     fn startMachine(t: *Test, name: []const u8, label: []const u8) !void {

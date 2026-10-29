@@ -33,6 +33,10 @@ pub const Machine = struct {
 };
 
 pub fn capture(io: Io, a: A, name: []const u8, place: Context) !void {
+    if (place == .aws) {
+        if (place.aws.id.len == 0) return error.TransferMachineIdentity;
+        _ = try @import("data-cloud-disk.zig").aws(io, a, place.aws.region, &.{ "ec2", "wait", "instance-running", "--instance-ids", place.aws.id });
+    }
     const on: howl.Platform = switch (place) {
         .aws => .aws,
         .gcp => .gcp,
@@ -43,6 +47,7 @@ pub fn capture(io: Io, a: A, name: []const u8, place: Context) !void {
     if (profile.provider != on) return error.TransferProvider;
     var context = place;
     const machine = try describe(io, a, name, context, false);
+    if (place == .aws and !mem.eql(u8, machine.id, place.aws.id)) return error.TransferMachineIdentity;
     const form = (profile.local orelse profile.spec).form;
     const expected = if (on == .gcp) std.fs.path.basename(mem.trimEnd(u8, form, "/")) else form;
     if (!mem.eql(u8, machine.form, expected) or machine.id.len == 0) return error.TransferMachineIdentity;
@@ -176,6 +181,27 @@ fn string(value: ?std.json.Value) ![]const u8 {
     const v = value orelse return error.TransferMachineState;
     if (v != .string or v.string.len == 0 or v.string.len > 4096) return error.TransferMachineState;
     return v.string;
+}
+
+test "AWS requires one enrolled instance with attached root storage and stable power" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = "{\"Reservations\":[{\"Instances\":[";
+    const vm = "{\"InstanceId\":\"i-a\",\"State\":{\"Name\":\"stopped\"},\"RootDeviceName\":\"/dev/xvda\",\"Tags\":[{\"Key\":\"werewolf-form\",\"Value\":\"plex\"}],\"BlockDeviceMappings\":[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"VolumeId\":\"vol-a\",\"Status\":\"attached\"}}]}";
+    const suffix = "]}]}";
+    const fixture = prefix ++ vm ++ suffix;
+    const machine = try parseAws(a, fixture, true);
+    try t.expect(!machine.running);
+    try t.expectEqualStrings("i-a", machine.id);
+    try t.expectEqualStrings("vol-a", machine.disk);
+    try t.expect((try parseAws(a, try mem.replaceOwned(u8, a, fixture, "stopped", "running"), true)).running);
+    try t.expectError(error.TransferMachineState, parseAws(a, try mem.replaceOwned(u8, a, fixture, "stopped", "stopping"), true));
+    try t.expectError(error.TransferStorageState, parseAws(a, try mem.replaceOwned(u8, a, fixture, "attached", "detaching"), true));
+    try t.expectError(error.TransferMachineIdentity, parseAws(a, try mem.replaceOwned(u8, a, fixture, "werewolf-form", "unrelated"), true));
+    try t.expectError(error.TransferMachineIdentity, parseAws(a, "{\"Reservations\":[]}", true));
+    try t.expectError(error.TransferMachineIdentity, parseAws(a, try mem.concat(a, u8, &.{ prefix, vm, ",", vm, suffix }), true));
 }
 
 test "cloud power state is authoritative and ambiguous boot storage refuses" {

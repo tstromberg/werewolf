@@ -366,7 +366,7 @@ $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zi
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig cmd/howl/data-cloud.zig cmd/howl/data-cloud-disk.zig cmd/howl/data-cloud-target.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig cmd/howl/data-cloud.zig cmd/howl/data-aws.zig cmd/howl/data-cloud-disk.zig cmd/howl/data-cloud-target.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
@@ -468,7 +468,7 @@ _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/preb
 _test/lib/boot-download.zig: ; zig test --dep prebuilt --dep update-policy --dep host -Mroot=lib/boot-download.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mhost=test/host/host.zig
-_test/cmd/howl/howl.zig _test/cmd/howl/import.zig _test/cmd/howl/test.zig _test/cmd/howl/data.zig _test/cmd/howl/data-helper.zig _test/cmd/howl/data-cloud.zig _test/cmd/howl/data-cloud-disk.zig _test/cmd/howl/data-cloud-target.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
+_test/cmd/howl/howl.zig _test/cmd/howl/import.zig _test/cmd/howl/test.zig _test/cmd/howl/data.zig _test/cmd/howl/data-helper.zig _test/cmd/howl/data-cloud.zig _test/cmd/howl/data-aws.zig _test/cmd/howl/data-cloud-disk.zig _test/cmd/howl/data-cloud-target.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig

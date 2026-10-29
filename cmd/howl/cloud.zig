@@ -268,7 +268,7 @@ pub fn createAws(
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
-        try @import("data-cloud.zig").capture(io, gpa, name, .{ .aws = .{ .region = p.region, .id = "" } });
+        try @import("data-cloud.zig").capture(io, gpa, name, .{ .aws = .{ .region = p.region, .id = id } });
         made = true;
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {

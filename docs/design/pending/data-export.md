@@ -35,7 +35,7 @@ state. Include logs for evidence; import discards them. Unsupported files fail.
 known app service; record scope. Plex state is `plex`; media is `plex-media`.
 
 Online export uses opt-in SSH; disk-based export requires a confirmed stopped VM.
-Cloud disks use authenticated `gcloud`/`az`, private snapshots and temporary storage.
+Cloud disks use `aws`/`gcloud`/`az`, private snapshots and temporary storage.
 GCP uses Cloud Build image export. Missing access fails; add no guest listeners.
 SSH failure is not shutdown. Export changes no service or VM power state.
 
