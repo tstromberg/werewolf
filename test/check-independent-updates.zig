@@ -527,17 +527,30 @@ const Test = struct {
                 try host.check.append(c.io, try c.path("evidence.jsonl"), record);
                 if (committed and mem.eql(u8, t.source_form, "postdoc-server")) {
                     const workload = @import("postdoc.zig");
-                    if (!(try t.ssh(workload.health, "postdoc-health", 960)).ok() or
-                        !(try t.ssh(
-                            try workload.command(c.gpa, t.postdoc_seeded),
-                            "postdoc-api",
-                            360,
-                        )).ok() or
-                        !(try t.ssh(workload.tunnel, "postdoc-tunnel", 30)).ok())
-                        return c.fail(
-                            "postdoc failed on {s}: JIT API, persisted verdict or tunnel metrics",
-                            .{label},
-                        );
+                    if (!(try t.ssh(workload.health, "postdoc-health", 960)).ok())
+                        return c.fail("postdoc health failed on {s}", .{label});
+                    const api = try t.ssh(
+                        try workload.command(c.gpa, t.postdoc_seeded),
+                        "postdoc-api",
+                        360,
+                    );
+                    // The index uses a rules/model namespace which may change
+                    // between boots. Save only filenames, not private data.
+                    const index_listing = t.ssh(
+                        "find /data/svc/postdoc/cache/atomdrift/scan/lookup -maxdepth 2 " ++
+                            "-name '*.json' -print 2>&1 | head -40",
+                        "postdoc-index",
+                        30,
+                    ) catch null;
+                    if (index_listing) |listing| c.say(
+                        "postdoc index on {s}: {s}",
+                        .{ label, host.check.tail(listing.stdout, 3000) },
+                    );
+                    if (!api.ok()) return c.fail("postdoc API failed on {s}: {f}: {s}", .{
+                        label, api.term, host.check.tail(api.stderr, 3000),
+                    });
+                    if (!(try t.ssh(workload.tunnel, "postdoc-tunnel", 30)).ok())
+                        return c.fail("postdoc tunnel metrics failed on {s}", .{label});
                     t.postdoc_seeded = true;
                     t.ok("postdoc API and persistent verdict healthy on {s}", .{label});
                 }

@@ -14,7 +14,7 @@ pub fn command(gpa: std.mem.Allocator, resumed: bool) ![]const u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(sample, &digest, .{});
     const request = if (resumed)
-        try gpa.print("wget -q -T 60 -O - --header \"Authorization: Bearer $t\" " ++
+        try gpa.print("wget -q -S -T 60 -O - --header \"Authorization: Bearer $t\" " ++
             "'http://127.0.0.1:49999/v1/lookup?sha256={s}'", .{std.fmt.bytesToHex(digest, .lower)})
     else
         try gpa.print("printf '%s' {s} >/data/postdoc-check.js; " ++
