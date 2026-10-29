@@ -153,7 +153,8 @@ const Test = struct {
                 "services:\n  postgres:\n" ++
                 "    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c " ++
                 "unix_socket_directories=/run/svc/postgres\n" ++
-                "    before: /usr/lib/werewolf/transfer-control prepare-postgres\n    user: postgres\n" ++
+                "    before: /usr/lib/werewolf/transfer-control prepare-postgres\n    user: " ++
+                "postgres\n" ++
                 "    pledge: stdio rpath wpath proc shm unix listen connect\n" ++
                 "    run: [/usr/lib/werewolf/transfer-control, /usr/lib/werewolf/pg-init, " ++
                 "/usr/bin/initdb, /usr/lib/werewolf/sh-shim" ++
