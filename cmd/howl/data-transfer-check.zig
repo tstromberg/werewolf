@@ -715,12 +715,21 @@ const Check = struct {
             return error.TransferTestCorruption
         else |err| if (err != error.TransferInstall)
             return err;
-        _ = try c.debug(source, "set_super_value state 2", true);
+        _ = try c.debug(source, "set_super_value state 0", true);
         const dirty_hash = try c.hash(source);
         if (c.invoke("dirty-export", source, null, null)) |_|
             return error.TransferTestDirty
         else |err| if (err != error.TransferUnclean)
             return err;
         try c.equal(dirty_hash, try c.hash(source));
+        // An ext4 error flag is filesystem damage, distinct from an unclean
+        // but otherwise valid journal. Both must be refused without writes.
+        _ = try c.debug(source, "set_super_value state 2", true);
+        const error_hash = try c.hash(source);
+        if (c.invoke("error-export", source, null, null)) |_|
+            return error.TransferTestDirty
+        else |err| if (err != error.TransferFilesystem)
+            return err;
+        try c.equal(error_hash, try c.hash(source));
     }
 };
