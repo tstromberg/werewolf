@@ -200,7 +200,16 @@ fn ensureDisk(
         "tsv",
     }, why);
     howl.say(io, "image {s}: uploading {d} bytes", .{ name, size });
-    const upload_err: ?anyerror = if (@import("data-cloud-disk.zig").uploadPages(io, gpa, sas, vhd, work)) null else |err| err;
+    const upload_err: ?anyerror = if (@import("data-cloud-disk.zig").uploadPages(
+        io,
+        gpa,
+        sas,
+        vhd,
+        work,
+    ))
+        null
+    else |err|
+        err;
     // The write SAS is revoked even when the upload failed, so none
     // outlives the attempt: hours of write access buy nothing.
     _ = try need(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" }, why);

@@ -148,7 +148,10 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
     var approved = profile;
     if (approved.configuration) |definition| approved.spec.form = definition.form;
     approved.data_image = try a.dupe(u8, &image);
-    approved.spec.boot_cert = if (profile.spec.boot_cert != null) try a.print("{s}/boot.crt", .{dir}) else null;
+    approved.spec.boot_cert = if (profile.spec.boot_cert != null)
+        try a.print("{s}/boot.crt", .{dir})
+    else
+        null;
     if (profile.spec.ipe_cert) |cert| {
         const path = try a.print("{s}/image.crt", .{dir});
         try Dir.cwd().copyFile(cert, .cwd(), path, io, .{});
