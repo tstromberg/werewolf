@@ -329,7 +329,8 @@ fn fetchBytes(io: Io, gpa: Allocator, url: []const u8, limit: usize, why: *Why) 
             // error, including temporary disconnects and certificate errors.
             // A retry never changes certificate verification or accepts data.
             if (attempt + 1 < bd.fetch_attempts and
-                (bd.retryable(err) or err == error.TlsInitializationFailed))
+                (bd.retryable(err) or err == error.TlsInitializationFailed or
+                    err == error.NameServerFailure))
             {
                 try Io.sleep(io, .fromSeconds(@intCast(attempt + 1)), .awake);
                 continue;
