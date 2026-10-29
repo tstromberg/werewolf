@@ -537,8 +537,8 @@ const Test = struct {
                     // The index uses a rules/model namespace which may change
                     // between boots. Save only filenames, not private data.
                     const index_listing = t.ssh(
-                        "find /data/svc/postdoc/cache/atomdrift/scan/lookup -maxdepth 2 " ++
-                            "-name '*.json' -print 2>&1 | head -40",
+                        "for f in /data/svc/postdoc/cache/atomdrift/scan/lookup/*/*.json; " ++
+                            "do [ -f \"$f\" ] && printf '%s\\n' \"$f\"; done; :",
                         "postdoc-index",
                         30,
                     ) catch null;
