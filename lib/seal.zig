@@ -1052,9 +1052,15 @@ test parse {
 test "transfer workers reap children without authority over other services" {
     for ([_]bool{ false, true }) |publisher| {
         var buf: [max_filter]Filter = undefined;
-        const f = if (publisher) buildPublisherFilter(&buf, 123) else buildPipeReaderFilter(&buf, 123);
+        const f = if (publisher)
+            buildPublisherFilter(&buf, 123)
+        else
+            buildPipeReaderFilter(&buf, 123);
         try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.wait4), 0));
-        try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.kill), 123));
+        try testing.expectEqual(
+            linux.SECCOMP.RET.ALLOW,
+            action(f, native_arch, number(.kill), 123),
+        );
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.kill), 124));
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.clone), 0));
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.execve), 0));

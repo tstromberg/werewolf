@@ -435,7 +435,12 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
         @as(?Io.File, null);
     defer if (cloud_guard) |file| file.close(io);
     if (cloud.supported(on)) {
-        const profile_bytes = Dir.cwd().readFileAlloc(io, try gpa.print("{s}/authority/profile.json", .{dir}), gpa, .limited(256 << 10)) catch |err| switch (err) {
+        const profile_bytes = Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/authority/profile.json", .{dir}),
+            gpa,
+            .limited(256 << 10),
+        ) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -461,16 +466,27 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
         },
         .gcp => {
             // Delete the VM and its disk, not the image, which others may share.
-            const p: gcp.Place = if (cloud_context) |ctx| .{ .project = ctx.gcp.project, .zone = ctx.gcp.zone } else try gcp.place(io, gpa, why);
+            const p: gcp.Place = if (cloud_context) |ctx|
+                .{ .project = ctx.gcp.project, .zone = ctx.gcp.zone }
+            else
+                try gcp.place(io, gpa, why);
             if (try gcp.formOf(io, gpa, p, name, why)) |was| {
                 if (was.len == 0) return notMade(name, .gcp, why);
-                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(io, gpa, name, ctx);
+                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(
+                    io,
+                    gpa,
+                    name,
+                    ctx,
+                );
                 try gcp.delete(io, gpa, p, name, why);
             }
         },
         .aws => {
             // Delete the instance, its volume and security group, not the AMI.
-            const p: aws.Place = if (cloud_context) |ctx| .{ .region = ctx.aws.region } else try aws.place(io, gpa, why);
+            const p: aws.Place = if (cloud_context) |ctx|
+                .{ .region = ctx.aws.region }
+            else
+                try aws.place(io, gpa, why);
             const i = try aws.find(io, gpa, p, name, why);
             if (i) |m| if (m.form.len == 0) return notMade(name, .aws, why);
             if (i != null) if (cloud_context) |ctx| {
@@ -480,11 +496,19 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
         },
         .azure => {
             // Delete the VM, its disk, NIC and network, not the image.
-            const p: azure.Place = if (cloud_context) |ctx| .{ .group = ctx.azure.group, .location = ctx.azure.location } else try azure.place(io, gpa, why);
+            const p: azure.Place = if (cloud_context) |ctx|
+                .{ .group = ctx.azure.group, .location = ctx.azure.location }
+            else
+                try azure.place(io, gpa, why);
             const vm = try azure.find(io, gpa, p, name, why);
             if (vm) |v| if (v.form.len == 0) return notMade(name, .azure, why);
             if (vm != null) {
-                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(io, gpa, name, ctx);
+                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(
+                    io,
+                    gpa,
+                    name,
+                    ctx,
+                );
             }
             try azure.delete(io, gpa, p, name, vm, why);
         },

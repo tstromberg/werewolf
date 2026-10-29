@@ -36,14 +36,18 @@ fn run(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len < 4 or args.len > 5) return error.TransferInvocation;
-    const mode = std.meta.stringToEnum(enum { read, install, decode, @"install-session", @"decode-session" }, args[1]) orelse
+    const mode = std.meta.stringToEnum(
+        enum { read, install, decode, @"install-session", @"decode-session" },
+        args[1],
+    ) orelse
         return error.TransferInvocation;
     if ((mode == .@"install-session") != (args.len == 5)) return error.TransferInvocation;
     const control_fd = try descriptor(args[2]);
     const root_fd = try descriptor(args[3]);
     if (control_fd == root_fd) return error.TransferInvocation;
     const guard_fd = if (args.len == 5) try descriptor(args[4]) else root_fd;
-    if (args.len == 5 and (guard_fd == control_fd or guard_fd == root_fd)) return error.TransferInvocation;
+    if (args.len == 5 and (guard_fd == control_fd or
+        guard_fd == root_fd)) return error.TransferInvocation;
     const control: File = .{ .handle = control_fd, .flags = .{ .nonblocking = false } };
     var buf: [4096]u8 = undefined;
     var reader = control.reader(init.io, &buf);
@@ -105,7 +109,7 @@ fn run(init: std.process.Init) !void {
             var child = try std.process.spawn(init.io, .{
                 .argv = &.{
                     "/usr/lib/werewolf/data-transfer",
-                    "decode",
+                    if (session_mode) "decode-session" else "decode",
                     try a.print("{d}", .{control.handle}),
                     try a.print("{d}", .{session.stage.handle}),
                 },
@@ -129,17 +133,26 @@ fn run(init: std.process.Init) !void {
                 session.stage.handle,
                 decoded.handle,
                 pipe.handle,
+                guard_fd,
             });
-            try sandbox.keepOnly(
-                (1 << linux.CAP.CHOWN) | (1 << linux.CAP.DAC_OVERRIDE) | (1 << linux.CAP.FOWNER),
-            );
+            const caps = (1 << linux.CAP.CHOWN) | (1 << linux.CAP.FOWNER) |
+                (1 << linux.CAP.SETGID) |
+                (1 << linux.CAP.DAC_READ_SEARCH);
+            if (session_mode)
+                try sandbox.inheritedCapabilities(caps)
+            else
+                try sandbox.keepOnly(caps | (1 << linux.CAP.DAC_OVERRIDE));
             try sandbox.landlock(
                 &.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }},
                 &.{},
             );
             var filter: [seal.max_filter]seal.Filter = undefined;
             _ = try seal.install(
-                seal.buildFilter(&filter, .initMany(&.{ .stdio, .rpath, .wpath, .proc }), true),
+                seal.buildFilter(
+                    &filter,
+                    .initMany(&.{ .stdio, .rpath, .wpath, .proc, .setgid }),
+                    true,
+                ),
                 false,
             );
             // The decoder never receives a machine-state file descriptor.
@@ -161,7 +174,10 @@ fn run(init: std.process.Init) !void {
             }
             const status = try child.wait(init.io);
             if (!status.success()) return error.TransferDecode;
-            try (File{ .handle = session.stage.handle, .flags = .{ .nonblocking = false } }).setOwner(init.io, 0, 0);
+            try (File{
+                .handle = session.stage.handle,
+                .flags = .{ .nonblocking = false },
+            }).setOwner(init.io, 0, 0);
             var input_buffer: [4096]u8 = undefined;
             var input = decoded.reader(init.io, &input_buffer);
             const result = try data.protocol.read(
@@ -239,7 +255,7 @@ fn confineDecoderMode(root: Dir, session: bool) !void {
     try sandbox.closeExcept(&.{root.handle});
     try sandbox.limit(.FSIZE, data.limits.file_bytes);
     try sandbox.limit(.AS, 1 << 30);
-    try sandbox.dropTo(reader_id, null);
+    if (session) try sandbox.dropSession(reader_id, 0) else try sandbox.dropTo(reader_id, null);
     try sandbox.landlock(
         &.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }},
         &.{},
@@ -307,7 +323,7 @@ test "Linux decoder and readers enforce filesystem, capability, network and exec
         .handle = stage.handle,
         .flags = .{ .nonblocking = false },
     }).setOwner(io, reader_id, reader_id);
-    for (0..5) |mode| {
+    for (0..6) |mode| {
         const pid = try sandbox.sys(linux.fork(), "fork boundary test");
         if (pid == 0) {
             boundaryProbe(io, tmp.dir, stage, mode) catch linux.exit_group(1);
@@ -343,7 +359,9 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
     if (mode == 3) try sandbox.inheritedCapabilities((1 << linux.CAP.DAC_READ_SEARCH) |
         (1 << linux.CAP.SETUID) | (1 << linux.CAP.SETGID));
     const view = if (mode == 0 or mode == 5) blk: {
-        if (mode == 5) try sandbox.inheritedCapabilities((1 << linux.CAP.SETUID) | (1 << linux.CAP.SETGID));
+        if (mode == 5) try sandbox.inheritedCapabilities(
+            (1 << linux.CAP.SETUID) | (1 << linux.CAP.SETGID),
+        );
         try confineDecoderMode(stage, mode == 5);
         break :blk stage;
     } else try @import("data-read").confine(
@@ -358,12 +376,12 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
         linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&caps)),
         "capget boundary test",
     );
-    const permitted: u32 = if (mode == 0) 0 else 1 << linux.CAP.DAC_READ_SEARCH;
+    const permitted: u32 = if (mode == 0 or mode == 5) 0 else 1 << linux.CAP.DAC_READ_SEARCH;
     if (linux.geteuid() != reader_id or caps[0].effective != permitted or
         caps[0].permitted != permitted or
         caps[0].inheritable != 0 or caps[1].effective != 0 or
         caps[1].permitted != 0) return error.Boundary;
-    if (mode == 0) {
+    if (mode == 0 or mode == 5) {
         const fd = try sandbox.sys(
             linux.openat(view.handle, "allowed", .{ .ACCMODE = .RDWR, .CREAT = true }, 0o600),
             "stage write",
@@ -379,7 +397,16 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
         _ = linux.close(@intCast(fd));
         try denied(linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDWR }, 0));
         try denied(linux.openat(view.handle, ".werewolf/secret", .{ .ACCMODE = .RDONLY }, 0));
-        try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0));
+        if (mode == 1) {
+            try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0));
+        } else {
+            const log_fd = try sandbox.sys(
+                linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0),
+                "audit log read",
+            );
+            _ = linux.close(@intCast(log_fd));
+            try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDWR }, 0));
+        }
         if (mode == 1) try denied(linux.openat(
             view.handle,
             "svc/plex-media/secret",
@@ -416,7 +443,14 @@ test "SSH publisher installs scoped bytes without SETPCAP or DAC_OVERRIDE" {
     defer source.close(io);
     var target = try tmp.dir.openDir(io, "target", .{ .iterate = true });
     defer target.close(io);
-    try source.writeFile(io, .{ .sub_path = "svc/plex/db", .data = "database", .flags = .{ .permissions = .fromMode(0o600) } });
+    try source.writeFile(
+        io,
+        .{
+            .sub_path = "svc/plex/db",
+            .data = "database",
+            .flags = .{ .permissions = .fromMode(0o600) },
+        },
+    );
     var app = try source.openDir(io, "svc/plex", .{ .iterate = true });
     defer app.close(io);
     const app_file: File = .{ .handle = app.handle, .flags = .{ .nonblocking = false } };
@@ -447,22 +481,47 @@ test "SSH publisher installs scoped bytes without SETPCAP or DAC_OVERRIDE" {
     try archive.writeStreamingAll(io, &frame);
     try archive.writeStreamingAll(io, tar.written());
     _ = try sandbox.sys(@intCast(linux.lseek(archive.handle, 0, 0)), "rewind archive");
-    try tmp.dir.writeFile(io, .{ .sub_path = "policy", .data = try std.json.Stringify.valueAlloc(alloc, Request{ .target = "online:/data", .policy = policy, .service = "plex" }, .{}) });
+    try tmp.dir.writeFile(
+        io,
+        .{
+            .sub_path = "policy",
+            .data = try std.json.Stringify.valueAlloc(
+                alloc,
+                Request{ .target = "online:/data", .policy = policy, .service = "plex" },
+                .{},
+            ),
+        },
+    );
     const control = try tmp.dir.openFile(io, "policy", .{});
     defer control.close(io);
     const guard = try tmp.dir.createFile(io, "guard", .{});
     defer guard.close(io);
     const argv = [_:null]?[*:0]const u8{
-        "/usr/lib/werewolf/data-transfer",                    "install-session",
-        try alloc.printSentinel("{d}", .{control.handle}, 0), try alloc.printSentinel("{d}", .{target.handle}, 0),
+        "/usr/lib/werewolf/data-transfer",                  "install-session",
+        try alloc.printSentinel(
+            "{d}",
+            .{control.handle},
+            0,
+        ),
+        try alloc.printSentinel(
+            "{d}",
+            .{target.handle},
+            0,
+        ),
         try alloc.printSentinel("{d}", .{guard.handle}, 0),
     };
     for (0..2) |attempt| {
         _ = try sandbox.sys(@intCast(linux.lseek(archive.handle, 0, 0)), "rewind archive retry");
         const pid = try sandbox.sys(linux.fork(), "fork SSH publisher test");
         if (pid == 0) {
-            for ([_]u32{ linux.CAP.SETPCAP, linux.CAP.DAC_OVERRIDE }) |cap|
-                if (linux.errno(linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0)) != .SUCCESS) linux.exit_group(126);
+            for ([_]u32{ linux.CAP.SETPCAP, linux.CAP.DAC_OVERRIDE, linux.CAP.FSETID }) |cap|
+                if (linux.errno(linux.prctl(
+                    @backingInt(linux.PR.CAPBSET_DROP),
+                    cap,
+                    0,
+                    0,
+                    0,
+                )) != .SUCCESS) linux.exit_group(126);
             for ([_]i32{ control.handle, target.handle, guard.handle }) |fd|
                 _ = linux.fcntl(fd, linux.F.SETFD, 0);
             _ = linux.dup2(archive.handle, 0);
@@ -473,10 +532,22 @@ test "SSH publisher installs scoped bytes without SETPCAP or DAC_OVERRIDE" {
         var status: i32 = 0;
         _ = try sandbox.sys(linux.waitpid(@intCast(pid), &status, 0), "wait SSH publisher test");
         if (attempt == 0) try t.expectEqual(@as(i32, 0), status) else try t.expect(status != 0);
-        try t.expectError(error.FileNotFound, target.access(io, data.install.state_path ++ "/incoming", .{}));
+        try t.expectError(
+            error.FileNotFound,
+            target.access(io, data.install.state_path ++ "/incoming", .{}),
+        );
     }
-    try t.expectEqualStrings("database", try target.readFileAlloc(io, "svc/plex/db", alloc, .limited(32)));
-    try t.expectEqual(@as(u32, 0o2750), @as(u32, (try target.statFile(io, "svc/plex", .{})).permissions.toMode() & 0o7777));
-    try t.expectEqualStrings("keep", try target.readFileAlloc(io, "svc/plex-media/movie", alloc, .limited(32)));
+    try t.expectEqualStrings(
+        "database",
+        try target.readFileAlloc(io, "svc/plex/db", alloc, .limited(32)),
+    );
+    try t.expectEqual(
+        @as(u32, 0o2750),
+        @as(u32, (try target.statFile(io, "svc/plex", .{})).permissions.toMode() & 0o7777),
+    );
+    try t.expectEqualStrings(
+        "keep",
+        try target.readFileAlloc(io, "svc/plex-media/movie", alloc, .limited(32)),
+    );
     try t.expect(!try data.install.blocked(io, target));
 }

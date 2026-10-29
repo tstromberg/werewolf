@@ -6,7 +6,6 @@
 //! otherwise takes changes by reinstalling (docs/design/implemented/independent-updates.md).
 const std = @import("std");
 const howl = @import("howl.zig");
-const cloud = @import("data-cloud.zig");
 const lima = @import("lima.zig");
 const native = @import("build.zig");
 const secureboot = @import("secureboot.zig");
@@ -35,7 +34,7 @@ pub const Profile = struct {
     local: ?native.Spec = null,
     /// The approved immutable image cache, independent of later source builds.
     data_image: ?[]const u8 = null,
-    cloud: ?@import("data-cloud.zig").Context = null,
+    cloud: ?@import("data-cloud.zig").Provider = null,
     /// Restored storage remains local and unbooted until explicit activation.
     cloud_staged: bool = false,
     cloud_size: ?[]const u8 = null,
@@ -243,7 +242,10 @@ pub fn transferTarget(
     tar: []const u8,
     why: *howl.Why,
 ) !Profile {
-    if (r.profile.spec.boot_cert == null) return why.refuse("create an empty destination with the approved image before importing", .{});
+    if (r.profile.spec.boot_cert == null) return why.refuse(
+        "create an empty destination with the approved image before importing",
+        .{},
+    );
     _ = try admit(io, a, on, false, why);
     const at = try std.fs.path.resolveAlloc(
         a,

@@ -211,7 +211,12 @@ pub fn createGcp(
         const image = try gcp.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.zone });
         try gcp.create(io, gpa, p, name, o.form, c.arch, o.size, image, c.b64, why);
-        try @import("data-cloud.zig").capture(io, gpa, name, .{ .gcp = .{ .project = p.project, .zone = p.zone, .id = "" } });
+        try @import("data-cloud.zig").capture(
+            io,
+            gpa,
+            name,
+            .{ .gcp = .{ .project = p.project, .zone = p.zone, .id = "" } },
+        );
         made = true;
     }
     switch (try gcp.awaitUp(io, gpa, p, name)) {
@@ -268,7 +273,12 @@ pub fn createAws(
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
-        try @import("data-cloud.zig").capture(io, gpa, name, .{ .aws = .{ .region = p.region, .id = id } });
+        try @import("data-cloud.zig").capture(
+            io,
+            gpa,
+            name,
+            .{ .aws = .{ .region = p.region, .id = id } },
+        );
         made = true;
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {
@@ -330,7 +340,12 @@ pub fn createAzure(
     const image = try azure.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
     say(io, "{s}: starting it in {s}, {s}", .{ name, p.group, p.location });
     try azure.create(io, gpa, p, name, o.form, c.arch, o.size, image, tar_path, why);
-    try @import("data-cloud.zig").capture(io, gpa, name, .{ .azure = .{ .group = p.group, .location = p.location, .id = "" } });
+    try @import("data-cloud.zig").capture(
+        io,
+        gpa,
+        name,
+        .{ .azure = .{ .group = p.group, .location = p.location, .id = "" } },
+    );
     try azureUp(io, gpa, p, name, o.form, "", w, why);
     try sayOpen(io, gpa, name, o.form, azure, p, o.allow_from, why);
 }

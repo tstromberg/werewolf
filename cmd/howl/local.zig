@@ -991,7 +991,13 @@ pub fn createFirecrackerLocked(
                 .managed = false,
                 .spec = recorded,
                 .local = spec,
-                .configuration = try @import("boot-config.zig").derive(io, gpa, o.form, std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/")), why),
+                .configuration = try @import("boot-config.zig").derive(
+                    io,
+                    gpa,
+                    o.form,
+                    std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/")),
+                    why,
+                ),
             }, true, why);
             var profile = approved.profile;
             profile.provider = .firecracker;
@@ -1001,13 +1007,21 @@ pub fn createFirecrackerLocked(
             const authority = try gpa.print("{s}/authority", .{dir});
             try Dir.cwd().createDirPath(io, authority);
             try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});
-            try images.replaceRecord(io, gpa, try gpa.print("{s}/profile.json", .{authority}), try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+            try images.replaceRecord(
+                io,
+                gpa,
+                try gpa.print("{s}/profile.json", .{authority}),
+                try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+            );
         }
         built = (try steps.finish()).seconds;
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
-    Dir.cwd().deleteFile(io, try gpa.print("{s}/stop-request", .{dir})) catch |err| if (err != error.FileNotFound) return err;
+    Dir.cwd().deleteFile(
+        io,
+        try gpa.print("{s}/stop-request", .{dir}),
+    ) catch |err| if (err != error.FileNotFound) return err;
     const log = try gpa.print("{s}/{s}/console.log", .{ cwd, dir });
     const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;
     try firecracker.networkUp(io, gpa, root, n, user, why);

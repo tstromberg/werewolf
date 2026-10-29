@@ -2429,7 +2429,13 @@ pub fn releaseDiskAt(
         else
             1,
     };
-    const p = try buildHere(io, gpa, &steps, spec, .{ .qcow2 = true, .private_machine = target != null });
+    const p = try buildHere(
+        io,
+        gpa,
+        &steps,
+        spec,
+        .{ .qcow2 = true, .private_machine = target != null },
+    );
     if (target) |disk| {
         var recorded = spec;
         recorded.disk_path = disk;
@@ -2453,7 +2459,12 @@ pub fn releaseDiskAt(
         const authority = try gpa.print("{s}/authority", .{std.fs.path.dirname(disk).?});
         try Dir.cwd().createDirPath(io, authority);
         try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});
-        try images.replaceRecord(io, gpa, try gpa.print("{s}/profile.json", .{authority}), try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+        try images.replaceRecord(
+            io,
+            gpa,
+            try gpa.print("{s}/profile.json", .{authority}),
+            try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+        );
     }
     _ = try steps.finish();
     return target orelse gpa.print("{s}/disk.qcow2", .{p.out});
