@@ -44,8 +44,8 @@ pub const usage =
     \\       howl owner [NAME] status|pause|resume|check|outcome|try [HASH]   operate an enrolled QEMU VM without guest SSH
     \\       howl stop [NAME] [--on qemu]   stop a local VM and keep its disk
     \\       howl start NAME                                  start an enrolled stopped VM
-    \\       howl export NAME [--service NAME] [--output FILE]   export a consistent data archive
-    \\       howl import NAME ARCHIVE [--service NAME] [--on TARGET] [--config DIR]   restore data; leave the target stopped
+    \\       howl export NAME [--service NAME] [--output FILE] [--disk RAW]   export a consistent data archive
+    \\       howl import NAME ARCHIVE [--service NAME] [--on TARGET] [--config DIR] [--disk RAW]   restore data; leave applications stopped
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
     "] [--version TAG] [--disable=secureboot,tpm,ipe] [--dev=ssh] [--build] [--yes] [--arch " ++
@@ -216,11 +216,7 @@ pub fn main(init: std.process.Init) void {
             why.refuse("_bhyve-secure NAME DIR BHYVE...", .{})
         else
             bhyve.keepProtected(io, gpa, args[2], args[3], args[4..]),
-        ._firecracker => if (args.len != 3 and
-            !(args.len == 4 and std.mem.eql(u8, args[3], "--pinned")))
-            why.refuse("_firecracker DIR [--pinned]", .{})
-        else
-            firecracker.keep(io, gpa, args[2], args.len == 4),
+        ._firecracker => firecracker.command(io, gpa, args[2..], &why),
         // Internal: a protected machine's TPM supervisor, and what
         // tools/enroll-boot asks howl for.
         ._tpm => @import("swtpm.zig").command(io, gpa, args[2..], &why),
@@ -2337,7 +2333,7 @@ test "reconfigure accepts a cloud form label for a local manifest path" {
 /// releaseDisk returns the form's release disk.qcow2, with --app's
 /// application, and builds it if it is stale, as howl build would.
 pub fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![]const u8 {
-    return releaseDiskAt(io, gpa, o, arch, null, why);
+    return releaseDiskAt(io, gpa, o, arch, o.on orelse .qemu, null, why);
 }
 
 pub fn releaseDiskAt(
@@ -2345,6 +2341,7 @@ pub fn releaseDiskAt(
     gpa: Allocator,
     o: Options,
     arch: Arch,
+    provider: Platform,
     target: ?[]const u8,
     why: *Why,
 ) ![]const u8 {
@@ -2399,7 +2396,7 @@ pub fn releaseDiskAt(
         var it = std.mem.tokenizeAny(u8, extra, " \t");
         while (it.next()) |w| try words.append(gpa, w);
     }
-    const p = try buildHere(io, gpa, &steps, .{
+    const spec: native.Spec = .{
         .form = o.form,
         .variants = variants,
         .arch = arch,
@@ -2431,7 +2428,33 @@ pub fn releaseDiskAt(
             )
         else
             1,
-    }, .{ .qcow2 = true });
+    };
+    const p = try buildHere(io, gpa, &steps, spec, .{ .qcow2 = true, .private_machine = target != null });
+    if (target) |disk| {
+        var recorded = spec;
+        recorded.disk_path = disk;
+        recorded.boot_key = null;
+        recorded.ipe_key = null;
+        const definition = try @import("boot-config.zig").derive(io, gpa, o.form, name, why);
+        const secure = @import("local-secure.zig");
+        const images = @import("data-image.zig");
+        const approved = try images.approve(io, gpa, secure.Profile{
+            .spec = recorded,
+            .local = spec,
+            .provider = provider,
+            .managed = false,
+            .configuration = definition,
+        }, true, why);
+        var profile = approved.profile;
+        profile.provider = provider;
+        profile.spec.disk_path = disk;
+        profile.configuration = definition;
+        profile.local = spec;
+        const authority = try gpa.print("{s}/authority", .{std.fs.path.dirname(disk).?});
+        try Dir.cwd().createDirPath(io, authority);
+        try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});
+        try images.replaceRecord(io, gpa, try gpa.print("{s}/profile.json", .{authority}), try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+    }
     _ = try steps.finish();
     return target orelse gpa.print("{s}/disk.qcow2", .{p.out});
 }

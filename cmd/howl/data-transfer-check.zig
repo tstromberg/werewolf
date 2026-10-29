@@ -74,6 +74,7 @@ const Check = struct {
     image: []const u8,
     why: howl.Why = .{},
     phase: []const u8 = "fixture creation",
+    replay_copy: bool = false,
 
     fn path(c: *Check, name: []const u8) ![]const u8 {
         return c.a.print("{s}/{s}", .{ c.work, name });
@@ -260,6 +261,7 @@ const Check = struct {
             .target = "public-fixture",
             .service = scope,
             .initialize = archive != null,
+            .replay_journal_on_copy = c.replay_copy,
         }, archive, key, &c.why);
         const policy = try helper.run(
             c.io,
@@ -626,6 +628,12 @@ const Check = struct {
         const before = try c.hash(source);
         const full = try c.invoke("full-export", source, null, null);
         const inventory = try c.validate(full.archive, full.policy, null);
+        var has_log = false;
+        for (inventory.manifest.entries) |e|
+            if (mem.eql(u8, e.path, "log/current") and e.kind == .file) {
+                has_log = true;
+            };
+        if (!has_log) return error.TransferTestMissingLogs;
         try c.equal(before, try c.hash(source));
         for (inventory.manifest.entries) |e| if (data.excluded(
             e.path,

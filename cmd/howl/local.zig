@@ -890,6 +890,23 @@ pub fn createFirecracker(
     tell: Tell,
     why: *Why,
 ) !void {
+    const guard = try @import("data-cloud.zig").guard(io, gpa, try machineDir(gpa, name));
+    defer guard.close(io);
+    return createFirecrackerLocked(io, gpa, o, name, tar, dns_given, tell, guard, why);
+}
+
+/// Caller holds secure.lock, including when starting an imported destination.
+pub fn createFirecrackerLocked(
+    io: Io,
+    gpa: Allocator,
+    o: Options,
+    name: []const u8,
+    tar: []const u8,
+    dns_given: ?[]const u8,
+    tell: Tell,
+    launch_guard: Io.File,
+    why: *Why,
+) !void {
     const pinned = !o.disabled.contains(.ipe);
     if (pinned and howl.environ.get("IPE_UPDATES") != null) return why.refuse(
         "Firecracker pins this image on the host; IPE_UPDATES requires a provider with " ++
@@ -965,10 +982,32 @@ pub fn createFirecracker(
         spec.disk.args = try firecracker.bootArgs(gpa, n, dns);
         _ = try howl.buildHere(io, gpa, &steps, spec, .{ .disk = true });
         if (pinned) try firecracker.pin(io, gpa, try gpa.print("{s}/{s}", .{ cwd, dir }), why);
+        if (pinned) {
+            const images = @import("data-image.zig");
+            var recorded = spec;
+            recorded.ipe_key = null;
+            const approved = try images.approve(io, gpa, .{
+                .provider = .firecracker,
+                .managed = false,
+                .spec = recorded,
+                .local = spec,
+                .configuration = try @import("boot-config.zig").derive(io, gpa, o.form, std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/")), why),
+            }, true, why);
+            var profile = approved.profile;
+            profile.provider = .firecracker;
+            profile.spec = recorded;
+            profile.spec.ipe_cert = approved.profile.spec.ipe_cert;
+            profile.local = spec;
+            const authority = try gpa.print("{s}/authority", .{dir});
+            try Dir.cwd().createDirPath(io, authority);
+            try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});
+            try images.replaceRecord(io, gpa, try gpa.print("{s}/profile.json", .{authority}), try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+        }
         built = (try steps.finish()).seconds;
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
+    Dir.cwd().deleteFile(io, try gpa.print("{s}/stop-request", .{dir})) catch |err| if (err != error.FileNotFound) return err;
     const log = try gpa.print("{s}/{s}/console.log", .{ cwd, dir });
     const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;
     try firecracker.networkUp(io, gpa, root, n, user, why);
@@ -979,12 +1018,14 @@ pub fn createFirecracker(
     const argv = try std.mem.concat(gpa, []const u8, &.{
         &.{ "setsid", "-f", self, "_firecracker", try gpa.print("{s}/{s}", .{ cwd, dir }) },
         if (pinned) &.{"--pinned"} else &.{},
+        &.{ "--guard", try gpa.print("{d}", .{launch_guard.handle}) },
     });
     var starter = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
+        .inherit_files = &.{launch_guard},
     }) catch |err| return why.refuse("setsid: {s}", .{@errorName(err)});
     _ = starter.wait(io) catch {};
     var spin: progress.Spinner = .init(io);

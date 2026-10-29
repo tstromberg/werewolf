@@ -6,6 +6,9 @@ pub fn main(init: std.process.Init) noreturn {
     _ = linux.mkdir("/proc", 0o755);
     _ = linux.mount("devtmpfs", "/dev", "devtmpfs", 0, 0);
     _ = linux.mount("proc", "/proc", "proc", 0, 0);
+    _ = linux.mkdir("/tmp", 0o700);
+    if (linux.errno(linux.mount("tmpfs", "/tmp", "tmpfs", 0, 0)) != .SUCCESS or
+        linux.errno(linux.chdir("/tmp")) != .SUCCESS) poweroff();
     const fd = linux.open("/dev/console", .{ .ACCMODE = .RDWR }, 0);
     if (linux.errno(fd) == .SUCCESS) for (0..3) |n| {
         _ = linux.dup2(@intCast(fd), @intCast(n));

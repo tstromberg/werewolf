@@ -154,6 +154,11 @@ phase by phase (kernel, disk, slot, root, init's steps, seal), and keeps it in
 `/run/werewolf/boot`. The console shows only warnings and worse (`loglevel=5`);
 `dmesg` keeps every line.
 
+## Data transfer
+
+`make check-data-transfer` checks the isolated helper and shell-free VM restores.
+See [provider selection and evidence](data.md#transfer-tests).
+
 ## CI
 
 [check.yml](../.github/workflows/check.yml) runs host tests on both architectures,

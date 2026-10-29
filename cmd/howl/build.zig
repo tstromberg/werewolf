@@ -40,6 +40,8 @@ pub const Goals = struct {
     disk: bool = false,
     /// qcow2 is OUT/disk.qcow2, the disk a release publishes.
     qcow2: bool = false,
+    /// Internal named-machine builds are private deployments, not releases.
+    private_machine: bool = false,
     /// lock is the form's apko config and lock, for make's release-inputs.
     lock: bool = false,
 };
@@ -601,6 +603,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
             const goal = std.meta.stringToEnum(std.meta.FieldEnum(Goals), args[i]) orelse
                 return why.refuse("{s}: {s}", .{ args[i], syntax });
             switch (goal) {
+                .private_machine => return why.refuse("private_machine is an internal deployment goal", .{}),
                 inline else => |g| @field(goals, @tagName(g)) = true,
             }
         }
@@ -881,7 +884,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
     // Native test roots are instrumentation, never distributable releases.
-    if (goals.qcow2 or goals.prebuilt) for (b.chain) |fm| {
+    if ((goals.qcow2 and !goals.private_machine) or goals.prebuilt) for (b.chain) |fm| {
         const marker = try gpa.print("{s}/rootfs/usr/share/werewolf/test-image", .{fm.dir});
         if (Dir.cwd().access(io, marker, .{})) |_| {
             return steps.fail("native test images cannot be exported as release artifacts");
@@ -1317,6 +1320,13 @@ fn tree(io: Io, gpa: Allocator, dir: []const u8, out: *std.ArrayList([]const u8)
 }
 
 const testing = std.testing;
+
+test "command-line build goals cannot select private deployment exemptions" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: howl.Why = .{};
+    try testing.expectError(error.Refused, buildTargets(testing.io, arena.allocator(), &.{"private_machine"}, &why));
+}
 
 test buildOptions {
     var why: howl.Why = .{};

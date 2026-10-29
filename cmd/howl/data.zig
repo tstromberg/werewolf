@@ -2,6 +2,7 @@
 //! networkless storage appliance, never by the host running Howl.
 const std = @import("std");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const secure = @import("local-secure.zig");
 const images = @import("data-image.zig");
 const helper = @import("data-helper.zig");
@@ -25,6 +26,8 @@ const Options = struct {
     port: ?u16 = null,
     form: ?[]const u8 = null,
     version: ?[]const u8 = null,
+    disk: ?[]const u8 = null,
+    size: ?[]const u8 = null,
 };
 
 fn parse(op: Operation, args: []const []const u8) !Options {
@@ -46,7 +49,7 @@ fn parse(op: Operation, args: []const []const u8) !Options {
             o.service = value;
         } else if (op == .@"export" and mem.eql(u8, flag, "--output") and o.output == null) {
             o.output = value;
-        } else if (op == .@"export" and mem.eql(u8, flag, "--identity") and o.identity == null) {
+        } else if (mem.eql(u8, flag, "--identity") and o.identity == null) {
             o.identity = value;
         } else if (op == .@"export" and mem.eql(u8, flag, "--host") and o.host == null) {
             for (value) |c| if (!std.ascii.isAlphanumeric(c) and
@@ -54,7 +57,7 @@ fn parse(op: Operation, args: []const []const u8) !Options {
                 return error.TransferArguments;
             if (value[0] == '-') return error.TransferArguments;
             o.host = value;
-        } else if (op == .@"export" and mem.eql(u8, flag, "--port") and o.port == null) {
+        } else if (mem.eql(u8, flag, "--port") and o.port == null) {
             o.port = std.fmt.parseUnsigned(u16, value, 10) catch return error.TransferArguments;
             if (o.port.? == 0) return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--on") and o.on == null) {
@@ -64,6 +67,10 @@ fn parse(op: Operation, args: []const []const u8) !Options {
             ) orelse return error.TransferArguments;
         } else if (mem.eql(u8, flag, "--data-key") and o.key == null) {
             o.key = value;
+        } else if (mem.eql(u8, flag, "--disk") and o.disk == null) {
+            o.disk = value;
+        } else if (op == .import and mem.eql(u8, flag, "--size") and o.size == null) {
+            o.size = value;
         } else if (op == .import and mem.eql(u8, flag, "--config") and o.config == null) {
             o.config = value;
         } else if (op == .import and mem.eql(u8, flag, "--with") and o.form == null) {
@@ -152,6 +159,7 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
             .{},
         );
         profile = try secure.parseProfile(a, text);
+        if (o.size != null) return why.refuse("existing destinations retain their size; omit --size", .{});
         if (o.on) |on| if (on != profile.provider) return error.TransferProvider;
         if (op == .@"export" and try machineRunning(io, a, o.name, at, profile.provider, why)) {
             const approved = try @import("data-ssh.zig").capture(
@@ -180,12 +188,13 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
             .{},
         );
     } else {
+        if (o.disk != null) return error.TransferArguments;
         if (op != .import) return why.refuse("{s}: no enrolled machine", .{o.name});
         // Hints are used solely as a key in the owner's approved image cache.
         const hint = try archiveHint(io, a, o.archive.?);
         image = hint.image;
         const on = o.on orelse howl.engine(io, a, null).on;
-        if (on != .qemu and on != .lima) return error.TransferProvider;
+        if (on != .qemu and on != .lima and on != .bhyve and !cloud.supported(on)) return error.TransferProvider;
         const arch = std.meta.stringToEnum(howl.Arch, @tagName(hint.arch)).?;
         if (arch != howl.hostArch()) return error.TransferArchitecture;
         record = if (o.form) |form_name|
@@ -227,27 +236,22 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
             why,
         );
     }
+    const remote = !profile.cloud_staged and (cloud.supported(profile.provider));
+    if (op == .import and remote and o.disk == null) return why.refuse("offline cloud import requires a new machine name; use --disk RAW for manual staging on an existing VM", .{});
+    if (o.disk != null and !remote) return error.TransferArguments;
+    const context = if (remote) try @import("data-cloud.zig").load(io, a, at, profile.provider) else null;
+    const disk = if (o.disk) |path| try std.fs.path.resolveAlloc(a, &.{ cwd, path }) else if (context) |c|
+        try @import("data-cloud-disk.zig").copy(io, a, o.name, c, profile.spec.arch, work, why)
+    else
+        try storage(io, a, o.name, at, profile.provider);
     const guest = try images.guest(io, a, image, record, why);
-    const disk = try storage(io, a, o.name, at, profile.provider);
     try requireUnused(io, a, disk);
-    if (op == .import) {
-        const info = try std.process.run(a, io, .{
-            .argv = &.{ "qemu-img", "info", "--output=json", disk },
-            .stdout_limit = .limited(64 << 10),
-            .stderr_limit = .limited(4096),
-        });
-        if (!info.term.success()) return error.TransferStorageState;
-        const description = try std.json.parseFromSliceLeaky(struct {
-            format: []const u8,
-            @"backing-filename": ?[]const u8 = null,
-        }, a, info.stdout, .{ .ignore_unknown_fields = true });
-        if (!mem.eql(u8, description.format, "raw") or description.@"backing-filename" != null)
-            return why.refuse("destination storage must be a standalone raw disk", .{});
-    }
-    const source = if (op == .@"export") blk: {
+    // Storage adapters provide raw disks. Never sniff guest-controlled bytes:
+    // a forged qcow2 header could otherwise name a host backing file.
+    const source = if (op == .@"export" and !profile.cloud_staged and (!remote or o.disk != null)) blk: {
         const before = try Dir.cwd().statFile(io, disk, .{});
         const copy = try a.print("{s}/source.raw", .{work});
-        try howl.run(io, why, &.{ "qemu-img", "convert", "-O", "raw", disk, copy });
+        try copyRaw(io, disk, copy, why);
         try requireStopped(io, a, o.name, at, profile.provider, why);
         try requireUnused(io, a, disk);
         const after = try Dir.cwd().statFile(io, disk, .{});
@@ -265,6 +269,7 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
         .target = at,
         .initialize = op == .import,
         .users = users,
+        .replay_journal_on_copy = op == .@"export" and !profile.cloud_staged,
         .nocloud = if (profile.provider == .lima and op == .import)
             try @import("lima.zig").dataIdentity(io, a, o.name)
         else
@@ -309,13 +314,41 @@ fn publish(
 /// lifecycle lock excludes its own launchers; this also catches external QEMU
 /// instances holding the disk without that PID file. Uncertain probes fail.
 fn requireUnused(io: Io, a: A, disk: []const u8) !void {
+    if (!std.fs.path.isAbsolute(disk)) return error.TransferPath;
+    if (@import("builtin").os.tag == .freebsd) {
+        const root = try @import("bhyve.zig").asRoot(io);
+        const result = try std.process.run(a, io, .{
+            .argv = try mem.concat(a, []const u8, &.{ root, &.{ "/usr/bin/fstat", "-n", disk } }),
+            .stdout_limit = .limited(64 << 10),
+            .stderr_limit = .limited(4096),
+        });
+        if (!result.term.success() or result.stderr.len != 0) return error.TransferStorageInUse;
+        try unusedFreebsd(result.stdout);
+        return;
+    }
+    // Linux lsof stats every mount, including unrelated private/FUSE mounts.
+    // An inode probe avoids those warnings. Root is required to inspect every
+    // process; an unprivileged scan cannot establish that the disk is unused.
+    const args: []const []const u8 = if (@import("builtin").os.tag == .linux)
+        try mem.concat(a, []const u8, &.{ try @import("firecracker.zig").asRoot(io, a), &.{ "/usr/bin/fuser", "-I", disk } })
+    else
+        &.{ "lsof", "-Fpcfn", "--", disk };
     const result = try std.process.run(a, io, .{
-        .argv = &.{ "lsof", "-Fpcfn", "--", disk },
+        .argv = args,
         .stdout_limit = .limited(64 << 10),
         .stderr_limit = .limited(4096),
     });
     if (result.term != .exited or result.term.exited != 1 or
         result.stdout.len != 0 or result.stderr.len != 0)
+        return error.TransferStorageInUse;
+}
+
+fn unusedFreebsd(output: []const u8) !void {
+    const end = mem.findScalar(u8, output, '\n') orelse return error.TransferStorageInUse;
+    var columns = mem.tokenizeAny(u8, output[0..end], " \t\r");
+    for ([_][]const u8{ "USER", "CMD", "PID", "FD", "DEV", "INUM", "MODE", "SZ|DV", "R/W", "NAME" }) |expected|
+        if (!mem.eql(u8, columns.next() orelse return error.TransferStorageInUse, expected)) return error.TransferStorageInUse;
+    if (columns.next() != null or mem.trim(u8, output[end + 1 ..], " \t\r\n").len != 0)
         return error.TransferStorageInUse;
 }
 
@@ -432,4 +465,29 @@ test "one archive syntax rejects legacy inputs and scope escalation" {
         error.TransferArguments,
         parse(.import, &.{ "target", "backup", "--with", "../untrusted" }),
     );
+}
+
+test "FreeBSD file-use probe requires a complete header and no open files" {
+    const header = "USER     CMD          PID   FD  DEV    INUM       MODE SZ|DV R/W NAME\n";
+    try unusedFreebsd(header);
+    for ([_][]const u8{ "", "USER CMD", "USER CMD\n", header ++ "root bhyve 123 5 ...\n", header ++ "unexpected output\n" }) |output|
+        try std.testing.expectError(error.TransferStorageInUse, unusedFreebsd(output));
+}
+
+test "Linux root inode probe distinguishes held and unused storage" {
+    if (@import("builtin").os.tag != .linux or !howl.isRoot()) return error.SkipZigTest;
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const held = try tmp.dir.createFile(t.io, "disk.raw", .{});
+    var open = true;
+    defer if (open) held.close(t.io);
+    const path = try tmp.dir.realPathFileAlloc(t.io, "disk.raw", a);
+    try t.expectError(error.TransferStorageInUse, requireUnused(t.io, a, path));
+    held.close(t.io);
+    open = false;
+    try requireUnused(t.io, a, path);
 }

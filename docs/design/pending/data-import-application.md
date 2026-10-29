@@ -1,6 +1,6 @@
 # Data import and export verification (proposed)
 
-**Status:** Pending as of 2026-10-27
+**Status:** Pending as of 2026-10-28
 
 ## Summary
 
@@ -12,13 +12,13 @@ Replace seed/sync tests with archive import and isolation/failure fixtures.
 
 ## Goals
 
-- Test both source states and both scopes: running/stopped and full/service.
+- Test both VM states at source and destination, with full and service scopes.
 - Compare every selected file before application startup; verify behavior afterward.
 - Prove failed or scoped operations cannot overwrite unrelated data or grant trust.
 
 ## Non-Goals
 
-- Live application capture, application upgrades, schema conversion and independent
+- Live writers, application upgrades, schema conversion and independent
   Plex identity cloning. Synthetic fixtures do not prove real-account playback.
 
 ## Detailed design
@@ -37,14 +37,13 @@ import. Never initialize over failed import or let image SQL overwrite records.
 **Plex.** Copy `/data/svc/plex` state (databases, metadata, artwork, preferences and
 watched state) and `/data/svc/plex-media` media, including caches. Stop writers,
 scanners, callbacks and transcoding before reading, as [Plex requires][plex-move].
-Assert selected files cannot change during capture.
 
 Full round trips preserve library state, artwork, media hashes, paths, modes and
 access grants. Test `--service plex` for state only and `--service plex-media` for
 media only. Neither claims full migration. Importing one into a stopped VM must leave
 the other's sentinel bytes and metadata unchanged.
 
-Preserve Plex identity/preferences and leave the target stopped. Fence the source
+Preserve Plex identity/preferences and leave target apps stopped. Fence the source
 before startup; assert no source sign-out or token rewriting. Synthetic fixtures
 prove data behavior; real-account playback stays outside credential-free CI.
 
@@ -52,11 +51,11 @@ prove data behavior; real-account playback stays outside credential-free CI.
 export/default import and full export/service import. Include extra `/data` paths,
 hidden/empty files, nested/empty directories, unusual modes and approved owners.
 Compare pre-start paths, bytes, modes, timestamps and owners with capture inventory.
-Assert exclusions and regenerated destination credentials.
+Assert exclusions and fresh credentials; export logs, validate them, never restore.
 
 Test LUKS with correct/missing/wrong keys, archive privacy, invalid service names,
-absent selections and image/architecture mismatch. Refuse running targets, occupied
-selected roots and unsupported owners; preserve other data. Reject raw directories,
+absent selections and image/architecture mismatch. Refuse disk access to running VMs,
+occupied roots and unsupported owners; preserve other data. Reject raw directories,
 SQL dumps and old seed/sync syntax without guessing formats.
 
 Inject failure during transfer, decompression and directory publication. Refuse
@@ -65,9 +64,10 @@ A restart during capture, including a complete up/down cycle, invalidates output
 Disconnect/timeout changes no service state. Incomplete import blocks boot; only the
 same archive/scope may finish its receipt. Completed import never replays at boot.
 
-Run the real CLI on protected local VMs, each supported provider and cross-cloud
-pair. Verify fresh boot trust, Secure Boot, IPE, confinement, no shell and refusal to
-execute imported code. Benchmark time, CPU and memory on database and media data.
+Run the CLI on Azure, AWS, GCP, Lima, QEMU, Firecracker and bhyve: disk transfers
+with VMs off and SSH absent; SSH transfers with VMs on and apps down. No guest
+shell in either path. Test source/destination state pairs and cross-cloud moves.
+Verify boot trust, confinement and refusal to execute imported code; measure costs.
 
 ## Drawbacks
 
@@ -84,14 +84,14 @@ The matrix needs VM time/storage; real Plex account tests need separate credenti
 Use public fixtures and bounded diagnostics; never publish exported real databases,
 Plex tokens or SSH/LUKS secrets as CI artifacts. Exercise traversal, duplicate names,
 links, devices, corrupt manifests, expansion limits and trailing compressed frames.
-Verify denied keys, host-key mismatch, forbidden commands and scope containment.
+Verify denied keys, host-key mismatch, forbidden commands and scope isolation.
 
 ## Reliability Considerations
 
-Gate CI delivery on a proposed `make check-data-transfer` running this matrix. Test
-disk-full, collisions, lifecycle/update races and reboot. Failed
-captures leave no complete artifact. Check offline source bytes and online records
-remain intact; export never changes source service states.
+Gate delivery on the real matrix; unavailable providers remain unverified. Test
+disk-full, collisions, lifecycle/update races, reboot and SSH loss. Failed captures
+leave no complete artifact. Check source bytes/records remain intact, export changes
+no service state, and interrupted online import blocks startup and permits retry.
 
 [export]: data-export.md
 [import]: data-import.md

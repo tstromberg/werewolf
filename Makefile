@@ -366,7 +366,7 @@ $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zi
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig cmd/howl/data-cloud.zig cmd/howl/data-aws.zig cmd/howl/data-cloud-disk.zig cmd/howl/data-cloud-target.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
@@ -1340,13 +1340,13 @@ check-shellfree-data-transfer-helper: check-data-transfer-helper
 
 build/host/data-app-check: cmd/howl/data-app-check.zig $(wildcard cmd/howl/*.zig) $(wildcard lib/data-transfer*.zig)
 	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$@
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call HOST_ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
 check-data-transfer: check-data-transfer-helper build/host/data-app-check build/$(ARCH)/transfer-control
 	build/host/data-app-check $(HOWL) build/$(ARCH)/transfer-control
 build/host/data-transfer-check: cmd/howl/data-transfer-check.zig cmd/howl/data-helper.zig $(wildcard lib/data-transfer*.zig)
 	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
 build/$(ARCH)/transfer-control: test/transfer-control.zig
 	@mkdir -p $(dir $@)
@@ -1366,4 +1366,6 @@ build/$(ARCH)/transfer-boundaries.cpio: cmd/data-transfer/data-transfer.zig test
 	@mkdir -p build/$(ARCH)/transfer-boundaries
 	zig test -O ReleaseSafe -target $(ARCH)-linux-musl --test-no-exec $(call ZIG_MODULES,cmd/data-transfer/data-transfer.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/checks
 	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call ZIG_MODULES,test/transfer-boundary-init.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/init
-	bsdtar -cf $@ --format newc --uid 0 --gid 0 --numeric-owner -C build/$(ARCH)/transfer-boundaries init checks
+	@mkdir -p build/$(ARCH)/transfer-boundaries/usr/lib/werewolf
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call ZIG_MODULES,cmd/data-transfer/data-transfer.zig) -femit-bin=build/$(ARCH)/transfer-boundaries/usr/lib/werewolf/data-transfer
+	bsdtar -cf $@ --format newc --uid 0 --gid 0 --numeric-owner -C build/$(ARCH)/transfer-boundaries init checks usr

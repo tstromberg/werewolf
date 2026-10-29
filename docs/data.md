@@ -57,31 +57,38 @@ is never opened without it. Keep each
 machine's key somewhere other than the machine, since without it the data
 is gone. Encryption does not detect tampering.
 
-**Export and import.** `howl export NAME --output backup.tar.zst` captures
-`/data`, excluding machine authority, audit logs and system state. `--service NAME`
+**Export and import.** `howl export NAME --output backup.tar.zst` captures `/data`,
+including logs, excluding machine authority and system state. `--service NAME`
 selects exactly `/data/svc/NAME`. Archives use Zstandard level 1 and preserve paths,
 bytes, ownership, modes and timestamps. They are private, mode 0600, and plaintext;
 keep them as carefully as credentials.
 
-`howl import NAME backup.tar.zst` restores into empty application data on a stopped
-VM with the same image and architecture. A new local destination uses an approved
-matching image kept by Howl; supply its deployment configuration with `--config`.
-On another host, select the matching published release with `--with FORM --version
-SERIAL`. It goes through normal image verification; archives never authorize code.
-The destination remains stopped; `howl start NAME` starts its saved image and
-configuration. A selected-service import preserves companion
-roots and never merges occupied data. Fence the source before starting a replacement
-that shares application identity. Plex state (`plex`) and media (`plex-media`) are
-separate selections.
+Full exports include logs; import validates and discards them, retaining target logs.
+Online log snapshots can omit new writes or fail during rotation/truncation.
 
-The current storage adapter accepts stopped local QEMU and Lima machines with
-standalone raw destination disks. Unsupported providers and running storage are
-refused. New destinations retain the approved image's disk size; v1 does not grow
-disks. A networkless Linux appliance reads a detached source copy or installs onto
-the stopped destination; Howl never mounts guest filesystems on the host. Encrypted
-data needs `--data-key FILE`. Cleanly stopped export is the least dangerous approach.
+`howl import NAME backup.tar.zst` restores into empty application data with the same
+image and architecture. Disk-based import requires a stopped VM; online import uses
+the restricted SSH interface with all applications stopped. A new local VM uses an
+approved matching image kept by Howl; supply its deployment configuration with
+`--config`. On another host, local VMs select a matching published release with
+`--with FORM --version SERIAL`; cloud v1 needs the owner-approved image cache.
+Normal image verification still applies; archives never
+authorize code. An offline destination remains stopped; `howl start NAME` starts its
+saved image and configuration. A selected-service import preserves companion roots
+and never merges occupied data. Fence the source before starting a replacement that
+shares identity. Plex state (`plex`) and media (`plex-media`) are separate.
 
-A running source can export over pinned SSH when its image includes `data-export`.
+The storage adapter accepts stopped QEMU, Lima, Firecracker and x86_64 bhyve
+machines, plus enrolled AWS, Azure and GCP VMs. Local targets need standalone raw
+disks. Create empty Firecracker destinations first; use new names for cloud import.
+Running storage is refused. V1 keeps the approved disk size. A networkless appliance
+reads an export copy or installs onto a stopped disk. Only export copies replay
+journals; damage is refused. Howl never mounts guest filesystems on the host.
+Encrypted data needs `--data-key FILE`. Cleanly stopped export is safest.
+Linux disk transfers use `psmisc` and sudo/doas for a read-only inode-use check;
+the archive processor and VM helper still run as the owner.
+
+A running VM can transfer over pinned SSH when its image includes `data-export`.
 The owner stops all application services first, keeps them down until export exits,
 and starts them afterward. Export checks supervision and clean PostgreSQL shutdown;
 it never stops services or powers off the VM. Stop clients before their databases.
@@ -97,12 +104,65 @@ Repeat the explicit stop/start requests for other application services as needed
 These fixed operations work without a shell. The opt-in endpoint refuses system
 service control, PTYs, SFTP and forwarding. A failed export leaves service state
 alone; the owner decides when to resume. `--host HOST --port PORT` selects a remote
-SSH address using the same saved host-key pin. Connection failure never falls back
-to copying possibly live storage. See the [export design](design/pending/data-export.md).
+SSH address using the same saved host-key pin. Connection failure never falls back to
+copying possibly live storage. See the [export
+design](design/pending/data-export.md).
 
-Directory, SQL and raw media seeds, `create --import` and `sync` have been replaced
-by this archive interface. Database startup initializes only an empty service or
-uses the restored physical data. Image-owned SQL setup still runs normally.
+Online import uses the same host-key pin and owner authorization. It leaves apps
+stopped, rejects occupied selected roots and blocks service-start requests while
+publication is pending. Use `howl import NAME backup.tar.zst --service plex` for a
+running local VM, or add `--host HOST --port PORT --identity FILE` for a remote VM.
+Interrupted publication can be retried with the same archive and scope; a reboot
+with a pending receipt requires offline recovery before applications may start.
+
+## Cloud disks and manual transfer
+
+Cloud disk transfer uses logged-in `aws`, `gcloud` or `az` and private storage.
+Keep the VM cleanly stopped; fence other operators and automation during transfer.
+Howl checks the saved VM identity, location, power state and boot disk. GCP export
+requires `cloudbuild.googleapis.com` and the export worker's documented permissions;
+`WEREWOLF_GCP_EXPORT_ACCOUNT` selects an existing worker. Temporary buckets enforce
+private access and disable soft deletion. Credentials travel in private pipes.
+
+Offline cloud import uses a new name and stages a pristine, approved disk locally.
+It creates no VM and changes no existing cloud disk or firmware state. Supply
+`--config DIR` and optionally `--size TYPE`; `howl start NAME` publishes the restored
+disk and creates a fresh VM, with new TPM/firmware authority. Existing running VMs
+can import over SSH. Existing stopped cloud VMs require manual `--disk` staging.
+Failed publication retains local staging. If a cloud VM exists before its identity
+was recorded, start refuses to adopt it; inspect it through the provider CLI.
+
+For manual transport, download the stopped disk with the provider CLI. AWS snapshot
+blocks form raw disks; convert Azure's fixed VHD or GCP's `disk.raw` to raw disks.
+Keep it unmounted on the host and use the enrolled VM:
+
+```sh
+howl export database --disk ./disk.raw --output backup.tar.zst
+howl import database backup.tar.zst --disk ./disk.raw
+```
+
+Import with `--disk` writes only that local file. Upload and swap with the provider
+CLI, preserving Secure Boot, TPM state and Azure VMGS. Retain the original until a
+verified boot. Use short-lived storage grants and revoke them afterward; never put
+signed URLs or access tokens in shell arguments or history.
+
+## Transfer tests
+
+`make check-data-transfer` runs the isolated storage helper and real PostgreSQL
+restores through Howl. The fixture has no shell. It checks full and single-service
+archives, stopped disk and powered-on SSH destinations, writer refusals,
+interrupted input, occupied roots, metadata and database queries.
+
+The VM runner defaults to Lima on macOS, QEMU on Linux and bhyve on FreeBSD.
+Run `build/host/data-app-check build/host/howl build/ARCH/transfer-control` after
+building those tools to select a provider with `DATA_TRANSFER_PROVIDER`. AWS, GCP and
+Azure also accept `DATA_TRANSFER_SIZE`; the provider CLI's environment selects the
+test project, zone or resource group. `DATA_TRANSFER_PATH=ssh` selects only online
+SSH cases and does not qualify disk support. The default, `all`, requires both
+paths. Missing credentials or infrastructure leave a provider unqualified.
+
+Archive import replaces directory/SQL/media seeds, `create --import` and `sync`.
+Database startup initializes only empty data; image-owned SQL setup still runs.
 
 **Updates** roll back the image, not `/data`. A release that changes how a
 service stores its data should change it only once its slot has committed
@@ -110,9 +170,6 @@ service stores its data should change it only once its slot has committed
 can still read. Otherwise a fallback runs the old release against data it
 cannot read.
 
-Under QEMU and Lima, `howl create NAME` gives each machine its own boot disk,
-`build/machines/NAME/disk.img`, holding its slots and /data, which a second
-create of the name keeps; `howl delete NAME` removes it, and `howl run` makes
-a new one each time.
-Delete a machine for a blank disk when adding or removing `data.key`, since a
-plain disk and a LUKS one refuse each other's config.
+QEMU/Lima keep each VM's slots and data on its own boot disk; a repeated create
+keeps it, delete removes it, and run uses a fresh disk. Adding/removing `data.key`
+requires a blank disk: plain and LUKS disks refuse each other's configuration.

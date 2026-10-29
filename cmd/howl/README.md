@@ -66,7 +66,7 @@ QEMU and Lima-managed).
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket; C4, C4A and N4 boot from `hyperdisk-balanced` | gcloud |
 | aws | AMI written straight into an EBS snapshot | aws CLI |
-| azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
+| azure | managed disk via bounded HTTPS page writes; a specialized VM on a copy | az, curl, a default group |
 
 Local engines and Proxmox attach the tar read-only; clouds take base64 user data and
 a `werewolf-FORM-ARCH-DIGEST` image (`image.zig`), which a build uploads once and
@@ -79,7 +79,7 @@ account defaults, developer access, forwarded agents and cloud firewall behavior
 **Second create.** The machine keeps its disk and takes the new config.
 `howl export NAME [--service NAME] [--output FILE]` writes a private data archive.
 `howl import NAME ARCHIVE [--service NAME]` restores empty data and leaves the
-machine stopped. See [data storage](../../docs/data.md) for supported adapters,
+applications stopped. See [data storage](../../docs/data.md) for supported adapters,
 image requirements and exclusions. `howl start NAME` boots its enrolled image and
 saved configuration. `create --import`, directory seeds and `sync` are unsupported.
 

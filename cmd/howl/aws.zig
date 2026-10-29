@@ -24,6 +24,38 @@ const tag = howl.form_tag;
 /// alive filters out instances that are terminated or shutting down.
 const alive = "Name=instance-state-name,Values=pending,running,stopping,stopped";
 
+/// Resolve login/SSO/static credentials once for parallel block workers. The
+/// private child environment avoids an OAuth refresh storm and secret argv.
+pub fn credentials(io: Io, a: Allocator) !std.process.Environ.Map {
+    const result = try std.process.run(a, io, .{ .argv = &.{ "aws", "configure", "export-credentials", "--format", "process" }, .stdout_limit = .limited(64 << 10), .stderr_limit = .limited(4096) });
+    defer a.free(result.stdout);
+    defer a.free(result.stderr);
+    if (!result.term.success()) return error.TransferCloudAuthentication;
+    return credentialEnvironment(a, howl.environ, result.stdout);
+}
+
+fn credentialEnvironment(a: Allocator, base: *const std.process.Environ.Map, bytes: []const u8) !std.process.Environ.Map {
+    const parsed = try std.json.parseFromSlice(struct {
+        Version: u32,
+        AccessKeyId: []const u8,
+        SecretAccessKey: []const u8,
+        SessionToken: ?[]const u8 = null,
+    }, a, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const c = parsed.value;
+    if (c.Version != 1 or c.AccessKeyId.len == 0 or c.SecretAccessKey.len == 0) return error.TransferCloudAuthentication;
+    var env = try base.clone(a);
+    errdefer env.deinit();
+    try env.put("AWS_ACCESS_KEY_ID", c.AccessKeyId);
+    try env.put("AWS_SECRET_ACCESS_KEY", c.SecretAccessKey);
+    _ = env.swapRemove("AWS_SECURITY_TOKEN");
+    if (c.SessionToken) |token| {
+        if (token.len == 0) return error.TransferCloudAuthentication;
+        try env.put("AWS_SESSION_TOKEN", token);
+    } else _ = env.swapRemove("AWS_SESSION_TOKEN");
+    return env;
+}
+
 pub const Place = struct { region: []const u8 };
 
 /// place returns the region the aws CLI resolves from its config or the
@@ -251,12 +283,21 @@ fn writeSnapshot(
         Dir.cwd().deleteFile(io, s.err) catch {};
     };
     const buf = try gpa.alloc(u8, block_size);
+    var session = try credentials(io, gpa);
+    defer session.deinit();
+    var refreshed = Io.Clock.awake.now(io);
     var written: u64 = 0;
     var index: u64 = 0;
     while (index * block_size < size) : (index += 1) {
         const n = try f.readPositionalAll(io, buf, index * block_size);
         @memset(buf[n..], 0);
         if (std.mem.allEqual(u8, buf, 0)) continue;
+        if (refreshed.untilNow(io, .awake).toSeconds() >= 60) {
+            const fresh = try credentials(io, gpa);
+            session.deinit();
+            session = fresh;
+            refreshed = Io.Clock.awake.now(io);
+        }
         const s = &slots[written % parallel];
         try finish(io, gpa, s, why);
         try Dir.cwd().writeFile(io, .{ .sub_path = s.data, .data = buf });
@@ -285,6 +326,7 @@ fn writeSnapshot(
                 "SHA256",
             }),
             .stdin = .ignore,
+            .environ_map = &session,
             .stdout = .ignore,
             .stderr = .{ .file = err_file },
         }) catch |err| return why.refuse("aws ebs put-snapshot-block: {s}", .{@errorName(err)});
@@ -673,6 +715,29 @@ pub fn delete(
 }
 
 const testing = std.testing;
+
+test "block worker credentials replace stale tokens without changing the owner environment" {
+    var base: std.process.Environ.Map = .init(testing.allocator);
+    defer base.deinit();
+    try base.put("AWS_SESSION_TOKEN", "old-session");
+    try base.put("AWS_SECURITY_TOKEN", "old-legacy-token");
+    var temporary = try credentialEnvironment(testing.allocator, &base,
+        \\{"Version":1,"AccessKeyId":"new-id","SecretAccessKey":"new-secret","SessionToken":"new-session"}
+    );
+    defer temporary.deinit();
+    try testing.expectEqualStrings("new-session", temporary.get("AWS_SESSION_TOKEN").?);
+    try testing.expectEqualStrings("old-session", base.get("AWS_SESSION_TOKEN").?);
+    try testing.expect(temporary.get("AWS_SECURITY_TOKEN") == null);
+    var permanent = try credentialEnvironment(testing.allocator, &base,
+        \\{"Version":1,"AccessKeyId":"static-id","SecretAccessKey":"static-secret"}
+    );
+    defer permanent.deinit();
+    try testing.expect(permanent.get("AWS_SESSION_TOKEN") == null);
+    try testing.expect(permanent.get("AWS_SECURITY_TOKEN") == null);
+    try testing.expectError(error.TransferCloudAuthentication, credentialEnvironment(testing.allocator, &base,
+        \\{"Version":2,"AccessKeyId":"id","SecretAccessKey":"secret"}
+    ));
+}
 
 test openArgs {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

@@ -1,7 +1,7 @@
-# An owner-authorized native export endpoint; no shell or general SSH session.
+# Owner-authorized native transfers; no shell or general SSH session.
 base: minimal
 
-programs: [data-export, data-transfer-tool]
+programs: [data-export, data-transfer, data-transfer-tool]
 packages: [openssh-server, zstd]
 
 accounts:
@@ -16,7 +16,7 @@ accounts:
       shell: /sbin/nologin
 
 weaknesses:
-  network-no-login: owner security keys authorize the fixed native export operation
+  network-no-login: owner security keys authorize fixed native transfer operations
 
 services:
   sshd:
@@ -28,5 +28,5 @@ services:
     nofile: 1024
     memory: 512
     # These setup calls let the native endpoint narrow its inherited login
-    # context. It retains no SETPCAP and drops to the read-only worker identity.
+    # context. Readers/decoders drop uid; the publisher keeps only file authority.
     pledge: stdio rpath wpath inet unix connect listen proc exec setuid setgid setgroups chroot caps seccomp landlock

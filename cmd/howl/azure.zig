@@ -120,10 +120,8 @@ pub fn machine(arch: howl.Arch) Machine {
 
 /// ensureDisk returns the name of the managed disk made from disk, creating
 /// it once: convert to a fixed VHD, create an upload disk of that size, copy
-/// with azcopy under a write grant, then revoke the grant to make it usable.
-/// azcopy is needed because the upload URL takes only page writes, which az's
-/// blob upload does not do; it also skips empty pages, so only tens of MiB of
-/// an 8 GiB disk move. A disk left mid-upload by a failed create is remade.
+/// with bounded page writes under a write grant, then revoke the grant.
+/// Empty pages stay sparse. A disk left mid-upload is remade on retry.
 fn ensureDisk(
     io: Io,
     gpa: Allocator,
@@ -149,10 +147,6 @@ fn ensureDisk(
         _ = ask(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" });
         _ = try need(io, gpa, p, &.{ "disk", "delete", "-n", name, "--yes", "-o", "none" }, why);
     }
-    if (!call(io, gpa, &.{ "azcopy", "--version" }).ok) return why.refuse(
-        "--on azure: no azcopy here, which uploads the disk (brew install azcopy)",
-        .{},
-    );
     howl.say(io, "image {s}: making it from {s}", .{ name, disk });
     const vhd = try gpa.print("{s}/disk.vhd", .{work});
     defer Dir.cwd().deleteFile(io, vhd) catch {};
@@ -206,11 +200,7 @@ fn ensureDisk(
         "tsv",
     }, why);
     howl.say(io, "image {s}: uploading {d} bytes", .{ name, size });
-    const upload_err: ?anyerror = if (howl.run(
-        io,
-        why,
-        &.{ "azcopy", "copy", vhd, sas, "--blob-type", "PageBlob", "--log-level", "ERROR" },
-    )) null else |err| err;
+    const upload_err: ?anyerror = if (@import("data-cloud-disk.zig").uploadPages(io, gpa, sas, vhd, work)) null else |err| err;
     // The write SAS is revoked even when the upload failed, so none
     // outlives the attempt: hours of write access buy nothing.
     _ = try need(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" }, why);

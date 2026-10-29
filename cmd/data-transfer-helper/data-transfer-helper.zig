@@ -25,6 +25,7 @@ pub const Config = struct {
     initialize: bool = false,
     users: []const u8 = "",
     nocloud: ?people.NoCloud = null,
+    replay_journal_on_copy: bool = false,
 };
 
 pub fn main(init: std.process.Init) noreturn {
@@ -75,7 +76,8 @@ fn setup() !void {
 fn run(io: Io, a: Allocator) !void {
     const bytes = try read(io, a, "/control/request.json", 1 << 20);
     const c = try std.json.parseFromSliceLeaky(Config, a, bytes, .{});
-    if (c.version != 1 or c.target.len == 0 or c.target.len > 256 or c.users.len > 1 << 18)
+    if (c.version != 1 or c.target.len == 0 or c.target.len > 256 or c.users.len > 1 << 18 or
+        (c.replay_journal_on_copy and c.operation != .@"export"))
         return error.TransferControl;
     const native_arch: data.Arch = switch (@import("builtin").cpu.arch) {
         .aarch64 => .aarch64,
@@ -307,6 +309,7 @@ fn cleanExt4(io: Io, path: []const u8) !void {
     var super: [1024]u8 = undefined;
     if (try file.readPositionalAll(io, &super, 1024) != super.len) return error.TransferFilesystem;
     if (mem.readInt(u16, super[0x38..0x3a], .little) != 0xef53) return error.TransferFilesystem;
+    if (mem.readInt(u16, super[0x3a..0x3c], .little) & 2 != 0) return error.TransferFilesystem;
     if (mem.readInt(u16, super[0x3a..0x3c], .little) & 3 != 1 or
         mem.readInt(u32, super[0x60..0x64], .little) & 4 != 0) return error.TransferUnclean;
 }

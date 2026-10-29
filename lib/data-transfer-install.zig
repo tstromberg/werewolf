@@ -118,7 +118,7 @@ pub const Session = struct {
         const st = try lock.stat(io);
         if (st.kind != .file or st.nlink != 1) return error.TransferState;
         try lock.lock(io, .exclusive);
-        state.deleteTree(io, "incoming") catch |err| if (err != error.FileNotFound) return err;
+        try cleanIncoming(io, state);
         try state.createDir(io, "incoming", .fromMode(0o700));
         const stage = try state.openDir(
             io,
@@ -136,7 +136,7 @@ pub const Session = struct {
 
     pub fn deinit(s: *Session, io: Io) void {
         s.stage.close(io);
-        s.state.deleteTree(io, "incoming") catch {};
+        cleanIncoming(io, s.state) catch {};
         s.lock.close(io);
         s.state.close(io);
         s.machine.close(io);
@@ -160,9 +160,26 @@ pub const Session = struct {
         const stage = s.stage;
         const old = try readReceipt(io, a, state);
         const scope = o.service orelse result.manifest.service;
+        phase = "staging inventory";
         try verifyStage(io, a, stage, result.manifest, scope);
         var staging: Staging = .{ .io = io, .allocator = a, .root = stage };
+        phase = "staging metadata";
         try staging.metadata(result.manifest, p, scope);
+        // These containers are staging scaffolding, never publication units.
+        // Reclaim them after the decoder exits so moving their children needs
+        // no DAC write override. Destination metadata is restored separately.
+        if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0) {
+            for ([_][]const u8{ "svc", "home" }) |name| {
+                var container = stage.openDir(io, name, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+                    if (err == error.FileNotFound) continue;
+                    return err;
+                };
+                defer container.close(io);
+                const file: File = .{ .handle = container.handle, .flags = .{ .nonblocking = false } };
+                try file.setOwner(io, 0, 0);
+                try file.setPermissions(io, .fromMode(0o700));
+            }
+        }
         var units: std.ArrayList(Unit) = .empty;
         defer units.deinit(a);
         for (result.manifest.entries) |e| {
@@ -206,6 +223,7 @@ pub const Session = struct {
             // A crash may happen after the rename but before its receipt update.
             // The pre-rename inode, recorded durably, identifies that exact move.
         }
+        phase = "progress records";
         const progress = try Progress.open(io, state, units.items, old != null);
         defer progress.file.close(io);
         if (old != null) {
@@ -233,20 +251,35 @@ pub const Session = struct {
                 unit.installed = true;
             };
         }
+        phase = "destination preflight";
         try preflight(io, a, target, scope, units.items);
         // No application directory changes before this durable boot barrier.
         if (old == null) try writeReceipt(io, a, state, receipt);
         try syncDir(io, machine);
         try syncDir(io, target);
         try o.hit(.pending);
+        phase = "directory publication";
         for (units.items, 0..) |*unit, index| {
-            if (unit.installed) continue;
+            if (unit.installed) {
+                if (unit.entry.?.kind == .directory) try applyMetadata(io, target, unit.entry.?, p);
+                continue;
+            }
             try ensureContainer(io, target, unit.path);
             var from = try data.parentDir(io, stage, unit.path);
             defer from.close(io);
             var to = try data.parentDir(io, target, unit.path);
             defer to.close(io);
             const base = std.fs.path.basename(unit.path);
+            if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and unit.entry.?.kind == .directory) {
+                // Moving a directory across parents requires write access to
+                // that directory itself. Keep it private until final metadata
+                // is restored; a pending receipt fences every crash boundary.
+                var moving = try from.openDir(io, base, .{ .iterate = true, .follow_symlinks = false });
+                defer moving.close(io);
+                const file: File = .{ .handle = moving.handle, .flags = .{ .nonblocking = false } };
+                try file.setOwner(io, 0, 0);
+                try file.setPermissions(io, .fromMode(0o700));
+            }
             const st = try from.statFile(io, base, .{ .follow_symlinks = false });
             unit.inode = st.inode;
             try progress.record(io, index, unit);
@@ -257,6 +290,7 @@ pub const Session = struct {
                 base,
             ) catch |err| if (err != error.FileNotFound) return error.TransferConflict;
             try from.renamePreserve(base, to, base, io);
+            if (unit.entry.?.kind == .directory) try applyMetadata(io, target, unit.entry.?, p);
             try syncDir(io, from);
             try syncDir(io, to);
             try o.hit(.after_move);
@@ -276,6 +310,7 @@ pub const Session = struct {
                 try applyMetadata(io, target, e, p);
             }
         };
+        phase = "container metadata";
         if (receipt.parent_inode) |inode| {
             var parent = try target.openDir(
                 io,
@@ -304,6 +339,33 @@ pub const Session = struct {
         try syncDir(io, state);
     }
 };
+
+fn cleanIncoming(io: Io, state: Dir) !void {
+    if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0) {
+        var incoming = state.openDir(io, "incoming", .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        defer incoming.close(io);
+        try reclaimStaging(io, incoming, 0);
+    }
+    state.deleteTree(io, "incoming") catch |err| if (err != error.FileNotFound) return err;
+}
+
+fn reclaimStaging(io: Io, dir: Dir, depth: usize) !void {
+    if (depth > data.limits.depth) return error.TransferLimit;
+    const file: File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    try file.setOwner(io, 0, 0);
+    try file.setPermissions(io, .fromMode(0o700));
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        const st = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+        if (st.kind != .directory) continue;
+        var child = try dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
+        defer child.close(io);
+        try reclaimStaging(io, child, depth + 1);
+    }
+}
 
 // The immutable pending receipt is written once. Each unit has two fixed
 // records: an interrupted write leaves its previous durable record intact.
@@ -432,6 +494,31 @@ pub fn openMachine(io: Io, root: Dir) !Dir {
     return privateDir(io, root, ".werewolf");
 }
 
+/// The volume keeps its receipt identity across online/offline recovery and
+/// host moves. Archives exclude this private machine state.
+pub fn targetIdentity(io: Io, root: Dir) ![64]u8 {
+    var machine = try openMachine(io, root);
+    defer machine.close(io);
+    const file = data.openRegular(io, machine, "transfer-id") catch |err| blk: {
+        if (err != error.FileNotFound) return err;
+        const created = try machine.createFile(io, "transfer-id", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        errdefer created.close(io);
+        var random: [32]u8 = undefined;
+        try io.randomSecure(&random);
+        try created.writeStreamingAll(io, &std.fmt.bytesToHex(random, .lower));
+        try created.sync(io);
+        try syncDir(io, machine);
+        break :blk created;
+    };
+    defer file.close(io);
+    const st = try file.stat(io);
+    if (st.size != 64 or st.nlink != 1) return error.TransferTarget;
+    var bytes: [64]u8 = undefined;
+    if (try file.readPositionalAll(io, &bytes, 0) != 64) return error.TransferTarget;
+    for (bytes) |c| if (!std.ascii.isHex(c)) return error.TransferTarget;
+    return bytes;
+}
+
 pub fn syncDir(io: Io, dir: Dir) !void {
     var opened = try dir.openDir(io, ".", .{ .iterate = true });
     defer opened.close(io);
@@ -527,7 +614,7 @@ fn emptyTree(
         else
             try a.print("{s}/{s}", .{ prefix, e.name });
         defer a.free(path);
-        if (data.excluded(path) or installed.contains(path)) continue;
+        if (data.excluded(path) or data.beneath(path, "log") or installed.contains(path)) continue;
         const st = try dir.statFile(io, e.name, .{ .follow_symlinks = false });
         if (st.kind != .directory) return error.TransferConflict;
         var sub = try dir.openDir(io, e.name, .{ .iterate = true, .follow_symlinks = false });
@@ -570,7 +657,7 @@ fn verifyStage(io: Io, a: Allocator, stage: Dir, m: data.Manifest, scope: ?[]con
     var expected: std.StringHashMapUnmanaged(data.Entry) = .empty;
     defer expected.deinit(a);
     for (m.entries) |entry| {
-        if (data.selected(entry.path, scope)) try expected.put(a, entry.path, entry);
+        if (data.importSelected(entry.path, scope)) try expected.put(a, entry.path, entry);
     }
     // A selected service archive has an implicit, private svc container.
     var seen: usize = 0;
@@ -672,13 +759,15 @@ const Staging = struct {
         while (i > 0) {
             i -= 1;
             const e = manifest.entries[i];
-            if (data.selected(e.path, scope)) try applyMetadata(s.io, s.root, e, policy);
+            if (data.importSelected(e.path, scope)) try applyMetadata(s.io, s.root, e, policy);
         }
         try syncDir(s.io, s.root);
     }
 };
 
 fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
+    var phase: []const u8 = "open";
+    errdefer std.debug.print("data-transfer metadata: {s}\n", .{phase});
     var parent = try data.parentDir(io, root, e.path);
     defer parent.close(io);
     const base = std.fs.path.basename(e.path);
@@ -704,9 +793,14 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
         try data.identityByName(p.groups, e.group),
     );
     try file.setPermissions(io, .fromMode(@intCast(e.mode)));
+    if (setgid_directory) try file.setOwner(io, uid, gid);
+    phase = "ACL";
     if (e.kind == .directory and e.default_acl == null) try data.metadata.clearDefault(file);
     if (e.default_acl) |acl| try data.metadata.setDefault(file, acl);
+    phase = "timestamp";
     try file.setTimestamps(io, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = e.mtime_ns } } });
+    phase = "sync";
+    if ((try file.stat(io)).permissions.toMode() & 0o7777 != e.mode) return error.TransferMetadata;
     try file.sync(io);
 }
 
@@ -1001,6 +1095,7 @@ test "full compressed import preserves data and machine exclusions and rejects o
     const manifest = try data.scan(io, a, source, policy, null, owners);
     var tar: Io.Writer.Allocating = .init(a);
     _ = try data.emit(io, a, source, manifest, policy, owners, &tar.writer);
+    try t.expect(mem.find(u8, tar.written(), "source audit trail") != null);
     try tmp.dir.writeFile(io, .{ .sub_path = "archive.tar", .data = tar.written() });
     const path = try tmp.dir.realPathFileAlloc(io, "archive.tar", a);
     const compressed = try std.process.run(
@@ -1025,6 +1120,7 @@ test "full compressed import preserves data and machine exclusions and rejects o
         try target.readFileAlloc(io, "log/current", a, .limited(1024)),
     );
     for (manifest.entries) |e| {
+        if (data.beneath(e.path, "log")) continue;
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });
         try t.expectEqual(e.mode, @as(u32, st.permissions.toMode() & 0o7777));
         try t.expectEqual(@as(i96, e.mtime_ns), st.mtime.nanoseconds);
@@ -1059,4 +1155,14 @@ test "boot barrier fails closed on linked machine state" {
     try tmp.dir.symLink(io, "missing", state_path, .{ .is_directory = true });
     // A linked intermediate path must not look like an absent receipt.
     if (blocked(io, tmp.dir)) |_| return error.AcceptedLinkedState else |_| {}
+}
+
+test "receipt target identity is private, durable and refuses truncation" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const first = try targetIdentity(t.io, tmp.dir);
+    try t.expectEqualStrings(&first, &try targetIdentity(t.io, tmp.dir));
+    try tmp.dir.writeFile(t.io, .{ .sub_path = ".werewolf/transfer-id", .data = "torn" });
+    try t.expectError(error.TransferTarget, targetIdentity(t.io, tmp.dir));
 }

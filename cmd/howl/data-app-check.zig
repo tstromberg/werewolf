@@ -3,7 +3,9 @@
 const std = @import("std");
 const host = @import("host");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const lima = @import("lima.zig");
+const data = @import("data-transfer");
 const Io = std.Io;
 const Dir = Io.Dir;
 const mem = std.mem;
@@ -12,8 +14,14 @@ pub fn main(init: std.process.Init) void {
     var c = host.Check.init(init, "data-transfer") catch std.process.exit(1);
     howl.environ = &c.env;
     var t: Test = .{ .c = &c };
-    const result = t.run();
-    t.cleanup();
+    var result: anyerror!void = if (c.env.get("DATA_TRANSFER_RESUME")) |nonce| t.resumeCloud(nonce) else t.run();
+    const retain = if (result) |_| false else |_| mem.eql(u8, c.env.get("DATA_TRANSFER_KEEP_FAILED") orelse "", "1");
+    if (retain) c.say("retained disposable fixtures for diagnosis; credentials: {s}; delete these VMs and keys after recovery", .{c.work}) else t.cleanup() catch |err| {
+        c.say("fixture cleanup failed; retained private credentials in {s}", .{c.work});
+        if (result) |_| {
+            result = err;
+        } else |_| {}
+    };
     c.finish(result);
 }
 
@@ -23,11 +31,26 @@ const Test = struct {
     form: []const u8 = "",
     key: []const u8 = "",
     names: std.ArrayList([]const u8) = .empty,
-    on: howl.Platform = if (@import("builtin").os.tag == .macos) .lima else .qemu,
+    boot_markers: std.StringHashMapUnmanaged([]const u8) = .empty,
+    disks: std.ArrayList(struct { context: @import("data-cloud.zig").Context, id: []const u8 }) = .empty,
+    ssh_only: bool = false,
+    on: howl.Platform = switch (@import("builtin").os.tag) {
+        .macos => .lima,
+        .freebsd => .bhyve,
+        else => .qemu,
+    },
 
     fn run(t: *Test) !void {
         const c = t.c;
         if (c.args.len != 3) return c.fail("usage: check-data-transfer HOWL CONTROLLER", .{});
+        if (c.env.get("DATA_TRANSFER_PROVIDER")) |provider|
+            t.on = std.meta.stringToEnum(howl.Platform, provider) orelse return error.TransferTestProvider;
+        if (t.on != .qemu and t.on != .lima and t.on != .bhyve and t.on != .firecracker and !cloud.supported(t.on))
+            return error.TransferTestProvider;
+        if (c.env.get("DATA_TRANSFER_PATH")) |path| {
+            if (!mem.eql(u8, path, "ssh") and !mem.eql(u8, path, "all")) return error.TransferTestPath;
+            t.ssh_only = mem.eql(u8, path, "ssh");
+        }
         t.binary = try c.absolute(c.args[1]);
         var nonce: [6]u8 = undefined;
         try c.io.randomSecure(&nonce);
@@ -36,6 +59,10 @@ const Test = struct {
         try Dir.cwd().setFilePermissions(c.io, c.work, .fromMode(0o700), .{});
         try c.env.put("XDG_DATA_HOME", try c.path("credentials"));
         try c.env.put("SSH_AUTH_SOCK", "");
+        // Existing destination directories prevent legacy signing-key
+        // migration from taking the owner's keys into disposable credentials.
+        for ([_][]const u8{ "ipe", "boot/aarch64", "boot/x86_64" }) |sub|
+            try Dir.cwd().createDirPath(c.io, try c.path(try c.gpa.print("credentials/howl/keys/{s}", .{sub})));
         t.key = try c.path("owner.key");
         _ = try c.must(
             &.{
@@ -97,10 +124,16 @@ const Test = struct {
                 "unix_socket_directories=/run/svc/postgres\n" ++
                 "    before: /usr/lib/werewolf/pg-init\n    user: postgres\n" ++
                 "    pledge: stdio rpath wpath proc shm unix listen connect\n" ++
-                "    run: [/usr/bin/initdb, /usr/lib/werewolf/sh-shim, /usr/bin/locale]\n" ++
+                "    run: [/usr/lib/werewolf/pg-init, /usr/bin/initdb, /usr/lib/werewolf/sh-shim, /usr/bin/locale]\n" ++
                 "    share: shared\n    config: transfer-role /run/config/transfer-role\n",
         });
         const source_config = try t.configuration("source");
+        if (t.on == .firecracker) {
+            try Dir.cwd().writeFile(c.io, .{ .sub_path = try c.gpa.print("{s}/rootfs/usr/share/werewolf/transfer-stop-fixture", .{t.form}), .data = "private shutdown fixture\n" });
+            const fixture = try Dir.cwd().openFile(c.io, try c.gpa.print("{s}/form.yaml", .{t.form}), .{ .mode = .read_write });
+            defer fixture.close(c.io);
+            try fixture.writePositionalAll(c.io, "  transfer-stop:\n    exec: /usr/lib/werewolf/transfer-control park\n    user: transfer-stop\n    pledge: stdio\n", try fixture.length(c.io));
+        }
         const target_config = try t.configuration("target");
         // Keep Unix socket paths below the limit in long runner checkouts.
         const source = try t.own(try c.gpa.print("dts{s}", .{suffix}));
@@ -147,7 +180,7 @@ const Test = struct {
             return err;
         try t.ssh(source, &.{ "service-down-v1", "postgres" }, "manual-down", true);
         for ([_]bool{ true, false }) |online| {
-            if (!online) try t.poweroff(source);
+            if (!online and !cloud_provider) try t.poweroff(source);
             const prefix = if (online) "online" else "offline";
             const full = try c.path(try c.gpa.print("{s}-full.tar.zst", .{prefix}));
             const selected = try c.path(try c.gpa.print("{s}-postgres.tar.zst", .{prefix}));
@@ -227,6 +260,24 @@ const Test = struct {
                 );
             }
             if (online) {
+                // SSH-only runs no longer need the captured cloud source.
+                // Deallocated Azure VMs still consume regional core quota.
+                if (cloud_provider) {
+                    try t.poweroff(source);
+                    if (!t.ssh_only) {
+                        try t.exportData(source, try c.path("offline-full.tar.zst"), null, true, "offline-full-export");
+                        try t.exportData(source, try c.path("offline-postgres.tar.zst"), "postgres", true, "offline-service-export");
+                    }
+                    try t.removeCompleted(source, "captured-source-delete");
+                }
+                try t.onlineImports(full, selected, &suffix);
+            }
+            if (t.ssh_only) {
+                c.say("pass: {t} SSH full/service import and export; disk path was not requested", .{t.on});
+                return;
+            }
+            try t.diskImports(full, selected, &suffix, online, target_config);
+            if (online and !cloud_provider) {
                 try t.ssh(source, &.{ "service-up-v1", "postgres" }, "manual-up", true);
                 try t.exportData(
                     source,
@@ -266,7 +317,9 @@ const Test = struct {
     fn own(t: *Test, name: []const u8) ![]const u8 {
         const c = t.c;
         if (t.on == .lima and try lima.exists(c.io, c.gpa, name)) return error.ExistingFixtureName;
-        try Dir.cwd().createDir(c.io, try howl.machineDir(c.gpa, name), .fromMode(0o700));
+        const at = try howl.machineDir(c.gpa, name);
+        try Dir.cwd().createDirPath(c.io, std.fs.path.dirname(at).?);
+        try Dir.cwd().createDir(c.io, at, .fromMode(0o700));
         try t.names.append(c.gpa, name);
         return name;
     }
@@ -398,12 +451,12 @@ const Test = struct {
             },
         );
         switch (kind) {
-            .command => {},
+            .command, .shutdown => {},
             .pty => try argv.append(c.gpa, "-tt"),
             .forward => try argv.appendSlice(c.gpa, &.{ "-W", "127.0.0.1:22" }),
             .subsystem => try argv.append(c.gpa, "-s"),
         }
-        try argv.append(c.gpa, "root@127.0.0.1");
+        try argv.append(c.gpa, try c.gpa.print("root@{s}", .{try t.sshHost(name)}));
         try argv.appendSlice(c.gpa, command);
         const r = try c.run(argv.items, label, .{ .timeout = .fromSeconds(100) });
         if (r.ok() != success) return c.fail(
@@ -446,6 +499,11 @@ const Test = struct {
         label: []const u8,
     ) !void {
         const c = t.c;
+        // Resume rechecks current bytes; never mistake a previous successful
+        // fixture capture for the output of this invocation.
+        if (success) Dir.cwd().deleteFile(c.io, archive) catch |err| {
+            if (err != error.FileNotFound) return err;
+        };
         var args: std.ArrayList([]const u8) = .empty;
         try args.appendSlice(
             c.gpa,
@@ -464,7 +522,7 @@ const Test = struct {
                 ) orelse return error.SshPort;
             try args.appendSlice(c.gpa, &.{ "--host", "127.0.0.1", "--port", port });
         }
-        const r = try c.run(args.items, label, .{ .timeout = .fromSeconds(900) });
+        const r = try c.run(args.items, label, .{ .timeout = .fromSeconds(if (cloud.supported(t.on)) 7200 else 900) });
         if (r.ok() != success) return c.fail("{s}: export result: {s}", .{ label, r.stderr });
         if ((mem.eql(u8, label, "live-refused") or
             mem.eql(u8, label, "restarted-writer-refused")) and
@@ -495,6 +553,129 @@ const Test = struct {
             ) != null;
     }
 
+    fn sshHost(t: *Test, name: []const u8) ![]const u8 {
+        if (t.on == .firecracker) return (try @import("firecracker.zig").net(t.c.gpa, name)).guest;
+        if (cloud.supported(t.on)) return @import("data-cloud.zig").address(t.c.io, t.c.gpa, name, try t.cloudContext(name));
+        const host_name = if (t.on == .bhyve)
+            @import("qemu.zig").record(t.c.io, t.c.gpa, try howl.machineDir(t.c.gpa, name), "host") orelse return error.SshAddress
+        else
+            "127.0.0.1";
+        if (!howl.isIp4(host_name)) return error.SshAddress;
+        return host_name;
+    }
+
+    fn sshPort(t: *Test, name: []const u8) ![]const u8 {
+        if (cloud.supported(t.on) or t.on == .firecracker) return "22";
+        return if (t.on == .lima) lima.sshPort(t.c.io, t.c.gpa, name) orelse error.SshPort else @import("qemu.zig").record(t.c.io, t.c.gpa, try howl.machineDir(t.c.gpa, name), "ssh") orelse error.SshPort;
+    }
+
+    fn cloudContext(t: *Test, name: []const u8) !@import("data-cloud.zig").Context {
+        return @import("data-cloud.zig").load(t.c.io, t.c.gpa, try howl.machineDir(t.c.gpa, name), t.on);
+    }
+
+    fn profile(t: *Test, name: []const u8) !@import("local-secure.zig").Profile {
+        const c = t.c;
+        return @import("local-secure.zig").parseProfile(c.gpa, try Dir.cwd().readFileAlloc(c.io, try c.gpa.print("{s}/authority/profile.json", .{try howl.machineDir(c.gpa, name)}), c.gpa, .limited(256 << 10)));
+    }
+
+    fn rejectHostBacking(t: *Test, name: []const u8) !void {
+        const c = t.c;
+        const raw = (try t.profile(name)).spec.disk_path orelse return error.TransferStorageState;
+        const allowed = try c.path("manual-raw.tar.zst");
+        _ = try c.must(&.{ t.binary, "export", name, "--disk", raw, "--output", allowed }, "manual-raw-export", .{});
+        const forged = try c.path("host-pointer.qcow2");
+        _ = try c.must(&.{ "qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", raw, forged }, "host-pointer-image", .{});
+        const output = try c.path("host-pointer-must-not-export.tar.zst");
+        const result = try c.run(&.{ t.binary, "export", name, "--disk", forged, "--output", output }, "host-pointer-refused", .{});
+        if (result.ok()) return error.TransferHostBackingRead;
+        if (Dir.cwd().access(c.io, output, .{})) |_| return error.TransferHostBackingRead else |err| if (err != error.FileNotFound) return err;
+    }
+
+    fn rememberDisk(t: *Test, name: []const u8) !void {
+        if (!cloud.supported(t.on)) return;
+        if ((try t.profile(name)).cloud_staged) return;
+        const context = try t.cloudContext(name);
+        const machine = try @import("data-cloud.zig").state(t.c.io, t.c.gpa, name, context);
+        for (t.disks.items) |disk| if (mem.eql(u8, disk.id, machine.disk)) return;
+        try t.disks.append(t.c.gpa, .{ .context = context, .id = machine.disk });
+    }
+
+    fn cleanupDisks(t: *Test) !void {
+        const c = t.c;
+        const disk_api = @import("data-cloud-disk.zig");
+        // Only exact disk IDs observed on this run's randomly named fixtures.
+        // A VM must be deleted successfully before any retained disk is removed.
+        for (t.disks.items) |disk| switch (disk.context) {
+            .aws => |p| {
+                const found = try disk_api.aws(c.io, c.gpa, p.region, &.{ "ec2", "describe-volumes", "--filters", try c.gpa.print("Name=volume-id,Values={s}", .{disk.id}), "--query", "Volumes[].{id:VolumeId,state:State}" });
+                const volumes = try std.json.parseFromSliceLeaky([]const struct { id: []const u8, state: []const u8 }, c.gpa, found, .{});
+                if (volumes.len == 0) continue;
+                if (volumes.len != 1 or !mem.eql(u8, volumes[0].id, disk.id) or !mem.eql(u8, volumes[0].state, "available")) return error.TransferTestCleanup;
+                _ = try disk_api.aws(c.io, c.gpa, p.region, &.{ "ec2", "delete-volume", "--volume-id", disk.id });
+            },
+            .gcp => |p| {
+                const found = try disk_api.gcp(c.io, c.gpa, p.project, &.{ "compute", "disks", "list", "--zones", p.zone, "--filter", try c.gpa.print("name={s}", .{std.fs.path.basename(disk.id)}), "--format=value(selfLink)" });
+                if (found.len == 0) continue;
+                if (!mem.eql(u8, found, disk.id)) return error.TransferTestCleanup;
+                _ = try disk_api.gcp(c.io, c.gpa, p.project, &.{ "compute", "disks", "delete", disk.id, "--zone", p.zone });
+            },
+            .azure => |p| {
+                const found = try disk_api.azure(c.io, c.gpa, p.group, &.{ "disk", "list", "--query", try c.gpa.print("[?id=='{s}'].id", .{disk.id}), "-o", "tsv" });
+                if (found.len == 0) continue;
+                if (!mem.eql(u8, found, disk.id)) return error.TransferTestCleanup;
+                _ = try disk_api.azure(c.io, c.gpa, p.group, &.{ "disk", "delete", "--ids", disk.id, "--yes", "-o", "none" });
+            },
+        };
+    }
+
+    fn cloudConsole(t: *Test, name: []const u8) ![]const u8 {
+        return switch (try t.cloudContext(name)) {
+            .aws => |p| @import("aws.zig").console(t.c.io, t.c.gpa, .{ .region = p.region }, p.id),
+            .gcp => |p| @import("gcp.zig").console(t.c.io, t.c.gpa, .{ .project = p.project, .zone = p.zone }, name),
+            .azure => |p| @import("azure.zig").console(t.c.io, t.c.gpa, .{ .group = p.group, .location = p.location }, name),
+        } orelse "";
+    }
+
+    fn cloudPower(t: *Test, name: []const u8, up: bool, label: []const u8) !void {
+        const c = t.c;
+        const context = try t.cloudContext(name);
+        _ = try @import("data-cloud.zig").state(c.io, c.gpa, name, context);
+        if (up) try t.boot_markers.put(c.gpa, name, @import("azure.zig").mark(try t.cloudConsole(name)));
+        const args: []const []const u8 = switch (context) {
+            .aws => |p| &.{ "aws", "--region", p.region, "ec2", if (up) "start-instances" else "stop-instances", "--instance-ids", p.id },
+            .gcp => |p| &.{ "gcloud", "--quiet", "--project", p.project, "compute", "instances", if (up) "start" else "stop", name, "--zone", p.zone },
+            .azure => |p| &.{ "az", "vm", if (up) "start" else "deallocate", "-g", p.group, "-n", name, "-o", "none" },
+        };
+        _ = try c.must(args, label, .{ .timeout = .fromSeconds(600) });
+        if (context == .aws) _ = try c.must(&.{ "aws", "--region", context.aws.region, "ec2", "wait", if (up) "instance-running" else "instance-stopped", "--instance-ids", context.aws.id }, try c.gpa.print("{s}-wait", .{label}), .{ .timeout = .fromSeconds(600) });
+    }
+
+    fn startMachine(t: *Test, name: []const u8, label: []const u8) !void {
+        if (cloud.supported(t.on)) {
+            if (!(try t.profile(name)).cloud_staged) return t.cloudPower(name, true, label);
+            _ = try t.c.must(&.{ t.binary, "start", name }, label, .{ .timeout = .fromSeconds(1800) });
+            try t.rememberDisk(name);
+            return;
+        }
+        if (t.on == .firecracker) {
+            // Its supervisor appends serial logs across boots. A readiness
+            // marker from the previous boot cannot qualify this restart.
+            const console = try Dir.cwd().createFile(t.c.io, try t.c.gpa.print("{s}/console.log", .{try t.instance(name)}), .{});
+            console.close(t.c.io);
+        }
+        _ = try t.c.must(&.{ t.binary, "start", name }, label, .{});
+    }
+
+    fn removeCompleted(t: *Test, name: []const u8, label: []const u8) !void {
+        const c = t.c;
+        try Dir.cwd().copyFile(try c.gpa.print("{s}/console.log", .{try t.instance(name)}), .cwd(), try c.path(try c.gpa.print("{s}-console.log", .{name})), c.io, .{});
+        _ = try c.must(&.{ t.binary, "delete", name, "--on", @tagName(t.on) }, label, .{ .timeout = .fromSeconds(600) });
+        for (t.names.items) |*owned| if (mem.eql(u8, owned.*, name)) {
+            owned.* = "";
+            break;
+        };
+    }
+
     fn plainHash(t: *Test, path: []const u8) ![32]u8 {
         const io = t.c.io;
         var child = try std.process.spawn(
@@ -512,19 +693,44 @@ const Test = struct {
         defer pipe.close(io);
         var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
         var buffer: [64 << 10]u8 = undefined;
-        var total: u64 = 0;
-        while (true) {
-            const n = pipe.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            };
-            if (n == 0) break;
-            total += n;
-            if (total > 1 << 30) return error.FixtureLimit;
-            hash.update(buffer[0..n]);
+        var reader = file.reader(io, &buffer);
+        const manifest = try data.zstd.manifest(a, &reader.interface);
+        var users: std.ArrayList(data.Identity) = .empty;
+        var groups: std.ArrayList(data.Identity) = .empty;
+        var services: std.ArrayList([]const u8) = .empty;
+        for (manifest.entries) |entry| {
+            try users.append(a, .{ .name = entry.owner, .id = 0 });
+            try groups.append(a, .{ .name = entry.group, .id = 0 });
+            if (mem.cutPrefix(u8, entry.path, "svc/")) |suffix| {
+                const end = mem.findScalar(u8, suffix, '/') orelse suffix.len;
+                try services.append(a, suffix[0..end]);
+            }
         }
-        if (!(try child.wait(io)).success()) return error.FixtureCompression;
-        return hash.finalResult();
+        // Test-only policy checks the fixture's whole archive. The sink hashes
+        // selected application metadata and bytes, excluding archived logs.
+        const policy: data.Policy = .{ .image = manifest.image, .arch = manifest.arch, .services = services.items, .users = users.items, .groups = groups.items };
+        const Hash = struct {
+            hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
+            allocator: mem.Allocator,
+            fn begin(ctx: *anyopaque, entry: data.Entry) !void {
+                const self: *@This() = @ptrCast(@alignCast(ctx));
+                const json = try std.json.Stringify.valueAlloc(self.allocator, entry, .{});
+                defer self.allocator.free(json);
+                var size: [8]u8 = undefined;
+                mem.writeInt(u64, &size, json.len, .little);
+                self.hash.update(&size);
+                self.hash.update(json);
+            }
+            fn write(ctx: *anyopaque, bytes: []const u8) !void {
+                const self: *@This() = @ptrCast(@alignCast(ctx));
+                self.hash.update(bytes);
+            }
+            fn end(_: *anyopaque, _: data.Entry) !void {}
+        };
+        var hash: Hash = .{ .allocator = a };
+        var again = file.reader(io, &buffer);
+        _ = try data.zstd.validate(a, &again.interface, policy, null, .{ .context = &hash, .begin = Hash.begin, .write = Hash.write, .end = Hash.end });
+        return hash.hash.finalResult();
     }
 
     fn poweroff(t: *Test, name: []const u8) !void {
@@ -562,9 +768,16 @@ const Test = struct {
         return error.PoweroffTimeout;
     }
 
-    fn cleanup(t: *Test) void {
+    fn stopApplications(t: *Test, name: []const u8, label: []const u8) !void {
+        try t.ssh(name, &.{ "service-down-v1", "postgres" }, label, true);
+        if (t.on == .firecracker) try t.ssh(name, &.{ "service-down-v1", "transfer-stop" }, try t.c.gpa.print("{s}-stop", .{label}), true);
+    }
+
+    fn cleanup(t: *Test) !void {
         const c = t.c;
+        var failed = false;
         for (t.names.items) |name| {
+            if (name.len == 0) continue;
             if (t.instance(name)) |at| {
                 const file = c.gpa.print(
                     "{s}/{s}",
@@ -589,6 +802,8 @@ const Test = struct {
                 .{ .timeout = .fromSeconds(120) },
             ) catch {};
         }
+        if (failed) return error.TransferTestCleanup;
+        try t.cleanupDisks();
         if (t.key.len != 0) Dir.cwd().deleteFile(c.io, t.key) catch {};
         if (c.work.len > 1) Dir.cwd().deleteTree(c.io, c.path("credentials") catch return) catch {};
     }

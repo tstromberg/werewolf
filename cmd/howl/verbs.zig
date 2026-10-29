@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const lima = @import("lima.zig");
 const bhyve = @import("bhyve.zig");
 const firecracker = @import("firecracker.zig");
@@ -343,6 +344,8 @@ pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !vo
     else
         try machineArgs(io, gpa, args, why);
     if (on == .firecracker) {
+        const guard = try @import("data-cloud.zig").guard(io, gpa, try machineDir(gpa, name));
+        defer guard.close(io);
         if (madeOn(io, gpa, name) != .firecracker) return notMade(name, on, why);
         const dir = try machineDir(gpa, name);
         if (firecracker.running(io, gpa, dir)) |pid|
@@ -426,6 +429,31 @@ pub fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void
 /// or tag is missing: howl create did not make it, so it is not howl's.
 pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why) !void {
     const dir = try machineDir(gpa, name);
+    const cloud_guard = if (cloud.supported(on) or on == .firecracker)
+        try @import("data-cloud.zig").guard(io, gpa, dir)
+    else
+        @as(?Io.File, null);
+    defer if (cloud_guard) |file| file.close(io);
+    if (cloud.supported(on)) {
+        const profile_bytes = Dir.cwd().readFileAlloc(io, try gpa.print("{s}/authority/profile.json", .{dir}), gpa, .limited(256 << 10)) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (profile_bytes) |bytes| {
+            const profile = try @import("local-secure.zig").parseProfile(gpa, bytes);
+            if (profile.provider != on) return error.TransferProvider;
+            if (profile.cloud_staged and profile.cloud == null) {
+                // No remote identity was enrolled. Never delete a same-named
+                // VM that another operator may have created independently.
+                try Dir.cwd().deleteTree(io, dir);
+                return;
+            }
+        }
+    }
+    const cloud_context = if (cloud.supported(on))
+        try @import("data-cloud.zig").recorded(io, gpa, dir, on)
+    else
+        null;
     switch (on) {
         .qemu => {
             _ = try qemu.stop(io, gpa, dir);
@@ -433,24 +461,31 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
         },
         .gcp => {
             // Delete the VM and its disk, not the image, which others may share.
-            const p = try gcp.place(io, gpa, why);
+            const p: gcp.Place = if (cloud_context) |ctx| .{ .project = ctx.gcp.project, .zone = ctx.gcp.zone } else try gcp.place(io, gpa, why);
             if (try gcp.formOf(io, gpa, p, name, why)) |was| {
                 if (was.len == 0) return notMade(name, .gcp, why);
+                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(io, gpa, name, ctx);
                 try gcp.delete(io, gpa, p, name, why);
             }
         },
         .aws => {
             // Delete the instance, its volume and security group, not the AMI.
-            const p = try aws.place(io, gpa, why);
+            const p: aws.Place = if (cloud_context) |ctx| .{ .region = ctx.aws.region } else try aws.place(io, gpa, why);
             const i = try aws.find(io, gpa, p, name, why);
             if (i) |m| if (m.form.len == 0) return notMade(name, .aws, why);
+            if (i != null) if (cloud_context) |ctx| {
+                _ = try cloud.state(io, gpa, name, ctx);
+            };
             try aws.delete(io, gpa, p, name, i, why);
         },
         .azure => {
             // Delete the VM, its disk, NIC and network, not the image.
-            const p = try azure.place(io, gpa, why);
+            const p: azure.Place = if (cloud_context) |ctx| .{ .group = ctx.azure.group, .location = ctx.azure.location } else try azure.place(io, gpa, why);
             const vm = try azure.find(io, gpa, p, name, why);
             if (vm) |v| if (v.form.len == 0) return notMade(name, .azure, why);
+            if (vm != null) {
+                if (cloud_context) |ctx| _ = try @import("data-cloud.zig").state(io, gpa, name, ctx);
+            }
             try azure.delete(io, gpa, p, name, vm, why);
         },
         .proxmox => {

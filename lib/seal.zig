@@ -441,6 +441,12 @@ pub fn buildPipeReaderFilter(buf: *[max_filter]Filter, child: u32) []const Filte
     return buildFilterWithExec(buf, .initMany(&.{ .stdio, .rpath }), true, null, child);
 }
 
+/// A publisher may modify files and reap its decoder, but cannot create a
+/// process or signal any other service running under the same uid.
+pub fn buildPublisherFilter(buf: *[max_filter]Filter, child: u32) []const Filter {
+    return buildFilterWithExec(buf, .initMany(&.{ .stdio, .rpath, .wpath }), true, null, child);
+}
+
 /// buildServiceFilter narrows the initial exec to Leash's selected descriptor
 /// number and exact AT_EMPTY_PATH flags. Landlock supplies file identity.
 pub fn buildServiceFilter(buf: *[max_filter]Filter, promises: Set, exec_fd: u32) []const Filter {
@@ -1043,13 +1049,15 @@ test parse {
     try testing.expectEqual(Set.initMany(&.{ .shm, .sem, .msg }), ipc);
 }
 
-test "pipe reader can reap and signal only its compressor" {
-    var buf: [max_filter]Filter = undefined;
-    const f = buildPipeReaderFilter(&buf, 123);
-    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.wait4), 0));
-    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.kill), 123));
-    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.kill), 124));
-    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.clone), 0));
-    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.execve), 0));
-    try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.socket), linux.AF.INET));
+test "transfer workers reap children without authority over other services" {
+    for ([_]bool{ false, true }) |publisher| {
+        var buf: [max_filter]Filter = undefined;
+        const f = if (publisher) buildPublisherFilter(&buf, 123) else buildPipeReaderFilter(&buf, 123);
+        try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.wait4), 0));
+        try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.kill), 123));
+        try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.kill), 124));
+        try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.clone), 0));
+        try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.execve), 0));
+        try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.socket), linux.AF.INET));
+    }
 }

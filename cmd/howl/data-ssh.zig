@@ -1,7 +1,8 @@
-//! Streaming, pinned SSH capture. No guest installation, firewall change,
+//! Streaming, pinned SSH transfers. No guest installation, firewall change,
 //! command interpreter or host filesystem extraction is involved.
 const std = @import("std");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const data = @import("data-transfer");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -28,9 +29,20 @@ pub fn capture(
             "ssh",
         ) orelse return error.TransferSshAddress,
         .lima => @import("lima.zig").sshPort(io, a, name) orelse return error.TransferSshAddress,
+        .aws, .gcp, .azure => "22",
+        .firecracker => "22",
         else => return error.TransferProvider,
     };
-    _ = try std.fmt.parseUnsigned(u16, port, 10);
+    if (try std.fmt.parseUnsigned(u16, port, 10) == 0) return error.TransferSshAddress;
+    const host = if (endpoint) |e| e.host else if (cloud.supported(on))
+        try @import("data-cloud.zig").address(io, a, name, try @import("data-cloud.zig").load(io, a, at, on))
+    else if (on == .firecracker)
+        (try @import("firecracker.zig").net(a, name)).guest
+    else if (on == .bhyve)
+        @import("qemu.zig").record(io, a, at, "host") orelse "127.0.0.1"
+    else
+        "127.0.0.1";
+    if (endpoint == null and !howl.isIp4(host)) return error.TransferSshAddress;
     const known = try a.print("{s}/known_hosts", .{at});
     const pin = try std.process.run(a, io, .{
         .argv = &.{ "ssh-keygen", "-F", name, "-f", known },
@@ -38,7 +50,7 @@ pub fn capture(
         .stderr_limit = .limited(4096),
     });
     if (!pin.term.success() or pin.stdout.len == 0) return why.refuse(
-        "{s}: export requires an existing host key pin in {s}",
+        "{s}: transfer requires an existing host key pin in {s}",
         .{ name, known },
     );
     var args: std.ArrayList([]const u8) = .empty;
