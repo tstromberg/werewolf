@@ -949,13 +949,15 @@ const Test = struct {
 
     fn removeCompleted(t: *Test, name: []const u8, label: []const u8) !void {
         const c = t.c;
-        try Dir.cwd().copyFile(
-            try c.gpa.print("{s}/console.log", .{try t.instance(name)}),
-            .cwd(),
-            try c.path(try c.gpa.print("{s}-console.log", .{name})),
-            c.io,
-            .{},
-        );
+        const kept = try c.path(try c.gpa.print("{s}-console.log", .{name}));
+        if (cloud.supported(t.on)) {
+            try Dir.cwd().writeFile(c.io, .{ .sub_path = kept, .data = try t.cloudConsole(name) });
+        } else {
+            const source = try c.gpa.print("{s}/{s}", .{
+                try t.instance(name), if (t.on == .lima) "serial.log" else "console.log",
+            });
+            try keepLog(c.io, source, kept);
+        }
         _ = try c.must(
             &.{ t.binary, "delete", name, "--on", @tagName(t.on) },
             label,
@@ -1086,14 +1088,14 @@ const Test = struct {
                     "{s}-console.log",
                     .{name},
                 ) catch continue) catch continue;
-                Dir.cwd().copyFile(file, .cwd(), kept, c.io, .{}) catch {};
+                keepLog(c.io, file, kept) catch {};
                 // The catalog uploader collects architecture-specific check
                 // logs; keep the console before delete removes the machine.
                 const catalog = c.gpa.print("build/{s}/check/data-transfer-{s}.log", .{
                     @tagName(@import("builtin").cpu.arch), name,
                 }) catch continue;
                 Dir.cwd().createDirPath(c.io, std.fs.path.dirname(catalog).?) catch {};
-                Dir.cwd().copyFile(file, .cwd(), catalog, c.io, .{}) catch {};
+                keepLog(c.io, file, catalog) catch {};
             } else |_| {}
             const deleted = c.run(
                 &.{ t.binary, "delete", name, "--on", @tagName(t.on) },
@@ -1111,3 +1113,20 @@ const Test = struct {
         if (c.work.len > 1) Dir.cwd().deleteTree(c.io, c.path("credentials") catch return) catch {};
     }
 };
+
+// The console can still grow while it is copied.
+fn keepLog(io: Io, source: []const u8, destination: []const u8) !void {
+    const input = try Dir.cwd().openFile(io, source, .{});
+    defer input.close(io);
+    const output = try Dir.cwd().createFile(io, destination, .{});
+    defer output.close(io);
+    var buffer: [64 << 10]u8 = undefined;
+    while (true) {
+        const n = input.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        try output.writeStreamingAll(io, buffer[0..n]);
+    }
+}
