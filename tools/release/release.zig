@@ -245,7 +245,7 @@ fn run(s: *Sys, verb: []const u8, args: []const [:0]const u8) !u8 {
     }
     if (mem.eql(u8, verb, "github-protected")) {
         try a.want(s, 1, "github-protected EXPORTED_JSON");
-        _ = try github.fromListing(s, t, a.at(0));
+        _ = try github.fromListing(s, try imageScope(s, t), a.at(0));
         return 0;
     }
     unreachable;
