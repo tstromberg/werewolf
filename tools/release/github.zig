@@ -10,6 +10,7 @@ const sys = @import("sys.zig");
 const Sys = sys.Sys;
 const images = @import("images.zig");
 const catalog = @import("catalog.zig");
+const boot = @import("boot.zig");
 const exporter = @import("exporter.zig");
 const legacy = @import("legacy.zig");
 
@@ -19,7 +20,10 @@ pub const Secure = struct {
     bundle: []const u8,
     report: Json,
     provider: []const u8,
+    variants: []const u8 = "",
 };
+
+pub const Legacy = struct { assets: []const u8, variants: []const u8 = "" };
 
 /// draft verifies every export and creates the draft release with gh; it
 /// returns the tag. now names a retry's tag: published releases are
@@ -29,7 +33,7 @@ pub fn draft(
     t: images.Images,
     targets: []const Secure,
     trust: []const u8,
-    legacy_assets: []const []const u8,
+    legacy_assets: []const Legacy,
     now: i64,
 ) ![]const u8 {
     var manifests: std.ArrayList(Json) = .empty;
@@ -37,7 +41,10 @@ pub fn draft(
     var lines: std.ArrayList([]const u8) = .empty;
     const sha = s.getenv("GITHUB_SHA") orelse "";
     const repository = s.getenv("GITHUB_REPOSITORY") orelse "";
+    const saved_variants = s.variants;
+    defer s.variants = saved_variants;
     for (targets) |target| {
+        s.variants = target.variants;
         const directory = try sys.resolve(s, target.assets);
         const manifest = try exporter.verify(
             s,
@@ -68,11 +75,15 @@ pub fn draft(
         )) |f| try assets.append(s.gpa, try sys.join(s, &.{ directory, f }));
         const prefix = try s.gpa.print(
             "{s}-{s}-{s}",
-            .{ name, try json.text(manifest, "provider"), try json.text(manifest, "arch") },
+            .{
+                try s.variantKey(name),
+                try json.text(manifest, "provider"),
+                try json.text(manifest, "arch"),
+            },
         );
         const mirror = try s.gpa.print("https://dist.werewolf-linux.org/boot/v1/{s}/{s}/{s}/obje" ++
             "cts/{s}", .{
-            name,
+            try s.variantPath(name),
             try json.text(
                 manifest,
                 "provider",
@@ -93,13 +104,17 @@ pub fn draft(
     }
     const public = try catalog.public(s);
     var legacy_lines: std.ArrayList([]const u8) = .empty;
-    for (legacy_assets) |directory| {
+    for (legacy_assets) |target| {
+        s.variants = target.variants;
+        const directory = target.assets;
         const manifest = try legacy.verify(
             s,
             t,
             directory,
             try sys.join(s, &.{ trust, "image.crt" }),
         );
+        if (!sys.selectionMatches(manifest, s.variants))
+            return s.refuse("legacy release describes another variant selection", .{});
         const provenance = try json.field(manifest, "provenance");
         if (!mem.eql(u8, try json.text(provenance, "commit"), sha) or
             !mem.eql(u8, try json.text(provenance, "repository"), repository))
@@ -117,17 +132,25 @@ pub fn draft(
                 s,
                 &.{
                     directory,
-                    try s.gpa.print("{s}-{s}-legacy-boot-downloads.json", .{ name, arch }),
+                    try s.gpa.print(
+                        "{s}-{s}-legacy-boot-downloads.json",
+                        .{ try s.variantKey(name), arch },
+                    ),
                 },
             );
             changes = try s.gpa.print(" [Package changes]({s}/legacy-boot/{s}/{s}/objects/{s}/{s" ++
                 "}).", .{
-                public, name, arch, &try sys.sha(s, head), try json.text(page, "asset"),
+                public,                       try s.variantKey(name), arch,
+                &try sys.sha(
+                    s,
+                    head,
+                ),
+                try json.text(page, "asset"),
             });
         }
         try legacy_lines.append(s.gpa, try s.gpa.print("- `{s}-{s}-legacy-boot`, serial {s}: " ++
             "boots without Secure Boot, TPM or IPE.{s}", .{
-            name, arch, try json.text(manifest, "serial"), changes,
+            try s.variantKey(name), arch, try json.text(manifest, "serial"), changes,
         }));
     }
     // Lines list the bundles in the order Python wrote them: secure, then legacy.
@@ -211,8 +234,12 @@ pub fn draft(
 
 /// fromListing drafts the release of an exported.json listing.
 pub fn fromListing(s: *Sys, t: images.Images, listing: []const u8) ![]const u8 {
+    return fromListingAt(s, t, listing, "release/protected");
+}
+
+fn fromListingAt(s: *Sys, t: images.Images, listing: []const u8, trust: []const u8) ![]const u8 {
     var secure: std.ArrayList(Secure) = .empty;
-    var legacy_assets: std.ArrayList([]const u8) = .empty;
+    var legacy_assets: std.ArrayList(Legacy) = .empty;
     for (try json.items(try sys.readJson(s, listing, 16 << 20))) |target| {
         const profile = if (json.get(target, "boot_profile")) |p| p.string else "secure-boot";
         if (!t.identity(
@@ -225,14 +252,18 @@ pub fn fromListing(s: *Sys, t: images.Images, listing: []const u8) ![]const u8 {
             .bundle = try json.text(target, "bundle"),
             .report = try sys.readJson(s, try json.text(target, "gates"), 64 << 10),
             .provider = try json.text(target, "provider"),
+            .variants = try sys.selection(s, target),
         });
         if (mem.eql(
             u8,
             profile,
             "legacy-boot",
-        )) try legacy_assets.append(s.gpa, try json.text(target, "assets"));
+        )) try legacy_assets.append(s.gpa, .{
+            .assets = try json.text(target, "assets"),
+            .variants = try sys.selection(s, target),
+        });
     }
-    return draft(s, t, secure.items, "release/protected", legacy_assets.items, s.now());
+    return draft(s, t, secure.items, trust, legacy_assets.items, s.now());
 }
 
 const testing = std.testing;
@@ -385,7 +416,7 @@ test "one GitHub release carries both boot profiles" {
             .provider = "qemu",
         }},
         e.trust,
-        &.{legacy_assets},
+        &.{.{ .assets = legacy_assets }},
         s.now(),
     );
     try testing.expectEqual(@as(usize, 1), e.f.called(&.{"gh"}));
@@ -412,6 +443,89 @@ test "one GitHub release carries both boot profiles" {
         e.f.text,
         "(`minimal`, `prod-ssh`, `playground`, `postdoc-server`)",
     ) != null);
+}
+
+test "one GitHub release verifies default and SSH variants together" {
+    var e: exporter.Exported = undefined;
+    try e.init();
+    defer e.deinit();
+    const s = &e.f.s;
+    const t = try images.load(s);
+    const ssh_bundle = e.f.path("ssh-bundle");
+    try sys.copyTree(s, e.bundle, ssh_bundle);
+    const head_path = try sys.join(s, &.{ ssh_bundle, "boot.json" });
+    var head = try sys.readJson(s, head_path, boot.head_limit);
+    try head.object.put(s.gpa, "variants", try json.from(s.gpa, &[_][]const u8{"ssh"}));
+    try sys.writeJson(s, head_path, head);
+    try sys.write(
+        s,
+        try sys.join(s, &.{ ssh_bundle, "boot.json.sig" }),
+        try fixture.signed(&e.f, "image", try sys.read(s, head_path, boot.head_limit)),
+    );
+    var report = try json.parse(s.gpa, try json.encode(s.gpa, e.report));
+    try report.object.put(
+        s.gpa,
+        "descriptor",
+        .{ .string = try s.gpa.dupe(u8, &try sys.sha(s, head_path)) },
+    );
+    s.variants = "ssh";
+    const ssh_assets = e.f.path("ssh-assets");
+    _ = try exporter.exportBundle(s, "howl", ssh_bundle, report, "qemu", ssh_assets, e.trust, null);
+    const legacy_dir = try legacy.testCandidate(&e.f, "minimal", "20261017T010001Z", "1");
+    const exported = try legacy.exportVerified(
+        s,
+        t,
+        std.fs.path.dirname(legacy_dir).?,
+        e.f.path("ssh-legacy"),
+        try exporter.provenance(s),
+        try legacy.testTargets(
+            s,
+            legacy_dir,
+            "build",
+        ),
+        e.keys.crt,
+        null,
+    );
+    const legacy_assets = try json.text(exported[0], "assets");
+    s.variants = "";
+    try sys.writeJson(s, e.f.path("default-gates.json"), e.report);
+    try sys.writeJson(s, e.f.path("ssh-gates.json"), report);
+    const listing = try json.from(s.gpa, &[_]Json{
+        try json.from(s.gpa, .{
+            .form = "playground",
+            .arch = "x86_64",
+            .provider = "qemu",
+            .assets = e.assets,
+            .bundle = e.bundle,
+            .gates = e.f.path("default-gates.json"),
+            .variants = &[_][]const u8{},
+        }),
+        try json.from(s.gpa, .{
+            .form = "playground",
+            .arch = "x86_64",
+            .provider = "qemu",
+            .assets = ssh_assets,
+            .bundle = ssh_bundle,
+            .gates = e.f.path("ssh-gates.json"),
+            .variants = &[_][]const u8{"ssh"},
+        }),
+        try json.from(s.gpa, .{
+            .form = "minimal",
+            .arch = "x86_64",
+            .boot_profile = "legacy-boot",
+            .assets = legacy_assets,
+            .variants = &[_][]const u8{"ssh"},
+        }),
+    });
+    try sys.writeJson(s, e.f.path("mixed-listing.json"), listing);
+    try e.f.env.put("GITHUB_OUTPUT", e.f.path("outputs-mixed"));
+    e.f.answer = gh;
+    _ = try fromListingAt(s, t, e.f.path("mixed-listing.json"), e.trust);
+    try testing.expectEqualStrings("", s.variants);
+    try testing.expect(mem.find(u8, e.f.text, "playground-variants-ssh-qemu-x86_64") != null);
+    try testing.expect(mem.find(u8, e.f.text, "/playground/variants/ssh/qemu/") != null);
+    try testing.expect(mem.find(u8, e.f.text, "minimal-variants-ssh-x86_64-legacy-boot") != null);
+    try testing.expect(mem.find(u8, e.f.text, "/legacy-boot/minimal-variants-ssh/x86_64/") != null);
 }
 
 /// fake_gh answers release/publish as GitHub would: the release listing
