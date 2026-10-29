@@ -510,7 +510,7 @@ const Lifecycle = struct {
             keep: {
                 const from = l.consolePath() catch break :keep;
                 const to = c.path("console.log") catch break :keep;
-                Io.Dir.cwd().copyFile(from, .cwd(), to, c.io, .{}) catch {};
+                keepLog(c.io, .cwd(), from, to) catch {};
             }
             if (!l.shellfree) l.keepLimaLogs();
             const delete = [_][]const u8{ l.howl, "delete", machine_name, "--on", l.provider };
@@ -532,10 +532,49 @@ const Lifecycle = struct {
         while (it.next(c.io) catch return) |e| {
             if (e.kind != .file or !mem.endsWith(u8, e.name, ".log")) continue;
             const to = c.path(c.gpa.print("lima-{s}", .{e.name}) catch return) catch return;
-            dir.copyFile(e.name, .cwd(), to, c.io, .{}) catch {};
+            keepLog(c.io, dir, e.name, to) catch {};
         }
     }
 };
+
+// Logs may still be growing. Read them through a fixed buffer rather than
+// asking the platform's file-copy shortcut to size a changing source.
+fn keepLog(io: Io, source: Io.Dir, name: []const u8, path: []const u8) !void {
+    const input = try source.openFile(io, name, .{});
+    defer input.close(io);
+    const output = try Io.Dir.cwd().createFile(io, path, .{});
+    defer output.close(io);
+    var buffer: [64 << 10]u8 = undefined;
+    while (true) {
+        const n = input.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        try output.writeStreamingAll(io, buffer[0..n]);
+    }
+}
+
+test "keepLog copies empty and multi-buffer console logs" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const target = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(target);
+    const path = try std.fs.path.join(gpa, &.{ target, "copy.log" });
+    defer gpa.free(path);
+    for ([_]usize{ 0, 150_000 }) |size| {
+        const contents = try gpa.alloc(u8, size);
+        defer gpa.free(contents);
+        @memset(contents, 'x');
+        try tmp.dir.writeFile(io, .{ .sub_path = "console.log", .data = contents });
+        try keepLog(io, tmp.dir, "console.log", path);
+        const copied = try tmp.dir.readFileAlloc(io, "copy.log", gpa, .limited(150_001));
+        defer gpa.free(copied);
+        try std.testing.expectEqualSlices(u8, contents, copied);
+    }
+}
 
 /// updated judges check-independent-updates' evidence: a pass on this
 /// provider, architecture and source revision, attesting every update gate.
