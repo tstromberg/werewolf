@@ -370,8 +370,14 @@ TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/da
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/mdoc _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
+TEST_EXTRA = _test/mdoc _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/package-consumers _test/probes
+test: $(addprefix _test/,$(TEST_SOURCES)) $(TEST_EXTRA) _test/ci-forms
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
+# The dispatch test starts nested Make processes with bounded deadlines.
+# Run it after the parallel unit suites so CPU contention cannot exhaust them.
+ifneq ($(filter test,$(MAKECMDGOALS)),)
+_test/ci-forms: $(addprefix _test/,$(TEST_SOURCES)) $(TEST_EXTRA)
+endif
 .PHONY: _test/mdoc
 _test/mdoc: $(MDOC)
 	sh test/mdoc $(MDOC)
