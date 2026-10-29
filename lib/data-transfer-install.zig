@@ -193,7 +193,7 @@ pub const Session = struct {
         var units: std.ArrayList(Unit) = .empty;
         defer units.deinit(a);
         for (result.manifest.entries) |e| {
-            if (data.selected(e.path, scope) and
+            if (data.importSelected(e.path, scope) and
                 isUnit(e.path)) try units.append(a, .{ .path = e.path, .entry = e });
         }
         const paths = try a.alloc([]const u8, units.items.len);
