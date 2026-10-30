@@ -61,15 +61,21 @@ jobs:
         # image is pulled; persist the UEFI-firmware power-cut run; syslog
         # the shipped logger's attack probes. forms and
         # shellfree split over runners (SHARD=K/N). arm64 runs every group
-        # under KVM on the self-hosted runner (vm-arm64), so these 11 jobs
+        # under KVM on the self-hosted runner (vm-arm64), so these 15 jobs
         # leave room in the account's 20 hosted at once for kernel-build's
         # and the package publishers.
         group: [integrity, cloud, persist, syslog]
         include:
-          - { group: forms, shard: 1, shards: 4 }
-          - { group: forms, shard: 2, shards: 4 }
-          - { group: forms, shard: 3, shards: 4 }
-          - { group: forms, shard: 4, shards: 4 }
+          # Smaller shares limit accumulated package caches and give the
+          # larger native comparisons room on GitHub-hosted runner disks.
+          - { group: forms, shard: 1, shards: 8 }
+          - { group: forms, shard: 2, shards: 8 }
+          - { group: forms, shard: 3, shards: 8 }
+          - { group: forms, shard: 4, shards: 8 }
+          - { group: forms, shard: 5, shards: 8 }
+          - { group: forms, shard: 6, shards: 8 }
+          - { group: forms, shard: 7, shards: 8 }
+          - { group: forms, shard: 8, shards: 8 }
           - { group: shellfree, shard: 1, shards: 3 }
           - { group: shellfree, shard: 2, shards: 3 }
           - { group: shellfree, shard: 3, shards: 3 }

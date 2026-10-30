@@ -433,7 +433,7 @@ test "shards are disjoint and cover every form" {
     const gpa = arena.allocator();
     const inventory = "gamma\nalpha\nbeta\ndelta\nepsilon\n";
     const sorted = [_][]const u8{ "alpha", "beta", "delta", "epsilon", "gamma" };
-    for ([_]usize{ 3, 4 }) |count| {
+    for ([_]usize{ 3, 4, 8 }) |count| {
         const first = try selected(gpa, inventory, .{ .k = 1, .n = count });
         try testing.expectEqual((sorted.len + count - 1) / count, first.len);
         for (first, 0..) |name, i| try testing.expectEqualStrings(sorted[i * count], name);
