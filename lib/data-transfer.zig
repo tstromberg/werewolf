@@ -29,7 +29,8 @@ pub const limits = struct {
 /// These are machine authority or filesystem bookkeeping, never application
 /// input. The installer enforces these independently of the manifest's claims.
 pub const exclusions = [_][]const u8{
-    ".werewolf", "lost+found", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
+    ".werewolf",      "lost+found",      "svc/sshd", "svc/sshd-dev",
+    "svc/autoupdate", "svc/unwound-age",
 };
 
 pub const Identity = struct { name: []const u8, id: u32 };

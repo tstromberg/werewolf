@@ -45,6 +45,7 @@ pub const Options = struct {
 };
 const Unit = struct {
     path: []const u8,
+    entry: ?data.Entry = null,
     inode: ?u64 = null,
     installed: bool = false,
     sequence: u64 = 0,
@@ -153,7 +154,7 @@ pub const Session = struct {
         p: data.Policy,
         o: Options,
     ) !void {
-        var phase: []const u8 = "policy";
+        var phase: []const u8 = "validation";
         errdefer std.debug.print("data-transfer publication: {s}\n", .{phase});
         if (o.target.len == 0 or o.target.len > 256) return error.TransferTarget;
         try data.check(a, result.manifest, p, o.service);
@@ -811,20 +812,22 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
     const st = try file.stat(io);
     if ((e.kind == .file and (st.kind != .file or st.nlink != 1)) or
         (e.kind == .directory and st.kind != .directory)) return error.TransferFileType;
-    phase = "owner";
     const uid = try data.identityByName(p.users, e.owner);
     const gid = try data.identityByName(p.groups, e.group);
-    const setgid_directory = @import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and
-        e.kind == .directory and e.mode & 0o2000 != 0;
-    // Linux preserves a directory's setgid bit across chown, but chmod clears
-    // it for a foreign group without FSETID. Set it under our group first.
-    if (setgid_directory)
-        try file.setOwner(io, 0, std.os.linux.getegid())
-    else
-        try file.setOwner(io, uid, gid);
-    phase = "mode";
-    try file.setPermissions(io, .fromMode(@intCast(e.mode)));
-    if (setgid_directory) try file.setOwner(io, uid, gid);
+    try file.setOwner(io, uid, gid);
+    if (@import("builtin").os.tag == .linux and e.kind == .directory and e.mode & 0o2000 != 0 and
+        std.os.linux.geteuid() == 0)
+    {
+        const linux = std.os.linux;
+        const old_gid = linux.getegid();
+        const unchanged = std.math.maxInt(linux.gid_t);
+        if (linux.errno(linux.setresgid(unchanged, gid, unchanged)) != .SUCCESS)
+            return error.TransferMetadata;
+        const result = file.setPermissions(io, .fromMode(@intCast(e.mode)));
+        if (linux.errno(linux.setresgid(unchanged, old_gid, unchanged)) != .SUCCESS)
+            return error.TransferMetadata;
+        try result;
+    } else try file.setPermissions(io, .fromMode(@intCast(e.mode)));
     phase = "ACL";
     if (e.kind == .directory and e.default_acl == null) try data.metadata.clearDefault(file);
     if (e.default_acl) |acl| try data.metadata.setDefault(file, acl);

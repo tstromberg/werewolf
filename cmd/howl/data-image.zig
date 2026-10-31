@@ -293,7 +293,7 @@ pub fn approve(io: Io, a: A, profile: secure.Profile, pristine: bool, why: *howl
     approved.spec.disk_path = null;
     approved.local = if (approved.local) |local| secure.scrubLocalSpec(local) else null;
     if (approved.configuration) |definition| approved.spec.form = definition.form;
-    approved.data_image = try a.dupe(u8, &key);
+    approved.data_image = try a.dupe(u8, &image);
     approved.spec.boot_cert = if (profile.spec.boot_cert != null)
         try a.print("{s}/boot.crt", .{dir})
     else

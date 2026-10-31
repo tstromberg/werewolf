@@ -13,16 +13,25 @@ pub fn supported(on: howl.Platform) bool {
 pub fn guard(io: Io, a: A, at: []const u8) !Io.File {
     try Io.Dir.cwd().createDirPath(io, at);
     try Io.Dir.cwd().setFilePermissions(io, at, .fromMode(0o700), .{});
-    const file = try Io.Dir.cwd().createFile(io, try a.print("{s}/secure.lock", .{at}), .{ .truncate = false, .permissions = .fromMode(0o600) });
+    const file = try Io.Dir.cwd().createFile(
+        io,
+        try a.print("{s}/secure.lock", .{at}),
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    );
     errdefer file.close(io);
     try file.lock(io, .exclusive);
     return file;
 }
 
-pub const Context = union(enum) {
+pub const Provider = union(enum) {
     aws: struct { region: []const u8, id: []const u8, form: []const u8 = "" },
     gcp: struct { project: []const u8, zone: []const u8, id: []const u8, form: []const u8 = "" },
-    azure: struct { group: []const u8, location: []const u8, id: []const u8, form: []const u8 = "" },
+    azure: struct {
+        group: []const u8,
+        location: []const u8,
+        id: []const u8,
+        form: []const u8 = "",
+    },
 };
 
 pub const Machine = struct {
@@ -32,10 +41,15 @@ pub const Machine = struct {
     disk: []const u8,
 };
 
-pub fn capture(io: Io, a: A, name: []const u8, place: Context) !void {
+pub fn capture(io: Io, a: A, name: []const u8, place: Provider) !void {
     if (place == .aws) {
         if (place.aws.id.len == 0) return error.TransferMachineIdentity;
-        _ = try @import("data-cloud-disk.zig").aws(io, a, place.aws.region, &.{ "ec2", "wait", "instance-running", "--instance-ids", place.aws.id });
+        _ = try @import("data-cloud-disk.zig").aws(
+            io,
+            a,
+            place.aws.region,
+            &.{ "ec2", "wait", "instance-running", "--instance-ids", place.aws.id },
+        );
     }
     const on: howl.Platform = switch (place) {
         .aws => .aws,
@@ -43,14 +57,19 @@ pub fn capture(io: Io, a: A, name: []const u8, place: Context) !void {
         .azure => .azure,
     };
     const path = try a.print("{s}/authority/profile.json", .{try howl.machineDir(a, name)});
-    var profile = try @import("local-secure.zig").parseProfile(a, try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(256 << 10)));
+    var profile = try @import("local-secure.zig").parseProfile(
+        a,
+        try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(256 << 10)),
+    );
     if (profile.provider != on) return error.TransferProvider;
     var context = place;
     const machine = try describe(io, a, name, context, false);
-    if (place == .aws and !mem.eql(u8, machine.id, place.aws.id)) return error.TransferMachineIdentity;
+    if (place == .aws and
+        !mem.eql(u8, machine.id, place.aws.id)) return error.TransferMachineIdentity;
     const form = (profile.local orelse profile.spec).form;
     const expected = if (on == .gcp) std.fs.path.basename(mem.trimEnd(u8, form, "/")) else form;
-    if (!mem.eql(u8, machine.form, expected) or machine.id.len == 0) return error.TransferMachineIdentity;
+    if (!mem.eql(u8, machine.form, expected) or
+        machine.id.len == 0) return error.TransferMachineIdentity;
     switch (context) {
         inline else => |*c| {
             c.id = machine.id;
@@ -58,10 +77,15 @@ pub fn capture(io: Io, a: A, name: []const u8, place: Context) !void {
         },
     }
     profile.cloud = context;
-    try @import("data-image.zig").replaceRecord(io, a, path, try std.json.Stringify.valueAlloc(a, profile, .{}));
+    try @import("data-image.zig").replaceRecord(
+        io,
+        a,
+        path,
+        try std.json.Stringify.valueAlloc(a, profile, .{}),
+    );
 }
 
-pub fn state(io: Io, a: A, name: []const u8, context: Context) !Machine {
+pub fn state(io: Io, a: A, name: []const u8, context: Provider) !Machine {
     const machine = try describe(io, a, name, context, true);
     const id = switch (context) {
         inline else => |c| c.id,
@@ -69,17 +93,23 @@ pub fn state(io: Io, a: A, name: []const u8, context: Context) !Machine {
     const form = switch (context) {
         inline else => |c| c.form,
     };
-    if (id.len == 0 or form.len == 0 or !mem.eql(u8, id, machine.id) or !mem.eql(u8, form, machine.form)) return error.TransferMachineIdentity;
+    if (id.len == 0 or form.len == 0 or !mem.eql(u8, id, machine.id) or
+        !mem.eql(u8, form, machine.form)) return error.TransferMachineIdentity;
     return machine;
 }
 
-pub fn load(io: Io, a: A, at: []const u8, on: howl.Platform) !Context {
+pub fn load(io: Io, a: A, at: []const u8, on: howl.Platform) !Provider {
     return try recorded(io, a, at, on) orelse error.TransferMachineIdentity;
 }
 
-pub fn recorded(io: Io, a: A, at: []const u8, on: howl.Platform) !?Context {
+pub fn recorded(io: Io, a: A, at: []const u8, on: howl.Platform) !?Provider {
     if (!supported(on)) return error.TransferProvider;
-    const bytes = Io.Dir.cwd().readFileAlloc(io, try a.print("{s}/authority/profile.json", .{at}), a, .limited(256 << 10)) catch |err| switch (err) {
+    const bytes = Io.Dir.cwd().readFileAlloc(
+        io,
+        try a.print("{s}/authority/profile.json", .{at}),
+        a,
+        .limited(256 << 10),
+    ) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -90,24 +120,75 @@ pub fn recorded(io: Io, a: A, at: []const u8, on: howl.Platform) !?Context {
     return context;
 }
 
-pub fn address(io: Io, a: A, name: []const u8, context: Context) ![]const u8 {
+pub fn address(io: Io, a: A, name: []const u8, context: Provider) ![]const u8 {
     _ = try state(io, a, name, context);
     const host = switch (context) {
         .aws => |c| @import("aws.zig").address(io, a, .{ .region = c.region }, c.id),
-        .gcp => |c| @import("gcp.zig").address(io, a, .{ .project = c.project, .zone = c.zone }, name),
-        .azure => |c| @import("azure.zig").address(io, a, .{ .group = c.group, .location = c.location }, name),
+        .gcp => |c| @import("gcp.zig").address(
+            io,
+            a,
+            .{ .project = c.project, .zone = c.zone },
+            name,
+        ),
+        .azure => |c| @import("azure.zig").address(
+            io,
+            a,
+            .{ .group = c.group, .location = c.location },
+            name,
+        ),
     } orelse return error.TransferSshAddress;
     if (!howl.isIp4(host)) return error.TransferSshAddress;
     return host;
 }
 
-fn describe(io: Io, a: A, name: []const u8, context: Context, power: bool) !Machine {
+fn describe(io: Io, a: A, name: []const u8, context: Provider, power: bool) !Machine {
     const argv: []const []const u8 = switch (context) {
-        .aws => |c| &.{ "aws", "--region", c.region, "--output", "json", "--no-cli-pager", "ec2", "describe-instances", "--filters", try a.print("Name=tag:Name,Values={s}", .{name}), "Name=instance-state-name,Values=pending,running,stopping,stopped" },
-        .gcp => |c| &.{ "gcloud", "--quiet", "--project", c.project, "compute", "instances", "describe", name, "--zone", c.zone, "--format=json(id,status,labels,disks)" },
-        .azure => |c| &.{ "az", "vm", "show", "-g", c.group, "-n", name, "--show-details", "--query", "{id:vmId,status:powerState,labels:tags,disk:storageProfile.osDisk.managedDisk.id}", "-o", "json" },
+        .aws => |c| &.{
+            "aws",
+            "--region",
+            c.region,
+            "--output",
+            "json",
+            "--no-cli-pager",
+            "ec2",
+            "describe-instances",
+            "--filters",
+            try a.print("Name=tag:Name,Values={s}", .{name}),
+            "Name=instance-state-name,Values=pending,running,stopping,stopped",
+        },
+        .gcp => |c| &.{
+            "gcloud",
+            "--quiet",
+            "--project",
+            c.project,
+            "compute",
+            "instances",
+            "describe",
+            name,
+            "--zone",
+            c.zone,
+            "--format=json(id,status,labels,disks)",
+        },
+        .azure => |c| &.{
+            "az",
+            "vm",
+            "show",
+            "-g",
+            c.group,
+            "-n",
+            name,
+            "--show-details",
+            "--query",
+            "{id:vmId,status:powerState,labels:tags,disk:storageProfile.osDisk.managedDisk.id}",
+            "-o",
+            "json",
+        },
     };
-    const result = try std.process.run(a, io, .{ .argv = argv, .stdout_limit = .limited(64 << 10), .stderr_limit = .limited(4096) });
+    const result = try std.process.run(
+        a,
+        io,
+        .{ .argv = argv, .stdout_limit = .limited(64 << 10), .stderr_limit = .limited(4096) },
+    );
     if (!result.term.success()) return error.TransferMachineState;
     if (context == .aws) return parseAws(a, result.stdout, power);
     return parseMachine(a, result.stdout, std.meta.activeTag(context) == .gcp, power);
@@ -121,28 +202,53 @@ fn parseAws(a: A, bytes: []const u8, power: bool) !Machine {
                 State: struct { Name: []const u8 },
                 RootDeviceName: []const u8,
                 Tags: []const struct { Key: []const u8, Value: []const u8 } = &.{},
-                BlockDeviceMappings: []const struct { DeviceName: []const u8, Ebs: ?struct { VolumeId: []const u8, Status: []const u8 } = null },
+                BlockDeviceMappings: []const struct {
+                    DeviceName: []const u8,
+                    Ebs: ?struct { VolumeId: []const u8, Status: []const u8 } = null,
+                },
             },
         },
     };
-    const response = try std.json.parseFromSliceLeaky(Response, a, bytes, .{ .ignore_unknown_fields = true });
+    const response = try std.json.parseFromSliceLeaky(
+        Response,
+        a,
+        bytes,
+        .{ .ignore_unknown_fields = true },
+    );
     var found: ?Machine = null;
     for (response.Reservations) |reservation| for (reservation.Instances) |vm| {
         if (found != null or vm.InstanceId.len == 0) return error.TransferMachineIdentity;
-        const running = if (!power) false else if (mem.eql(u8, vm.State.Name, "running")) true else if (mem.eql(u8, vm.State.Name, "stopped")) false else return error.TransferMachineState;
+        const running = if (!power)
+            false
+        else if (mem.eql(u8, vm.State.Name, "running"))
+            true
+        else if (mem.eql(u8, vm.State.Name, "stopped"))
+            false
+        else
+            return error.TransferMachineState;
         var form: ?[]const u8 = null;
         for (vm.Tags) |tag| if (mem.eql(u8, tag.Key, howl.form_tag)) {
             if (form != null or tag.Value.len == 0) return error.TransferMachineIdentity;
             form = tag.Value;
         };
         var disk: ?[]const u8 = null;
-        for (vm.BlockDeviceMappings) |mapping| if (mem.eql(u8, mapping.DeviceName, vm.RootDeviceName)) {
+        for (vm.BlockDeviceMappings) |mapping| if (mem.eql(
+            u8,
+            mapping.DeviceName,
+            vm.RootDeviceName,
+        )) {
             if (disk != null) return error.TransferStorageState;
             const ebs = mapping.Ebs orelse return error.TransferStorageState;
-            if (!mem.eql(u8, ebs.Status, "attached") or ebs.VolumeId.len == 0) return error.TransferStorageState;
+            if (!mem.eql(u8, ebs.Status, "attached") or
+                ebs.VolumeId.len == 0) return error.TransferStorageState;
             disk = ebs.VolumeId;
         };
-        found = .{ .id = vm.InstanceId, .form = form orelse return error.TransferMachineIdentity, .running = running, .disk = disk orelse return error.TransferStorageState };
+        found = .{
+            .id = vm.InstanceId,
+            .form = form orelse return error.TransferMachineIdentity,
+            .running = running,
+            .disk = disk orelse return error.TransferStorageState,
+        };
     };
     return found orelse error.TransferMachineIdentity;
 }
@@ -160,7 +266,15 @@ fn parseMachine(a: A, bytes: []const u8, gcp: bool, power: bool) !Machine {
     if (labels != .object) return error.TransferMachineIdentity;
     const form = try string(labels.object.get(howl.form_tag));
     const status = if (power) try string(object.get("status")) else "";
-    const running = if (!power) false else if (mem.eql(u8, status, if (gcp) "RUNNING" else "VM running")) true else if (mem.eql(u8, status, if (gcp) "TERMINATED" else "VM deallocated") or (!gcp and mem.eql(u8, status, "VM stopped"))) false else return error.TransferMachineState;
+    const running = if (!power) false else if (mem.eql(
+        u8,
+        status,
+        if (gcp) "RUNNING" else "VM running",
+    )) true else if (mem.eql(
+        u8,
+        status,
+        if (gcp) "TERMINATED" else "VM deallocated",
+    ) or (!gcp and mem.eql(u8, status, "VM stopped"))) false else return error.TransferMachineState;
     var disk: ?[]const u8 = null;
     if (gcp) {
         const disks = object.get("disks") orelse return error.TransferStorageState;
@@ -174,7 +288,12 @@ fn parseMachine(a: A, bytes: []const u8, gcp: bool, power: bool) !Machine {
             disk = try string(entry.object.get("source"));
         }
     } else disk = try string(object.get("disk"));
-    return .{ .id = id, .form = form, .running = running, .disk = disk orelse return error.TransferStorageState };
+    return .{
+        .id = id,
+        .form = form,
+        .running = running,
+        .disk = disk orelse return error.TransferStorageState,
+    };
 }
 
 fn string(value: ?std.json.Value) ![]const u8 {
@@ -189,19 +308,38 @@ test "AWS requires one enrolled instance with attached root storage and stable p
     defer arena.deinit();
     const a = arena.allocator();
     const prefix = "{\"Reservations\":[{\"Instances\":[";
-    const vm = "{\"InstanceId\":\"i-a\",\"State\":{\"Name\":\"stopped\"},\"RootDeviceName\":\"/dev/xvda\",\"Tags\":[{\"Key\":\"werewolf-form\",\"Value\":\"plex\"}],\"BlockDeviceMappings\":[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"VolumeId\":\"vol-a\",\"Status\":\"attached\"}}]}";
+    const vm = "{\"InstanceId\":\"i-a\",\"State\":{\"Name\":\"stopped\"},\"RootDeviceName\":\"/d" ++
+        "ev/xvda\",\"Tags\":[{\"Key\":\"werewolf-form\",\"Value\":\"plex\"}],\"BlockDeviceMappin" ++
+        "gs\":[{\"DeviceName\":\"/dev/xvda\",\"Ebs\":{\"VolumeId\":\"vol-a\",\"Status\":\"attach" ++
+        "ed\"}}]}";
     const suffix = "]}]}";
     const fixture = prefix ++ vm ++ suffix;
     const machine = try parseAws(a, fixture, true);
     try t.expect(!machine.running);
     try t.expectEqualStrings("i-a", machine.id);
     try t.expectEqualStrings("vol-a", machine.disk);
-    try t.expect((try parseAws(a, try mem.replaceOwned(u8, a, fixture, "stopped", "running"), true)).running);
-    try t.expectError(error.TransferMachineState, parseAws(a, try mem.replaceOwned(u8, a, fixture, "stopped", "stopping"), true));
-    try t.expectError(error.TransferStorageState, parseAws(a, try mem.replaceOwned(u8, a, fixture, "attached", "detaching"), true));
-    try t.expectError(error.TransferMachineIdentity, parseAws(a, try mem.replaceOwned(u8, a, fixture, "werewolf-form", "unrelated"), true));
+    try t.expect((try parseAws(
+        a,
+        try mem.replaceOwned(u8, a, fixture, "stopped", "running"),
+        true,
+    )).running);
+    try t.expectError(
+        error.TransferMachineState,
+        parseAws(a, try mem.replaceOwned(u8, a, fixture, "stopped", "stopping"), true),
+    );
+    try t.expectError(
+        error.TransferStorageState,
+        parseAws(a, try mem.replaceOwned(u8, a, fixture, "attached", "detaching"), true),
+    );
+    try t.expectError(
+        error.TransferMachineIdentity,
+        parseAws(a, try mem.replaceOwned(u8, a, fixture, "werewolf-form", "unrelated"), true),
+    );
     try t.expectError(error.TransferMachineIdentity, parseAws(a, "{\"Reservations\":[]}", true));
-    try t.expectError(error.TransferMachineIdentity, parseAws(a, try mem.concat(a, u8, &.{ prefix, vm, ",", vm, suffix }), true));
+    try t.expectError(
+        error.TransferMachineIdentity,
+        parseAws(a, try mem.concat(a, u8, &.{ prefix, vm, ",", vm, suffix }), true),
+    );
 }
 
 test "cloud power state is authoritative and ambiguous boot storage refuses" {
@@ -209,13 +347,30 @@ test "cloud power state is authoritative and ambiguous boot storage refuses" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const gcp = "{\"id\":\"123\",\"status\":\"TERMINATED\",\"labels\":{\"werewolf-form\":\"plex\"},\"disks\":[{\"boot\":true,\"source\":\"disk\"}]}";
+    const gcp = "{\"id\":\"123\",\"status\":\"TERMINATED\",\"labels\":{\"werewolf-form\":\"plex" ++
+        "\"},\"disks\":[{\"boot\":true,\"source\":\"disk\"}]}";
     try t.expect(!(try parse(a, gcp, true)).running);
-    const azure = "{\"id\":\"uuid\",\"status\":\"VM running\",\"labels\":{\"werewolf-form\":\"plex\"},\"disk\":\"disk\"}";
+    const azure = "{\"id\":\"uuid\",\"status\":\"VM running\",\"labels\":{\"werewolf-form\":\"pl" ++
+        "ex\"},\"disk\":\"disk\"}";
     try t.expect((try parse(a, azure, false)).running);
     try t.expectError(error.TransferMachineState, parse(a, "{}", true));
-    try t.expectError(error.TransferMachineState, parse(a, "{\"id\":\"1\",\"status\":\"STAGING\",\"labels\":{\"werewolf-form\":\"plex\"}}", true));
-    try t.expectError(error.TransferStorageState, parse(a, "{\"id\":\"1\",\"status\":\"RUNNING\",\"labels\":{\"werewolf-form\":\"plex\"},\"disks\":[{\"boot\":true,\"source\":\"a\"},{\"boot\":true,\"source\":\"b\"}]}", true));
+    try t.expectError(
+        error.TransferMachineState,
+        parse(
+            a,
+            "{\"id\":\"1\",\"status\":\"STAGING\",\"labels\":{\"werewolf-form\":\"plex\"}}",
+            true,
+        ),
+    );
+    try t.expectError(
+        error.TransferStorageState,
+        parse(
+            a,
+            "{\"id\":\"1\",\"status\":\"RUNNING\",\"labels\":{\"werewolf-form\":\"plex\"},\"disk" ++
+                "s\":[{\"boot\":true,\"source\":\"a\"},{\"boot\":true,\"source\":\"b\"}]}",
+            true,
+        ),
+    );
 }
 
 test "cloud context is recorded locally and cannot change provider" {
@@ -233,14 +388,36 @@ test "cloud context is recorded locally and cannot change provider" {
         .spec = .{ .form = "plex", .arch = .aarch64 },
         .managed = false,
         .provider = .gcp,
-        .cloud = .{ .gcp = .{ .project = "owner-project", .zone = "owner-zone", .id = "123", .form = "plex" } },
+        .cloud = .{ .gcp = .{
+            .project = "owner-project",
+            .zone = "owner-zone",
+            .id = "123",
+            .form = "plex",
+        } },
     };
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "authority/profile.json", .data = try std.json.Stringify.valueAlloc(a, profile, .{}) });
+    try tmp.dir.writeFile(
+        t.io,
+        .{
+            .sub_path = "authority/profile.json",
+            .data = try std.json.Stringify.valueAlloc(a, profile, .{}),
+        },
+    );
     const context = try load(t.io, a, at, .gcp);
     try t.expectEqualStrings("owner-project", context.gcp.project);
     try t.expectEqualStrings("123", context.gcp.id);
     try t.expectError(error.TransferMachineIdentity, load(t.io, a, at, .azure));
-    profile.cloud = .{ .azure = .{ .group = "rg", .location = "westus", .id = "uuid", .form = "plex" } };
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "authority/profile.json", .data = try std.json.Stringify.valueAlloc(a, profile, .{}) });
+    profile.cloud = .{ .azure = .{
+        .group = "rg",
+        .location = "westus",
+        .id = "uuid",
+        .form = "plex",
+    } };
+    try tmp.dir.writeFile(
+        t.io,
+        .{
+            .sub_path = "authority/profile.json",
+            .data = try std.json.Stringify.valueAlloc(a, profile, .{}),
+        },
+    );
     try t.expectError(error.TransferMachineIdentity, load(t.io, a, at, .gcp));
 }

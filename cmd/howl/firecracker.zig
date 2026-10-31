@@ -581,7 +581,11 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
 }
 
 pub fn supervised(io: Io, gpa: Allocator, dir: []const u8) !bool {
-    const guard = Dir.cwd().openFile(io, try gpa.print("{s}/firecracker.lock", .{dir}), .{ .mode = .read_write }) catch |err| switch (err) {
+    const guard = Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/firecracker.lock", .{dir}),
+        .{ .mode = .read_write },
+    ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -930,7 +934,11 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
             pinned = true;
         } else if (mem.eql(u8, args[i], "--guard") and handoff == null and i + 1 < args.len) {
             i += 1;
-            const fd = std.fmt.parseInt(std.posix.fd_t, args[i], 10) catch return error.FirecrackerGuard;
+            const fd = std.fmt.parseInt(
+                std.posix.fd_t,
+                args[i],
+                10,
+            ) catch return error.FirecrackerGuard;
             if (fd < 3) return error.FirecrackerGuard;
             handoff = .{ .handle = fd, .flags = .{ .nonblocking = false } };
         } else return error.FirecrackerArguments;
@@ -942,7 +950,11 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool, handoff: ?Io.
     const launch_guard = handoff orelse try @import("data-cloud.zig").guard(io, gpa, dir);
     var inherited = true;
     defer if (inherited) launch_guard.close(io);
-    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/firecracker.lock", .{dir}), .{ .truncate = false, .permissions = .fromMode(0o600) });
+    const guard = try Dir.cwd().createFile(
+        io,
+        try gpa.print("{s}/firecracker.lock", .{dir}),
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    );
     defer guard.close(io);
     if (!try guard.tryLock(io, .exclusive)) return error.FirecrackerAlreadyRunning;
     defer guard.unlock(io);
@@ -1031,7 +1043,10 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8, pinned: bool, handoff: ?Io.
                 "the guest asked to reboot" },
         ) catch unreachable) catch {};
         if (code != 0 or halted) return;
-        if (Dir.cwd().access(io, try gpa.print("{s}/stop-request", .{dir}), .{})) |_| return else |err| if (err != error.FileNotFound) return err;
+        if (Dir.cwd().access(io, try gpa.print("{s}/stop-request", .{dir}), .{})) |_|
+            return
+        else |err| if (err != error.FileNotFound)
+            return err;
         Dir.cwd().access(io, config_tar, .{}) catch return;
     }
 }

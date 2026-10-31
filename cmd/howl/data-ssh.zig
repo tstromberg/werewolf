@@ -9,7 +9,120 @@ const Dir = Io.Dir;
 const A = std.mem.Allocator;
 pub const Endpoint = struct { host: []const u8, port: u16 = 22 };
 
-fn arguments(
+/// Send an archive over an authenticated, pinned connection. The guest's
+/// confined decoder validates it against the destination's own policy.
+pub fn restore(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    service: ?[]const u8,
+    identity: ?[]const u8,
+    archive: []const u8,
+    why: *howl.Why,
+) !void {
+    const port = switch (on) {
+        .qemu => @import("qemu.zig").record(
+            io,
+            a,
+            at,
+            "ssh",
+        ) orelse return error.TransferSshAddress,
+        .lima => @import("lima.zig").sshPort(io, a, name) orelse return error.TransferSshAddress,
+        .aws, .gcp, .azure, .firecracker => "22",
+        else => return error.TransferProvider,
+    };
+    if (try std.fmt.parseUnsigned(u16, port, 10) == 0) return error.TransferSshAddress;
+    const host = if (cloud.supported(on))
+        try cloud.address(io, a, name, try cloud.load(io, a, at, on))
+    else if (on == .firecracker)
+        (try @import("firecracker.zig").net(a, name)).guest
+    else
+        "127.0.0.1";
+    if (!howl.isIp4(host)) return error.TransferSshAddress;
+    const known = try a.print("{s}/known_hosts", .{at});
+    const pin = try std.process.run(a, io, .{
+        .argv = &.{ "ssh-keygen", "-F", name, "-f", known },
+        .stdout_limit = .limited(64 << 10),
+        .stderr_limit = .limited(4096),
+    });
+    if (!pin.term.success() or pin.stdout.len == 0) return why.refuse(
+        "{s}: transfer requires an existing host key pin in {s}",
+        .{ name, known },
+    );
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(a, &.{
+        "ssh",
+        "-F",
+        "/dev/null",
+        "-S",
+        "none",
+        "-T",
+        "-a",
+        "-p",
+        port,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        try a.print("UserKnownHostsFile={s}", .{known}),
+        "-o",
+        try a.print("HostKeyAlias={s}", .{name}),
+        "-o",
+        "Compression=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "LogLevel=ERROR",
+    });
+    if (identity) |path| {
+        try args.appendSlice(a, &.{ "-i", path, "-o", "IdentitiesOnly=yes" });
+    } else if (howl.environ.get("HOME")) |home| {
+        for (try @import("keys.zig").securityIdentities(
+            io,
+            a,
+            try a.print("{s}/.ssh", .{home}),
+        )) |path|
+            try args.appendSlice(a, &.{ "-i", path });
+    }
+    try args.appendSlice(a, &.{ try a.print("root@{s}", .{host}), "import-v1" });
+    if (service) |name_of_service| try args.append(a, name_of_service);
+    const input = try Dir.cwd().openFile(io, archive, .{});
+    defer input.close(io);
+    if ((try input.stat(io)).kind != .file) return error.TransferFileType;
+    var child = try std.process.spawn(io, .{
+        .argv = args.items,
+        .stdin = .{ .file = input },
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    defer child.kill(io);
+    const Event = union(enum) {
+        done: anyerror!std.process.Child.Term,
+        deadline: Io.Cancelable!void,
+    };
+    var events: [2]Event = undefined;
+    var select = Io.Select(Event).init(io, &events);
+    defer select.cancelDiscard();
+    try select.concurrent(.done, std.process.Child.wait, .{ &child, io });
+    try select.concurrent(.deadline, Io.sleep, .{ io, Io.Duration.fromSeconds(12 * 3600), .awake });
+    switch (try select.await()) {
+        .done => |result| if (!(try result).success()) return error.TransferSshInstall,
+        .deadline => return error.TransferTimeout,
+    }
+}
+
+pub fn capture(
     io: Io,
     a: A,
     name: []const u8,
@@ -102,7 +215,10 @@ fn arguments(
         )) |path|
             try args.appendSlice(a, &.{ "-i", path });
     }
-    try args.appendSlice(a, &.{ try a.print("root@{s}", .{host}), operation });
+    try args.appendSlice(
+        a,
+        &.{ try a.print("root@{s}", .{host}), "export-v1" },
+    );
     if (service) |name_of_service| try args.append(a, name_of_service);
     return args.toOwnedSlice(a);
 }

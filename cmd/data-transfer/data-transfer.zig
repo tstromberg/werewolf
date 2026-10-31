@@ -135,27 +135,26 @@ fn run(init: std.process.Init) !void {
                 pipe.handle,
                 guard_fd,
             });
-            if (session_mode) {
-                // SSH deliberately lacks SETPCAP and DAC_OVERRIDE. Publication
-                // writes root-owned containers and changes staged ownership.
-                try sandbox.inheritedCapabilities(
-                    (1 << linux.CAP.CHOWN) | (1 << linux.CAP.DAC_READ_SEARCH) |
-                        (1 << linux.CAP.FOWNER),
-                );
-                _ = try sandbox.sys(
-                    linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
-                    "publisher no_new_privs",
-                );
-                try sandbox.refuseExecGain();
-            } else try sandbox.keepOnly(
-                (1 << linux.CAP.CHOWN) | (1 << linux.CAP.DAC_OVERRIDE) | (1 << linux.CAP.FOWNER),
-            );
+            const caps = (1 << linux.CAP.CHOWN) | (1 << linux.CAP.FOWNER) |
+                (1 << linux.CAP.SETGID) |
+                (1 << linux.CAP.DAC_READ_SEARCH);
+            if (session_mode)
+                try sandbox.inheritedCapabilities(caps)
+            else
+                try sandbox.keepOnly(caps | (1 << linux.CAP.DAC_OVERRIDE));
             try sandbox.landlock(
                 &.{.{ .fd = root.handle, .access = sandbox.own_dir | sandbox.refer }},
                 &.{},
             );
             var filter: [seal.max_filter]seal.Filter = undefined;
-            _ = try seal.install(seal.buildPublisherFilter(&filter, @intCast(child.id.?)), false);
+            _ = try seal.install(
+                seal.buildFilter(
+                    &filter,
+                    .initMany(&.{ .stdio, .rpath, .wpath, .proc, .setgid }),
+                    true,
+                ),
+                false,
+            );
             // The decoder never receives a machine-state file descriptor.
             // Drain its pipe with a hard byte limit before parsing records.
             var transfer_buffer: [64 << 10]u8 = undefined;
@@ -398,12 +397,16 @@ fn boundaryProbe(io: Io, root: Dir, stage: Dir, mode: usize) !void {
         _ = linux.close(@intCast(fd));
         try denied(linux.openat(view.handle, "svc/plex/content", .{ .ACCMODE = .RDWR }, 0));
         try denied(linux.openat(view.handle, ".werewolf/secret", .{ .ACCMODE = .RDONLY }, 0));
-        if (mode == 1) try denied(linux.openat(
-            view.handle,
-            "log/secret",
-            .{ .ACCMODE = .RDONLY },
-            0,
-        ));
+        if (mode == 1) {
+            try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0));
+        } else {
+            const log_fd = try sandbox.sys(
+                linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDONLY }, 0),
+                "audit log read",
+            );
+            _ = linux.close(@intCast(log_fd));
+            try denied(linux.openat(view.handle, "log/secret", .{ .ACCMODE = .RDWR }, 0));
+        }
         if (mode == 1) try denied(linux.openat(
             view.handle,
             "svc/plex-media/secret",
@@ -511,7 +514,7 @@ test "SSH publisher installs scoped bytes without SETPCAP or DAC_OVERRIDE" {
         _ = try sandbox.sys(@intCast(linux.lseek(archive.handle, 0, 0)), "rewind archive retry");
         const pid = try sandbox.sys(linux.fork(), "fork SSH publisher test");
         if (pid == 0) {
-            for ([_]u32{ linux.CAP.SETPCAP, linux.CAP.DAC_OVERRIDE }) |cap|
+            for ([_]u32{ linux.CAP.SETPCAP, linux.CAP.DAC_OVERRIDE, linux.CAP.FSETID }) |cap|
                 if (linux.errno(linux.prctl(
                     @backingInt(linux.PR.CAPBSET_DROP),
                     cap,

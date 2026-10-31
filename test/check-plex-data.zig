@@ -148,7 +148,7 @@ fn run(c: *host.Check) !void {
             policy,
             .{ .target = target_path, .service = case.to },
         );
-        for (restored.manifest.entries) |entry| if (data.selected(entry.path, scope)) {
+        for (restored.manifest.entries) |entry| if (data.importSelected(entry.path, scope)) {
             const st = try target.statFile(io, entry.path, .{ .follow_symlinks = false });
             if (st.permissions.toMode() & 0o7777 != entry.mode or
                 st.mtime.nanoseconds != entry.mtime_ns) return error.Metadata;

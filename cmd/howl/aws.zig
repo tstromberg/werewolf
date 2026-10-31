@@ -769,12 +769,10 @@ test "block worker credentials replace stale tokens without changing the owner e
     defer permanent.deinit();
     try testing.expect(permanent.get("AWS_SESSION_TOKEN") == null);
     try testing.expect(permanent.get("AWS_SECURITY_TOKEN") == null);
-    try testing.expectError(
-        error.TransferCloudAuthentication,
-        credentialEnvironment(testing.allocator, &base,
-            \\{"Version":2,"AccessKeyId":"id","SecretAccessKey":"secret"}
-        ),
+    const invalid = credentialEnvironment(testing.allocator, &base,
+        \\{"Version":2,"AccessKeyId":"id","SecretAccessKey":"secret"}
     );
+    try testing.expectError(error.TransferCloudAuthentication, invalid);
 }
 
 test openArgs {

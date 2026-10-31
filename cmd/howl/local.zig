@@ -989,7 +989,7 @@ pub fn createFirecrackerLocked(
                 .provider = .firecracker,
                 .managed = false,
                 .spec = recorded,
-                .local = recorded,
+                .local = spec,
                 .configuration = try @import("boot-config.zig").derive(
                     io,
                     gpa,
