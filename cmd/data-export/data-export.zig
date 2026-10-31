@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) void {
         var line: [256]u8 = undefined;
         const message = std.mem.print(
             &line,
-            "data-export: {s}: {s}; keep application writers down until export exits\n",
+            "data-export: {s}: {s}; keep application writers down until transfer exits\n",
             .{ phase, @errorName(err) },
         ) catch unreachable;
         File.stderr().writeStreamingAll(init.io, message) catch {};
@@ -107,7 +107,8 @@ fn run(init: std.process.Init) !void {
     defer supervision.close(io);
     if (operation.action == .up or operation.action == .down) {
         phase = "service control";
-        if (operation.action == .up and try data.install.blocked(io, root)) return error.TransferPending;
+        if (operation.action == .up and
+            try data.install.blocked(io, root)) return error.TransferPending;
         try serviceRequest(io, a, supervision, service.?, operation.action == .down);
         return;
     }
@@ -183,22 +184,44 @@ fn run(init: std.process.Init) !void {
     try data.supervision.unchanged(io, supervision, stamps);
 }
 
-fn restore(io: Io, a: mem.Allocator, root: Dir, supervision: Dir, policy: data.Policy, service: ?[]const u8, lock: File) !void {
+fn restore(
+    io: Io,
+    a: mem.Allocator,
+    root: Dir,
+    supervision: Dir,
+    policy: data.Policy,
+    service: ?[]const u8,
+    lock: File,
+) !void {
     // Only locally derived policy enters this file. Archive bytes go directly
     // from SSH stdin to the unprivileged decoder, never through this launcher.
     const path = "data-import-policy.json";
     supervision.deleteFile(io, path) catch |err| if (err != error.FileNotFound) return err;
-    const file = try supervision.createFile(io, path, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    const file = try supervision.createFile(
+        io,
+        path,
+        .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    );
     defer file.close(io);
     defer supervision.deleteFile(io, path) catch {};
     const target = try data.install.targetIdentity(io, root);
-    const control: data.WorkerRequest = .{ .policy = policy, .service = service, .target = &target };
+    const control: data.WorkerRequest = .{
+        .policy = policy,
+        .service = service,
+        .target = &target,
+    };
     try file.writeStreamingAll(io, try std.json.Stringify.valueAlloc(a, control, .{}));
     const input = try data.openRegular(io, supervision, path);
     defer input.close(io);
     var env: std.process.Environ.Map = .init(a);
     var child = try std.process.spawn(io, .{
-        .argv = &.{ "/usr/lib/werewolf/data-transfer", "install-session", try a.print("{d}", .{input.handle}), try a.print("{d}", .{root.handle}), try a.print("{d}", .{lock.handle}) },
+        .argv = &.{
+            "/usr/lib/werewolf/data-transfer",
+            "install-session",
+            try a.print("{d}", .{input.handle}),
+            try a.print("{d}", .{root.handle}),
+            try a.print("{d}", .{lock.handle}),
+        },
         .environ_map = &env,
         .stdin = .{ .file = File.stdin() },
         .stdout = .ignore,
@@ -310,6 +333,12 @@ test "import requests accept only one exact optional service" {
     const t = std.testing;
     try t.expectEqual(.restore, (try request("import-v1")).action);
     try t.expectEqualStrings("plex", (try request("import-v1 plex")).service.?);
-    for ([_][]const u8{ "import-v1 ", "import-v1 ../plex", "import-v1 plex extra", "import-v1;id", "import-v1\n" }) |command|
+    for ([_][]const u8{
+        "import-v1 ",
+        "import-v1 ../plex",
+        "import-v1 plex extra",
+        "import-v1;id",
+        "import-v1\n",
+    }) |command|
         if (request(command)) |_| return error.AcceptedCommand else |_| {};
 }

@@ -9,7 +9,7 @@ const Dir = Io.Dir;
 const A = std.mem.Allocator;
 pub const Endpoint = struct { host: []const u8, port: u16 = 22 };
 
-pub fn capture(
+fn arguments(
     io: Io,
     a: A,
     name: []const u8,
@@ -18,16 +18,13 @@ pub fn capture(
     service: ?[]const u8,
     identity: ?[]const u8,
     endpoint: ?Endpoint,
-    work: []const u8,
+    operation: []const u8,
     why: *howl.Why,
-) !data.Policy {
+) ![]const []const u8 {
     const port = if (endpoint) |e| try a.print("{d}", .{e.port}) else switch (on) {
-        .qemu => @import("qemu.zig").record(
-            io,
-            a,
-            at,
-            "ssh",
-        ) orelse return error.TransferSshAddress,
+        .qemu,
+        .bhyve,
+        => @import("qemu.zig").record(io, a, at, "ssh") orelse return error.TransferSshAddress,
         .lima => @import("lima.zig").sshPort(io, a, name) orelse return error.TransferSshAddress,
         .aws, .gcp, .azure => "22",
         .firecracker => "22",
@@ -35,7 +32,12 @@ pub fn capture(
     };
     if (try std.fmt.parseUnsigned(u16, port, 10) == 0) return error.TransferSshAddress;
     const host = if (endpoint) |e| e.host else if (cloud.supported(on))
-        try @import("data-cloud.zig").address(io, a, name, try @import("data-cloud.zig").load(io, a, at, on))
+        try @import("data-cloud.zig").address(
+            io,
+            a,
+            name,
+            try @import("data-cloud.zig").load(io, a, at, on),
+        )
     else if (on == .firecracker)
         (try @import("firecracker.zig").net(a, name)).guest
     else if (on == .bhyve)
@@ -100,14 +102,78 @@ pub fn capture(
         )) |path|
             try args.appendSlice(a, &.{ "-i", path });
     }
-    try args.appendSlice(
-        a,
-        &.{ try a.print("root@{s}", .{if (endpoint) |e| e.host else "127.0.0.1"}), "export-v1" },
-    );
+    try args.appendSlice(a, &.{ try a.print("root@{s}", .{host}), operation });
     if (service) |name_of_service| try args.append(a, name_of_service);
+    return args.toOwnedSlice(a);
+}
+
+pub fn restore(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    service: ?[]const u8,
+    identity: ?[]const u8,
+    endpoint: ?Endpoint,
+    archive: []const u8,
+    why: *howl.Why,
+) !void {
+    const args = try arguments(io, a, name, at, on, service, identity, endpoint, "import-v1", why);
+    const input = try Dir.cwd().openFile(io, archive, .{});
+    defer input.close(io);
+    if ((try input.stat(io)).kind != .file) return error.TransferArguments;
     var child = try std.process.spawn(
         io,
-        .{ .argv = args.items, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit },
+        .{ .argv = args, .stdin = .{ .file = input }, .stdout = .pipe, .stderr = .inherit },
+    );
+    defer child.kill(io);
+    const Event = union(enum) { installed: anyerror!void, deadline: Io.Cancelable!void };
+    var events: [2]Event = undefined;
+    var select = Io.Select(Event).init(io, &events);
+    defer select.cancelDiscard();
+    try select.concurrent(.installed, installed, .{ io, &child });
+    try select.concurrent(.deadline, Io.sleep, .{ io, Io.Duration.fromSeconds(12 * 3600), .awake });
+    switch (try select.await()) {
+        .installed => |result| try result,
+        .deadline => return error.TransferTimeout,
+    }
+    howl.say(io, "{s}: import complete; applications remain stopped", .{name});
+}
+
+fn installed(io: Io, child: *std.process.Child) !void {
+    const pipe = child.stdout.?;
+    child.stdout = null;
+    defer pipe.close(io);
+    var buffer: [128]u8 = undefined;
+    var reader = pipe.readerStreaming(io, &buffer);
+    const message = "import complete; applications remain stopped\n";
+    var response: [message.len]u8 = undefined;
+    try reader.interface.readSliceAll(&response);
+    if (!std.mem.eql(u8, &response, message)) return error.TransferSshProtocol;
+    if (reader.interface.takeByte()) |_|
+        return error.TransferSshProtocol
+    else |err| if (err != error.EndOfStream)
+        return err;
+    if (!(try child.wait(io)).success()) return error.TransferSshImport;
+}
+
+pub fn capture(
+    io: Io,
+    a: A,
+    name: []const u8,
+    at: []const u8,
+    on: howl.Platform,
+    service: ?[]const u8,
+    identity: ?[]const u8,
+    endpoint: ?Endpoint,
+    work: []const u8,
+    why: *howl.Why,
+) !data.Policy {
+    const args = try arguments(io, a, name, at, on, service, identity, endpoint, "export-v1", why);
+    var child = try std.process.spawn(
+        io,
+        .{ .argv = args, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit },
     );
     defer child.kill(io);
     const output = try Dir.cwd().createFile(io, try a.print("{s}/archive.tar.zst", .{work}), .{

@@ -204,17 +204,15 @@ fn serve() noreturn {
     }
 }
 
-/// refreshDomain sends only a validated suffix over a separate private
-/// channel. A config FQDN takes precedence over DHCP; removing both clears
-/// the runtime grant. Neither file is a client-controlled policy message.
+/// refreshDomain sends only a validated boot-config suffix over a separate
+/// private channel. Untrusted DHCP Option 15 domains are ignored so an on-link
+/// DHCP server cannot widen DNS grants or bypass domain-age enforcement.
 fn refreshDomain() void {
     const t = unwound.now();
     if (u.domain_checked) |last| if (t - last < reread_ms) return;
     u.domain_checked = t;
     var chosen: [253]u8 = undefined;
-    // Root writes the config domain; dhcp-client (73), the DHCP one.
-    const configured = readDomain(dns.config_domain_name, 0, &chosen);
-    const len = if (configured > 0) configured else readDomain(dns.dhcp_domain_name, 73, &chosen);
+    const len = readDomain(dns.config_domain_name, 0, &chosen);
     if (u.domain_sent and len == u.domain_len and
         std.mem.eql(u8, chosen[0..len], u.domain[0..u.domain_len])) return;
     var packet: [254]u8 = undefined;

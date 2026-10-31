@@ -17,6 +17,9 @@ const mem = std.mem;
 const peer_ip = "10.77.0.2";
 const wan = "198.51.100.2";
 const client_ip = "10.77.0.1";
+const pub_lan_client = "203.0.113.1";
+const pub_lan_peer = "203.0.113.2";
+const tcp_lan_port: u16 = 8053;
 const groups = [_]struct { u16, []const u8 }{.{ 5353, "224.0.0.251" }};
 const payload = "werewolf-lan-fixture";
 /// Programs under fence run only from /usr: this one is bound there.
@@ -28,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 2 and eql(args[1], "--peer")) return peer(l);
     if (args.len == 2 and eql(args[1], "--probe")) return probe(l);
     if (args.len == 6 and eql(args[1], "--send")) return send(l, args[2..6].*);
+    if (args.len == 5 and eql(args[1], "--tcp-send")) return tcpSend(args[2..5].*);
     if (args.len == 5 and eql(args[1], "--inside")) return inside(l, args[2], args[3], args[4]);
     if (args.len != 2 or args[1][0] == '-') {
         l.log("usage", .{ .usage = "check-lan FENCE" });
@@ -54,10 +58,10 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 /// peer echoes every datagram to an mDNS group's port, joined on the peer's
-/// address, back to its sender.
+/// address, back to its sender, and echoes TCP connections on port 443.
 fn peer(l: netns.Lab) !void {
-    var fds: [groups.len]linux.pollfd = undefined;
-    for (groups, &fds) |g, *p| {
+    var fds: [groups.len + 1]linux.pollfd = undefined;
+    for (groups, fds[0..groups.len]) |g, *p| {
         const fd = try netns.socket(linux.SOCK.DGRAM);
         try netns.listen(fd, "0.0.0.0", g[0], null);
         var membership: [8]u8 = undefined;
@@ -73,11 +77,14 @@ fn peer(l: netns.Lab) !void {
             .SUCCESS) return l.fail("multicast_join_failed", .{ .group = g[1] });
         p.* = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
     }
+    const tcp = try netns.socket(linux.SOCK.STREAM);
+    try netns.listen(tcp, "0.0.0.0", 443, 16);
+    fds[groups.len] = .{ .fd = tcp, .events = linux.POLL.IN, .revents = 0 };
     try netns.writeAll(1, "ready\n");
     while (true) {
         for (&fds) |*p| p.revents = 0;
         if (linux.errno(linux.poll(&fds, fds.len, -1)) != .SUCCESS) continue;
-        for (fds) |p| if (p.revents != 0) {
+        for (fds[0..groups.len]) |p| if (p.revents != 0) {
             var data: [2048]u8 = undefined;
             var from: linux.sockaddr.in = undefined;
             var len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
@@ -91,7 +98,38 @@ fn peer(l: netns.Lab) !void {
                 len,
             );
         };
+        if (fds[groups.len].revents != 0) echoAccepted(tcp);
     }
+}
+
+fn echoAccepted(listener: linux.fd_t) void {
+    const conn_rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
+    if (linux.errno(conn_rc) != .SUCCESS) return;
+    const conn: linux.fd_t = @intCast(conn_rc);
+    defer netns.close(conn);
+    netns.limit(conn, 600);
+    var data: [256]u8 = undefined;
+    const n = linux.read(conn, &data, data.len);
+    if (linux.errno(n) == .SUCCESS and n > 0) netns.writeAll(conn, data[0..n]) catch {};
+}
+
+/// tcpSend connects from FROM to TO:PORT in the peer namespace and prints
+/// `received` on echoed payload or `lost` on timeout/failure.
+fn tcpSend(args: [3][:0]const u8) !void {
+    const fd = try netns.socket(linux.SOCK.STREAM);
+    defer netns.close(fd);
+    netns.limit(fd, 600);
+    const from = try netns.address(args[0], 0);
+    if (linux.errno(linux.bind(fd, @ptrCast(&from), @sizeOf(@TypeOf(from)))) != .SUCCESS)
+        return netns.writeAll(1, "lost\n");
+    const to = try netns.address(args[1], try std.fmt.parseInt(u16, args[2], 10));
+    if (linux.errno(linux.connect(fd, @ptrCast(&to), @sizeOf(@TypeOf(to)))) != .SUCCESS)
+        return netns.writeAll(1, "lost\n");
+    netns.writeAll(fd, payload) catch return netns.writeAll(1, "lost\n");
+    var data: [64]u8 = undefined;
+    const n = linux.read(fd, &data, data.len);
+    const ok = linux.errno(n) == .SUCCESS and eql(data[0..n], payload);
+    try netns.writeAll(1, if (ok) "received\n" else "lost\n");
 }
 
 /// send sends the payload from ADDRESS:SOURCE to CLIENT:PORT, in the peer.
@@ -116,6 +154,18 @@ fn send(l: netns.Lab, args: [4][:0]const u8) !void {
 /// `received`, or `lost ERRNO` (0 when nothing came). A child drops to UID
 /// for each; the probe starts no threads, so that child may run Zig.
 fn probe(l: netns.Lab) !void {
+    // Bind and serve the LAN TCP port under fence's Landlock domain.
+    const lan_listener = try netns.socket(linux.SOCK.STREAM);
+    try netns.listen(lan_listener, "0.0.0.0", tcp_lan_port, 16);
+    const parent = linux.getpid();
+    const srv_rc = linux.fork();
+    if (linux.errno(srv_rc) != .SUCCESS) return error.ForkFailed;
+    if (srv_rc == 0) {
+        _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0);
+        if (linux.getppid() != parent) linux.exit_group(0);
+        while (true) echoAccepted(lan_listener);
+    }
+    netns.close(lan_listener);
     try netns.writeAll(1, "ready\n");
     const requests = try l.gpa.create(netns.Lines);
     requests.* = .{ .fd = 0 };
@@ -127,17 +177,22 @@ fn probe(l: netns.Lab) !void {
         var words = mem.tokenizeScalar(u8, line, ' ');
         const kind = words.next() orelse return error.BadRequest;
         const uid = try std.fmt.parseInt(u32, words.next() orelse return error.BadRequest, 10);
+        const tcp_out = eql(kind, "tcp-out");
         var to: ?linux.sockaddr.in = null;
-        if (eql(kind, "out")) {
+        if (eql(kind, "out") or tcp_out) {
             const address = words.next() orelse return error.BadRequest;
             to = try netns.address(address, try std.fmt.parseInt(u16, words.next() orelse
                 return error.BadRequest, 10));
         } else if (!eql(kind, "in")) return error.BadRequest;
-        const source = try std.fmt.parseInt(u16, words.next() orelse return error.BadRequest, 10);
+        const source = if (tcp_out) 0 else try std.fmt.parseInt(
+            u16,
+            words.next() orelse return error.BadRequest,
+            10,
+        );
         const rc = linux.fork();
         if (linux.errno(rc) != .SUCCESS) return error.ForkFailed;
         if (rc == 0) {
-            const lost = attempt(uid, to, source);
+            const lost = if (tcp_out) attemptTcp(uid, to.?) else attempt(uid, to, source);
             var buf: [32]u8 = undefined;
             const text = if (lost) |e|
                 std.mem.print(&buf, "lost {d}\n", .{e}) catch unreachable
@@ -151,9 +206,8 @@ fn probe(l: netns.Lab) !void {
     }
 }
 
-/// attempt runs one request as uid, in a forked child: it returns null if
-/// the payload arrived, else the errno that stopped it, or 0 for silence.
-fn attempt(uid: u32, to: ?linux.sockaddr.in, source: u16) ?u16 {
+fn dropUid(uid: u32) ?u16 {
+    if (uid == 0) return null;
     // An unprivileged user namespace may deny setgroups.
     const none: [0]linux.gid_t = .{};
     const groups_rc = linux.errno(linux.setgroups(0, &none));
@@ -161,10 +215,34 @@ fn attempt(uid: u32, to: ?linux.sockaddr.in, source: u16) ?u16 {
     var rc = linux.setgid(uid);
     if (linux.errno(rc) == .SUCCESS) rc = linux.setuid(uid);
     if (linux.errno(rc) != .SUCCESS) return @backingInt(linux.errno(rc));
+    return null;
+}
+
+fn attemptTcp(uid: u32, to: linux.sockaddr.in) ?u16 {
+    if (dropUid(uid)) |e| return e;
+    const fd = netns.socket(linux.SOCK.STREAM) catch return @backingInt(linux.E.MFILE);
+    defer netns.close(fd);
+    netns.limit(fd, 600);
+    const rc = linux.connect(fd, @ptrCast(&to), @sizeOf(@TypeOf(to)));
+    if (linux.errno(rc) != .SUCCESS) return @backingInt(linux.errno(rc));
+    netns.writeAll(fd, payload) catch return 0;
+    var data: [64]u8 = undefined;
+    const n = linux.read(fd, &data, data.len);
+    return switch (linux.errno(n)) {
+        .SUCCESS => if (eql(data[0..n], payload)) null else 0,
+        .AGAIN => 0,
+        else => |e| @backingInt(e),
+    };
+}
+
+/// attempt runs one request as uid, in a forked child: it returns null if
+/// the payload arrived, else the errno that stopped it, or 0 for silence.
+fn attempt(uid: u32, to: ?linux.sockaddr.in, source: u16) ?u16 {
+    if (dropUid(uid)) |e| return e;
     const fd = netns.socket(linux.SOCK.DGRAM) catch return @backingInt(linux.E.MFILE);
     netns.limit(fd, 600);
     const here = netns.address("0.0.0.0", source) catch unreachable;
-    rc = linux.bind(fd, @ptrCast(&here), @sizeOf(@TypeOf(here)));
+    var rc = linux.bind(fd, @ptrCast(&here), @sizeOf(@TypeOf(here)));
     if (linux.errno(rc) != .SUCCESS) return @backingInt(linux.errno(rc));
     if (to) |t| {
         rc = linux.sendto(fd, payload, payload.len, 0, @ptrCast(&t), @sizeOf(@TypeOf(t)));
@@ -224,15 +302,20 @@ fn inside(l: netns.Lab, fence: []const u8, parent_net: []const u8, parent_mnt: [
         "listen 207 udp {d} lan\nconnect 207 udp {d} lan\n",
         .{ g[0], g[0] },
     );
-    try policy.appendSlice(l.gpa, "connect 207 udp 53\n");
+    try policy.print(
+        l.gpa,
+        "connect 207 udp 53\nlisten tcp {d} lan\nconnect 207 tcp 443 public\n",
+        .{tcp_lan_port},
+    );
     try l.write("/usr/share/werewolf/net", policy.items);
     try l.veth(.{
         .peer = "lan-peer",
         .client = client_ip ++ "/24",
-        .addresses = &.{ peer_ip ++ "/24", wan ++ "/32" },
+        .addresses = &.{ peer_ip ++ "/24", pub_lan_peer ++ "/24", wan ++ "/32" },
         .gateway = peer_ip,
         .peer_default = true,
     });
+    try l.run(&.{ "ip", "addr", "add", pub_lan_client ++ "/24", "dev", "client" });
 
     var t: Lan = .{ .l = l, .replies = try l.gpa.create(netns.Lines) };
     defer t.deinit();
@@ -310,5 +393,48 @@ fn inside(l: netns.Lab, fence: []const u8, parent_net: []const u8, parent_mnt: [
             count += 1;
         }
     }
-    l.log("pass", .{ .checks = count, .what = "real-kernel LAN discovery allow/deny checks" });
+    for ([_]struct { []const u8, bool }{
+        .{ peer_ip, true },
+        .{ pub_lan_peer, true },
+        .{ wan, false },
+    }) |in_tcp| {
+        const out = try l.output(&.{
+            "ip",                                    "netns",
+            "exec",                                  "lan-peer",
+            installed,                               "--tcp-send",
+            in_tcp[0],                               client_ip,
+            try l.gpa.print("{d}", .{tcp_lan_port}),
+        });
+        if (eql(mem.trim(u8, out, " \n"), "received") != in_tcp[1]) return l.fail("tcp_lan_in", .{
+            .from = in_tcp[0],
+            .allowed = in_tcp[1],
+            .got = out,
+        });
+        count += 1;
+    }
+    for ([_]struct { u32, []const u8, u16, bool }{
+        .{ 207, wan, 443, true },
+        .{ 207, peer_ip, 443, false },
+        .{ 207, pub_lan_peer, 443, false },
+        .{ 207, pub_lan_client, 443, false },
+        .{ 0, "127.0.0.1", tcp_lan_port, true },
+        .{ 0, client_ip, tcp_lan_port, true },
+        .{ 208, "127.0.0.1", tcp_lan_port, true },
+        .{ 208, client_ip, tcp_lan_port, false },
+        .{ 1000, "127.0.0.1", tcp_lan_port, false },
+        .{ 1000, client_ip, tcp_lan_port, false },
+    }) |tc| {
+        const uid, const address, const port, const allowed = tc;
+        const got = try t.ask(try l.gpa.print("tcp-out {d} {s} {d}", .{ uid, address, port }));
+        const refused = eql(got, "lost 13") or eql(got, "lost 1");
+        if (eql(got, "received") != allowed or (!allowed and !refused)) return l.fail("tcp_out", .{
+            .uid = uid,
+            .address = address,
+            .port = port,
+            .allowed = allowed,
+            .got = got,
+        });
+        count += 1;
+    }
+    l.log("pass", .{ .checks = count, .what = "real-kernel LAN and local routing checks" });
 }

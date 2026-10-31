@@ -113,9 +113,11 @@ fn exercise(l: Lab, broker: *netns.Child, clients: [3]linux.fd_t) !void {
     try exchange(l, keeper, "shutdown", "no NotStageThree\n");
     try exchange(l, stage, "reboot", "no NotSlotService\n");
     try exchange(l, updater, "reboot extra", "no BadRequest\n");
+    try exchange(l, updater, "reboot", "no UnauthorizedPeer\n");
+    try exchange(l, keeper, "esp-status", "no UnauthorizedPeer\n");
     try exchange(l, updater, &@as([1025]u8, @splat('x')), "no BadRequest\n");
     try exchange(l, updater, "owner-channel", "ok none\n");
-    l.log("pass", .{ .what = "role restrictions, exact requests, oversized packets, recovery" });
+    l.log("pass", .{ .what = "role, peer credential, exact request and oversized packet checks" });
     // Stop reading replies: fill the broker's send queue without filling its
     // log or touching a device or file.
     try stall(l, updater, "owner-channel");

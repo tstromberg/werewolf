@@ -211,7 +211,12 @@ pub fn createGcp(
         const image = try gcp.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.zone });
         try gcp.create(io, gpa, p, name, o.form, c.arch, o.size, image, c.b64, why);
-        try @import("data-cloud.zig").capture(io, gpa, name, .{ .gcp = .{ .project = p.project, .zone = p.zone, .id = "" } });
+        try @import("data-cloud.zig").capture(
+            io,
+            gpa,
+            name,
+            .{ .gcp = .{ .project = p.project, .zone = p.zone, .id = "" } },
+        );
         made = true;
     }
     switch (try gcp.awaitUp(io, gpa, p, name)) {
@@ -268,7 +273,12 @@ pub fn createAws(
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
-        try @import("data-cloud.zig").capture(io, gpa, name, .{ .aws = .{ .region = p.region, .id = id } });
+        try @import("data-cloud.zig").capture(
+            io,
+            gpa,
+            name,
+            .{ .aws = .{ .region = p.region, .id = id } },
+        );
         made = true;
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {
@@ -330,7 +340,12 @@ pub fn createAzure(
     const image = try azure.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
     say(io, "{s}: starting it in {s}, {s}", .{ name, p.group, p.location });
     try azure.create(io, gpa, p, name, o.form, c.arch, o.size, image, tar_path, why);
-    try @import("data-cloud.zig").capture(io, gpa, name, .{ .azure = .{ .group = p.group, .location = p.location, .id = "" } });
+    try @import("data-cloud.zig").capture(
+        io,
+        gpa,
+        name,
+        .{ .azure = .{ .group = p.group, .location = p.location, .id = "" } },
+    );
     try azureUp(io, gpa, p, name, o.form, "", w, why);
     try sayOpen(io, gpa, name, o.form, azure, p, o.allow_from, why);
 }
@@ -361,28 +376,63 @@ fn azureUp(
     try w.print("{s}\t{s}\t{s}\n", .{ name, azure.address(io, gpa, p, name) orelse "?", form });
 }
 
-/// upload is howl upload DISK --on gcp|aws|azure. It makes a release's
-/// FORM-ARCH-disk.qcow2 a GCP image, an AMI or an Azure managed disk, as
-/// create does, for VMs made some other way (Terraform, the console), and
-/// prints the image name or AMI id. An Azure disk serves one VM, so copy it
-/// for each (az disk create --source).
-pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
-    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|") ++
-        " --disable=" ++ howl.every_protection;
-    const launch = try howl.launchFlags(gpa, given, why);
-    if (launch.protected()) return why.refuse(
+/// diskProtected reports whether disk carries a signed release's boot
+/// diskProtected reports whether a FORM-ARCH-disk.qcow2 release has a signed
+/// UKI and boot certificate beside it without disabled protections in its
+/// cmdline sidecar.
+fn diskProtected(io: Io, gpa: Allocator, disk: []const u8) bool {
+    const base = std.fs.path.basename(disk);
+    if (!std.mem.endsWith(u8, base, "-disk.qcow2")) return false;
+    const stem = base[0 .. base.len - "-disk.qcow2".len];
+    const dir = std.fs.path.dirname(disk) orelse ".";
+    for ([_][]const u8{ "boot.crt", "uki" }) |ext| {
+        const sidecar = gpa.print("{s}/{s}-{s}", .{ dir, stem, ext }) catch return false;
+        Dir.cwd().access(io, sidecar, .{}) catch return false;
+    }
+    const cmd_path = gpa.print("{s}/{s}-cmdline", .{ dir, stem }) catch return false;
+    const text = Dir.cwd().readFileAlloc(io, cmd_path, gpa, .limited(8192)) catch return false;
+    return std.mem.find(u8, text, "werewolf.disable=") == null;
+}
+
+fn checkUploadProtection(
+    io: Io,
+    gpa: Allocator,
+    disk: []const u8,
+    protected: bool,
+    why: *Why,
+) !void {
+    const signed_disk = diskProtected(io, gpa, disk);
+    if (protected and !signed_disk) return why.refuse(
         "a raw disk cannot bring Secure Boot, the TPM or IPE with it: create with a signed " ++
             "image, or give them up: --disable=" ++ howl.every_protection,
         .{},
     );
+    if (!protected and signed_disk) return why.refuse(
+        "{s}: signed release disk carries its Secure Boot certificate; omit --disable to " ++
+            "enroll it, or build an unprotected disk first",
+        .{disk},
+    );
+}
+
+/// upload is howl upload DISK --on gcp|aws|azure. It makes a release's
+/// FORM-ARCH-disk.qcow2 a GCP image, an AMI or an Azure gallery image (or
+/// managed disk when --disable=secureboot,tpm,ipe is given), as create does,
+/// for VMs made some other way (Terraform, the console), and prints the image
+/// name, gallery version or AMI id.
+pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|") ++
+        " [--disable=" ++ howl.every_protection ++ "]";
+    const launch = try howl.launchFlags(gpa, given, why);
     const args = launch.args;
     if (args.len < 2) return why.refuse(syntax, .{});
+    const disk = args[0];
+    const protected = launch.protected();
+    try checkUploadProtection(io, gpa, disk, protected, why);
     var i: usize = 1;
     const flag, const value = try flagValue(args, &i, why);
     const on = std.meta.stringToEnum(Platform, value) orelse .disk;
     if (i + 1 != args.len or !std.mem.eql(u8, flag, "--on") or !on.is(.cloud))
         return why.refuse(syntax, .{});
-    const disk = args[0];
     const base = std.fs.path.basename(disk);
     const stem = if (std.mem.endsWith(u8, base, "-disk.qcow2"))
         base[0 .. base.len - "-disk.qcow2".len]
@@ -412,17 +462,14 @@ pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !voi
     try Dir.cwd().createDirPath(io, work);
     defer Dir.cwd().deleteTree(io, work) catch {};
     const image = switch (on) {
-        .azure => try azure.ensureImage(
-            io,
-            gpa,
-            try azure.place(io, gpa, why),
-            form,
-            arch,
-            disk,
-            work,
-            why,
-        ),
-        .aws => try aws.ensureImage(
+        .azure => blk: {
+            const p = try azure.place(io, gpa, why);
+            break :blk if (protected)
+                try azure.ensureImage(io, gpa, p, form, arch, disk, work, why)
+            else
+                try azure.ensureDisk(io, gpa, p, form, arch, disk, work, why);
+        },
+        .aws => try aws.ensureImageMode(
             io,
             gpa,
             try aws.place(io, gpa, why),
@@ -430,9 +477,10 @@ pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !voi
             arch,
             disk,
             work,
+            protected,
             why,
         ),
-        .gcp => try gcp.ensureImage(
+        .gcp => try gcp.ensureImageMode(
             io,
             gpa,
             try gcp.place(io, gpa, why),
@@ -440,6 +488,7 @@ pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !voi
             arch,
             disk,
             work,
+            protected,
             why,
         ),
         else => unreachable,
@@ -506,4 +555,52 @@ test "--allow-from is create's, for the clouds alone" {
         "0.0.0.0/0",
         try allowSource(testing.io, gpa, "0.0.0.0/0", &why),
     );
+}
+
+test "upload protection matches signed and unprotected release disks" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    const disk = try gpa.print("{s}/minimal-aarch64-disk.qcow2", .{root});
+    try Dir.cwd().writeFile(testing.io, .{ .sub_path = disk, .data = "qcow2" });
+    var why: Why = .{};
+
+    // Unsigned disk without --disable is refused, with --disable is accepted.
+    try testing.expectError(
+        error.Refused,
+        checkUploadProtection(testing.io, gpa, disk, true, &why),
+    );
+    try testing.expect(std.mem.find(u8, why.text, "cannot bring Secure Boot") != null);
+    try checkUploadProtection(testing.io, gpa, disk, false, &why);
+
+    // Signed protected disk is accepted by default and refuses --disable.
+    try Dir.cwd().writeFile(testing.io, .{
+        .sub_path = try gpa.print("{s}/minimal-aarch64-boot.crt", .{root}),
+        .data = "cert",
+    });
+    try Dir.cwd().writeFile(testing.io, .{
+        .sub_path = try gpa.print("{s}/minimal-aarch64-uki", .{root}),
+        .data = "uki",
+    });
+    const cmd_path = try gpa.print("{s}/minimal-aarch64-cmdline", .{root});
+    try Dir.cwd().writeFile(testing.io, .{ .sub_path = cmd_path, .data = "ro quiet\n" });
+    try checkUploadProtection(testing.io, gpa, disk, true, &why);
+    try testing.expectError(
+        error.Refused,
+        checkUploadProtection(testing.io, gpa, disk, false, &why),
+    );
+
+    // A disk whose cmdline carries werewolf.disable= is not treated as protected.
+    try Dir.cwd().writeFile(testing.io, .{
+        .sub_path = cmd_path,
+        .data = "ro werewolf.disable=secureboot,tpm,ipe\n",
+    });
+    try testing.expectError(
+        error.Refused,
+        checkUploadProtection(testing.io, gpa, disk, true, &why),
+    );
+    try checkUploadProtection(testing.io, gpa, disk, false, &why);
 }

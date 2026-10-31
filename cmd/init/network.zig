@@ -117,13 +117,17 @@ fn routerAdvertisements(m: *Machine, nic: []const u8) void {
         for ([_][2][]const u8{
             .{ "accept_ra_rtr_pref", "0" },
             .{ "accept_ra_rt_info_max_plen", "0" },
+            .{ "accept_ra_mtu", "0" },
             .{ "max_addresses", "4" },
         }) |kv| {
             if (!writeFile(m.fmtZ("{s}/{s}", .{ d, kv[0] }), kv[1])) all = false;
         }
         // "all"'s accept_ra governs no interface; each has its own.
-        if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all") and
-            !writeFile(m.fmtZ("{s}/accept_ra", .{d}), "0")) all = false;
+        if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all")) {
+            for ([_][]const u8{ "accept_ra", "accept_ra_pinfo", "autoconf" }) |k| {
+                if (!writeFile(m.fmtZ("{s}/{s}", .{ d, k }), "0")) all = false;
+            }
+        }
     }
     if (!all) say("some IPv6 router advertisement limits were not applied", .{});
 }

@@ -292,13 +292,23 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 };
 
 const max_calls = 512;
-/// max_filter counts the prelude (6), execveat and its descriptor guards (25),
-/// the socket and socketpair families (2 * (3 + 2 * 5)), the machine's refusals
-/// (7 + 5 + 5 + 7 + 7 + 8 + 10), the table and the final return.
-pub const max_filter = 6 + 25 + 16 + 2 * (3 + 2 * 5) + 49 + 2 * max_calls + 1;
+/// max_filter counts the prelude (6), execveat and its descriptor guards (41),
+/// pipe_child (16), the socket and socketpair families (2 * (3 + 2 * 5)), the
+/// machine's refusals (7 + 5 + 5 + 7 + 7 + 8 + 10), the table and final return.
+pub const max_filter = 6 + 41 + 16 + 2 * (3 + 2 * 5) + 49 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 const F_DUPFD = 0;
 const F_DUPFD_CLOEXEC = 1030;
+
+/// ExecGate pins a non-exec service's single transition execveat(2) to
+/// Leash's ceiling descriptor, read-only empty-path address, instruction
+/// pointer immediately after the syscall instruction, and exact 64-bit
+/// AT_EMPTY_PATH flags.
+pub const ExecGate = struct {
+    fd: u32,
+    ip: u64,
+    empty_path: u64,
+};
 
 /// families maps each socket promise to the address families it allows.
 const families = [_]struct { p: Promise, af: u32 }{
@@ -447,17 +457,22 @@ pub fn buildPublisherFilter(buf: *[max_filter]Filter, child: u32) []const Filter
     return buildFilterWithExec(buf, .initMany(&.{ .stdio, .rpath, .wpath }), true, null, child);
 }
 
-/// buildServiceFilter narrows the initial exec to Leash's selected descriptor
-/// number and exact AT_EMPTY_PATH flags. Landlock supplies file identity.
-pub fn buildServiceFilter(buf: *[max_filter]Filter, promises: Set, exec_fd: u32) []const Filter {
-    return buildFilterWithExec(buf, promises, true, exec_fd, null);
+/// buildServiceFilter narrows the initial exec to Leash's ceiling descriptor,
+/// read-only empty-path address, trampoline instruction pointer and exact
+/// 64-bit AT_EMPTY_PATH flags. Landlock supplies file identity.
+pub fn buildServiceFilter(
+    buf: *[max_filter]Filter,
+    promises: Set,
+    gate: ?ExecGate,
+) []const Filter {
+    return buildFilterWithExec(buf, promises, true, gate, null);
 }
 
 fn buildFilterWithExec(
     buf: *[max_filter]Filter,
     promises: Set,
     per_service: bool,
-    exec_fd: ?u32,
+    gate: ?ExecGate,
     pipe_child: ?u32,
 ) []const Filter {
     // A service's filter needs no listener, so leash can install it after
@@ -493,14 +508,33 @@ fn buildFilterWithExec(
         put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
         put(buf, &n, RET_K, 0, 0, other);
     }
-    if (per_service and !promises.contains(.exec) and exec_fd != null) {
-        put(buf, &n, JEQ_K, 0, 6, number(.execveat));
-        put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word: fd
-        put(buf, &n, JEQ_K, 0, 3, exec_fd.?);
+    if (per_service and !promises.contains(.exec)) if (gate) |g| {
+        // Benign libc probes pass flags == 0 and receive ENOSYS; any other
+        // mismatch against Leash's 64-bit (flags, fd, empty_path, ip) tuple
+        // kills the process immediately.
+        put(buf, &n, JEQ_K, 0, 22, number(.execveat));
         put(buf, &n, LD_W_ABS, 0, 0, 48); // seccomp_data.args[4], low word: flags
-        put(buf, &n, JEQ_K, 0, 1, AT_EMPTY_PATH);
-        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
+        put(buf, &n, JEQ_K, 0, 3, 0);
+        put(buf, &n, LD_W_ABS, 0, 0, 52); // seccomp_data.args[4], high word: flags
+        put(buf, &n, JEQ_K, 0, 17, 0);
         put(buf, &n, RET_K, 0, 0, other);
+        put(buf, &n, JEQ_K, 0, 15, AT_EMPTY_PATH);
+        put(buf, &n, LD_W_ABS, 0, 0, 52); // seccomp_data.args[4], high word: flags
+        put(buf, &n, JEQ_K, 0, 13, 0);
+        put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word: fd
+        put(buf, &n, JEQ_K, 0, 11, g.fd);
+        put(buf, &n, LD_W_ABS, 0, 0, 20); // seccomp_data.args[0], high word: fd
+        put(buf, &n, JEQ_K, 0, 9, 0);
+        put(buf, &n, LD_W_ABS, 0, 0, 24); // seccomp_data.args[1], low word: empty_path
+        put(buf, &n, JEQ_K, 0, 7, @truncate(g.empty_path));
+        put(buf, &n, LD_W_ABS, 0, 0, 28); // seccomp_data.args[1], high word: empty_path
+        put(buf, &n, JEQ_K, 0, 5, @truncate(g.empty_path >> 32));
+        put(buf, &n, LD_W_ABS, 0, 0, 8); // seccomp_data.instruction_pointer, low word
+        put(buf, &n, JEQ_K, 0, 3, @truncate(g.ip));
+        put(buf, &n, LD_W_ABS, 0, 0, 12); // seccomp_data.instruction_pointer, high word
+        put(buf, &n, JEQ_K, 0, 1, @truncate(g.ip >> 32));
+        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
+        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.KILL_PROCESS);
         for (if (@import("builtin").cpu.arch == .x86_64)
             [_]linux.SYS{ .dup2, .dup3 }
         else
@@ -508,7 +542,7 @@ fn buildFilterWithExec(
         {
             put(buf, &n, JEQ_K, 0, 4, number(sys));
             put(buf, &n, LD_W_ABS, 0, 0, 24); // seccomp_data.args[1], low word: newfd
-            put(buf, &n, JEQ_K, 0, 1, exec_fd.?);
+            put(buf, &n, JEQ_K, 0, 1, g.fd);
             put(buf, &n, RET_K, 0, 0, other);
             put(buf, &n, LD_W_ABS, 0, 0, 0);
         }
@@ -517,10 +551,10 @@ fn buildFilterWithExec(
         put(buf, &n, JEQ_K, 1, 0, F_DUPFD);
         put(buf, &n, JEQ_K, 0, 3, F_DUPFD_CLOEXEC);
         put(buf, &n, LD_W_ABS, 0, 0, 32); // seccomp_data.args[2], low word: minfd
-        put(buf, &n, JGE_K, 0, 1, exec_fd.?);
+        put(buf, &n, JGE_K, 0, 1, g.fd);
         put(buf, &n, RET_K, 0, 0, other);
         put(buf, &n, LD_W_ABS, 0, 0, 0);
-    }
+    };
     {
         var afs: [families.len]u32 = undefined;
         var m: usize = 0;
@@ -673,16 +707,29 @@ fn action(filter: []const Filter, arch: u32, nr: u32, arg0: u32) u32 {
 
 /// actionArgs is action with the low word of each argument given.
 fn actionArgs(filter: []const Filter, arch: u32, nr: u32, args: [6]u32) u32 {
+    return actionFull(
+        filter,
+        arch,
+        nr,
+        0,
+        .{ args[0], args[1], args[2], args[3], args[4], args[5] },
+    );
+}
+
+/// actionFull runs filter against a full 64-bit seccomp_data record.
+fn actionFull(filter: []const Filter, arch: u32, nr: u32, ip: u64, args: [6]u64) u32 {
     var a: u32 = 0;
     var pc: usize = 0;
     while (true) {
         const i = filter[pc];
         switch (i.code) {
             LD_W_ABS => a = switch (i.k) {
-                4 => arch,
                 0 => nr,
-                16, 24, 32, 40, 48, 56 => args[(i.k - 16) / 8],
-                20, 28, 36, 44, 52, 60 => 0,
+                4 => arch,
+                8 => @truncate(ip),
+                12 => @truncate(ip >> 32),
+                16, 24, 32, 40, 48, 56 => @truncate(args[(i.k - 16) / 8]),
+                20, 28, 36, 44, 52, 60 => @truncate(args[(i.k - 20) / 8] >> 32),
                 else => unreachable,
             },
             JSET_K => pc += if (a & i.k != 0) i.jt else i.jf,
@@ -787,7 +834,12 @@ test buildFilter {
         );
 
     // A service's filter refuses with ENOSYS and needs no listener.
-    const service = buildServiceFilter(&buf, .initMany(&.{ .stdio, .inet }), 7);
+    const gate: ExecGate = .{
+        .fd = 7,
+        .ip = 0x0000_7f12_3456_789a,
+        .empty_path = 0x0000_7fed_cba9_8765,
+    };
+    const service = buildServiceFilter(&buf, .initMany(&.{ .stdio, .inet }), gate);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(service, native_arch, socket, linux.AF.INET),
@@ -835,24 +887,69 @@ test buildFilter {
     }) |sys|
         try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(sys), 0));
 
-    // Only Leash's selected descriptor number and exact flags pass this
-    // filter; Landlock still judges executable identity.
+    // Only Leash's exact 64-bit (fd, empty_path, ip, AT_EMPTY_PATH) tuple
+    // passes this filter; flags == 0 gets ENOSYS and any other execveat kills.
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
-        actionArgs(service, native_arch, number(.execveat), .{ 7, 0, 0, 0, AT_EMPTY_PATH, 0 }),
-    );
-    try testing.expectEqual(
-        RET_ENOSYS,
-        actionArgs(service, native_arch, number(.execveat), .{ 8, 0, 0, 0, AT_EMPTY_PATH, 0 }),
-    );
-    try testing.expectEqual(
-        RET_ENOSYS,
-        actionArgs(
+        actionFull(
             service,
             native_arch,
             number(.execveat),
-            .{ 7, 0, 0, 0, AT_EMPTY_PATH | 0x100, 0 },
+            gate.ip,
+            .{ gate.fd, gate.empty_path, 0, 0, AT_EMPTY_PATH, 0 },
         ),
+    );
+    // High-word 64-bit tampering on fd, flags, empty_path or ip kills.
+    for ([_]struct { ip: u64, args: [6]u64 }{
+        .{ .ip = gate.ip, .args = .{ 8, gate.empty_path, 0, 0, AT_EMPTY_PATH, 0 } },
+        .{
+            .ip = gate.ip,
+            .args = .{ (@as(u64, 1) << 32) | gate.fd, gate.empty_path, 0, 0, AT_EMPTY_PATH, 0 },
+        },
+        .{
+            .ip = gate.ip,
+            .args = .{ gate.fd, gate.empty_path ^ 1, 0, 0, AT_EMPTY_PATH, 0 },
+        },
+        .{
+            .ip = gate.ip,
+            .args = .{ gate.fd, gate.empty_path ^ (@as(u64, 1) << 40), 0, 0, AT_EMPTY_PATH, 0 },
+        },
+        .{
+            .ip = gate.ip,
+            .args = .{ gate.fd, gate.empty_path, 0, 0, AT_EMPTY_PATH | 0x100, 0 },
+        },
+        .{
+            .ip = gate.ip,
+            .args = .{
+                gate.fd,
+                gate.empty_path,
+                0,
+                0,
+                (@as(u64, 1) << 32) | AT_EMPTY_PATH,
+                0,
+            },
+        },
+        .{
+            .ip = gate.ip,
+            .args = .{ gate.fd, gate.empty_path, 0, 0, @as(u64, 1) << 32, 0 },
+        },
+        .{
+            .ip = gate.ip + 4,
+            .args = .{ gate.fd, gate.empty_path, 0, 0, AT_EMPTY_PATH, 0 },
+        },
+        .{
+            .ip = gate.ip ^ (@as(u64, 1) << 36),
+            .args = .{ gate.fd, gate.empty_path, 0, 0, AT_EMPTY_PATH, 0 },
+        },
+    }) |bad| {
+        try testing.expectEqual(
+            linux.SECCOMP.RET.KILL_PROCESS,
+            actionFull(service, native_arch, number(.execveat), bad.ip, bad.args),
+        );
+    }
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionFull(service, native_arch, number(.execveat), 0, .{ 99, 0x1234, 0, 0, 0, 0 }),
     );
     try testing.expectEqual(
         RET_ENOSYS,
@@ -1052,9 +1149,15 @@ test parse {
 test "transfer workers reap children without authority over other services" {
     for ([_]bool{ false, true }) |publisher| {
         var buf: [max_filter]Filter = undefined;
-        const f = if (publisher) buildPublisherFilter(&buf, 123) else buildPipeReaderFilter(&buf, 123);
+        const f = if (publisher)
+            buildPublisherFilter(&buf, 123)
+        else
+            buildPipeReaderFilter(&buf, 123);
         try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.wait4), 0));
-        try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(f, native_arch, number(.kill), 123));
+        try testing.expectEqual(
+            linux.SECCOMP.RET.ALLOW,
+            action(f, native_arch, number(.kill), 123),
+        );
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.kill), 124));
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.clone), 0));
         try testing.expectEqual(RET_ENOSYS, action(f, native_arch, number(.execve), 0));

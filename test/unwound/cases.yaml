@@ -67,53 +67,49 @@ types:
     rcode: refused
     answers: []
 
-# With corp.lan.test from DHCP.
+# With corp.lan.test from DHCP: ignored so an on-link DHCP server cannot widen
+# DNS grants or exempt domains.
 dhcp-domain:
-  - why: DHCP domain shared with a DNS-enabled service
+  - why: DHCP domain never widens a pinned service
     uid: 2001
     name: host.corp.lan.test
-    rcode: nxdomain
-    answers: []
-  - why: system domain apex
-    uid: 2001
-    name: corp.lan.test
-    rcode: nxdomain
-    answers: []
-  - why: system domain supports DNS types
-    uid: 2001
-    name: host.corp.lan.test
-    type: TXT
-    rcode: nxdomain
-    answers: []
-  - why: system domain label boundary
-    uid: 2001
-    name: host.corp.lan.test.evil
     rcode: refused
     answers: []
-  - why: system domain still screened
-    uid: 2001
-    name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.corp.lan.test
+  - why: DHCP domain never grants ungranted RR types
+    uid: 2002
+    name: host.corp.lan.test
+    type: TXT
     rcode: refused
     answers: []
 
-# With config.lan.test from the configuration as well.
+# With config.lan.test from root's boot configuration: applies only to screened
+# wildcard grants and their granted RR types, never widening pinned services.
 config-domain:
-  - why: config domain overrides DHCP
+  - why: config domain never widens a pinned service
     uid: 2001
-    name: host.corp.lan.test
+    name: host.config.lan.test
     rcode: refused
     answers: []
-  - why: config FQDN domain
-    uid: 2001
+  - why: config FQDN domain on a screened wildcard service
+    uid: 2002
     name: host.config.lan.test
     rcode: nxdomain
     answers: []
-
-dhcp-restored:
-  - why: DHCP domain restored
-    uid: 2001
-    name: host.corp.lan.test
+  - why: system domain apex on a screened wildcard service
+    uid: 2002
+    name: config.lan.test
     rcode: nxdomain
+    answers: []
+  - why: system domain respects granted RR types
+    uid: 2002
+    name: host.config.lan.test
+    type: TXT
+    rcode: refused
+    answers: []
+  - why: system domain still screened for tunnel labels
+    uid: 2002
+    name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.config.lan.test
+    rcode: refused
     answers: []
 
 names:
@@ -256,10 +252,10 @@ callbacks:
     rcode: noerror
     answers: [CNAME]
 
-# With oastify.com from DHCP: DHCP cannot exempt a callback domain.
+# With oastify.com from boot config: system domain cannot exempt a callback.
 assigned-callback:
   - why: assigned endpoint refused
-    uid: 2001
+    uid: 2002
     name: assigned.oastify.com
     rcode: refused
     answers: []
@@ -569,10 +565,11 @@ audit:
     decision: allow
     rcode: noerror
     rule: 3
-  - uid: 2001
-    name: host.corp.lan.test
+  - uid: 2002
+    name: host.config.lan.test
     decision: allow
     why: system_domain
+    rule: 10
   - uid: 2001
     name: alias-bad.example.test
     decision: deny
@@ -702,12 +699,23 @@ age-audit:
     why: age
     detail: unknown
 
-# With assigned.test from DHCP, exempt from age.
-age-assigned:
-  - why: an assigned name, exactly granted
+# With assigned.test from DHCP: ignored under age enforcement too.
+age-dhcp-ignored:
+  - why: DHCP domain does not exempt a pinned service
     uid: 2001
     name: host.assigned.test
-    rcode: nxdomain
+    rcode: refused
+  - why: DHCP domain does not bypass age on a screened service
+    uid: 2002
+    name: host.assigned.test
+    rcode: refused
+
+# With assigned.test from boot config, exempt from age on screened wildcards.
+age-assigned:
+  - why: a pinned service is never widened by the config domain
+    uid: 2001
+    name: host.assigned.test
+    rcode: refused
   - why: an assigned name, screened
     uid: 2002
     name: host.assigned.test
@@ -717,10 +725,10 @@ age-assigned:
     name: assigned-alias.assigned.test
     tcp: true
     rcode: refused
-  - why: an exact grant's alias into the assigned domain
+  - why: a pinned grant's alias into the config domain stays refused
     uid: 2001
     name: revoked-alias.example.test
-    rcode: noerror
+    rcode: refused
   - why: a screened alias into the assigned domain
     uid: 2002
     name: revoked-alias.example.test
@@ -728,11 +736,6 @@ age-assigned:
 
 # Once the domain is revoked, its cached aliases are refused.
 age-revoked:
-  - why: an exact grant's alias into a revoked domain
-    uid: 2001
-    name: revoked-alias.example.test
-    tcp: true
-    rcode: refused
   - why: a screened alias into a revoked domain
     uid: 2002
     name: revoked-alias.example.test

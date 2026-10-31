@@ -17,6 +17,7 @@ net:
 packages:
   - bash
   - busybox-full
+  - chard                  # hardening inspection, executable by root and ordinary users
   - man-db                 # reads the mdoc manuals installed with guest programs
   - python-3.15
 

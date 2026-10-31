@@ -48,6 +48,7 @@ const Unit = struct {
     inode: ?u64 = null,
     installed: bool = false,
     sequence: u64 = 0,
+    entry: ?data.Entry = null,
 };
 const Receipt = struct {
     version: u8 = 2,
@@ -152,6 +153,8 @@ pub const Session = struct {
         p: data.Policy,
         o: Options,
     ) !void {
+        var phase: []const u8 = "policy";
+        errdefer std.debug.print("data-transfer publication: {s}\n", .{phase});
         if (o.target.len == 0 or o.target.len > 256) return error.TransferTarget;
         try data.check(a, result.manifest, p, o.service);
         const target = s.target;
@@ -170,12 +173,19 @@ pub const Session = struct {
         // no DAC write override. Destination metadata is restored separately.
         if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0) {
             for ([_][]const u8{ "svc", "home" }) |name| {
-                var container = stage.openDir(io, name, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+                var container = stage.openDir(
+                    io,
+                    name,
+                    .{ .iterate = true, .follow_symlinks = false },
+                ) catch |err| {
                     if (err == error.FileNotFound) continue;
                     return err;
                 };
                 defer container.close(io);
-                const file: File = .{ .handle = container.handle, .flags = .{ .nonblocking = false } };
+                const file: File = .{
+                    .handle = container.handle,
+                    .flags = .{ .nonblocking = false },
+                };
                 try file.setOwner(io, 0, 0);
                 try file.setPermissions(io, .fromMode(0o700));
             }
@@ -183,8 +193,8 @@ pub const Session = struct {
         var units: std.ArrayList(Unit) = .empty;
         defer units.deinit(a);
         for (result.manifest.entries) |e| {
-            if (data.selected(e.path, scope) and
-                isUnit(e.path)) try units.append(a, .{ .path = e.path });
+            if (data.importSelected(e.path, scope) and
+                isUnit(e.path)) try units.append(a, .{ .path = e.path, .entry = e });
         }
         const paths = try a.alloc([]const u8, units.items.len);
         defer a.free(paths);
@@ -270,11 +280,17 @@ pub const Session = struct {
             var to = try data.parentDir(io, target, unit.path);
             defer to.close(io);
             const base = std.fs.path.basename(unit.path);
-            if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and unit.entry.?.kind == .directory) {
+            if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and
+                unit.entry.?.kind == .directory)
+            {
                 // Moving a directory across parents requires write access to
                 // that directory itself. Keep it private until final metadata
                 // is restored; a pending receipt fences every crash boundary.
-                var moving = try from.openDir(io, base, .{ .iterate = true, .follow_symlinks = false });
+                var moving = try from.openDir(
+                    io,
+                    base,
+                    .{ .iterate = true, .follow_symlinks = false },
+                );
                 defer moving.close(io);
                 const file: File = .{ .handle = moving.handle, .flags = .{ .nonblocking = false } };
                 try file.setOwner(io, 0, 0);
@@ -342,7 +358,11 @@ pub const Session = struct {
 
 fn cleanIncoming(io: Io, state: Dir) !void {
     if (@import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0) {
-        var incoming = state.openDir(io, "incoming", .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+        var incoming = state.openDir(
+            io,
+            "incoming",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
@@ -501,7 +521,11 @@ pub fn targetIdentity(io: Io, root: Dir) ![64]u8 {
     defer machine.close(io);
     const file = data.openRegular(io, machine, "transfer-id") catch |err| blk: {
         if (err != error.FileNotFound) return err;
-        const created = try machine.createFile(io, "transfer-id", .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        const created = try machine.createFile(
+            io,
+            "transfer-id",
+            .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) },
+        );
         errdefer created.close(io);
         var random: [32]u8 = undefined;
         try io.randomSecure(&random);
@@ -775,7 +799,7 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
         const fd = try std.posix.openat(
             parent.handle,
             base,
-            .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true },
+            .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true },
             0,
         );
         break :blk .{ .handle = fd, .flags = .{ .nonblocking = true } };
@@ -787,11 +811,18 @@ fn applyMetadata(io: Io, root: Dir, e: data.Entry, p: data.Policy) !void {
     const st = try file.stat(io);
     if ((e.kind == .file and (st.kind != .file or st.nlink != 1)) or
         (e.kind == .directory and st.kind != .directory)) return error.TransferFileType;
-    try file.setOwner(
-        io,
-        try data.identityByName(p.users, e.owner),
-        try data.identityByName(p.groups, e.group),
-    );
+    phase = "owner";
+    const uid = try data.identityByName(p.users, e.owner);
+    const gid = try data.identityByName(p.groups, e.group);
+    const setgid_directory = @import("builtin").os.tag == .linux and std.os.linux.geteuid() == 0 and
+        e.kind == .directory and e.mode & 0o2000 != 0;
+    // Linux preserves a directory's setgid bit across chown, but chmod clears
+    // it for a foreign group without FSETID. Set it under our group first.
+    if (setgid_directory)
+        try file.setOwner(io, 0, std.os.linux.getegid())
+    else
+        try file.setOwner(io, uid, gid);
+    phase = "mode";
     try file.setPermissions(io, .fromMode(@intCast(e.mode)));
     if (setgid_directory) try file.setOwner(io, uid, gid);
     phase = "ACL";
@@ -1065,6 +1096,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
     var target = try tmp.dir.openDir(io, "target", .{ .iterate = true });
     defer target.close(io);
     try source.createDirPath(io, "svc/postgres");
+    try source.setFilePermissions(
+        io,
+        "svc/postgres",
+        .fromMode(0o2750),
+        .{ .follow_symlinks = false },
+    );
     try source.createDirPath(io, "home/person/empty");
     try source.createDirPath(io, ".werewolf");
     try source.createDirPath(io, "log");
@@ -1119,6 +1156,12 @@ test "full compressed import preserves data and machine exclusions and rejects o
         "destination audit trail",
         try target.readFileAlloc(io, "log/current", a, .limited(1024)),
     );
+    try tmp.dir.createDir(io, "fresh", .fromMode(0o700));
+    var fresh = try tmp.dir.openDir(io, "fresh", .{ .iterate = true });
+    defer fresh.close(io);
+    var fresh_input: Io.Reader = .fixed(compressed.stdout);
+    _ = try apply(io, a, &fresh_input, fresh, policy, .{ .target = "fresh-machine" });
+    try t.expectError(error.FileNotFound, fresh.access(io, "log", .{}));
     for (manifest.entries) |e| {
         if (data.beneath(e.path, "log")) continue;
         const st = try target.statFile(io, e.path, .{ .follow_symlinks = false });

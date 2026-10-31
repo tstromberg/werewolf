@@ -292,7 +292,6 @@ fn checks(c: *Client, doc: form.Node) !void {
     try c.domain("config.lan.test", .config);
     _ = try c.phase(doc, "config-domain");
     try c.domain("", .config);
-    _ = try c.phase(doc, "dhcp-restored");
     try c.domain("", .dhcp);
     _ = try c.phase(doc, "names");
     const endpoints = try lab.list(gpa, doc, "endpoints");
@@ -308,9 +307,9 @@ fn checks(c: *Client, doc: form.Node) !void {
         });
     };
     _ = try c.phase(doc, "callbacks");
-    try c.domain("oastify.com", .dhcp);
+    try c.domain("oastify.com", .config);
     _ = try c.phase(doc, "assigned-callback");
-    try c.domain("", .dhcp);
+    try c.domain("", .config);
     _ = try c.phase(doc, "explicit-endpoints");
 
     // A poller learns nothing new while an answer stands; unfiltered, it does.
@@ -529,7 +528,7 @@ fn audited(c: *Client, doc: form.Node) !void {
     var observed = false;
     for (records) |r| {
         if (!lab.isEvent(r, "age_observe")) continue;
-        if (text(r, "qname", "host.corp.lan.test") or text(r, "qname", "open.example.test"))
+        if (text(r, "qname", "host.config.lan.test") or text(r, "qname", "open.example.test"))
             return l.fail("observed_unscreened", .{ .record = r });
         const domain = lab.field(r, "domain");
         observed = observed or (int(r, "uid", 2002) and text(r, "qname", "poll.example.test") and
@@ -585,9 +584,13 @@ fn ageChecks(c: *Client, doc: form.Node) !void {
     _ = try c.phase(doc, "age");
     try asked(c, "young.com", 0, "a young domain reached the resolver");
     try lab.audited(c.w, doc, "age-audit");
+    // Untrusted DHCP Option 15 must never bypass domain-age enforcement.
     try c.domain("assigned.test", .dhcp);
-    _ = try c.phase(doc, "age-assigned");
+    _ = try c.phase(doc, "age-dhcp-ignored");
     try c.domain("", .dhcp);
+    try c.domain("assigned.test", .config);
+    _ = try c.phase(doc, "age-assigned");
+    try c.domain("", .config);
     _ = try c.phase(doc, "age-revoked");
     try asked(c, "revoked-alias.example.test", 2, "a revoked alias asked again");
 }

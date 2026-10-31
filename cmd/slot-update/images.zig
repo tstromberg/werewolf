@@ -9,9 +9,8 @@ const m = @import("slot-update.zig");
 const Dir = m.Dir;
 const Update = m.Update;
 const work = m.work_dir;
-const state = m.state_dir;
 const meta = signed.metadata;
-const floor_path = state ++ "/image-floor";
+const floor_path = m.coord_dir ++ "/image-floor";
 
 pub const Verified = struct { manifest: signed.Manifest, data: []const u8, signature: []const u8 };
 

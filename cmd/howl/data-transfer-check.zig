@@ -207,6 +207,8 @@ const Check = struct {
             "-F",
             "-t",
             "ext4",
+            "-o",
+            "Linux",
             "-m",
             "0",
             "-E",
@@ -267,7 +269,7 @@ const Check = struct {
             c.io,
             c.a,
             c.guest,
-            .{ .data = disk, .control = control, .writable = archive != null },
+            .{ .data = disk, .control = control, .writable = archive != null or c.replay_copy },
             work,
         );
         return .{ .policy = policy, .archive = try c.a.print("{s}/archive.tar.zst", .{work}) };
@@ -446,6 +448,8 @@ const Check = struct {
             "-F",
             "-t",
             "ext4",
+            "-o",
+            "Linux",
             "-b",
             "4096",
             "-m",
@@ -635,6 +639,16 @@ const Check = struct {
             };
         if (!has_log) return error.TransferTestMissingLogs;
         try c.equal(before, try c.hash(source));
+        {
+            const replay = try c.path("journal-copy.raw");
+            try Dir.cwd().copyFile(source, .cwd(), replay, c.io, .{});
+            _ = try c.debug(replay, "feature needs_recovery", true);
+            c.replay_copy = true;
+            defer c.replay_copy = false;
+            const recovered = try c.invoke("journal-copy-export", replay, null, null);
+            _ = try c.validate(recovered.archive, recovered.policy, null);
+            try c.equal(before, try c.hash(source));
+        }
         for (inventory.manifest.entries) |e| if (data.excluded(
             e.path,
         )) return error.TransferTestExclusion;
@@ -719,8 +733,14 @@ const Check = struct {
         const dirty_hash = try c.hash(source);
         if (c.invoke("dirty-export", source, null, null)) |_|
             return error.TransferTestDirty
-        else |err| if (err != error.TransferUnclean)
+        else |err| if (err != error.TransferFilesystem)
             return err;
+        c.replay_copy = true;
+        if (c.invoke("damaged-copy-refused", source, null, null)) |_|
+            return error.TransferTestDirty
+        else |err| if (err != error.TransferFilesystem)
+            return err;
+        c.replay_copy = false;
         try c.equal(dirty_hash, try c.hash(source));
     }
 };

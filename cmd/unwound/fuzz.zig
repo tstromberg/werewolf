@@ -248,6 +248,7 @@ fn grants(_: void, smith: *t.Smith) !void {
     defer t.allocator.destroy(p);
     p.parse(policy_text) catch return;
     if (p.users.len == 0) return;
+    if (smith.boolWeighted(1, 3)) _ = p.setSystemDomain("corp.example");
     // Ask about a name some grant names, or a relative of one.
     var name: wire.Name = .{};
     if (p.n > 0) {
@@ -272,7 +273,10 @@ fn grants(_: void, smith: *t.Smith) !void {
     } else return error.NoSuchGrant;
     try t.expectEqual(s, g.service);
     try t.expect(g.types.contains(wire.Type.from(qtype).?));
-    try t.expectEqual(d.why == .screened, g.kind == .any and !g.unfiltered);
+    try t.expectEqual(
+        d.why == .screened or d.why == .system_domain,
+        g.kind == .any and !g.unfiltered,
+    );
     switch (g.kind) {
         .any => {},
         .exact => try t.expectEqualStrings(g.name.text(), name.text()),

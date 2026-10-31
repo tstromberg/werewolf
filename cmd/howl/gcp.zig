@@ -85,19 +85,66 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    return ensureImageAt(io, gpa, p, form, arch, disk, work, null, why);
+    return ensureImageAt(io, gpa, p, form, arch, disk, work, null, true, why);
+}
+
+pub fn ensureImageMode(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    protected: bool,
+    why: *howl.Why,
+) ![]const u8 {
+    return ensureImageAt(io, gpa, p, form, arch, disk, work, null, protected, why);
 }
 
 /// Application data is published only through an operation-private bucket
 /// and image; never through the shared distributable-image cache.
-pub fn privateImage(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.Arch, disk: []const u8, work: []const u8, name: []const u8, bucket: []const u8, why: *howl.Why) ![]const u8 {
-    return ensureImageAt(io, gpa, p, form, arch, disk, work, .{ .name = name, .bucket = bucket }, why);
+pub fn privateImage(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    name: []const u8,
+    bucket: []const u8,
+    why: *howl.Why,
+) ![]const u8 {
+    return ensureImageAt(
+        io,
+        gpa,
+        p,
+        form,
+        arch,
+        disk,
+        work,
+        .{ .name = name, .bucket = bucket },
+        true,
+        why,
+    );
 }
 
-fn ensureImageAt(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.Arch, disk: []const u8, work: []const u8, private: ?struct { name: []const u8, bucket: []const u8 }, why: *howl.Why) ![]const u8 {
+fn ensureImageAt(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    private: ?struct { name: []const u8, bucket: []const u8 },
+    protected: bool,
+    why: *howl.Why,
+) ![]const u8 {
     // The image's own boot certificate is PK, KEK and db: the published
     // vendor's for a download, the builder's for a --build.
-    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    if (protected) _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     const digest = try images.sha256(io, disk);
     const code = try gpa.print("{s}/boot.der", .{work});
     const name = if (private) |v| v.name else try images.name(gpa, form, arch, &digest);
@@ -129,7 +176,10 @@ fn ensureImageAt(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.
         tarball,
         "disk.raw",
     });
-    const bucket = if (private) |target| target.bucket else try gpa.print("gs://{s}-werewolf-images", .{p.project});
+    const bucket = if (private) |target|
+        target.bucket
+    else
+        try gpa.print("gs://{s}-werewolf-images", .{p.project});
     const region = p.zone[0 .. std.mem.findScalarLast(u8, p.zone, '-') orelse p.zone.len];
     if (ask(
         io,
@@ -147,7 +197,8 @@ fn ensureImageAt(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.
     const object = try gpa.print("{s}/{s}.tar.gz", .{ bucket, name });
     try howl.run(io, why, try gcloud(gpa, p, &.{ "storage", "cp", tarball, object }));
     defer _ = ask(io, gpa, p, &.{ "storage", "rm", object });
-    try howl.run(io, why, try gcloud(gpa, p, &.{
+    var create_args: std.ArrayList([]const u8) = .empty;
+    try create_args.appendSlice(gpa, &.{
         "compute",
         "images",
         "create",
@@ -158,19 +209,24 @@ fn ensureImageAt(io: Io, gpa: Allocator, p: Place, form: []const u8, arch: howl.
         machine(arch).arch,
         "--guest-os-features",
         "UEFI_COMPATIBLE,GVNIC",
+    });
+    if (protected) try create_args.appendSlice(gpa, &.{
         "--platform-key-file",
         code,
         "--key-exchange-key-file",
         code,
         "--signature-database-file",
         code,
+    });
+    try create_args.appendSlice(gpa, &.{
         "--labels",
         try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         // Store the image in the zone's region, not GCP's default
         // multi-region, so it is not copied across regions.
         "--storage-location",
         region,
-    }));
+    });
+    try howl.run(io, why, try gcloud(gpa, p, create_args.items));
     return name;
 }
 

@@ -27,14 +27,26 @@ const alive = "Name=instance-state-name,Values=pending,running,stopping,stopped"
 /// Resolve login/SSO/static credentials once for parallel block workers. The
 /// private child environment avoids an OAuth refresh storm and secret argv.
 pub fn credentials(io: Io, a: Allocator) !std.process.Environ.Map {
-    const result = try std.process.run(a, io, .{ .argv = &.{ "aws", "configure", "export-credentials", "--format", "process" }, .stdout_limit = .limited(64 << 10), .stderr_limit = .limited(4096) });
+    const result = try std.process.run(
+        a,
+        io,
+        .{
+            .argv = &.{ "aws", "configure", "export-credentials", "--format", "process" },
+            .stdout_limit = .limited(64 << 10),
+            .stderr_limit = .limited(4096),
+        },
+    );
     defer a.free(result.stdout);
     defer a.free(result.stderr);
     if (!result.term.success()) return error.TransferCloudAuthentication;
     return credentialEnvironment(a, howl.environ, result.stdout);
 }
 
-fn credentialEnvironment(a: Allocator, base: *const std.process.Environ.Map, bytes: []const u8) !std.process.Environ.Map {
+fn credentialEnvironment(
+    a: Allocator,
+    base: *const std.process.Environ.Map,
+    bytes: []const u8,
+) !std.process.Environ.Map {
     const parsed = try std.json.parseFromSlice(struct {
         Version: u32,
         AccessKeyId: []const u8,
@@ -43,7 +55,8 @@ fn credentialEnvironment(a: Allocator, base: *const std.process.Environ.Map, byt
     }, a, bytes, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     const c = parsed.value;
-    if (c.Version != 1 or c.AccessKeyId.len == 0 or c.SecretAccessKey.len == 0) return error.TransferCloudAuthentication;
+    if (c.Version != 1 or c.AccessKeyId.len == 0 or
+        c.SecretAccessKey.len == 0) return error.TransferCloudAuthentication;
     var env = try base.clone(a);
     errdefer env.deinit();
     try env.put("AWS_ACCESS_KEY_ID", c.AccessKeyId);
@@ -150,31 +163,47 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
+    return ensureImageMode(io, gpa, p, form, arch, disk, work, true, why);
+}
+
+pub fn ensureImageMode(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    protected: bool,
+    why: *howl.Why,
+) ![]const u8 {
     // The image's own boot certificate is PK, KEK and db: the published
     // vendor's for a download, the builder's for a --build.
-    const cert = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    if (protected) {
+        const cert = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+        const helper = try gpa.print("{s}/enroll-boot", .{work});
+        try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = @import("files").enroll_boot });
+        defer Dir.cwd().deleteFile(io, helper) catch {};
+        const template = try gpa.print("{s}/build-helper.yaml", .{work});
+        try Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = template, .data = @import("files").build_helper_template },
+        );
+        defer Dir.cwd().deleteFile(io, template) catch {};
+        try howl.run(io, why, &.{
+            "env",
+            try gpa.print("WEREWOLF_HOWL={s}", .{try std.process.executablePathAlloc(io, gpa)}),
+            try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}),
+            "sh",
+            helper,
+            @tagName(arch),
+            cert,
+            work,
+            "aws",
+            cert,
+        });
+    }
     const digest = try images.sha256(io, disk);
-    const helper = try gpa.print("{s}/enroll-boot", .{work});
-    try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = @import("files").enroll_boot });
-    defer Dir.cwd().deleteFile(io, helper) catch {};
-    const template = try gpa.print("{s}/build-helper.yaml", .{work});
-    try Dir.cwd().writeFile(
-        io,
-        .{ .sub_path = template, .data = @import("files").build_helper_template },
-    );
-    defer Dir.cwd().deleteFile(io, template) catch {};
-    try howl.run(io, why, &.{
-        "env",
-        try gpa.print("WEREWOLF_HOWL={s}", .{try std.process.executablePathAlloc(io, gpa)}),
-        try gpa.print("WEREWOLF_HELPER_TEMPLATE={s}", .{template}),
-        "sh",
-        helper,
-        @tagName(arch),
-        cert,
-        work,
-        "aws",
-        cert,
-    });
     const name = try images.name(gpa, form, arch, &digest);
     if (ask(io, gpa, p, &.{
         "ec2",
@@ -198,7 +227,8 @@ pub fn ensureImage(
     const snapshot = try writeSnapshot(io, gpa, p, name, form, raw, work, why);
     errdefer _ = ask(io, gpa, p, &.{ "ec2", "delete-snapshot", "--snapshot-id", snapshot });
     const m = machine(arch);
-    return need(io, gpa, p, &.{
+    var register: std.ArrayList([]const u8) = .empty;
+    try register.appendSlice(gpa, &.{
         "ec2",
         "register-image",
         "--name",
@@ -207,11 +237,15 @@ pub fn ensureImage(
         m.arch,
         "--boot-mode",
         "uefi",
+    });
+    if (protected) try register.appendSlice(gpa, &.{
         "--uefi-data",
         try gpa.print("file://{s}/vars.aws", .{work}),
-        "--ena-support",
         "--tpm-support",
         "v2.0",
+    });
+    try register.appendSlice(gpa, &.{
+        "--ena-support",
         "--virtualization-type",
         "hvm",
         "--imds-support",
@@ -227,7 +261,8 @@ pub fn ensureImage(
         try gpa.print("ResourceType=image,Tags=[{{Key={s},Value={s}}}]", .{ tag, form }),
         "--query",
         "ImageId",
-    }, why);
+    });
+    return need(io, gpa, p, register.items, why);
 }
 
 /// Slot runs one aws put-snapshot-block at a time. data holds the block and
@@ -734,9 +769,12 @@ test "block worker credentials replace stale tokens without changing the owner e
     defer permanent.deinit();
     try testing.expect(permanent.get("AWS_SESSION_TOKEN") == null);
     try testing.expect(permanent.get("AWS_SECURITY_TOKEN") == null);
-    try testing.expectError(error.TransferCloudAuthentication, credentialEnvironment(testing.allocator, &base,
-        \\{"Version":2,"AccessKeyId":"id","SecretAccessKey":"secret"}
-    ));
+    try testing.expectError(
+        error.TransferCloudAuthentication,
+        credentialEnvironment(testing.allocator, &base,
+            \\{"Version":2,"AccessKeyId":"id","SecretAccessKey":"secret"}
+        ),
+    );
 }
 
 test openArgs {

@@ -245,6 +245,15 @@ suites:
                   - tcp/587 public
       - name: nc-private
         steps:
+          - service: caddy
+            expect:
+              user: caddy
+              groups: []
+          - service: nginx
+            expect:
+              user: nginx
+              groups:
+                - nextcloud
           - file: /run/svc/nextcloud/admin-password
             expect:
               uid: nextcloud
@@ -331,3 +340,12 @@ suites:
           - write: /usr/share/nextcloud/werewolf-test-write
             expect:
               errno: EROFS
+  - name: nextcloud-symlink
+    source: driver.zig
+    mode: symlink
+    user: root
+    policy:
+      pledge: stdio rpath wpath inet
+    cases:
+      seed: [nc-symlink-refused]
+      verify: [nc-symlink-refused]

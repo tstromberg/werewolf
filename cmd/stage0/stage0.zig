@@ -10,6 +10,7 @@ const ipe = @import("ipe");
 const cmdline = @import("cmdline");
 const sandbox = @import("sandbox");
 const tpm = @import("tpm");
+const uefi_sig = @import("uefi-sig");
 const MS = linux.MS; // ziglint-ignore: Z032
 const nosymfollow = 256; // Linux MS_NOSYMFOLLOW, absent from std.os.linux.MS.
 
@@ -581,97 +582,46 @@ fn firmwareTrust(gpa: std.mem.Allocator) !void {
     const vars = "/sys/firmware/efi/efivars";
     const own = readAll(gpa, "/root/usr/share/werewolf/boot.der");
     if (own.len == 0) return error.NoBootCertificate;
-    const db_text = readAll(gpa, vars ++ "/db-d719b2cb-3d3a-4596-a3bc-dad00e67656f");
-    const dbx_text = readAll(gpa, vars ++ "/dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f");
-    const db = try signatures(gpa, db_text, x509);
-    // dbx revokes a signer by its whole certificate or by its SHA-256.
-    const revoked_certs = try signatures(gpa, dbx_text, x509);
-    const revoked_hashes = try signatures(gpa, dbx_text, sha256);
+    const pk_text = readAll(gpa, vars ++ "/" ++ uefi_sig.pk_name);
+    const kek_text = readAll(gpa, vars ++ "/" ++ uefi_sig.kek_name);
+    const db_text = readAll(gpa, vars ++ "/" ++ uefi_sig.db_name);
+    const dbx_text = readAll(gpa, vars ++ "/" ++ uefi_sig.dbx_name);
+    try checkFirmwareTrust(gpa, pk_text, kek_text, db_text, dbx_text, own, true);
+}
+
+fn checkFirmwareTrust(
+    gpa: std.mem.Allocator,
+    pk_text: []const u8,
+    kek_text: []const u8,
+    db_text: []const u8,
+    dbx_text: []const u8,
+    own: []const u8,
+    log_foreign: bool,
+) !void {
+    const eval = try uefi_sig.evaluate(gpa, pk_text, kek_text, db_text, dbx_text, own);
     var found = false;
     var extra: usize = 0;
-    for (db) |certificate| {
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(certificate, &digest, .{});
-        var revoked = false;
-        for (revoked_certs) |r| revoked = revoked or std.mem.eql(u8, r, certificate);
-        for (revoked_hashes) |r| revoked = revoked or std.mem.eql(u8, r, &digest);
-        if (revoked) continue;
+    for (eval.active_db) |certificate| {
         if (std.mem.eql(u8, certificate, own)) {
             found = true;
             continue;
         }
-        // List every signer firmware still admits, so one boot names the
-        // whole set to revoke; a hash fits a line, a certificate does not.
         extra += 1;
-        say("Secure Boot admits another signer, sha256 {x}", .{&digest});
+        if (log_foreign) {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(certificate, &digest, .{});
+            const encoded = try gpa.alloc(
+                u8,
+                std.base64.standard.Encoder.calcSize(certificate.len),
+            );
+            say("Secure Boot admits another signer, sha256 {x} der {s}", .{
+                &digest,
+                std.base64.standard.Encoder.encode(encoded, certificate),
+            });
+        }
     }
     if (extra > 0) return error.ForeignSignerInDb;
     if (!found) return error.SignerNotInDb;
-}
-
-// EFI_CERT_X509_GUID and EFI_CERT_SHA256_GUID, the signature-list types
-// stage0 reads: whole certificates and bare SHA-256 digests.
-const x509 = [16]u8{
-    0xa1,
-    0x59,
-    0xc0,
-    0xa5,
-    0xe4,
-    0x94,
-    0xa7,
-    0x4a,
-    0x87,
-    0xb5,
-    0xab,
-    0x15,
-    0x5c,
-    0x2b,
-    0xf0,
-    0x72,
-};
-const sha256 = [16]u8{
-    0x26,
-    0x16,
-    0xc4,
-    0xc1,
-    0x4c,
-    0x50,
-    0x92,
-    0x40,
-    0xac,
-    0xa9,
-    0x41,
-    0xf9,
-    0x36,
-    0x93,
-    0x43,
-    0x28,
-};
-
-/// signatures lists a database's entries of one type (x509 or sha256) as
-/// efivarfs shows it: four attribute bytes, then EFI_SIGNATURE_LISTs, each a
-/// type GUID, three sizes, a header and same-sized entries of owner GUID and
-/// data. An absent variable holds nothing; a malformed one is a refusal.
-fn signatures(gpa: std.mem.Allocator, variable: []const u8, kind: [16]u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    if (variable.len == 0) return out.items;
-    if (variable.len < 4) return error.MalformedSignatureList;
-    var rest = variable[4..];
-    while (rest.len > 0) {
-        if (rest.len < 28) return error.MalformedSignatureList;
-        const list_size = std.mem.readInt(u32, rest[16..20], .little);
-        const header_size = std.mem.readInt(u32, rest[20..24], .little);
-        const entry_size = std.mem.readInt(u32, rest[24..28], .little);
-        if (list_size < 28 or list_size > rest.len or header_size > list_size - 28)
-            return error.MalformedSignatureList;
-        var entries = rest[28 + header_size .. list_size];
-        if (entry_size <= 16 or entries.len % entry_size != 0) return error.MalformedSignatureList;
-        while (entries.len > 0) : (entries = entries[entry_size..]) {
-            if (std.mem.eql(u8, rest[0..16], &kind)) try out.append(gpa, entries[16..entry_size]);
-        }
-        rest = rest[list_size..];
-    }
-    return out.items;
 }
 
 fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
@@ -715,40 +665,51 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 const testing = std.testing;
 
-test signatures {
+test checkFirmwareTrust {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const owner: [16]u8 = @splat(0xee);
-    var variable: std.ArrayList(u8) = .empty;
-    try variable.appendSlice(gpa, &.{ 0x27, 0, 0, 0 }); // attributes
-    // Two certificates of three bytes in one X.509 list, then a hash list.
-    try variable.appendSlice(gpa, &x509);
-    try variable.appendSlice(gpa, &.{ 28 + 2 * 19, 0, 0, 0, 0, 0, 0, 0, 19, 0, 0, 0 });
-    for ([_][]const u8{ &.{ 1, 2, 3 }, &.{ 4, 5, 6 } }) |certificate| {
-        try variable.appendSlice(gpa, &owner);
-        try variable.appendSlice(gpa, certificate);
+    const cas = @import("files").microsoft_uefi_cas;
+    const own = cas[0];
+    const ms_pk = cas[1];
+
+    var pk: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &pk, uefi_sig.x509_guid, &.{ms_pk});
+    var kek: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &kek, uefi_sig.x509_guid, &.{ms_pk});
+
+    // Azure template: all 4 CAs + own in db.
+    var db: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &db, uefi_sig.x509_guid, &cas);
+    var own_db: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &own_db, uefi_sig.x509_guid, &.{ cas[1], cas[2], cas[3], own });
+
+    // Bare SHA-256 digests in dbx do NOT revoke X.509 signers in UEFI firmware.
+    var sha_dbx: std.ArrayList(u8) = .empty;
+    for (cas[1..]) |ca| {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(ca, &digest, .{});
+        try uefi_sig.encodeList(gpa, &sha_dbx, uefi_sig.sha256_guid, &.{&digest});
     }
-    try variable.appendSlice(gpa, &sha256);
-    try variable.appendSlice(gpa, &.{ 28 + 48, 0, 0, 0, 0, 0, 0, 0, 48, 0, 0, 0 });
-    try variable.appendSlice(gpa, &owner);
-    try variable.appendNTimes(gpa, 0xab, 32);
-    const certs = try signatures(gpa, variable.items, x509);
-    try testing.expectEqual(@as(usize, 2), certs.len);
-    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, certs[0]);
-    try testing.expectEqualSlices(u8, &.{ 4, 5, 6 }, certs[1]);
-    // The same bytes read for their one hash entry, not the certificates.
-    const hashes = try signatures(gpa, variable.items, sha256);
-    const expected_hash: [32]u8 = @splat(0xab);
-    try testing.expectEqual(@as(usize, 1), hashes.len);
-    try testing.expectEqualSlices(u8, &expected_hash, hashes[0]);
-    try testing.expectEqual(@as(usize, 0), (try signatures(gpa, "", x509)).len);
-    try testing.expectEqual(@as(usize, 0), (try signatures(gpa, &.{ 0x27, 0, 0, 0 }, x509)).len);
-    // A list claiming more than the variable holds, then entries of no size.
-    const short = variable.items[0 .. variable.items.len - 1];
-    try testing.expectError(error.MalformedSignatureList, signatures(gpa, short, x509));
-    variable.items[4 + 24] = 16;
-    try testing.expectError(error.MalformedSignatureList, signatures(gpa, variable.items, x509));
+    try testing.expectError(
+        error.ForeignSignerInDb,
+        checkFirmwareTrust(gpa, pk.items, kek.items, own_db.items, sha_dbx.items, own, false),
+    );
+
+    // X.509 certificate entries in dbx DO revoke the foreign CAs, leaving own alone.
+    var x509_dbx: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &x509_dbx, uefi_sig.x509_guid, cas[1..]);
+    try checkFirmwareTrust(gpa, pk.items, kek.items, own_db.items, x509_dbx.items, own, false);
+
+    // Custom PK (PK == own) rejects an extra KEK or binary hash allowlist in db.
+    var own_pk: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &own_pk, uefi_sig.x509_guid, &.{own});
+    var extra_kek: std.ArrayList(u8) = .empty;
+    try uefi_sig.encodeList(gpa, &extra_kek, uefi_sig.x509_guid, &.{ own, ms_pk });
+    try testing.expectError(
+        error.ForeignKek,
+        checkFirmwareTrust(gpa, own_pk.items, extra_kek.items, own_pk.items, "", own, false),
+    );
 }
 
 test identify {

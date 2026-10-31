@@ -8,6 +8,7 @@ const allow = @import("allow");
 const dns = @import("dns");
 const net_rule = @import("net-rule");
 const network = @import("network");
+const people = @import("people");
 const linux = std.os.linux;
 const Io = std.Io;
 
@@ -261,7 +262,7 @@ const Lan = struct {
         }
         for (l.prefixes[0..l.len]) |p| if (p.len == bits and
             std.mem.eql(u8, p.addr, normalized[0..addr.len])) return;
-        if (l.len == max_lan) return error.TooManyLanSubnets;
+        if (l.len == max_lan) return;
         l.addresses[l.len] = normalized;
         l.prefixes[l.len] = .{ .addr = l.addresses[l.len][0..addr.len], .len = bits };
         l.len += 1;
@@ -282,7 +283,9 @@ const Lan = struct {
             var addr: [4]u8 = undefined;
             std.mem.writeInt(u32, &addr, dest, .little);
             if (addr[0] == 0 or addr[0] == 127 or addr[0] >= 224) continue;
-            try l.add(&addr, @intCast(@popCount(mask)));
+            const bits: u8 = @intCast(@popCount(mask));
+            if (bits < 8) continue;
+            try l.add(&addr, bits);
         }
     }
 
@@ -300,6 +303,9 @@ const Lan = struct {
             var addr: [16]u8 = undefined;
             _ = try std.fmt.hexToBytes(&addr, hex);
             if (hex.len != 32 or addr[0] == 255) return error.BadLan;
+            // Ignore rogue Router Advertisement prefixes wider than /48 (or /64 on link-local).
+            const link_local = addr[0] == 0xfe and (addr[1] & 0xc0) == 0x80;
+            if (bits < (if (link_local) @as(u8, 64) else 48)) continue;
             try l.add(&addr, bits);
         }
     }
@@ -344,7 +350,7 @@ const Policy = struct {
     fn needsLan(p: Policy) bool {
         if (p.nlisten_lan > 0) return true;
         for (p.udp[0..p.nudp]) |u| if (u.lan) return true;
-        for (p.connect[0..p.nconnect]) |c| if (c.lan) return true;
+        for (p.connect[0..p.nconnect]) |c| if (c.lan or c.public) return true;
         return false;
     }
 
@@ -569,16 +575,25 @@ const Rule = net_rule.Rule;
 /// policy_max bounds the compiled policy, lookup grants included.
 const policy_max = 64 << 10;
 
-const max_rules = 24 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
-    (36 + 8 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
+const max_rules = 32 + 2 * dns.max_users + wire_server_ports.len + dropped.len +
+    (44 + 13 * max_lan + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
+
+/// overlapsPeople reports whether c's uid or range intersects people.ids.
+fn overlapsPeople(c: Connect) bool {
+    const first = c.uid orelse return true;
+    const last = c.uid_last orelse first;
+    for (people.ids) |r| {
+        if (first <= r[1] and last >= r[0]) return true;
+    }
+    return false;
+}
 
 /// plan returns the rules for family, in the order the kernel tries them:
 ///
-///   5     a `public` connect to a non-public address: refused
-///   8     one user's named port on loopback, when that user connects
-///         to every TCP port: local table
-///   9     the rest of loopback, for that user alone: refused
-///   10    sent to this machine or over loopback: local table
+///   5     a `public` connect to a non-public or connected-LAN address: refused
+///   8     named ports on loopback for wide connectors and people: local table
+///   9     the rest of loopback for wide connectors and people: refused
+///   10    sent over loopback, or by root to this machine: local table
 ///   100   sent to the metadata server's TCP 80 by a named user: main
 ///   101   sent to it by anyone else, or to Azure's wire server: refused
 ///   200   sent as declared (user, protocol, port), from a served port (a
@@ -683,17 +698,36 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .dst = &dns.resolver,
     });
     const non_public: []const Prefix = if (family == linux.AF.INET6) &non_public6 else &non_public4;
-    for (p.connect[0..p.nconnect]) |c| if (c.public) for (non_public) |np| rules.add(.{
-        .priority = pref.public_refuse,
-        .action = FR_ACT_PROHIBIT,
-        .from_here = true,
-        .dst = np.addr,
-        .dst_len = np.len,
-        .proto = c.proto,
-        .dport = c.port,
-        .uid = c.uid,
-        .uid_last = c.uid_last,
-    });
+    const addr_len: usize = if (family == linux.AF.INET6) 16 else 4;
+    for (p.connect[0..p.nconnect]) |c| if (c.public) {
+        for (non_public) |np| rules.add(.{
+            .priority = pref.public_refuse,
+            .action = FR_ACT_PROHIBIT,
+            .from_here = true,
+            .dst = np.addr,
+            .dst_len = np.len,
+            .proto = c.proto,
+            .dport = c.port,
+            .uid = c.uid,
+            .uid_last = c.uid_last,
+        });
+        for (p.lan) |lp| if (lp.addr.len == addr_len) {
+            const covered = for (non_public) |np| {
+                if (lp.len >= np.len and prefixMatches(lp.addr, np.addr, np.len)) break true;
+            } else false;
+            if (!covered) rules.add(.{
+                .priority = pref.public_refuse,
+                .action = FR_ACT_PROHIBIT,
+                .from_here = true,
+                .dst = lp.addr,
+                .dst_len = lp.len,
+                .proto = c.proto,
+                .dport = c.port,
+                .uid = c.uid,
+                .uid_last = c.uid_last,
+            });
+        };
+    };
     if (family == linux.AF.INET and p.local_validator) {
         for ([_]Proto{ .udp, .tcp }) |proto| rules.add(.{
             .priority = pref.local_validator_refuse,
@@ -704,10 +738,9 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .dport = 53,
         });
     }
-    // A user who may open every TCP port must not reach this machine's
-    // own services. An explicit port of that user's (Redis) is allowed
-    // on 127.0.0.1 and ::1; the rest of loopback is prohibited. Other
-    // users are not in these rules, so their loopback is unchanged.
+    // Wide connectors (`tcp any`) and interactive logins (`people.ids`) must
+    // not reach undeclared internal loopback services. Emit all loopback_allow
+    // rules before any loopback_refuse rule so priorities stay monotonic.
     var isolated: [max_entries]u32 = undefined;
     var niso: usize = 0;
     for (p.connect[0..p.nconnect]) |c| {
@@ -721,9 +754,32 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             niso += 1;
         }
     }
-    for (isolated[0..niso]) |id| {
-        for (p.connect[0..p.nconnect]) |c| {
-            if (c.any or c.proto != .tcp or c.uid == null or c.uid.? != id) continue;
+    for (p.connect[0..p.nconnect]) |*c| {
+        if (c.destination) |*address| {
+            if ((address.* == .ip4) != (family == linux.AF.INET)) continue;
+            rules.add(.{
+                .priority = pref.loopback_allow,
+                .action = FR_ACT_TO_TBL,
+                .table = if (switch (address.*) {
+                    .ip4 => |a| a.bytes[0] == 127,
+                    .ip6 => |a| std.mem.eql(u8, &a.bytes, &loopback6),
+                })
+                    RT_TABLE_LOCAL
+                else
+                    RT_TABLE_MAIN,
+                .from_here = true,
+                .dst = switch (address.*) {
+                    .ip4 => |*a| &a.bytes,
+                    .ip6 => |*a| &a.bytes,
+                },
+                .proto = .tcp,
+                .dport = c.port,
+                .uid = c.uid,
+                .uid_last = c.uid_last,
+            });
+            continue;
+        }
+        if (c.loopback) {
             rules.add(.{
                 .priority = pref.loopback_allow,
                 .action = FR_ACT_TO_TBL,
@@ -732,46 +788,16 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
                 .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_ip,
                 .proto = .tcp,
                 .dport = c.port,
-                .uid = id,
+                .uid = c.uid,
+                .uid_last = c.uid_last,
             });
+            continue;
         }
-        rules.add(.{
-            .priority = pref.loopback_refuse,
-            .action = FR_ACT_PROHIBIT,
-            .from_here = true,
-            .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_net,
-            .dst_len = if (family == linux.AF.INET6) 128 else 8,
-            .uid = id,
-        });
-    }
-    for (p.connect[0..p.nconnect]) |*c| if (c.destination) |*address| {
-        if ((address.* == .ip4) != (family == linux.AF.INET)) continue;
-        rules.add(.{
-            .priority = pref.loopback_allow,
-            .action = FR_ACT_TO_TBL,
-            .table = if (switch (address.*) {
-                .ip4 => |a| a.bytes[0] == 127,
-                .ip6 => |a| std.mem.eql(u8, &a.bytes, &loopback6),
-            })
-                RT_TABLE_LOCAL
-            else
-                RT_TABLE_MAIN,
-            .from_here = true,
-            .dst = switch (address.*) {
-                .ip4 => |*a| &a.bytes,
-                .ip6 => |*a| &a.bytes,
-            },
-            .proto = .tcp,
-            .dport = c.port,
-            .uid = c.uid,
-            .uid_last = c.uid_last,
-        });
-    };
-    // A loopback-only connector gets the named port on the two loopback
-    // addresses. Refuse every other destination before the local table,
-    // including another address assigned to this machine.
-    for (p.connect[0..p.nconnect]) |c| if (c.loopback) {
-        rules.add(.{
+        if (c.any or c.public or c.proto != .tcp) continue;
+        const in_isolated = if (c.uid) |id| c.uid_last == null and for (isolated[0..niso]) |u| {
+            if (u == id) break true;
+        } else false else false;
+        if (in_isolated or overlapsPeople(c.*)) rules.add(.{
             .priority = pref.loopback_allow,
             .action = FR_ACT_TO_TBL,
             .table = RT_TABLE_LOCAL,
@@ -782,21 +808,53 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .uid = c.uid,
             .uid_last = c.uid_last,
         });
-        rules.add(.{
-            .priority = pref.loopback_refuse,
-            .action = FR_ACT_PROHIBIT,
-            .from_here = true,
-            .proto = .tcp,
-            .dport = c.port,
-            .uid = c.uid,
-            .uid_last = c.uid_last,
-        });
-    };
+    }
+    for (isolated[0..niso]) |id| rules.add(.{
+        .priority = pref.loopback_refuse,
+        .action = FR_ACT_PROHIBIT,
+        .from_here = true,
+        .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_net,
+        .dst_len = if (family == linux.AF.INET6) 128 else 8,
+        .uid = id,
+    });
+    for (people.ids) |range| rules.add(.{
+        .priority = pref.loopback_refuse,
+        .action = FR_ACT_PROHIBIT,
+        .from_here = true,
+        .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_net,
+        .dst_len = if (family == linux.AF.INET6) 128 else 8,
+        .uid = range[0],
+        .uid_last = range[1],
+    });
+    // A loopback-only connector gets the named port on the two loopback
+    // addresses. Refuse every other destination before the local table,
+    // including another address assigned to this machine.
+    for (p.connect[0..p.nconnect]) |c| if (c.loopback) rules.add(.{
+        .priority = pref.loopback_refuse,
+        .action = FR_ACT_PROHIBIT,
+        .from_here = true,
+        .proto = .tcp,
+        .dport = c.port,
+        .uid = c.uid,
+        .uid_last = c.uid_last,
+    });
+    // Pin non-root local delivery to true loopback so assigned NIC addresses
+    // cannot bypass loopback-only listeners, wide-connect isolation or public
+    // egress restrictions. Root retains local-address delivery.
     rules.add(.{
         .priority = pref.local_out,
         .action = FR_ACT_TO_TBL,
         .table = RT_TABLE_LOCAL,
         .from_here = true,
+        .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_net,
+        .dst_len = if (family == linux.AF.INET6) 128 else 8,
+    });
+    rules.add(.{
+        .priority = pref.local_out,
+        .action = FR_ACT_TO_TBL,
+        .table = RT_TABLE_LOCAL,
+        .from_here = true,
+        .uid = 0,
     });
     for (p.metadata[0..p.nmetadata]) |uid| rules.add(.{
         .priority = pref.metadata_allow,
@@ -867,6 +925,14 @@ fn plan(p: *const Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .sport = l,
     });
+    for (p.listen_lan[0..p.nlisten_lan]) |l| rules.onLan(.{
+        .priority = pref.out_allow,
+        .action = FR_ACT_TO_TBL,
+        .table = RT_TABLE_MAIN,
+        .from_here = true,
+        .proto = .tcp,
+        .sport = l,
+    }, p.lan, 0);
     // Landlock holds a TCP port's bind; nothing holds a UDP one's, so only
     // its user's datagrams leave from it, and a squatter cannot answer.
     for (p.udp[0..p.nudp]) |u| {
@@ -1129,6 +1195,10 @@ fn restrict(p: Policy) !void {
     }
     try ruleset.port(sandbox.bind_tcp, 0);
     for (p.listen[0..p.nlisten]) |l| {
+        try ruleset.port(sandbox.bind_tcp, l);
+        try ruleset.port(sandbox.connect_tcp, l);
+    }
+    for (p.listen_lan[0..p.nlisten_lan]) |l| {
         try ruleset.port(sandbox.bind_tcp, l);
         try ruleset.port(sandbox.connect_tcp, l);
     }
@@ -1563,12 +1633,16 @@ test "LAN subnets exclude default routes, gateways and loopback" {
         "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n" ++
             "eth0 00000000 01014D0A 0003 0 0 0 00000000 0 0 0\n" ++
             "eth0 00014D0A 00000000 0001 0 0 0 00FFFFFF 0 0 0\n" ++
+            "eth0 00000080 00000000 0001 0 0 0 00000080 0 0 0\n" ++
             "eth0 00000A0A 01014D0A 0003 0 0 0 0000FFFF 0 0 0\n" ++
             "lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0\n",
     );
     try lan.addresses6(
         "20010db8007700000000000000000001 02 40 00 80 eth0\n" ++
             "fe800000000000000000000000000001 02 40 20 80 eth0\n" ++
+            "fe800000000000000000000000000002 02 0a 20 80 eth0\n" ++
+            "20000000000000000000000000000001 02 03 00 80 eth0\n" ++
+            "fd000000000000000000000000000002 02 20 00 80 eth0\n" ++
             "00000000000000000000000000000001 01 80 10 80 lo\n" ++
             "fd000000000000000000000000000001 02 40 00 40 eth0\n",
     );
@@ -1581,6 +1655,8 @@ test "LAN subnets exclude default routes, gateways and loopback" {
         lan.prefixes[1].addr,
     );
     try std.testing.expectEqual(64, lan.prefixes[1].len);
+    for (0..max_lan + 8) |i| try lan.add(&.{ 10, 88, @intCast(i), 1 }, 24);
+    try std.testing.expectEqual(max_lan, lan.len);
 }
 
 test "LAN discovery allows on-link peers and groups, refusing other addresses and users" {
@@ -1682,13 +1758,23 @@ test "a TCP DNS listener accepts only connected subnets" {
     const planned = plan(&p, linux.AF.INET, &rules);
     var allow_lan = false;
     var deny_other = false;
+    var reply_lan = false;
+    var reply_wide = false;
     for (planned) |r| {
+        if (r.priority == pref.out_allow and r.proto == .tcp and r.sport == 53 and
+            r.action == FR_ACT_TO_TBL)
+        {
+            if (r.dst != null and prefixMatches(&.{ 10, 77, 0, 2 }, r.dst.?, r.dst_len.?))
+                reply_lan = true
+            else
+                reply_wide = true;
+        }
         if (r.priority != pref.in_private or r.proto != .tcp or r.dport != 53) continue;
         if (r.action == FR_ACT_TO_TBL and r.table == RT_TABLE_LOCAL and r.src != null and
             prefixMatches(&.{ 10, 77, 0, 2 }, r.src.?, r.src_len.?)) allow_lan = true;
         if (r.action == FR_ACT_BLACKHOLE and r.src == null) deny_other = true;
     }
-    try std.testing.expect(allow_lan and deny_other);
+    try std.testing.expect(allow_lan and deny_other and reply_lan and !reply_wide);
     try std.testing.expectError(error.BadPolicy, parsePolicy("listen tcp 53 lan extra\n"));
 }
 
@@ -1737,12 +1823,16 @@ test "the plan, in the order the kernel tries it" {
         try std.testing.expect(x.priority >= last); // ascending
         last = x.priority;
     }
-    // Only unwound's refusal precedes local traffic: with no lookup users,
-    // no one reaches it. The drops come just before the moved local rule.
+    // Unwound's refusal and people's loopback isolation precede local traffic,
+    // which is pinned to loopback and root. Drops precede the moved local rule.
     try std.testing.expectEqual(pref.label_refuse, r[0].priority);
     try std.testing.expectEqual(FR_ACT_PROHIBIT, r[0].action);
-    try std.testing.expectEqual(pref.local_out, r[1].priority);
-    try std.testing.expect(r[1].from_here);
+    try std.testing.expectEqual(pref.loopback_refuse, r[1].priority);
+    try std.testing.expectEqual(pref.loopback_refuse, r[2].priority);
+    try std.testing.expectEqual(pref.local_out, r[3].priority);
+    try std.testing.expect(r[3].from_here and r[3].dst_len == 8);
+    try std.testing.expectEqual(pref.local_out, r[4].priority);
+    try std.testing.expect(r[4].from_here and r[4].uid == 0 and r[4].dst == null);
     try std.testing.expectEqual(FR_ACT_BLACKHOLE, r[r.len - 2].action);
     try std.testing.expectEqual(pref.local, r[r.len - 1].priority);
 
@@ -2130,11 +2220,17 @@ test "a direct LAN DNS grant stays on connected subnets" {
 }
 
 test "public: refused to every non-public prefix, first, on its port alone" {
-    const p = try parsePolicy("connect 207 tcp 443 public\nconnect 207 udp 53\n");
+    var p = try parsePolicy("connect 207 tcp 443 public\nconnect 207 udp 53\n");
+    try std.testing.expect(p.needsLan());
+    var lan: Lan = .{};
+    try lan.add(&.{ 10, 77, 0, 1 }, 24);
+    try lan.add(&.{ 203, 0, 113, 1 }, 24);
+    try lan.add(&v6(&.{ 0x20, 1, 0x48, 0x60 }, 1), 64);
+    p.lan = lan.prefixes[0..lan.len];
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
         var rules: [max_rules]Rule = undefined;
         const r = plan(&p, fam, &rules);
-        const want: usize = if (fam == linux.AF.INET6) non_public6.len else non_public4.len;
+        const want: usize = (if (fam == linux.AF.INET6) non_public6.len else non_public4.len) + 1;
         var refusals: usize = 0;
         for (r, 0..) |x, i| {
             if (x.priority != pref.public_refuse) continue;
@@ -2190,8 +2286,14 @@ test "Azure's wire server is refused on its two ports, to everyone, IPv4 alone" 
 
 test "a full policy fits its rules" {
     var p: Policy = .{};
+    var lan: Lan = .{};
+    inline for (0..max_lan) |i|
+        try lan.add(&v6(&.{ 0x20, 1, 0x48, 0x60, 0, @intCast(i) }, 1), 64);
+    p.lan = lan.prefixes[0..lan.len];
     for (0..max_entries) |i| {
         p.listen[i] = @intCast(1000 + i);
+        p.listen_lan[i] = @intCast(4000 + i);
+        p.udp[i] = .{ .port = @intCast(5000 + i), .uid = @intCast(i), .lan = true };
         p.connect[i] = .{
             .uid = @intCast(i),
             .proto = .udp,
@@ -2203,10 +2305,69 @@ test "a full policy fits its rules" {
     }
     p.nloopback = max_entries;
     p.nlisten = max_entries;
+    p.nlisten_lan = max_entries;
+    p.nudp = max_entries;
     p.nconnect = max_entries;
     p.nmetadata = max_entries;
     var rules: [max_rules]Rule = undefined;
     _ = plan(&p, linux.AF.INET6, &rules);
+}
+
+test "local NIC addresses and undeclared loopback ports are refused to non-root and people" {
+    const p = try parsePolicy(
+        \\connect 70 tcp any
+        \\connect 70 tcp 6379
+        \\connect 500-60000 tcp 22
+        \\connect 207 tcp 32402 loopback
+        \\listen tcp 5432 loopback
+    );
+    const decide = struct {
+        fn action(rules: []const Rule, uid: u32, destination: []const u8, port_number: u16) Rule {
+            for (rules) |r| {
+                if (!r.from_here) continue;
+                if (r.proto != null and r.proto != .tcp) continue;
+                if (r.uid) |u| if (uid < u or uid > (r.uid_last orelse u)) continue;
+                if (r.dport != null and (port_number < r.dport.? or
+                    port_number > (r.dport_last orelse r.dport.?))) continue;
+                if (r.sport != null and r.sport.? != 40000) continue;
+                if (r.src != null) continue;
+                if (r.dst) |dst| if (!prefixMatches(
+                    destination,
+                    dst,
+                    r.dst_len orelse @intCast(dst.len * 8),
+                )) continue;
+                return r;
+            }
+            return .{ .priority = 0, .action = 0 };
+        }
+    }.action;
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
+        const planned = plan(&p, fam, &rules);
+        var last: u32 = 0;
+        for (planned) |x| {
+            try std.testing.expect(x.priority >= last);
+            last = x.priority;
+        }
+        const lo: []const u8 = if (fam == linux.AF.INET) &loopback_ip else &loopback6;
+        const nic: []const u8 = if (fam == linux.AF.INET)
+            &.{ 10, 0, 2, 15 }
+        else
+            &v6(&.{ 0xfd, 0 }, 15);
+        // Root reaches both loopback and assigned NIC addresses via RT_TABLE_LOCAL;
+        // non-root services reach loopback unless isolated, never the NIC address.
+        try std.testing.expectEqual(RT_TABLE_LOCAL, decide(planned, 0, nic, 5432).table);
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 208, nic, 5432).action);
+        try std.testing.expectEqual(RT_TABLE_LOCAL, decide(planned, 208, lo, 5432).table);
+        // Interactive people reach declared TCP ports on loopback, never
+        // internal loopback services or undeclared ports on the NIC address.
+        try std.testing.expectEqual(RT_TABLE_LOCAL, decide(planned, 1000, lo, 22).table);
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 1000, lo, 5432).action);
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 70000, lo, 5432).action);
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 1000, nic, 5432).action);
+        try std.testing.expectEqual(RT_TABLE_MAIN, decide(planned, 1000, nic, 22).table);
+        try std.testing.expectEqual(FR_ACT_PROHIBIT, decide(planned, 207, nic, 32402).action);
+    }
 }
 
 test "a scan reaches every port and not this machine's services" {

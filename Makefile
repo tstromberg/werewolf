@@ -214,9 +214,9 @@ LIB_MODULES = --dep data-transfer --dep sandbox --dep seal -Mdata-read=lib/data-
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep prebuilt --dep update-policy -Mboot-download=lib/boot-download.zig -Msecurity-inputs=lib/security-inputs.zig \
-	--dep form -Mtest-plan=test/native/plan.zig
+	-Muefi-sig=lib/uefi-sig.zig --dep form -Mtest-plan=test/native/plan.zig
 ZIG_MODULES =--dep data-read --dep data-source --dep data-transfer --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
-	--dep boot-download --dep security-inputs --dep test-plan \
+	--dep boot-download --dep security-inputs --dep uefi-sig --dep test-plan \
 	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 # A host-side test in Zig also takes test/host as module host (test/host/README.md):
@@ -259,7 +259,7 @@ $(PROGRAM_FLAGS_STAMP): _program-flags
 	@cmp -s $@.new $@ && rm -f $@.new || mv -f $@.new $@
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 define program
-$(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wildcard lib/*.zig) $(PROGRAM_FLAGS_STAMP)
+$(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wildcard lib/*.zig) tools/uki.zig $(PROGRAM_FLAGS_STAMP)
 	$$(zig_check)
 	zig build-exe $(PROGRAM_FLAGS) -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
@@ -343,7 +343,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard lib/data-transfer*.zig) $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/yaml.zig test/native/plan.zig test/native/steps.zig test/native/host.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig lib/apk.zig lib/apk-version.zig \
-	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig \
+	lib/baselayout.zig lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/uefi-sig.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig \
 	lib/boot-download.zig lib/security-inputs.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
@@ -366,10 +366,10 @@ $(CONSOLE_CHECK): test/console.zig test/native/regex.c $(wildcard test/host/*.zi
 
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
-TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/data.zig cmd/howl/data-helper.zig cmd/howl/data-cloud.zig cmd/howl/data-aws.zig cmd/howl/data-cloud-disk.zig cmd/howl/data-cloud-target.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
+TEST_SOURCES = lib/data-transfer.zig cmd/data-export/data-export.zig cmd/howl/boot-config.zig cmd/howl/lima.zig cmd/howl/local-secure.zig cmd/howl/data.zig cmd/howl/data-image.zig cmd/howl/data-helper.zig cmd/howl/data-cloud.zig cmd/howl/data-aws.zig cmd/howl/data-cloud-disk.zig cmd/howl/data-cloud-target.zig tools/mdoc.zig test/host/host.zig $(HOST_TESTS) test/howl/run.zig test/check-dns.zig test/unwound/lab.zig lib/yaml.zig test/native/plan.zig tools/native-tests.zig tools/form-coverage.zig test/native/iterate.zig test/native/system.zig cmd/howl/test.zig lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/net-rule.zig lib/dns.zig lib/lookup.zig cmd/unwound/fuzz.zig cmd/unwound/age.zig cmd/unwound/bootstrap.zig cmd/unwound/age_ipc.zig cmd/unwound/age_gate.zig cmd/unwound/age_http.zig cmd/unwound/age_evidence.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/boot-download.zig lib/security-inputs.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/uefi-sig.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig tools/update-unwound-age-data.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/mdoc _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/provider-ab _test/boot-images _test/local-prerequisites _test/tpm-floor _test/release-signing _test/form-coverage _test/ci-forms _test/package-consumers _test/probes
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 .PHONY: _test/mdoc
@@ -469,7 +469,7 @@ _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/preb
 _test/lib/boot-download.zig: ; zig test --dep prebuilt --dep update-policy --dep host -Mroot=lib/boot-download.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mhost=test/host/host.zig
-_test/cmd/howl/howl.zig _test/cmd/howl/test.zig _test/cmd/howl/data.zig _test/cmd/howl/data-helper.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
+_test/cmd/howl/howl.zig _test/cmd/howl/test.zig _test/cmd/howl/boot-config.zig _test/cmd/howl/lima.zig _test/cmd/howl/local-secure.zig _test/cmd/howl/data.zig _test/cmd/howl/data-image.zig _test/cmd/howl/data-helper.zig _test/cmd/howl/data-cloud.zig _test/cmd/howl/data-aws.zig _test/cmd/howl/data-cloud-disk.zig _test/cmd/howl/data-cloud-target.zig: _test/%: ; zig test $(call HOST_ZIG_MODULES,$*)
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 build/host/tpm-floor: tools/tpm-floor.zig lib/tpm.zig lib/boot-authority.zig lib/apk.zig lib/package.zig
@@ -903,7 +903,7 @@ $(BUILD)/dns-policy: test/dns-policy.zig $(wildcard lib/*.zig)
 $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $(wildcard lib/*.zig)
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
-		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm --dep sandbox -Mposture=cmd/posture/posture.zig -femit-bin=$@
+		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm --dep uefi-sig --dep sandbox -Mposture=cmd/posture/posture.zig -femit-bin=$@
 check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress \
 	$(BUILD)/check-dns $(BUILD)/check-lan
 	$(DNS_TEST_RUNNER) $(BUILD)/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
@@ -926,7 +926,7 @@ check-updater-installer: $(BUILD)/updater-installer-test $(BUILD)/updater-coordi
 	$(LINUX_TEST_RUNNER) sh test/check-updater-installer $(OUT)/rootfs.tar $(OUT)/overlay.tar $(BUILD)/updater-coordinator-test
 
 .PHONY: check-mount-broker check-privilege-boundaries
-$(BUILD)/mount-broker-test: cmd/mount-broker/mount-broker.zig $(wildcard lib/*.zig)
+$(BUILD)/mount-broker-test: cmd/mount-broker/mount-broker.zig $(wildcard lib/*.zig) tools/uki.zig
 	zig test -target $(ARCH)-linux-musl --test-no-exec -femit-bin=$@ $(call ZIG_MODULES,cmd/mount-broker/mount-broker.zig)
 check-mount-broker: $(call program_bin,mount-broker) $(BUILD)/mount-broker-test $(BUILD)/check-mount-broker
 	$(LINUX_TEST_RUNNER) $(BUILD)/check-mount-broker $(call program_bin,mount-broker) $(BUILD)/mount-broker-test

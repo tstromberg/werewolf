@@ -3,6 +3,8 @@
 The default `howl run` environment provides an interactive SSH shell and accepts
 ordinary SSH key files. Its software and permissions are in [form.yaml](form.yaml).
 It includes our hardened Python 3.15 and BusyBox tools; mksh supplies `/bin/sh`.
+Chard is available to root and ordinary users as `/usr/bin/chard` for hardening
+inspection (`chard elf /usr/bin/chard`).
 Guest command manuals are installed in `/usr/share/man`. Use `man posture`,
 `man seal`, `man slot-update` or `man su` in the machine to read them.
 [SSH-backed su](../ssh-su/README.md) accepts software keys for the local VM.

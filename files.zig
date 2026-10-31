@@ -15,6 +15,7 @@ pub const microsoft_uefi_cas = [_][]const u8{
     @embedFile("boot/microsoft/microsoft-corporation-uefi-ca-2011.der"),
     @embedFile("boot/microsoft/microsoft-uefi-ca-2023.der"),
     @embedFile("boot/microsoft/microsoft-option-rom-uefi-ca-2023.der"),
+    @embedFile("boot/microsoft/azure-services-linux-kmod-pca.der"),
 };
 pub const protected_trust = @embedFile("release/protected/trust.json");
 pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");

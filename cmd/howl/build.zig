@@ -509,10 +509,15 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
             "        howl run --with {s}           {f}\n",
             .{ ref, look.dim("boot it here, its console in this terminal") },
         );
-    } else {
+    } else if (o.disabled.eql(.empty)) {
         try e.print(
             "  Next: howl upload {s} --on {s}\n",
             .{ boot, howl.Platform.list(.cloud, "|") },
+        );
+    } else {
+        try e.print(
+            "  Next: howl upload {s} --on {s} --disable={s}\n",
+            .{ boot, howl.Platform.list(.cloud, "|"), howl.every_protection },
         );
     }
     Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};
@@ -603,7 +608,10 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
             const goal = std.meta.stringToEnum(std.meta.FieldEnum(Goals), args[i]) orelse
                 return why.refuse("{s}: {s}", .{ args[i], syntax });
             switch (goal) {
-                .private_machine => return why.refuse("private_machine is an internal deployment goal", .{}),
+                .private_machine => return why.refuse(
+                    "private_machine is an internal deployment goal",
+                    .{},
+                ),
                 inline else => |g| @field(goals, @tagName(g)) = true,
             }
         }
@@ -1325,7 +1333,10 @@ test "command-line build goals cannot select private deployment exemptions" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var why: howl.Why = .{};
-    try testing.expectError(error.Refused, buildTargets(testing.io, arena.allocator(), &.{"private_machine"}, &why));
+    try testing.expectError(
+        error.Refused,
+        buildTargets(testing.io, arena.allocator(), &.{"private_machine"}, &why),
+    );
 }
 
 test buildOptions {

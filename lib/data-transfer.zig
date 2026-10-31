@@ -29,8 +29,7 @@ pub const limits = struct {
 /// These are machine authority or filesystem bookkeeping, never application
 /// input. The installer enforces these independently of the manifest's claims.
 pub const exclusions = [_][]const u8{
-    ".werewolf",      "lost+found",      "log", "svc/sshd", "svc/sshd-dev",
-    "svc/autoupdate", "svc/unwound-age",
+    ".werewolf", "lost+found", "svc/sshd", "svc/sshd-dev", "svc/autoupdate", "svc/unwound-age",
 };
 
 pub const Identity = struct { name: []const u8, id: u32 };
@@ -758,9 +757,25 @@ test "inventory cannot authorize machine state, unknown owners or ambiguous path
     m.entries = &.{entry};
     try t.expectError(error.TransferOwner, check(a, m, test_policy, null));
     entry = directory;
+    entry.mode = 0o2750;
+    m.entries = &.{entry};
+    try check(a, m, test_policy, null);
+    entry.mode = 0o2770;
+    m.entries = &.{entry};
+    try check(a, m, test_policy, null);
     entry.mode = 0o4755;
     m.entries = &.{entry};
     try t.expectError(error.TransferMetadata, check(a, m, test_policy, null));
+    for ([_]u32{ 0o4755, 0o2755, 0o1755 }) |bad_file_mode| {
+        var file_entry = directory;
+        file_entry.path = "svc/plex";
+        var sub = file_entry;
+        sub.path = "svc/plex/bin";
+        sub.kind = .file;
+        sub.mode = bad_file_mode;
+        m.entries = &.{ directory, file_entry, sub };
+        try t.expectError(error.TransferMetadata, check(a, m, test_policy, null));
+    }
     m.entries = &.{directory};
     m.excluded = &.{};
     try t.expectError(error.TransferLimit, check(a, m, test_policy, null));
@@ -819,7 +834,10 @@ test "real tree archive round trip validates all selected and unselected bytes" 
     for (m.entries) |e| try t.expect(!excluded(e.path));
     // Active audit writers may append after inventory. Export the bounded
     // prefix that was measured, without weakening application consistency.
-    try tmp.dir.writeFile(io, .{ .sub_path = "log/current", .data = "native audit trail appended" });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "log/current", .data = "native audit trail appended" },
+    );
     var out: Io.Writer.Allocating = .init(a);
     const digest = try emit(io, a, tmp.dir, m, test_policy, owners, &out.writer);
     var input: Io.Reader = .fixed(out.written());

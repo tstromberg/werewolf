@@ -48,6 +48,7 @@ chmod(DATA . '/data', 0770);
 // locking and the shared cache.
 $conf = [
 	'trusted_domains' => [$host],
+	'trusted_proxies' => ['127.0.0.1', '::1'],
 	'overwrite.cli.url' => $url,
 	'overwriteprotocol' => $parts['scheme'],
 	'htaccess.RewriteBase' => '/',

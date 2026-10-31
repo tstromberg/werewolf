@@ -41,8 +41,8 @@ pub const Why = enum {
     granted,
     /// screened matched only a screened `*`: screen.zig decides the rest.
     screened,
-    /// system_domain is an assigned suffix shared by DNS-enabled services.
-    /// It still passes tunnel screening, but will skip the age gate.
+    /// system_domain is a boot-config suffix on a screened `*` grant.
+    /// It still passes tunnel screening and endpoint defaults, skipping age.
     system_domain,
     /// unsupported is a type no grant can name: ANY, AXFR, UPDATE's.
     unsupported,
@@ -165,7 +165,7 @@ pub const Policy = struct {
             return .{ .allow = true, .why = .granted, .line = g.line };
         }
         const system_domain = p.inSystemDomain(n);
-        if ((system_domain or screened != 0 or unfiltered != 0) and
+        if ((screened != 0 or unfiltered != 0) and
             endpoints.reason(n.text()) != null)
             return .{
                 .allow = false,
@@ -173,7 +173,8 @@ pub const Policy = struct {
                 .line = if (unfiltered != 0) unfiltered else screened,
             };
         if (unfiltered != 0) return .{ .allow = true, .why = .granted, .line = unfiltered };
-        if (system_domain) return .{ .allow = true, .why = .system_domain };
+        if (screened != 0 and system_domain)
+            return .{ .allow = true, .why = .system_domain, .line = screened };
         if (screened != 0) return .{ .allow = true, .why = .screened, .line = screened };
         return .{ .allow = false, .why = .no_grant };
     }
@@ -277,23 +278,77 @@ test "grants: exact names, subtrees, wildcards and their types" {
     try testing.expectEqual(null, p.service(.{ 127, 0, 0, 1 }));
 }
 
-test "assigned system domain is screened and shared only by DNS-enabled services" {
+test "assigned system domain applies only to screened wildcard grants" {
     var p: Policy = .{};
     try p.parse(example);
     try testing.expect(p.setSystemDomain("Corp.Example.COM."));
     try testing.expectEqualStrings("corp.example.com", p.system_domain.?.text());
-    const cases = [_]struct { s: u8, n: []const u8, t: u16, allow: bool, why: Why }{
-        .{ .s = 0, .n = "corp.example.com", .t = 1, .allow = true, .why = .system_domain },
-        .{ .s = 0, .n = "host.corp.example.com", .t = 16, .allow = true, .why = .system_domain },
-        .{ .s = 1, .n = "host.corp.example.com", .t = 1, .allow = true, .why = .system_domain },
-        .{ .s = 0, .n = "evilcorp.example.com", .t = 1, .allow = false, .why = .no_grant },
-        .{ .s = 0, .n = "corp.example.com.evil", .t = 1, .allow = false, .why = .no_grant },
-        .{ .s = 0, .n = "corp.example.com", .t = 255, .allow = false, .why = .unsupported },
+    const cases = [_]struct { s: u8, n: []const u8, t: u16, allow: bool, why: Why, line: u16 }{
+        // Pinned-only service 0 is never widened by system_domain.
+        .{ .s = 0, .n = "corp.example.com", .t = 1, .allow = false, .why = .no_grant, .line = 0 },
+        .{
+            .s = 0,
+            .n = "host.corp.example.com",
+            .t = 16,
+            .allow = false,
+            .why = .no_grant,
+            .line = 0,
+        },
+        // Screened `*` service 1 gets system_domain only for its granted RR types.
+        .{
+            .s = 1,
+            .n = "corp.example.com",
+            .t = 1,
+            .allow = true,
+            .why = .system_domain,
+            .line = 6,
+        },
+        .{
+            .s = 1,
+            .n = "host.corp.example.com",
+            .t = 28,
+            .allow = true,
+            .why = .system_domain,
+            .line = 6,
+        },
+        .{
+            .s = 1,
+            .n = "host.corp.example.com",
+            .t = 16,
+            .allow = false,
+            .why = .no_grant,
+            .line = 0,
+        },
+        .{
+            .s = 1,
+            .n = "evilcorp.example.com",
+            .t = 1,
+            .allow = true,
+            .why = .screened,
+            .line = 6,
+        },
+        .{
+            .s = 1,
+            .n = "corp.example.com.evil",
+            .t = 1,
+            .allow = true,
+            .why = .screened,
+            .line = 6,
+        },
+        .{
+            .s = 1,
+            .n = "corp.example.com",
+            .t = 255,
+            .allow = false,
+            .why = .unsupported,
+            .line = 0,
+        },
     };
     for (cases) |c| {
         const got = p.decide(c.s, &name(c.n), c.t);
         try testing.expectEqual(c.allow, got.allow);
         try testing.expectEqual(c.why, got.why);
+        try testing.expectEqual(c.line, got.line);
     }
     for ([_][]const u8{
         "a",

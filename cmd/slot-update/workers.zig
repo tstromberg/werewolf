@@ -175,13 +175,23 @@ fn prepare(io: std.Io, gpa: std.mem.Allocator) !void {
         .{ .iterate = true, .follow_symlinks = false },
     );
     defer state.close(io);
-    _ = try sandbox.sys(
-        linux.fchown(state.handle, coordinator_id, coordinator_id),
-        "own updater state",
-    );
-    _ = try sandbox.sys(linux.fchmod(state.handle, 0o755), "updater state mode");
-    try Dir.cwd().createDirPath(io, m.state_dir ++ "/reports");
-    try migrate(io, state, false);
+    _ = try sandbox.sys(linux.fchown(state.handle, 0, 0), "own updater jail root");
+    _ = try sandbox.sys(linux.fchmod(state.handle, 0o755), "updater jail root mode");
+    for ([_][]const u8{ "state", "reports" }) |name| {
+        try state.createDirPath(io, name);
+        var sub = try state.openDir(io, name, .{ .iterate = true, .follow_symlinks = false });
+        defer sub.close(io);
+        _ = try sandbox.sys(
+            linux.fchown(sub.handle, coordinator_id, coordinator_id),
+            "own coordinator directory",
+        );
+        _ = try sandbox.sys(linux.fchmod(sub.handle, 0o755), "coordinator directory mode");
+        try migrateDir(io, sub);
+    }
+    var coord = try state.openDir(io, "state", .{ .follow_symlinks = false });
+    defer coord.close(io);
+    try migrateRootState(io, state, coord.handle);
+    try ensureLogFile(state.handle);
     try installer.prepare(io, gpa, m.state_dir);
     for ([_][]const u8{
         "/etc/apk/arch",
@@ -195,12 +205,24 @@ fn prepare(io: std.Io, gpa: std.mem.Allocator) !void {
     try state.deleteTree(io, "data");
     for ([_][]const u8{ "host", "work", "cache", "data/svc" }) |path|
         try state.createDirPath(io, path);
+    for ([_][:0]const u8{ "usr", "etc", "host", "cache", "data", "data/svc" }) |name|
+        try setRootDir(state.handle, name);
+    {
+        var work = try state.openDir(io, "work", .{ .follow_symlinks = false });
+        defer work.close(io);
+        _ = try sandbox.sys(
+            linux.fchown(work.handle, coordinator_id, coordinator_id),
+            "own updater work",
+        );
+        _ = try sandbox.sys(linux.fchmod(work.handle, 0o755), "updater work mode");
+    }
     for ([_]struct { []const u8, []const u8 }{
         .{ "/", "data/svc/autoupdate" },
         .{ "/work/tmp", "tmp" },
         .{ "/work/net/etc/resolv.conf", "etc/resolv.conf" },
         .{ "/work/net/etc/hosts", "etc/hosts" },
         .{ "certs/ca-certificates.crt", "etc/ssl/cert.pem" },
+        .{ "state/held", "held" },
     }) |link| {
         state.deleteFile(io, link[1]) catch |err| if (err != error.FileNotFound) return err;
         try state.symLink(io, link[0], link[1], .{});
@@ -208,45 +230,97 @@ fn prepare(io: std.Io, gpa: std.mem.Allocator) !void {
     try broker.installerRuntime();
 }
 
-// Only existing regular state files and the reports directory need migration.
+fn setRootDir(parent: i32, name: [:0]const u8) !void {
+    const fd: i32 = @intCast(try sandbox.sys(linux.openat(parent, name, .{
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0), "open jail root directory"));
+    defer _ = linux.close(fd);
+    _ = try sandbox.sys(linux.fchown(fd, 0, 0), "own jail root directory");
+    _ = try sandbox.sys(linux.fchmod(fd, 0o755), "jail root directory mode");
+}
+
+fn ensureLogFile(state_fd: i32) !void {
+    const fd: i32 = @intCast(try sandbox.sys(linux.openat(state_fd, "log", .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .CLOEXEC = true,
+    }, 0o644), "open updater log"));
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .NLINK = true }, &st),
+        "stat updater log",
+    );
+    if (st.mode & linux.S.IFMT != linux.S.IFREG or st.nlink != 1)
+        return error.UnsafeUpdateState;
+    _ = try sandbox.sys(
+        linux.fchown(fd, coordinator_id, coordinator_id),
+        "own updater log",
+    );
+    _ = try sandbox.sys(linux.fchmod(fd, 0o644), "updater log mode");
+}
+
+// Migrate top-level regular state files into state/ while keeping log in place.
 // Never follow links or change an inode shared with another name.
-fn migrate(io: std.Io, dir: Dir, reports: bool) !void {
+fn migrateRootState(io: std.Io, dir: Dir, coord_fd: i32) !void {
+    var moved: std.ArrayList([256]u8) = .empty;
+    var lens: std.ArrayList(usize) = .empty;
+    defer moved.deinit(std.heap.page_allocator);
+    defer lens.deinit(std.heap.page_allocator);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (!reports and std.mem.eql(u8, entry.name, "reports")) {
-            var sub = try dir.openDir(
-                io,
-                entry.name,
-                .{ .iterate = true, .follow_symlinks = false },
-            );
-            defer sub.close(io);
-            try migrate(io, sub, true);
-            _ = try sandbox.sys(
-                linux.fchown(sub.handle, coordinator_id, coordinator_id),
-                "own updater reports",
-            );
-        } else if (entry.kind == .file) {
-            var buf: [256]u8 = undefined;
-            const name = try std.mem.printSentinel(&buf, "{s}", .{entry.name}, 0);
-            const fd: i32 = @intCast(try sandbox.sys(linux.openat(dir.handle, name, .{
-                .NOFOLLOW = true,
-                .NONBLOCK = true,
-                .CLOEXEC = true,
-            }, 0), "open old update state"));
-            defer _ = linux.close(fd);
-            var st: linux.Statx = undefined;
-            _ = try sandbox.sys(
-                linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .NLINK = true }, &st),
-                "stat old update state",
-            );
-            if (st.mode & linux.S.IFMT != linux.S.IFREG or
-                st.nlink != 1) return error.UnsafeUpdateState;
-            _ = try sandbox.sys(
-                linux.fchown(fd, coordinator_id, coordinator_id),
-                "own old update state",
-            );
+        if (entry.kind != .file) continue;
+        var buf: [256]u8 = undefined;
+        const name = try std.mem.printSentinel(&buf, "{s}", .{entry.name}, 0);
+        try ownStateFile(dir.handle, name);
+        if (!std.mem.eql(u8, entry.name, "log")) {
+            var copy: [256]u8 = @splat(0);
+            @memcpy(copy[0..entry.name.len], entry.name);
+            try moved.append(std.heap.page_allocator, copy);
+            try lens.append(std.heap.page_allocator, entry.name.len);
         }
     }
+    for (moved.items, lens.items) |*item, len| {
+        const name: [:0]const u8 = item[0..len :0];
+        _ = try sandbox.sys(
+            linux.renameat(dir.handle, name, coord_fd, name),
+            "move old update state",
+        );
+    }
+}
+
+fn migrateDir(io: std.Io, dir: Dir) !void {
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        var buf: [256]u8 = undefined;
+        const name = try std.mem.printSentinel(&buf, "{s}", .{entry.name}, 0);
+        try ownStateFile(dir.handle, name);
+    }
+}
+
+fn ownStateFile(dir_fd: i32, name: [:0]const u8) !void {
+    const fd: i32 = @intCast(try sandbox.sys(linux.openat(dir_fd, name, .{
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .CLOEXEC = true,
+    }, 0), "open old update state"));
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .NLINK = true }, &st),
+        "stat old update state",
+    );
+    if (st.mode & linux.S.IFMT != linux.S.IFREG or
+        st.nlink != 1) return error.UnsafeUpdateState;
+    _ = try sandbox.sys(
+        linux.fchown(fd, coordinator_id, coordinator_id),
+        "own old update state",
+    );
 }
 
 fn reportFailure(fd: i32, err: anyerror) void {
@@ -494,7 +568,7 @@ fn constructionDomain(kind: Kind) !void {
 }
 
 fn coordinatorDomain() !void {
-    var rules: [12]sandbox.Rule = undefined;
+    var rules: [16]sandbox.Rule = undefined;
     var count: usize = 0;
     for ([_]struct { [:0]const u8, u64 }{
         .{ "/usr", sandbox.read_file | sandbox.read_dir },
@@ -504,7 +578,11 @@ fn coordinatorDomain() !void {
         .{ "/boot", sandbox.read_file | sandbox.read_dir },
         .{ "/run/config", sandbox.read_file | sandbox.read_dir },
         .{ "/run/werewolf", sandbox.read_file | sandbox.read_dir },
-        .{ m.state_dir, sandbox.own_dir | sandbox.make_sym | sandbox.refer },
+        .{ m.state_dir, sandbox.read_file | sandbox.read_dir },
+        .{ m.coord_dir, sandbox.own_dir | sandbox.refer },
+        .{ m.work_dir, sandbox.own_dir | sandbox.make_sym | sandbox.refer },
+        .{ m.state_dir ++ "/reports", sandbox.own_dir | sandbox.refer },
+        .{ m.log_path, sandbox.read_file | sandbox.write_file },
         .{ "/dev/pts", sandbox.read_dir | sandbox.write_file },
     }) |grant| {
         const rc = linux.open(grant[0], .{ .PATH = true, .CLOEXEC = true }, 0);
@@ -1185,4 +1263,65 @@ fn constructionProbe(
         "/work/root.erofs",
         "/work/root",
     });
+}
+
+test "jail root keeps skeleton root-owned while migrating coordinator state into state/" {
+    if (@import("builtin").os.tag != .linux or linux.geteuid() != 0) return error.SkipZigTest;
+    const t = std.testing;
+    const io = t.io;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "jail/state");
+    try tmp.dir.createDirPath(io, "jail/etc/apk/keys");
+    try tmp.dir.writeFile(io, .{ .sub_path = "jail/log", .data = "old-log\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "jail/checked", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "jail/etc/apk/keys/trusted.pub", .data = "key" });
+    var jail = try tmp.dir.openDir(io, "jail", .{ .iterate = true, .follow_symlinks = false });
+    defer jail.close(io);
+    _ = try sandbox.sys(linux.fchown(jail.handle, 0, 0), "own test jail");
+    _ = try sandbox.sys(linux.fchmod(jail.handle, 0o755), "test jail mode");
+    try setRootDir(jail.handle, "etc");
+    try setRootDir(jail.handle, "etc/apk");
+    try setRootDir(jail.handle, "etc/apk/keys");
+    var coord = try jail.openDir(io, "state", .{ .follow_symlinks = false });
+    defer coord.close(io);
+    _ = try sandbox.sys(
+        linux.fchown(coord.handle, coordinator_id, coordinator_id),
+        "own test coord",
+    );
+    _ = try sandbox.sys(linux.fchmod(coord.handle, 0o755), "test coord mode");
+    try migrateRootState(io, jail, coord.handle);
+    try ensureLogFile(jail.handle);
+    try jail.access(io, "log", .{});
+    try jail.access(io, "state/checked", .{});
+    try t.expectError(error.FileNotFound, jail.access(io, "checked", .{}));
+
+    var output: [2]i32 = undefined;
+    _ = try sandbox.sys(linux.pipe2(&output, .{ .CLOEXEC = true }), "jail skeleton probe pipe");
+    defer _ = linux.close(output[0]);
+    const pid = try sandbox.sys(linux.fork(), "fork jail skeleton probe");
+    if (pid == 0) {
+        _ = linux.close(output[0]);
+        sandbox.dropTo(coordinator_id, null) catch linux.exit_group(1);
+        if (linux.errno(linux.unlinkat(jail.handle, "etc/apk/keys/trusted.pub", 0)) != .ACCES)
+            linux.exit_group(2);
+        if (linux.errno(linux.renameat(jail.handle, "etc", coord.handle, "stolen")) != .ACCES)
+            linux.exit_group(3);
+        if (linux.errno(linux.symlinkat("/tmp", jail.handle, "lib")) != .ACCES)
+            linux.exit_group(4);
+        const fd = linux.openat(
+            coord.handle,
+            "pending",
+            .{ .ACCMODE = .WRONLY, .CREAT = true },
+            0o600,
+        );
+        if (linux.errno(fd) != .SUCCESS) linux.exit_group(5);
+        _ = linux.close(@intCast(fd));
+        linux.exit_group(0);
+    }
+    _ = linux.close(output[1]);
+    const result = try sandbox.collect(arena.allocator(), @intCast(pid), output[0], 1024, 5);
+    try t.expectEqual(@as(u8, 0), result.code);
 }

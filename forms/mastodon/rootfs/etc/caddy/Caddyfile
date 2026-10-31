@@ -37,12 +37,10 @@
 		reverse_proxy 127.0.0.1:4000
 	}
 
-	# Media: strangers' files, served as nothing that runs.
+	# Media: strangers' files on /data, served by unprivileged nginx with
+	# symlink traversal disabled so Caddy never reads Mastodon's /data tree.
 	handle_path /system/* {
-		root * /data/svc/mastodon/system
-		header Cache-Control "public, max-age=2419200, immutable"
-		header Content-Security-Policy "default-src 'none'; form-action 'none'"
-		file_server
+		reverse_proxy 127.0.0.1:8080
 	}
 
 	# The assets, compiled into the image.

@@ -2429,18 +2429,23 @@ pub fn releaseDiskAt(
         else
             1,
     };
-    const p = try buildHere(io, gpa, &steps, spec, .{ .qcow2 = true, .private_machine = target != null });
+    const p = try buildHere(
+        io,
+        gpa,
+        &steps,
+        spec,
+        .{ .qcow2 = true, .private_machine = target != null },
+    );
     if (target) |disk| {
-        var recorded = spec;
-        recorded.disk_path = disk;
-        recorded.boot_key = null;
-        recorded.ipe_key = null;
-        const definition = try @import("boot-config.zig").derive(io, gpa, o.form, name, why);
         const secure = @import("local-secure.zig");
         const images = @import("data-image.zig");
+        const local_spec = secure.scrubLocalSpec(spec);
+        var recorded = local_spec;
+        recorded.disk_path = disk;
+        const definition = try @import("boot-config.zig").derive(io, gpa, o.form, name, why);
         const approved = try images.approve(io, gpa, secure.Profile{
             .spec = recorded,
-            .local = spec,
+            .local = local_spec,
             .provider = provider,
             .managed = false,
             .configuration = definition,
@@ -2449,11 +2454,16 @@ pub fn releaseDiskAt(
         profile.provider = provider;
         profile.spec.disk_path = disk;
         profile.configuration = definition;
-        profile.local = spec;
+        profile.local = local_spec;
         const authority = try gpa.print("{s}/authority", .{std.fs.path.dirname(disk).?});
         try Dir.cwd().createDirPath(io, authority);
         try Dir.cwd().setFilePermissions(io, authority, .fromMode(0o700), .{});
-        try images.replaceRecord(io, gpa, try gpa.print("{s}/profile.json", .{authority}), try std.json.Stringify.valueAlloc(gpa, profile, .{}));
+        try images.replaceRecord(
+            io,
+            gpa,
+            try gpa.print("{s}/profile.json", .{authority}),
+            try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+        );
     }
     _ = try steps.finish();
     return target orelse gpa.print("{s}/disk.qcow2", .{p.out});

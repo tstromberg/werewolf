@@ -97,6 +97,7 @@ pub fn confine(state: ?[*:0]const u8, d: Destination) !void {
         _ = try sandbox.sys(linux.chroot("."), "chroot installer");
     }
     _ = try sandbox.sys(linux.chdir("/"), "enter installer root");
+    for ([_][:0]const u8{ "/", "/usr", "/etc" }) |dir| try requireRootOwnedDir(dir);
     var rules: [7]sandbox.Rule = undefined;
     var n: usize = 0;
     const readable = sandbox.read_file | sandbox.read_dir;
@@ -121,6 +122,23 @@ pub fn confine(state: ?[*:0]const u8, d: Destination) !void {
         _ = linux.close(rule.fd);
     };
     try sandbox.landlock(rules[0..n], &.{});
+}
+
+fn requireRootOwnedDir(path: [:0]const u8) !void {
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(
+        linux.statx(
+            linux.AT.FDCWD,
+            path,
+            linux.AT.SYMLINK_NOFOLLOW,
+            .{ .TYPE = true, .MODE = true, .UID = true, .GID = true },
+            &st,
+        ),
+        "stat installer root directory",
+    );
+    if (st.mode & linux.S.IFMT != linux.S.IFDIR or st.uid != 0 or st.gid != 0 or
+        st.mode & 0o022 != 0)
+        return error.UnsafeInstallerRoot;
 }
 
 /// filter admits offline extraction and the dynamic loader, without sockets,
@@ -338,4 +356,25 @@ fn apkProbe(base: [*:0]const u8, usr: [*:0]const u8, output: i32) !noreturn {
     const env = [_:null]?[*:0]const u8{};
     _ = try sandbox.sys(linux.execve("/usr/bin/apk", &args, &env), "execute offline apk test");
     unreachable;
+}
+
+test "requireRootOwnedDir rejects coordinator-owned and writable directories" {
+    if (@import("builtin").os.tag != .linux or linux.geteuid() != 0) return error.SkipZigTest;
+    const t = std.testing;
+    const io = t.io;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "etc");
+    const path = try gpa.dupeSentinel(u8, try tmp.dir.realPathFileAlloc(io, "etc", gpa), 0);
+    _ = try sandbox.sys(linux.fchownat(linux.AT.FDCWD, path, 0, 0, 0), "own test etc");
+    _ = try sandbox.sys(linux.fchmodat(linux.AT.FDCWD, path, 0o755), "chmod test etc");
+    try requireRootOwnedDir(path);
+    _ = try sandbox.sys(linux.fchmodat(linux.AT.FDCWD, path, 0o775), "writable test etc");
+    try t.expectError(error.UnsafeInstallerRoot, requireRootOwnedDir(path));
+    _ = try sandbox.sys(linux.fchmodat(linux.AT.FDCWD, path, 0o755), "restore test etc");
+    _ = try sandbox.sys(linux.fchownat(linux.AT.FDCWD, path, 77, 77, 0), "foreign test etc");
+    try t.expectError(error.UnsafeInstallerRoot, requireRootOwnedDir(path));
 }

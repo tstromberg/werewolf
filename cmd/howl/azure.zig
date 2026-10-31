@@ -122,7 +122,7 @@ pub fn machine(arch: howl.Arch) Machine {
 /// it once: convert to a fixed VHD, create an upload disk of that size, copy
 /// with bounded page writes under a write grant, then revoke the grant.
 /// Empty pages stay sparse. A disk left mid-upload is remade on retry.
-fn ensureDisk(
+pub fn ensureDisk(
     io: Io,
     gpa: Allocator,
     p: Place,
@@ -200,7 +200,16 @@ fn ensureDisk(
         "tsv",
     }, why);
     howl.say(io, "image {s}: uploading {d} bytes", .{ name, size });
-    const upload_err: ?anyerror = if (@import("data-cloud-disk.zig").uploadPages(io, gpa, sas, vhd, work)) null else |err| err;
+    const upload_err: ?anyerror = if (@import("data-cloud-disk.zig").uploadPages(
+        io,
+        gpa,
+        sas,
+        vhd,
+        work,
+    ))
+        null
+    else |err|
+        err;
     // The write SAS is revoked even when the upload failed, so none
     // outlives the attempt: hours of write access buy nothing.
     _ = try need(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" }, why);
@@ -369,39 +378,16 @@ fn galleryReadRequest(gpa: Allocator, version: []const u8) ![]const []const u8 {
 }
 
 /// template is Azure's own PK, KEK and db: Microsoft's keys and the CAs
-/// that sign other vendors' loaders. revoked lists those CAs, for dbx.
+/// that sign other vendors' loaders. revokedCerts lists those CAs as X.509
+/// DER certificates in dbx so UEFI DxeImageVerificationLib revokes them.
 const template = "MicrosoftUefiCertificateAuthorityTemplate";
 
-// Azure's UEFI CA template puts Microsoft's signers in db beside ours. stage0
-// admits db less dbx and requires that to be the image's certificate alone,
-// so the gallery version revokes every other db signer in dbx by its SHA-256.
-// Three are Microsoft's published UEFI CAs (boot/microsoft/); the last is one
-// more the template's db carries, seen on Azure westus 2026-10-25 and absent
-// from microsoft/secureboot_objects. stage0 names any further one by its hash.
-const extra_revocations = [_][32]u8{
-    .{
-        0xca, 0x40, 0x0f, 0x91, 0x3a, 0xc6, 0xa5, 0x5a, 0x5c, 0xc8, 0x62, 0x9c, 0xe8, 0xd2, 0xb8,
-        0x47, 0xbf, 0xa0, 0xfc, 0xca, 0xd2, 0x0a, 0x4d, 0x13, 0x3c, 0x1f, 0x76, 0xda, 0xb2, 0xb3,
-        0x69, 0x25,
-    },
-};
-
-/// revoked returns the SHA-256 of every signer dbx must carry: each Microsoft
-/// UEFI CA the template trusts, and extra_revocations.
-fn revoked(gpa: Allocator) ![]const [32]u8 {
+/// revokedCerts returns the base64-encoded X.509 DER certificates of every
+/// signer in Azure's UEFI CA template that dbx must revoke.
+fn revokedCerts(gpa: Allocator) ![]const []const u8 {
     const cas = @import("files").microsoft_uefi_cas;
-    const out = try gpa.alloc([32]u8, cas.len + extra_revocations.len);
-    for (cas, out[0..cas.len]) |cert, *digest|
-        std.crypto.hash.sha2.Sha256.hash(cert, digest, .{});
-    @memcpy(out[cas.len..], &extra_revocations);
-    return out;
-}
-
-/// hashes is revoked() as Azure stores a sha256 signature: base64 of each.
-fn hashes(gpa: Allocator) ![]const []const u8 {
-    const digests = try revoked(gpa);
-    const out = try gpa.alloc([]const u8, digests.len);
-    for (digests, out) |*digest, *value| value.* = try base64(gpa, digest);
+    const out = try gpa.alloc([]const u8, cas.len);
+    for (cas, out) |cert, *value| value.* = try base64(gpa, cert);
     return out;
 }
 
@@ -420,12 +406,13 @@ fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
     if (r.signatureTemplateNames.len != 1 or
         !std.mem.eql(u8, r.signatureTemplateNames[0], template))
         return false;
-    // db holds our certificate; dbx the revoked signers' SHA-256, nothing else.
+    // db holds our certificate; dbx holds the revoked CA X.509 certificates, nothing else.
     if (!sameValues(r.additionalSignatures.db, "x509", &.{try base64(gpa, der)})) return false;
-    return sameValues(r.additionalSignatures.dbx, "sha256", try hashes(gpa));
+    return sameValues(r.additionalSignatures.dbx, "x509", try revokedCerts(gpa));
 }
 
-/// sameValues is true when keys, every one of type kind, hold exactly want.
+/// sameValues is true when keys, every one of type kind, hold the exact set want
+/// without missing or duplicate entries.
 fn sameValues(keys: []const Key, kind: []const u8, want: []const []const u8) bool {
     var count: usize = 0;
     for (keys) |key| {
@@ -439,7 +426,15 @@ fn sameValues(keys: []const Key, kind: []const u8, want: []const []const u8) boo
             if (!found) return false;
         }
     }
-    return count == want.len;
+    if (count != want.len) return false;
+    for (want) |w| {
+        var seen = false;
+        for (keys) |key| for (key.value) |value| {
+            if (std.mem.eql(u8, value, w)) seen = true;
+        };
+        if (!seen) return false;
+    }
+    return true;
 }
 
 fn base64(gpa: Allocator, der: []const u8) ![]const u8 {
@@ -465,7 +460,7 @@ fn galleryVersion(
                 .signatureTemplateNames = .{template},
                 .additionalSignatures = .{
                     .db = .{.{ .type = "x509", .value = .{try base64(gpa, der)} }},
-                    .dbx = .{.{ .type = "sha256", .value = try hashes(gpa) }},
+                    .dbx = .{.{ .type = "x509", .value = try revokedCerts(gpa) }},
                 },
             } },
         },
@@ -835,8 +830,9 @@ test "gallery adds the disk certificate to db and revokes the template's signers
     try testing.expectEqualStrings("x509", db.get("type").?.string);
     try testing.expectEqualStrings("AQID", db.get("value").?.array.items[0].string);
     const dbx = signatures.get("dbx").?.array.items[0].object;
-    try testing.expectEqualStrings("sha256", dbx.get("type").?.string);
-    const want = try hashes(gpa);
+    try testing.expectEqualStrings("x509", dbx.get("type").?.string);
+    const want = try revokedCerts(gpa);
+    try testing.expectEqual(@as(usize, 4), want.len);
     try testing.expectEqual(want.len, dbx.get("value").?.array.items.len);
     for (dbx.get("value").?.array.items, want) |value, w|
         try testing.expectEqualStrings(w, value.string);
@@ -856,43 +852,49 @@ test "gallery adds the disk certificate to db and revokes the template's signers
     try testing.expect(std.mem.find(u8, read[5], "&$expand=UefiSettings") != null);
 }
 
-test "gallery enrollment holds only with every revocation and no extra signer" {
+test "gallery enrollment holds only with every X.509 revocation and no extra signer" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    const want = try hashes(gpa);
+    const want = try revokedCerts(gpa);
     const first = want[0];
     const rest = try std.mem.join(gpa, "\",\"", want[1..]);
     // Split across entries and reordered, as Azure may store it: still enrolled.
     const split = try gpa.print(
         \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{"pk":null,"kek":[],
         \\"db":[{{"type":"x509","value":["AQID"]}}],
-        \\"dbx":[{{"type":"sha256","value":["{s}"]}},{{"type":"sha256","value":["{s}"]}}]}}}}
+        \\"dbx":[{{"type":"x509","value":["{s}"]}},{{"type":"x509","value":["{s}"]}}]}}}}
     , .{ template, rest, first });
     try testing.expect(try galleryEnrolled(gpa, split, &.{ 1, 2, 3 }));
     const cases = [_][]const u8{
         // A revocation missing: that signer's loaders would boot.
         try gpa.print(
             \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
-            \\"db":[{{"type":"x509","value":["AQID"]}}],"dbx":[{{"type":"sha256","value":["{s}"]}}]}}}}
+            \\"db":[{{"type":"x509","value":["AQID"]}}],"dbx":[{{"type":"x509","value":["{s}"]}}]}}}}
         , .{ template, rest }),
+        // Duplicate entries matching count without covering every CA.
+        try gpa.print(
+            \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
+            \\"db":[{{"type":"x509","value":["AQID"]}}],
+            \\"dbx":[{{"type":"x509","value":["{s}","{s}","{s}","{s}"]}}]}}}}
+        , .{ template, first, first, first, first }),
         // A second signer in db.
         try gpa.print(
             \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
             \\"db":[{{"type":"x509","value":["AQID","BAUG"]}}],
-            \\"dbx":[{{"type":"sha256","value":["{s}","{s}"]}}]}}}}
+            \\"dbx":[{{"type":"x509","value":["{s}","{s}"]}}]}}}}
         , .{ template, rest, first }),
-        // dbx as whole certificates, not the hashes stage0 matches.
+        // dbx as bare sha256 image digests, which UEFI firmware ignores for X.509 signers!
         try gpa.print(
             \\{{"signatureTemplateNames":["{s}"],"additionalSignatures":{{
             \\"db":[{{"type":"x509","value":["AQID"]}}],
-            \\"dbx":[{{"type":"x509","value":["{s}","{s}"]}}]}}}}
+            \\"dbx":[{{"type":"sha256","value":["{s}","{s}"]}}]}}}}
         , .{ template, rest, first }),
         // Our own PK: the template Azure honours is the one named.
         try gpa.print(
             \\{{"signatureTemplateNames":["NoSignatureTemplate"],"additionalSignatures":{{
             \\"db":[{{"type":"x509","value":["AQID"]}}],
-            \\"dbx":[{{"type":"sha256","value":["{s}","{s}"]}}]}}}}
+            \\"dbx":[{{"type":"x509","value":["{s}","{s}"]}}]}}}}
         , .{ rest, first }),
     };
     for (cases) |text| try testing.expect(!try galleryEnrolled(gpa, text, &.{ 1, 2, 3 }));

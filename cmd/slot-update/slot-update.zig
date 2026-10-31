@@ -36,26 +36,27 @@ const Pending = stage.Pending;
 
 pub const meta_dir = "/usr/share/werewolf";
 pub const state_dir = "/data/svc/autoupdate";
+pub const coord_dir = state_dir ++ "/state";
 pub const work_dir = state_dir ++ "/work";
 pub const cache_dir = state_dir ++ "/cache";
-const log_path = state_dir ++ "/log";
+pub const log_path = state_dir ++ "/log";
 /// checked_path exists once a check has finished, ending the first boot.
-const checked_path = state_dir ++ "/checked";
+const checked_path = coord_dir ++ "/checked";
 /// pending_path holds the staged build and when each tier of its fixes was
 /// first seen (stage.Pending).
-pub const pending_path = state_dir ++ "/pending";
+pub const pending_path = coord_dir ++ "/pending";
 /// attempt_path holds "SLOT BUILD BOOT": the slot armed to boot once, its
 /// build, and the boot_id that armed it (attemptOf).
-pub const attempt_path = state_dir ++ "/attempt";
+pub const attempt_path = coord_dir ++ "/attempt";
 /// lock_path is flocked while a pass changes state, so a check run by hand
 /// and the daemon's never interleave.
-pub const lock_path = state_dir ++ "/lock";
+pub const lock_path = coord_dir ++ "/lock";
 /// rebooted_path holds the RFC 3339 time of the last update reboot. outcome
 /// leaves it, so the next update reboot waits an hour after it. A cold boot
 /// is not an update reboot and does not move the time.
-pub const rebooted_path = state_dir ++ "/rebooted";
+pub const rebooted_path = coord_dir ++ "/rebooted";
 /// feed_path holds the last tiers feed taken; feed_sig_path its signature.
-pub const feed_path = state_dir ++ "/cve-tiers.json";
+pub const feed_path = coord_dir ++ "/cve-tiers.json";
 pub const feed_sig_path = feed_path ++ ".sig";
 /// feed_serial_path holds the newest feed serial taken, so a feed never goes
 /// backwards.
@@ -462,7 +463,8 @@ pub const Update = struct {
     image: ?images.Verified = null,
 
     pub fn setup(u: *Update) !void {
-        try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
+        Dir.cwd().access(u.io, state_dir ++ "/reports", .{}) catch
+            try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
         // init always sets the kernel's hostname, configured or not.
         const uts = std.posix.uname();
         u.host = try u.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0));
@@ -508,7 +510,7 @@ pub const Update = struct {
                 .down = down,
             });
         } else {
-            try u.append(state_dir ++ "/bad", try u.gpa.print("{s}\n", .{build}));
+            try u.append(coord_dir ++ "/bad", try u.gpa.print("{s}\n", .{build}));
             try u.record(.{
                 .event = "rollback",
                 .failed = tried,
@@ -565,13 +567,13 @@ pub const Update = struct {
             images.plan(u, arch)
         else
             u.packagesPlan(arch, release)) catch |err| {
-            try u.writeReplacing(state_dir ++ "/held", @errorName(err));
+            try u.writeReplacing(coord_dir ++ "/held", @errorName(err));
             return err;
         }) orelse {
-            Dir.cwd().deleteFile(io, state_dir ++ "/held") catch {};
+            Dir.cwd().deleteFile(io, coord_dir ++ "/held") catch {};
             return;
         };
-        Dir.cwd().deleteFile(io, state_dir ++ "/held") catch {};
+        Dir.cwd().deleteFile(io, coord_dir ++ "/held") catch {};
 
         if (u.isBad(plan.build)) {
             return u.record(.{
@@ -1111,7 +1113,7 @@ pub const Update = struct {
     pub const apkAdd = slot.apkAdd;
 
     pub fn isBad(u: *Update, build: []const u8) bool {
-        const bad = u.read(state_dir ++ "/bad") catch return false;
+        const bad = u.read(coord_dir ++ "/bad") catch return false;
         for (u.lines(bad) catch return false) |l| if (std.mem.eql(u8, l, build)) return true;
         return false;
     }

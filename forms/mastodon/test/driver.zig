@@ -33,6 +33,23 @@ pub fn main(init: std.process.Init) !void {
         const served = reply.object.get("status").?.integer == 200 and
             reply.object.get("body").?.string.len > 0;
         try ctx.result(init.io, args[1], "assets-served", served);
+
+        const link_path = "/data/svc/mastodon/system/werewolf-escape-link";
+        Io.Dir.cwd().deleteFile(init.io, link_path) catch {};
+        try Io.Dir.cwd().symLink(init.io, "/etc/hosts", link_path, .{});
+        defer Io.Dir.cwd().deleteFile(init.io, link_path) catch {};
+        var link_req = driver.system.object(a);
+        try link_req.object.put(
+            a,
+            "url",
+            driver.system.text("https://localhost/system/werewolf-escape-link"),
+        );
+        try link_req.object.put(a, "ca", driver.system.text(
+            "/data/svc/caddy/pki/authorities/local/root.crt",
+        ));
+        const link_reply = try client.request(link_req, 10000, a);
+        const status = link_reply.object.get("status").?.integer;
+        try ctx.result(init.io, args[1], "media-symlink-refused", status == 403 or status == 404);
         return;
     }
     return error.NoJavaScriptAsset;

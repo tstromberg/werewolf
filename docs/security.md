@@ -89,10 +89,10 @@ reveal the kernel's base to local code.
 Persistent state lives on `/data`, LUKS2 when a key is supplied. init formats only
 blank storage; a volume it cannot open is left untouched, `/data` becomes an empty
 read-only tmpfs, and the trial slot cannot commit. Writable mounts refuse symlink
-traversal (`nosymfollow`) except `/data`, which update builds need links on, so code
-walking it must refuse links that lead outside its permitted files. `/proc` hides
-other users' processes. Boot secrets are unpacked into `/run/config`, root's alone;
-the data key is removed once the volume is open.
+traversal (`nosymfollow`) except `/data`, where user data may hold links; TLS front
+ends never read application `/data` trees, and programs walking `/data` refuse links
+outside their tree. `/proc` hides other users' processes. Boot secrets are unpacked
+into `/run/config`, root's alone; the data key is removed once the volume is open.
 
 ## Reaching other machines
 

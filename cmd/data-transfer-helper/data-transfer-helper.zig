@@ -63,7 +63,7 @@ fn setup() !void {
     if (console > 2) _ = linux.close(@intCast(console));
     try mount("proc", "/proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
     try mount("sysfs", "/sys", "sysfs", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
-    // No device is allowed to hide a dirty filesystem behind a journal replay.
+    // The control disk never replays a journal or accepts uncommitted requests.
     try mount(
         "/dev/vdb",
         "/control",
@@ -106,8 +106,29 @@ fn run(io: Io, a: Allocator) !void {
         try data.images.requireBarrier(io, image_dir);
     }
     const device: [:0]const u8 = if (c.layout == .boot) "/dev/vda2" else "/dev/vda";
-    const source = try unlock(io, a, device, c.operation != .import);
-    if (c.operation != .import) try cleanExt4(io, source);
+    const source = try unlock(io, a, device, c.operation != .import and !c.replay_journal_on_copy);
+    if (c.operation != .import) cleanExt4(io, source) catch |err| {
+        if (err != error.TransferUnclean or !c.replay_journal_on_copy) return err;
+        // Only the owner's detached private copy is writable. A read-only
+        // mount permits the kernel to replay its journal, then we unmount and
+        // demand clean metadata before the ordinary noload reader mount.
+        try mount(
+            source,
+            "/volume",
+            "ext4",
+            linux.MS.RDONLY | linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC,
+            null,
+        );
+        if (linux.errno(linux.umount2(
+            "/volume",
+            0,
+        )) != .SUCCESS) return error.TransferHelperUnmount;
+        try cleanExt4(io, source);
+        try File.stderr().writeStreamingAll(
+            io,
+            "replayed filesystem journal on private export copy\n",
+        );
+    };
     try mount(source, "/volume", "ext4", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC |
         linux.MS.NOATIME | 256 |
         @as(
@@ -200,10 +221,11 @@ fn run(io: Io, a: Allocator) !void {
         .import => {
             const archive_file = try Dir.cwd().openFile(io, "/control/archive.tar.zst", .{});
             defer archive_file.close(io);
+            const target = try data.install.targetIdentity(io, root);
             const request: data.WorkerRequest = .{
                 .policy = policy,
                 .service = c.service,
-                .target = c.target,
+                .target = &target,
             };
             try Dir.cwd().writeFile(
                 io,

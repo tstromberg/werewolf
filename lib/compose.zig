@@ -1181,6 +1181,20 @@ fn privileges(
                 "{s}: caps login requires sshd with pty or the fixed data-export endpoint",
                 .{s.path},
             );
+        if (mem.eql(u8, s.name, "caddy") or mem.eql(u8, parsed.user, "caddy")) {
+            for ([_][]const []const u8{ parsed.read, parsed.write, parsed.sockets }) |paths| {
+                for (paths) |p| {
+                    if (!mem.eql(u8, p, "/data") and !mem.startsWith(u8, p, "/data/")) continue;
+                    if (serviceDirOwner(p)) |owner| if (mem.eql(u8, owner, s.name)) continue;
+                    return f.fail(
+                        gpa,
+                        "{s}: {s}: caddy holds TLS keys and may not reach another service's " ++
+                            "/data tree",
+                        .{ s.path, p },
+                    );
+                }
+            }
+        }
         for (parsed.data) |d| if (d.write and !owner_of.contains(d.host))
             try owner_of.put(gpa, d.host, s.name);
     }
@@ -1202,6 +1216,35 @@ fn privileges(
                 "{s}: data {s}: {s} owns it; group {s} joins that user",
                 .{ s.path, d.host, owner, owner_user },
             );
+        }
+        if (parsed.root == null) {
+            for ([_][]const []const u8{ parsed.read, parsed.write }) |paths| for (paths) |p| {
+                if (!mem.startsWith(u8, p, "/data/share/")) continue;
+                var owner: ?[]const u8 = null;
+                for (owner_of.keys(), owner_of.values()) |host, who| {
+                    if (mem.eql(u8, p, host) or
+                        (mem.startsWith(u8, p, host) and p[host.len] == '/'))
+                    {
+                        owner = who;
+                        break;
+                    }
+                }
+                const who = owner orelse return f.fail(
+                    gpa,
+                    "{s}: {s}: no service writes this shared directory",
+                    .{ s.path, p },
+                );
+                if (mem.eql(u8, who, s.name)) continue;
+                const owner_user = user_of.get(who).?;
+                const joined = for (parsed.groups) |g| {
+                    if (mem.eql(u8, g, owner_user)) break true;
+                } else false;
+                if (!joined) return f.fail(
+                    gpa,
+                    "{s}: {s}: {s} owns it; group {s} joins that user",
+                    .{ s.path, p, who, owner_user },
+                );
+            };
         }
     }
 }
@@ -2217,6 +2260,31 @@ test "privileges: fixed export SSH needs no terminal and grants no other root se
         .{ .sub_path = "forms/data-export/rootfs/etc/sv/other/service", .data = listener },
     );
     try testing.expectError(error.Form, privileges(io, a, tmp.dir, chain, &.{}, false, &failure));
+}
+
+test "privileges: caddy may not read another service's /data tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/caddy");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = "" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/x/rootfs/etc/sv/caddy/service",
+        .data = "exec /usr/bin/caddy\nuser caddy\npledge stdio rpath\n" ++
+            "read /etc/caddy /data/svc/app/public\n",
+    });
+    var failure: Failure = .{};
+    const chain = try form.chain(io, a, tmp.dir, "x", &failure);
+    try testing.expectError(error.Form, privileges(io, a, tmp.dir, chain, &.{}, false, &failure));
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/x/rootfs/etc/sv/caddy/service",
+        .data = "exec /usr/bin/caddy\nuser caddy\npledge stdio rpath\nread /etc/caddy\n",
+    });
+    const ok_chain = try form.chain(io, a, tmp.dir, "x", &failure);
+    try privileges(io, a, tmp.dir, ok_chain, &.{}, false, &failure);
 }
 
 test "apko: a service user apko.yaml does not name gets an account, its id its name's hash" {

@@ -232,6 +232,15 @@ pub fn resumeDownload(
 /// Built is the image a --build made for its machine, and the stub it took.
 pub const Built = struct { spec: native.Spec, stub: []const u8 };
 
+/// Recorded profiles retain public build metadata and signer certificates,
+/// never host private-key paths.
+pub fn scrubLocalSpec(spec: native.Spec) native.Spec {
+    var s = spec;
+    s.boot_key = null;
+    s.ipe_key = null;
+    return s;
+}
+
 /// Prepare an independently enrolled target; no application boot takes place.
 /// The caller holds its lifecycle lock and has validated the entire archive.
 pub fn transferTarget(
@@ -243,7 +252,10 @@ pub fn transferTarget(
     tar: []const u8,
     why: *howl.Why,
 ) !Profile {
-    if (r.profile.spec.boot_cert == null) return why.refuse("create an empty destination with the approved image before importing", .{});
+    if (r.profile.spec.boot_cert == null) return why.refuse(
+        "create an empty destination with the approved image before importing",
+        .{},
+    );
     _ = try admit(io, a, on, false, why);
     const at = try std.fs.path.resolveAlloc(
         a,
@@ -251,8 +263,12 @@ pub fn transferTarget(
     );
     const authority = try a.print("{s}/authority", .{at});
     if (!try emptyAuthority(io, authority)) return error.TransferTargetExists;
-    const image = std.fmt.bytesToHex(r.verity.root, .lower);
-    const cache = try @import("data-image.zig").directory(io, a, &image);
+    const fallback = std.fmt.bytesToHex(r.verity.root, .lower);
+    const cache = try @import("data-image.zig").directory(
+        io,
+        a,
+        r.profile.data_image orelse &fallback,
+    );
     var steps = try progress.Steps.init(io, a, why, .{
         .command = "howl import",
         .log = try a.print("{s}/create.log", .{at}),
@@ -843,7 +859,7 @@ test "unchanged live runs preserve state; changed inputs and config refuse reuse
         .spec = .{ .form = "form", .arch = .aarch64 },
         .managed = false,
         .provider = .qemu,
-        .local = spec,
+        .local = scrubLocalSpec(spec),
     };
     var m = testMachine(io, gpa, profile, tar) catch |err| switch (err) {
         error.PermissionDenied => return error.SkipZigTest,
@@ -856,8 +872,16 @@ test "unchanged live runs preserve state; changed inputs and config refuse reuse
     try Dir.cwd().writeFile(io, .{ .sub_path = stub, .data = "stub" });
     try Dir.cwd().writeFile(io, .{
         .sub_path = try gpa.print("{s}/image-inputs", .{authority}),
-        .data = &try inputs(io, gpa, spec, stub),
+        .data = &try inputs(io, gpa, scrubLocalSpec(spec), stub),
     });
+    const saved_json = try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    );
+    try t.expect(std.mem.find(u8, saved_json, "boot.key") == null);
+    try t.expect(std.mem.find(u8, saved_json, "ipe.key") == null);
     const o: howl.Options = .{ .form = form, .on = .qemu, .local = true };
     try t.expectEqual(Reuse.running, try reuse(io, gpa, o, m.name, tar));
     var downloaded = o;
@@ -888,11 +912,56 @@ test "unchanged live runs preserve state; changed inputs and config refuse reuse
         m.name,
         try howl.writeTar(gpa, &.{.{ .path = "hostname", .data = "changed", .from = "test" }}),
     ));
-    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_key.?, .data = "changed signer" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_cert.?, .data = "changed signer" });
     try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, m.name, tar));
-    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_key.?, .data = "ipe.key" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_cert.?, .data = "ipe.crt" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.boot_cert.?, .data = "changed boot signer" });
+    try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, m.name, tar));
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.boot_cert.?, .data = "boot.crt" });
     try Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority}));
     try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, m.name, tar));
+}
+
+test "scrubLocalSpec and replaceRecord persist 0600 profiles without private-key paths" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
+    const raw: native.Spec = .{
+        .form = "playground",
+        .arch = .aarch64,
+        .boot_key = "/secret/host/boot.key",
+        .boot_cert = "/public/host/boot.crt",
+        .ipe_key = "/secret/host/ipe.key",
+        .ipe_cert = "/public/host/ipe.crt",
+    };
+    const scrubbed = scrubLocalSpec(raw);
+    const profile: Profile = .{
+        .spec = scrubbed,
+        .local = scrubbed,
+        .managed = false,
+        .provider = .qemu,
+    };
+    const profile_path = try gpa.print("{s}/profile.json", .{root});
+    try @import("data-image.zig").replaceRecord(
+        t.io,
+        gpa,
+        profile_path,
+        try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+    );
+    const st = try tmp.dir.statFile(t.io, "profile.json", .{ .follow_symlinks = false });
+    try t.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
+    const text = try tmp.dir.readFileAlloc(t.io, "profile.json", gpa, .limited(64 << 10));
+    try t.expect(std.mem.find(u8, text, "boot.key") == null);
+    try t.expect(std.mem.find(u8, text, "ipe.key") == null);
+    const loaded = try parseProfile(gpa, text);
+    try t.expectEqual(null, loaded.spec.boot_key);
+    try t.expectEqual(null, loaded.spec.ipe_key);
+    try t.expectEqual(null, loaded.local.?.boot_key);
+    try t.expectEqual(null, loaded.local.?.ipe_key);
 }
 
 test "downloaded live reuse has no vendor keys and keeps the bundle it was made from" {
@@ -1035,12 +1104,11 @@ pub fn create(
             if (network_changed) {
                 profile.bhyve_network = o.network orelse .tap;
                 profile.bhyve_bridge = o.bridge;
-                try howl.writePrivate(
+                try @import("data-image.zig").replaceRecord(
                     io,
                     gpa,
                     profile_file,
                     try std.json.Stringify.valueAlloc(gpa, profile, .{}),
-                    why,
                 );
             }
         }
@@ -1048,15 +1116,13 @@ pub fn create(
         try Dir.cwd().createDir(io, authority, .fromMode(0o700));
         const form = std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/"));
         const definition = try @import("boot-config.zig").derive(io, gpa, o.form, form, why);
-        var spec = b.spec;
-        spec.boot_key = null;
-        spec.ipe_key = null;
+        const spec = scrubLocalSpec(b.spec);
         profile = .{
             .spec = spec,
             .provider = provider,
             .managed = definition.lima_managed,
             .configuration = definition,
-            .local = b.spec,
+            .local = spec,
             .bhyve_network = o.network orelse .tap,
             .bhyve_bridge = o.bridge,
         };
@@ -1079,7 +1145,7 @@ pub fn create(
     } else return error.MissingBootImage;
     if (!kept) {
         const approved = try @import("data-image.zig").approve(io, gpa, profile, true, why);
-        profile.data_image = try gpa.dupe(u8, &std.fmt.bytesToHex(approved.verity.root, .lower));
+        profile.data_image = approved.profile.data_image;
         try @import("data-image.zig").replaceRecord(
             io,
             gpa,
@@ -1116,6 +1182,89 @@ pub fn start(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
             .limited(256 << 10),
         ),
     );
+    if (profile.cloud_staged) return @import("data-cloud-target.zig").start(
+        io,
+        gpa,
+        name,
+        at,
+        profile,
+        why,
+    );
+    if (cloud.supported(profile.provider)) {
+        const context = try @import("data-cloud.zig").load(io, gpa, at, profile.provider);
+        if ((try @import("data-cloud.zig").state(
+            io,
+            gpa,
+            name,
+            context,
+        )).running) return why.refuse("{s}: already running", .{name});
+        const argv: []const []const u8 = switch (context) {
+            .aws => |p| &.{
+                "aws",
+                "--region",
+                p.region,
+                "ec2",
+                "start-instances",
+                "--instance-ids",
+                p.id,
+            },
+            .gcp => |p| &.{
+                "gcloud",
+                "--quiet",
+                "--project",
+                p.project,
+                "compute",
+                "instances",
+                "start",
+                name,
+                "--zone",
+                p.zone,
+            },
+            .azure => |p| &.{ "az", "vm", "start", "-g", p.group, "-n", name, "-o", "none" },
+        };
+        return howl.run(io, why, argv);
+    }
+    if (profile.provider == .firecracker) {
+        if (@import("builtin").os.tag != .linux or
+            profile.spec.arch != howl.hostArch()) return error.TransferArchitecture;
+        if (try @import("firecracker.zig").supervised(
+            io,
+            gpa,
+            at,
+        )) return why.refuse("{s}: already running", .{name});
+        const spec = profile.local orelse return error.MissingBootImage;
+        const definition = profile.configuration orelse return error.MissingBootConfiguration;
+        const saved_definition = @import("boot-config.zig").current;
+        @import("boot-config.zig").current = definition;
+        defer @import("boot-config.zig").current = saved_definition;
+        const tar = try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/config.tar", .{at}),
+            gpa,
+            .limited(64 << 20),
+        );
+        const tell: howl.Tell = .{
+            .verbose = false,
+            .command = try gpa.print("howl start {s}", .{name}),
+            .began = Io.Clock.awake.now(io),
+        };
+        return @import("local.zig").createFirecrackerLocked(
+            io,
+            gpa,
+            .{
+                .form = definition.form,
+                .local = true,
+                .on = .firecracker,
+                .disabled = spec.disabled,
+            },
+            name,
+            tar,
+            null,
+            tell,
+            guard,
+            why,
+        );
+    }
     profile.spec.form = (profile.configuration orelse return error.MissingBootConfiguration).form;
     if (profile.spec.arch != try admit(
         io,
@@ -1272,10 +1421,9 @@ fn inputs(io: Io, gpa: Allocator, spec: native.Spec, stub: []const u8) ![64]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(&try @import("lock.zig").inputs(io, gpa, spec));
     hash.update(&try programInputs(io, gpa, spec));
-    for ([7][]const u8{
+    for ([5][]const u8{
         spec.ipe_kernel.?,                            spec.ipe_cert.?,
-        spec.ipe_key.?,                               spec.boot_cert.?,
-        spec.boot_key.?,                              stub,
+        spec.boot_cert.?,                             stub,
         try std.process.executablePathAlloc(io, gpa),
     }) |file| hash.update((try @import("prebuilt").hashFile(io, gpa, file)).sha256);
     return std.fmt.bytesToHex(hash.finalResult(), .lower);

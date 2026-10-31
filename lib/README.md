@@ -345,4 +345,6 @@ public half first, so an interrupted boot leaves a whole key or none. A
 missing public half is rebuilt from the key.
 
 `dns.zig` binds declared users to detected IPv4 resolvers and replaces grants on
-DHCP renewal; `net-rule.zig` encodes the shared bounded routing messages.
+DHCP renewal; `net-rule.zig` encodes the shared bounded routing messages;
+`uefi-sig.zig` parses `EFI_SIGNATURE_LIST` variables and verifies Secure Boot X.509
+signer authority across `PK`, `KEK`, `db` and `dbx`.

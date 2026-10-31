@@ -15,6 +15,7 @@ with: [postgresql, valkey, caddy, cron, sh-shim]
 
 packages:
   - nextcloud
+  - nginx-mainline
   - php-8.5>=8.5.12-r17000
   - php-8.5-fpm>=8.5.12-r17000
   - php-8.5-apcu          # the local cache
@@ -54,22 +55,18 @@ weaknesses:
 
 services:
   # Caddy, as its own user, for Nextcloud: it may bind :80 and :443 and no
-  # other port, reach the ACME CA over HTTPS and a resolver, and php-fpm's
-  # socket, which it reaches as a member of nextcloud's group. It reads
-  # its configuration, the image and the apps installed from the app
-  # store, whose scripts and styles it serves, and writes only its own
-  # directories. Its site is the base URL Nextcloud takes too, from the
-  # machine's settings, as BASE_URL, which the Caddyfile reads.
+  # other port, reach the ACME CA over HTTPS, a resolver, and loopback nginx,
+  # read only its own configuration, and write only its own directories. It
+  # holds neither Nextcloud's group nor access to Nextcloud's /data tree.
   caddy:
     exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     user: caddy
-    group: nextcloud
     pledge: stdio rpath wpath inet unix connect listen proc
     listen: [tcp/80 tcp/443]
-    connect: [tcp/443, /run/svc/nextcloud/php.sock]
+    connect: [tcp/443, tcp/8080]
     lookup: "*"
-    read: /etc/caddy /data/svc/nextcloud/apps
+    read: /etc/caddy
     config: settings /run/config/caddy/settings.json
     setting: base-url url as BASE_URL
     render: env site
@@ -80,6 +77,20 @@ services:
       - XDG_CONFIG_HOME=/run/svc/caddy
       - HOME=/run/svc/caddy
       - GOMEMLIMIT=384MiB
+
+  # nginx, as its own user, on loopback behind Caddy: it serves Nextcloud's
+  # static assets and app-store assets with disable_symlinks on and reaches
+  # php-fpm's socket, holding no TLS private keys.
+  nginx:
+    exec: /usr/bin/nginx -e stderr
+    before: /usr/bin/nginx -e stderr -t -q
+    user: nginx
+    group: nextcloud
+    pledge: stdio rpath wpath proc unix inet listen connect aio sendfile
+    listen: [tcp/8080 loopback]
+    connect: [/run/svc/nextcloud/php.sock]
+    read: /etc/nginx /data/svc/nextcloud/apps
+    nofile: 16384
 
   # Nextcloud, php-fpm, as nextcloud: it answers Caddy on a socket in its
   # own directory, reaches its database and Valkey by their sockets, and

@@ -76,6 +76,14 @@ suites:
                 location: 'https://localhost/'
       - name: secrets-private
         steps:
+          - service: caddy
+            expect:
+              user: caddy
+              groups: []
+          - service: nginx
+            expect:
+              user: nginx
+              groups: []
           - file: /data/svc/mastodon/env
             expect:
               type: file
@@ -120,7 +128,7 @@ suites:
     mode: assets
     user: root
     policy:
-      pledge: stdio rpath inet
+      pledge: stdio rpath wpath inet
     cases:
-      seed: [assets-served]
-      verify: [assets-served]
+      seed: [assets-served, media-symlink-refused]
+      verify: [assets-served, media-symlink-refused]

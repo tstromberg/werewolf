@@ -11,9 +11,18 @@ const policy = @import("update-policy");
 const signed = @import("prebuilt");
 const broker = @import("broker");
 const tpm = @import("tpm");
+const uki = @import("uki");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const cap_sys_admin = 21;
+const keeper_id: u32 = 72;
+const coordinator_id: u32 = 77;
+const scm_credentials: i32 = 2;
+const PeerCred = extern struct {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+};
 const roles = [_]broker.Role{ .updater, .keeper, .stage };
 var reboot_flag: i32 = -1;
 var stop_flag: i32 = -1;
@@ -40,9 +49,20 @@ pub fn main() !void {
 /// setUp verifies the inherited role descriptors, closes everything above
 /// them, and confines the process before serving.
 fn setUp() !void {
+    const one: c_int = 1;
     for (roles) |role| {
         const fd = broker.serverFd(role);
         _ = try sandbox.sys(linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC), "fcntl");
+        _ = try sandbox.sys(
+            linux.setsockopt(
+                fd,
+                linux.SOL.SOCKET,
+                linux.SO.PASSCRED,
+                std.mem.asBytes(&one),
+                @sizeOf(c_int),
+            ),
+            "setsockopt passcred",
+        );
     }
     _ = try sandbox.sys(
         linux.close_range(6, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false }),
@@ -64,14 +84,14 @@ fn setUp() !void {
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
-        "recvfrom",        "sendto",        "sendmsg",   "read",
-        "write",           "close",         "poll",      "ppoll",
-        "openat",          "openat2",       "fstat",     "statx",
-        "pread64",         "getdents64",    "fsopen",    "fsconfig",
-        "fsmount",         "sync",          "mmap",      "munmap",
-        "mremap",          "fsync",         "mkdirat",   "unlinkat",
-        "renameat",        "clock_gettime", "nanosleep", "exit_group",
-        "restart_syscall",
+        "recvfrom",   "recvmsg",         "sendto",        "sendmsg",
+        "read",       "write",           "close",         "poll",
+        "ppoll",      "openat",          "openat2",       "fstat",
+        "statx",      "pread64",         "getdents64",    "fsopen",
+        "fsconfig",   "fsmount",         "sync",          "mmap",
+        "munmap",     "mremap",          "fsync",         "mkdirat",
+        "unlinkat",   "renameat",        "clock_gettime", "nanosleep",
+        "exit_group", "restart_syscall",
     }) |name| f.allow(name);
     f.allowArg("fchmod", 1, 0o640);
     f.allowArg("fchmod", 1, 0o750);
@@ -146,28 +166,91 @@ fn serve(log: *Log) noreturn {
     }
 }
 
+const Packet = union(enum) {
+    again,
+    closed,
+    bad,
+    message: struct {
+        bytes: []const u8,
+        cred: PeerCred,
+    },
+};
+
+fn receivePacket(fd: i32, in_buf: []u8) Packet {
+    var ancillary: [1152]u8 align(8) = undefined;
+    var iov = [_]std.posix.iovec{.{ .base = in_buf.ptr, .len = in_buf.len }};
+    var msg: linux.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &ancillary,
+        .controllen = ancillary.len,
+        .flags = 0,
+    };
+    const rc = linux.recvmsg(
+        fd,
+        &msg,
+        linux.MSG.TRUNC | linux.MSG.DONTWAIT | linux.MSG.CMSG_CLOEXEC,
+    );
+    if (linux.errno(rc) == .INTR or linux.errno(rc) == .AGAIN) return .again;
+    if (linux.errno(rc) != .SUCCESS) return .closed;
+    var cred: ?PeerCred = null;
+    var valid_cmsg = (msg.flags & linux.MSG.CTRUNC) == 0;
+    var at: usize = 0;
+    while (at + @sizeOf(linux.cmsghdr) <= msg.controllen) {
+        const header: *align(1) const linux.cmsghdr = @ptrCast(&ancillary[at]);
+        if (header.len < @sizeOf(linux.cmsghdr) or header.len > msg.controllen - at) {
+            valid_cmsg = false;
+            break;
+        }
+        const data = ancillary[at + @sizeOf(linux.cmsghdr) .. at + header.len];
+        if (header.level == linux.SOL.SOCKET and header.type == scm_credentials and
+            data.len == @sizeOf(PeerCred) and cred == null)
+        {
+            var c: PeerCred = undefined;
+            @memcpy(std.mem.asBytes(&c), data);
+            cred = c;
+        } else {
+            valid_cmsg = false;
+            if (header.level == linux.SOL.SOCKET and header.type == linux.SCM.RIGHTS) {
+                var pos: usize = 0;
+                while (pos + 4 <= data.len) : (pos += 4) {
+                    const passed = std.mem.readInt(
+                        i32,
+                        data[pos..][0..4],
+                        @import("builtin").cpu.arch.endian(),
+                    );
+                    if (passed >= 0) _ = linux.close(passed);
+                }
+            }
+        }
+        at += std.mem.alignForward(usize, header.len, @alignOf(linux.cmsghdr));
+    }
+    if (at < msg.controllen) valid_cmsg = false;
+    if (rc == 0) return .closed;
+    if (!valid_cmsg or cred == null or rc > in_buf.len or (msg.flags & linux.MSG.TRUNC) != 0)
+        return .bad;
+    return .{ .message = .{ .bytes = in_buf[0..rc], .cred = cred.? } };
+}
+
 /// A stalled reader loses its channel, not service for the other roles.
 /// Never discard a reply and continue: that would misalign later requests.
 fn heard(log: *Log, fd: i32, role: broker.Role) bool {
     var in_buf: [1024]u8 = undefined;
-    const rc = linux.recvfrom(
-        fd,
-        &in_buf,
-        in_buf.len,
-        linux.MSG.TRUNC | linux.MSG.DONTWAIT,
-        null,
-        null,
-    );
-    if (linux.errno(rc) == .INTR or linux.errno(rc) == .AGAIN) return true;
-    if (linux.errno(rc) != .SUCCESS or rc == 0) return false;
-    if (rc > in_buf.len) {
-        return reply(fd, "no BadRequest\n");
-    }
-    const request = std.mem.trimEnd(u8, in_buf[0..rc], "\n");
+    const pkt = switch (receivePacket(fd, &in_buf)) {
+        .again => return true,
+        .closed => return false,
+        .bad => return reply(fd, "no BadRequest\n"),
+        .message => |m| m,
+    };
+    const request = std.mem.trimEnd(u8, pkt.bytes, "\n");
     var out_buf: [1024]u8 = undefined;
-    const text = handleRequest(log, role, request, &out_buf) catch |err| failed: {
+    const text = handleRequest(log, role, pkt.cred, request, &out_buf) catch |err| failed: {
         log.event("refused", .{
             .role = @tagName(role),
+            .uid = pkt.cred.uid,
+            .gid = pkt.cred.gid,
             .@"error" = @errorName(err),
             .call = if (err == error.SystemCall) sandbox.failed else null,
             .errno = if (err == error.SystemCall) sandbox.errnoName(sandbox.failed_errno) else null,
@@ -359,7 +442,106 @@ fn roleForOp(op: []const u8) !broker.Role {
     return error.UnknownEspOperation;
 }
 
-fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) ![]const u8 {
+const ParsedRequest = union(enum) {
+    owner_channel,
+    shutdown,
+    updater_ready,
+    reboot,
+    installer_runtime,
+    slot_root: broker.EspArtifact,
+    slot_decl: broker.SlotDecl,
+    slot_meta: broker.SlotMeta,
+    floor,
+    esp_status,
+    esp_commit,
+    esp_disarm,
+    esp_arm,
+    esp_inspect,
+    esp_install: broker.EspInstall,
+};
+
+fn parseRequest(op: []const u8, request: []const u8) !ParsedRequest {
+    if (std.mem.eql(u8, op, "owner-channel")) {
+        if (!std.mem.eql(u8, request, "owner-channel")) return error.BadRequest;
+        return .owner_channel;
+    }
+    if (std.mem.eql(u8, op, "shutdown")) {
+        if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
+        return .shutdown;
+    }
+    if (std.mem.eql(u8, op, "updater-ready")) {
+        if (!std.mem.eql(u8, request, "updater-ready")) return error.BadRequest;
+        return .updater_ready;
+    }
+    if (std.mem.eql(u8, op, "reboot")) {
+        if (!std.mem.eql(u8, request, "reboot")) return error.BadRequest;
+        return .reboot;
+    }
+    if (std.mem.eql(u8, op, "installer-runtime")) {
+        if (!std.mem.eql(u8, request, "installer-runtime")) return error.BadRequest;
+        return .installer_runtime;
+    }
+    if (std.mem.eql(
+        u8,
+        op,
+        "slot-root",
+    )) return .{ .slot_root = try broker.parseSlotRoot(request) };
+    if (std.mem.eql(
+        u8,
+        op,
+        "slot-decl",
+    )) return .{ .slot_decl = try broker.parseSlotDecl(request) };
+    if (std.mem.eql(
+        u8,
+        op,
+        "slot-meta",
+    )) return .{ .slot_meta = try broker.parseSlotMeta(request) };
+    if (std.mem.eql(u8, op, "floor")) {
+        if (!std.mem.eql(u8, request, "floor")) return error.BadRequest;
+        return .floor;
+    }
+    if (std.mem.eql(u8, op, "esp-status")) {
+        if (!std.mem.eql(u8, request, "esp-status")) return error.BadRequest;
+        return .esp_status;
+    }
+    if (std.mem.eql(u8, op, "esp-commit")) {
+        if (!std.mem.eql(u8, request, "esp-commit")) return error.BadRequest;
+        return .esp_commit;
+    }
+    if (std.mem.eql(u8, op, "esp-disarm")) {
+        if (!std.mem.eql(u8, request, "esp-disarm")) return error.BadRequest;
+        return .esp_disarm;
+    }
+    if (std.mem.eql(u8, op, "esp-arm")) {
+        if (!std.mem.eql(u8, request, "esp-arm")) return error.BadRequest;
+        return .esp_arm;
+    }
+    if (std.mem.eql(u8, op, "esp-inspect")) {
+        if (!std.mem.eql(u8, request, "esp-inspect")) return error.BadRequest;
+        return .esp_inspect;
+    }
+    return .{ .esp_install = try broker.parseEspInstall(request) };
+}
+
+fn authorizePeer(role: broker.Role, parsed: ParsedRequest, cred: PeerCred) !void {
+    const want_id: u32 = switch (role) {
+        .stage => 0,
+        .keeper => keeper_id,
+        .updater => switch (parsed) {
+            .owner_channel, .installer_runtime => 0,
+            else => coordinator_id,
+        },
+    };
+    if (cred.uid != want_id or cred.gid != want_id) return error.UnauthorizedPeer;
+}
+
+fn handleRequest(
+    log: *Log,
+    role: broker.Role,
+    cred: PeerCred,
+    request: []const u8,
+    out: []u8,
+) ![]const u8 {
     const op = request[0 .. std.mem.findScalar(u8, request, ' ') orelse request.len];
     const want_role = try roleForOp(op);
     if (role != want_role) {
@@ -370,77 +552,74 @@ fn handleRequest(log: *Log, role: broker.Role, request: []const u8, out: []u8) !
         });
         return if (want_role == .stage) error.NotStageThree else error.NotSlotService;
     }
-    if (std.mem.eql(u8, op, "owner-channel")) {
-        if (!std.mem.eql(u8, request, "owner-channel")) return error.BadRequest;
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "shutdown")) {
-        if (!std.mem.eql(u8, request, "shutdown")) return error.BadRequest;
-        shutdown(log);
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "updater-ready")) {
-        if (!std.mem.eql(u8, request, "updater-ready")) return error.BadRequest;
-        try publishMarker("/run/werewolf/updater-ready");
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "reboot")) {
-        if (!std.mem.eql(u8, request, "reboot")) return error.BadRequest;
-        _ = try sandbox.sys(linux.fchmod(reboot_flag, 0o100), "update reboot flag");
-        _ = try sandbox.sys(linux.fchmod(stop_flag, 0o100), "update stop flag");
-        _ = try sandbox.sys(linux.kill(1, linux.SIG.CONT), "wake runit for update");
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "installer-runtime")) {
-        if (!std.mem.eql(u8, request, "installer-runtime")) return error.BadRequest;
-        try installerRuntime();
-        return "ok\n";
+    const parsed = try parseRequest(op, request);
+    try authorizePeer(role, parsed, cred);
+    switch (parsed) {
+        .owner_channel => return "ok\n",
+        .shutdown => {
+            shutdown(log);
+            return "ok\n";
+        },
+        .updater_ready => {
+            try publishMarker("/run/werewolf/updater-ready");
+            return "ok\n";
+        },
+        .reboot => {
+            _ = try sandbox.sys(linux.fchmod(reboot_flag, 0o100), "update reboot flag");
+            _ = try sandbox.sys(linux.fchmod(stop_flag, 0o100), "update stop flag");
+            _ = try sandbox.sys(linux.kill(1, linux.SIG.CONT), "wake runit for update");
+            return "ok\n";
+        },
+        .installer_runtime => {
+            try installerRuntime();
+            return "ok\n";
+        },
+        else => {},
     }
     log.event("esp operation", .{ .role = @tagName(role), .op = op });
-    if (std.mem.eql(u8, op, "slot-root")) {
-        try slotRootNow(try broker.parseSlotRoot(request));
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "slot-decl")) {
-        try slotDeclNow(try broker.parseSlotDecl(request));
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "slot-meta")) {
-        try slotMetaNow(try broker.parseSlotMeta(request));
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "floor")) {
-        if (!std.mem.eql(u8, request, "floor")) return error.BadRequest;
-        const value = try raiseFloor();
-        log.event("floor", .{ .floor = value });
-        return std.mem.print(out, "ok n={d}\n", .{value});
-    }
-    if (std.mem.eql(u8, op, "esp-status")) {
-        if (!std.mem.eql(u8, request, "esp-status")) return error.BadRequest;
-        return switch ((try espScan()).status) {
+    switch (parsed) {
+        .slot_root => |want| {
+            try slotRootNow(want);
+            return "ok\n";
+        },
+        .slot_decl => |decl| {
+            try slotDeclNow(decl);
+            return "ok\n";
+        },
+        .slot_meta => |meta| {
+            try slotMetaNow(meta);
+            return "ok\n";
+        },
+        .floor => {
+            const value = try raiseFloor();
+            log.event("floor", .{ .floor = value });
+            return std.mem.print(out, "ok n={d}\n", .{value});
+        },
+        .esp_status => return switch ((try espScan()).status) {
             .already => "ok already\n",
             .tried => "ok tried\n",
             .none => "ok none\n",
-        };
+        },
+        .esp_commit => {
+            try espCommitNow();
+            try publishMarker("/run/werewolf/committed");
+            return "ok\n";
+        },
+        .esp_disarm => {
+            try espDeleteEntries((try bootSlots()).other);
+            return "ok\n";
+        },
+        .esp_arm => {
+            try espArmNow();
+            return "ok\n";
+        },
+        .esp_inspect => return espInspectNow(out),
+        .esp_install => |req| {
+            try espInstallNow(req);
+            return "ok\n";
+        },
+        else => unreachable,
     }
-    if (std.mem.eql(u8, op, "esp-commit")) {
-        if (!std.mem.eql(u8, request, "esp-commit")) return error.BadRequest;
-        try espCommitNow();
-        try publishMarker("/run/werewolf/committed");
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "esp-disarm")) {
-        try espDeleteEntries((try bootSlots()).other);
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "esp-arm")) {
-        try espArmNow();
-        return "ok\n";
-    }
-    if (std.mem.eql(u8, op, "esp-inspect")) return espInspectNow(out);
-    const req = try broker.parseEspInstall(request);
-    try espInstallNow(req);
-    return "ok\n";
 }
 
 fn publishMarker(path: [:0]const u8) !void {
@@ -725,13 +904,98 @@ test "EFI versions are canonical serials and advance past the newest entry" {
     try std.testing.expect(try policy.parseSerial(&next) > secs);
 }
 
+fn slotHasUki(m: i32, slot: []const u8) !bool {
+    const dir = espSlotDir(m, slot, false) catch |err| {
+        if (err == error.SystemCall and sandbox.failed_errno == .NOENT) return false;
+        return err;
+    };
+    defer _ = linux.close(dir);
+    const fd = openAt(
+        dir,
+        "uki.efi",
+        .{ .ACCMODE = .RDONLY, .PATH = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    ) catch |err| {
+        if (err == error.SystemCall and sandbox.failed_errno == .NOENT) return false;
+        return err;
+    };
+    _ = linux.close(fd);
+    return true;
+}
+
+fn needsUki(m: i32, current_slot: []const u8, boot: cmdline.Cmdline) !bool {
+    if (boot.native or boot.secure or boot.channel != null) return true;
+    return slotHasUki(m, current_slot);
+}
+
+fn verifyUkiBytes(mapped: []const u8, boot: cmdline.Cmdline, must_advance: bool) !void {
+    const linux_sec = (try uki.section(mapped, ".linux")) orelse return error.BadUki;
+    const initrd_sec = (try uki.section(mapped, ".initrd")) orelse return error.BadUki;
+    const raw_cmd = (try uki.section(mapped, ".cmdline")) orelse return error.BadUki;
+    if (linux_sec.len == 0 or initrd_sec.len == 0) return error.BadUki;
+    if (boot.secure or !boot.disable.contains(.secureboot)) {
+        if (!try uki.hasAuthenticode(mapped)) return error.UnsignedUki;
+    }
+    var bad: cmdline.Failure = .{};
+    const uki_cmd = cmdline.parse(std.mem.trimEnd(u8, raw_cmd, "\x00 \r\n"), &bad) orelse
+        return error.BadUkiCmdline;
+    if (boot.native and !uki_cmd.native) return error.UkiDowngrade;
+    if (boot.secure and !uki_cmd.secure) return error.UkiDowngrade;
+    for (std.enums.values(cmdline.Protection)) |p| {
+        if (!boot.disable.contains(p) and uki_cmd.disable.contains(p)) return error.UkiDowngrade;
+    }
+    if (boot.slots) |want_slots| {
+        if (!std.mem.eql(u8, uki_cmd.slots orelse "", want_slots)) return error.UkiDowngrade;
+    }
+    if (boot.esp) |want_esp| {
+        if (uki_cmd.esp != want_esp) return error.UkiDowngrade;
+    }
+    if (boot.channel) |want_channel| {
+        const got_channel = uki_cmd.channel orelse return error.UkiDowngrade;
+        if (!std.mem.eql(u8, &got_channel, &want_channel)) return error.WrongImageChannel;
+        if (must_advance and uki_cmd.index.? <= boot.index.?) return error.OlderImage;
+    }
+}
+
+fn verifyStagedUki(dirfd: i32, name: []const u8, boot: cmdline.Cmdline, must_advance: bool) !void {
+    const fd = try openAt(
+        dirfd,
+        name,
+        .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    _ = try sandbox.sys(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{
+        .TYPE = true,
+        .SIZE = true,
+    }, &st), "stat staged uki");
+    if ((st.mode & linux.S.IFMT) != linux.S.IFREG or st.size == 0 or st.size > max_staged)
+        return error.BadUki;
+    const len: usize = @intCast(st.size);
+    const addr = try sandbox.sys(
+        linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0),
+        "mmap staged uki",
+    );
+    defer _ = linux.munmap(@ptrFromInt(addr), len);
+    try verifyUkiBytes(@as([*]const u8, @ptrFromInt(addr))[0..len], boot, must_advance);
+}
+
 fn espArmNow() !void {
     const m = try espMount();
     defer _ = linux.close(m);
-    const slots = try bootSlots();
+    var cmdline_buf: [4096]u8 = undefined;
+    var refused: cmdline.Failure = .{};
+    const boot_parsed = cmdline.parse(readFile("/proc/cmdline", &cmdline_buf), &refused) orelse
+        return error.BadCommandLine;
+    const slot = boot_parsed.slot orelse return error.NoSlot;
+    const slots = .{
+        .current = @tagName(slot),
+        .other = if (slot == .a) "b" else "a",
+    };
     const slot_dir = try espSlotDir(m, slots.other, false);
     defer _ = linux.close(slot_dir);
-    const uki = blk: {
+    const has_uki = blk: {
         const fd = openAt(
             slot_dir,
             "uki.efi",
@@ -741,6 +1005,8 @@ fn espArmNow() !void {
         _ = linux.close(fd);
         break :blk true;
     };
+    if (try needsUki(m, slots.current, boot_parsed) and !has_uki) return error.MissingUki;
+    if (has_uki) try verifyStagedUki(slot_dir, "uki.efi", boot_parsed, false);
     const entries = try espEntriesDir(m, false);
     defer _ = linux.close(entries);
     var backing: [64 << 10]u8 = undefined;
@@ -757,7 +1023,7 @@ fn espArmNow() !void {
             gpa,
             try readAt(entries, name, &buf),
             slots.other,
-            uki,
+            has_uki,
         );
         found = true;
     }
@@ -767,7 +1033,7 @@ fn espArmNow() !void {
         if (signed.isEntryOf(names.get(i), slots.other)) try unlinkAt(entries, names.get(i));
     }
     const version = try espVersion(newest);
-    const entry = try signed.loaderEntry(gpa, slots.other, &version, options, uki);
+    const entry = try signed.loaderEntry(gpa, slots.other, &version, options, has_uki);
     var name_buf: [64]u8 = undefined;
     const name = try std.mem.print(&name_buf, "werewolf-{s}+1.conf", .{slots.other});
     try writeFileAt(entries, name, entry);
@@ -1046,7 +1312,16 @@ fn copyChecked(
 fn espInstallNow(req: broker.EspInstall) !void {
     const m = try espMount();
     defer _ = linux.close(m);
-    const slots = try bootSlots();
+    var cmd_buf: [8192]u8 = undefined;
+    const boot_cmdline = readFile("/proc/cmdline", cmd_buf[0..4096]);
+    var refused: cmdline.Failure = .{};
+    const boot_parsed = cmdline.parse(boot_cmdline, &refused) orelse return error.BadCommandLine;
+    const slot = boot_parsed.slot orelse return error.NoSlot;
+    const slots = .{
+        .current = @tagName(slot),
+        .other = if (slot == .a) "b" else "a",
+    };
+    if (try needsUki(m, slots.current, boot_parsed) and req.uki == null) return error.MissingUki;
     // The staged command line and artifacts are verified before any live file
     // or entry on the ESP changes: confined root can write the staging
     // directory, so its bytes are trusted only as the updater's named digests
@@ -1067,10 +1342,11 @@ fn espInstallNow(req: broker.EspInstall) !void {
     errdefer unlinkAt(slot_dir, "vmlinuz.tmp") catch {};
     try stageChecked(slot_dir, "slot/stage0.zst", "stage0.zst", req.stage0, max_staged);
     errdefer unlinkAt(slot_dir, "stage0.zst.tmp") catch {};
-    if (req.uki) |uki| {
-        try stageChecked(slot_dir, "slot/uki.efi", "uki.efi", uki, max_staged);
+    if (req.uki) |uki_art| {
+        try stageChecked(slot_dir, "slot/uki.efi", "uki.efi", uki_art, max_staged);
     }
     errdefer if (req.uki != null) unlinkAt(slot_dir, "uki.efi.tmp") catch {};
+    if (req.uki != null) try verifyStagedUki(slot_dir, "uki.efi.tmp", boot_parsed, true);
     const names = try listNames(entries);
     for (0..names.count) |i| {
         if (signed.isEntryOf(names.get(i), slots.other)) try unlinkAt(entries, names.get(i));
@@ -1085,8 +1361,6 @@ fn espInstallNow(req: broker.EspInstall) !void {
     var backing: [64 << 10]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&backing);
     const gpa = fba.allocator();
-    var cmd_buf: [8192]u8 = undefined;
-    const boot_cmdline = readFile("/proc/cmdline", cmd_buf[0..4096]);
     const options = try signed.withSlot(gpa, boot_cmdline, slot_cmdline, slots.other);
     const newest = try espNewest(entries);
     const version = try espVersion(newest);
@@ -1270,19 +1544,30 @@ fn espInspectNow(out: []u8) ![]const u8 {
     return w.buffered();
 }
 
-test "installer runtime accepts no paths and belongs only to the updater" {
+test "installer runtime accepts no paths and belongs only to root on the updater channel" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var log: Log = .{};
     var output: [256]u8 = undefined;
+    const root_cred: PeerCred = .{ .pid = 1, .uid = 0, .gid = 0 };
+    const coord_cred: PeerCred = .{ .pid = 2, .uid = coordinator_id, .gid = coordinator_id };
     try std.testing.expectError(error.BadRequest, handleRequest(
         &log,
         .updater,
+        root_cred,
         "installer-runtime /tmp/other",
         &output,
     ));
     try std.testing.expectError(error.NotSlotService, handleRequest(
         &log,
         .keeper,
+        root_cred,
+        "installer-runtime",
+        &output,
+    ));
+    try std.testing.expectError(error.UnauthorizedPeer, handleRequest(
+        &log,
+        .updater,
+        coord_cred,
         "installer-runtime",
         &output,
     ));
@@ -1635,23 +1920,238 @@ fn stagedFilesystemProbe(root: [:0]const u8) !void {
     try testing.expectEqualStrings("new", bytes[0..got]);
 }
 
-test "reboot requires the updater role and an exact request" {
+test "reboot requires the updater role, coordinator credentials, and an exact request" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var log: Log = .{};
     var out: [1024]u8 = undefined;
-    try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "reboot", &out));
-    try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "reboot", &out));
-    try testing.expectError(error.BadRequest, handleRequest(&log, .updater, "reboot extra", &out));
+    const root_cred: PeerCred = .{ .pid = 1, .uid = 0, .gid = 0 };
+    const coord_cred: PeerCred = .{ .pid = 2, .uid = coordinator_id, .gid = coordinator_id };
+    try testing.expectError(
+        error.NotSlotService,
+        handleRequest(&log, .keeper, coord_cred, "reboot", &out),
+    );
+    try testing.expectError(
+        error.NotSlotService,
+        handleRequest(&log, .stage, root_cred, "reboot", &out),
+    );
+    try testing.expectError(
+        error.BadRequest,
+        handleRequest(&log, .updater, root_cred, "reboot extra", &out),
+    );
+    try testing.expectError(
+        error.UnauthorizedPeer,
+        handleRequest(&log, .updater, root_cred, "reboot", &out),
+    );
 }
 
-test "the floor takes no argument and belongs to the updater" {
+test "the floor takes no argument and belongs to the confined updater" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var log: Log = .{};
     var out: [1024]u8 = undefined;
-    try testing.expectError(error.NotSlotService, handleRequest(&log, .keeper, "floor", &out));
-    try testing.expectError(error.NotSlotService, handleRequest(&log, .stage, "floor", &out));
+    const root_cred: PeerCred = .{ .pid = 1, .uid = 0, .gid = 0 };
+    const coord_cred: PeerCred = .{ .pid = 2, .uid = coordinator_id, .gid = coordinator_id };
+    try testing.expectError(
+        error.NotSlotService,
+        handleRequest(&log, .keeper, coord_cred, "floor", &out),
+    );
+    try testing.expectError(
+        error.NotSlotService,
+        handleRequest(&log, .stage, root_cred, "floor", &out),
+    );
     for ([_][]const u8{ "floor 1", "floor n=1", "floor " }) |request|
-        try testing.expectError(error.BadRequest, handleRequest(&log, .updater, request, &out));
+        try testing.expectError(
+            error.BadRequest,
+            handleRequest(&log, .updater, coord_cred, request, &out),
+        );
+    try testing.expectError(
+        error.UnauthorizedPeer,
+        handleRequest(&log, .updater, root_cred, "floor", &out),
+    );
+}
+
+test "peer credentials authorize each broker operation by dropped service identity" {
+    const root_cred: PeerCred = .{ .pid = 1, .uid = 0, .gid = 0 };
+    const keeper_cred: PeerCred = .{ .pid = 2, .uid = keeper_id, .gid = keeper_id };
+    const coord_cred: PeerCred = .{ .pid = 3, .uid = coordinator_id, .gid = coordinator_id };
+    const mixed_cred: PeerCred = .{ .pid = 4, .uid = coordinator_id, .gid = 0 };
+
+    try authorizePeer(.stage, .shutdown, root_cred);
+    try testing.expectError(error.UnauthorizedPeer, authorizePeer(.stage, .shutdown, coord_cred));
+
+    try authorizePeer(.keeper, .esp_status, keeper_cred);
+    try authorizePeer(.keeper, .esp_commit, keeper_cred);
+    try testing.expectError(error.UnauthorizedPeer, authorizePeer(.keeper, .esp_status, root_cred));
+    try testing.expectError(
+        error.UnauthorizedPeer,
+        authorizePeer(.keeper, .esp_commit, coord_cred),
+    );
+
+    try authorizePeer(.updater, .owner_channel, root_cred);
+    try authorizePeer(.updater, .installer_runtime, root_cred);
+    try testing.expectError(
+        error.UnauthorizedPeer,
+        authorizePeer(.updater, .owner_channel, coord_cred),
+    );
+    try testing.expectError(
+        error.UnauthorizedPeer,
+        authorizePeer(.updater, .installer_runtime, coord_cred),
+    );
+
+    inline for (.{
+        ParsedRequest.updater_ready,
+        ParsedRequest.reboot,
+        ParsedRequest.floor,
+        ParsedRequest.esp_disarm,
+        ParsedRequest.esp_arm,
+        ParsedRequest.esp_inspect,
+    }) |op| {
+        try authorizePeer(.updater, op, coord_cred);
+        try testing.expectError(error.UnauthorizedPeer, authorizePeer(.updater, op, root_cred));
+        try testing.expectError(error.UnauthorizedPeer, authorizePeer(.updater, op, keeper_cred));
+        try testing.expectError(error.UnauthorizedPeer, authorizePeer(.updater, op, mixed_cred));
+    }
+}
+
+test "receivePacket reads SCM_CREDENTIALS and closes unexpected SCM_RIGHTS descriptors" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var pair: [2]i32 = undefined;
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.socketpair(
+            linux.AF.UNIX,
+            linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC,
+            0,
+            &pair,
+        )),
+    );
+    defer for (pair) |fd| {
+        _ = linux.close(fd);
+    };
+    const one: c_int = 1;
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.setsockopt(
+            pair[1],
+            linux.SOL.SOCKET,
+            linux.SO.PASSCRED,
+            std.mem.asBytes(&one),
+            @sizeOf(c_int),
+        )),
+    );
+    try testing.expectEqual(
+        @as(usize, 5),
+        linux.sendto(pair[0], "floor", 5, linux.MSG.NOSIGNAL, null, 0),
+    );
+    var buf: [64]u8 = undefined;
+    const pkt = receivePacket(pair[1], &buf);
+    try testing.expect(pkt == .message);
+    try testing.expectEqualStrings("floor", pkt.message.bytes);
+    try testing.expectEqual(@as(u32, linux.geteuid()), pkt.message.cred.uid);
+    try testing.expectEqual(@as(u32, linux.getegid()), pkt.message.cred.gid);
+
+    var pipe: [2]i32 = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&pipe, .{ .CLOEXEC = true })));
+    defer _ = linux.close(pipe[0]);
+    broker.sendOwnerChannel(pair[0], pipe[1]) catch unreachable;
+    _ = linux.close(pipe[1]);
+    try testing.expect(receivePacket(pair[1], &buf) == .bad);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), linux.read(pipe[0], &byte, 1));
+}
+
+fn makeTestUki(gpa: std.mem.Allocator, cmd: []const u8, signed_pe: bool) ![]const u8 {
+    var stub: [0x600]u8 = @splat(0);
+    stub[0] = 'M';
+    stub[1] = 'Z';
+    std.mem.writeInt(u32, stub[0x3c..][0..4], 0x80, .little);
+    const pe = 0x80;
+    @memcpy(stub[pe..][0..4], "PE\x00\x00");
+    std.mem.writeInt(u16, stub[pe + 4 ..][0..2], 0xaa64, .little);
+    std.mem.writeInt(u16, stub[pe + 6 ..][0..2], 1, .little);
+    std.mem.writeInt(u16, stub[pe + 20 ..][0..2], 0xf0, .little);
+    const opt = pe + 24;
+    std.mem.writeInt(u16, stub[opt..][0..2], 0x20b, .little);
+    std.mem.writeInt(u32, stub[opt + 32 ..][0..4], 0x1000, .little);
+    std.mem.writeInt(u32, stub[opt + 36 ..][0..4], 0x200, .little);
+    std.mem.writeInt(u32, stub[opt + 56 ..][0..4], 0x2000, .little);
+    std.mem.writeInt(u32, stub[opt + 60 ..][0..4], 0x400, .little);
+    std.mem.writeInt(u32, stub[opt + 108 ..][0..4], 16, .little);
+    const sh = opt + 0xf0;
+    @memcpy(stub[sh..][0..8], ".text\x00\x00\x00");
+    std.mem.writeInt(u32, stub[sh + 8 ..][0..4], 16, .little);
+    std.mem.writeInt(u32, stub[sh + 12 ..][0..4], 0x1000, .little);
+    std.mem.writeInt(u32, stub[sh + 16 ..][0..4], 0x200, .little);
+    std.mem.writeInt(u32, stub[sh + 20 ..][0..4], 0x400, .little);
+    std.mem.writeInt(u32, stub[sh + 36 ..][0..4], 0x60000020, .little);
+
+    const assembled = try uki.assemble(
+        gpa,
+        &stub,
+        &.{ ".linux", ".initrd", ".cmdline" },
+        &.{ "kernel", "initrd", cmd },
+    );
+    if (!signed_pe) return assembled;
+    defer gpa.free(assembled);
+    var cert: [16]u8 = @splat(0);
+    std.mem.writeInt(u32, cert[0..4], cert.len, .little);
+    std.mem.writeInt(u16, cert[4..6], 0x0200, .little);
+    std.mem.writeInt(u16, cert[6..8], 0x0002, .little);
+    cert[8] = 0x30;
+    var out = try gpa.alloc(u8, assembled.len + cert.len);
+    @memcpy(out[0..assembled.len], assembled);
+    @memcpy(out[assembled.len..], &cert);
+    const cert_dir = opt + 112 + 4 * 8;
+    std.mem.writeInt(u32, out[cert_dir..][0..4], @intCast(assembled.len), .little);
+    std.mem.writeInt(u32, out[cert_dir + 4 ..][0..4], cert.len, .little);
+    return out;
+}
+
+test "verifyUkiBytes enforces Authenticode, protection non-downgrade, channel, and index advance" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const base_slots = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
+    const ch_a = @as([64]u8, @splat('a'));
+    const ch_b = @as([64]u8, @splat('b'));
+    var fail: cmdline.Failure = .{};
+    const boot = cmdline.parse(
+        "werewolf.native=1 werewolf.secure=1 werewolf.slots=" ++ base_slots ++
+            " werewolf.esp=57E1-F000 werewolf.channel=" ++ &ch_a ++ " werewolf.index=4",
+        &fail,
+    ).?;
+
+    const good_cmd = "werewolf.native=1 werewolf.secure=1 werewolf.slots=" ++ base_slots ++
+        " werewolf.esp=57E1-F000 werewolf.channel=" ++ &ch_a ++ " werewolf.index=5\x00";
+    const good = try makeTestUki(gpa, good_cmd, true);
+    try verifyUkiBytes(good, boot, true);
+
+    const unsigned = try makeTestUki(gpa, good_cmd, false);
+    try testing.expectError(error.UnsignedUki, verifyUkiBytes(unsigned, boot, true));
+
+    const same_idx = try makeTestUki(
+        gpa,
+        "werewolf.native=1 werewolf.secure=1 werewolf.slots=" ++ base_slots ++
+            " werewolf.esp=57E1-F000 werewolf.channel=" ++ &ch_a ++ " werewolf.index=4\x00",
+        true,
+    );
+    try testing.expectError(error.OlderImage, verifyUkiBytes(same_idx, boot, true));
+    try verifyUkiBytes(same_idx, boot, false);
+
+    const wrong_ch = try makeTestUki(
+        gpa,
+        "werewolf.native=1 werewolf.secure=1 werewolf.slots=" ++ base_slots ++
+            " werewolf.esp=57E1-F000 werewolf.channel=" ++ &ch_b ++ " werewolf.index=9\x00",
+        true,
+    );
+    try testing.expectError(error.WrongImageChannel, verifyUkiBytes(wrong_ch, boot, true));
+
+    const downgrade = try makeTestUki(
+        gpa,
+        "werewolf.native=1 werewolf.secure=1 werewolf.disable=tpm,ipe werewolf.slots=" ++
+            base_slots ++ " werewolf.esp=57E1-F000\x00",
+        true,
+    );
+    try testing.expectError(error.UkiDowngrade, verifyUkiBytes(downgrade, boot, true));
 }
 
 test "EFI versions contain only the canonical serial and advance" {

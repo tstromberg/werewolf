@@ -275,6 +275,43 @@ pub fn dir(io: Io, gpa: Allocator, name: []const u8) !?[]const u8 {
     return if (r.term == .exited and r.term.exited == 0 and d.len > 0) d else null;
 }
 
+/// storageDisk resolves the raw GPT root disk inside a Lima instance directory.
+/// Lima 2.x writes `disk`; Lima 1.x wrote `diffdisk` (raw under vz, qcow2 under
+/// qemu). Symlinks, hardlinks, ambiguous dual-disk directories, and legacy
+/// qcow2 overlays are refused without interpreting qcow2 backing paths.
+pub fn storageDisk(io: Io, gpa: Allocator, instance: []const u8) ![]const u8 {
+    var inst = Dir.cwd().openDir(io, instance, .{ .follow_symlinks = false }) catch |err|
+        switch (err) {
+            error.FileNotFound => return error.MissingLimaInstance,
+            else => return err,
+        };
+    defer inst.close(io);
+    const has_disk = try probeRawCandidate(io, inst, "disk");
+    const has_diffdisk = try probeRawCandidate(io, inst, "diffdisk");
+    if (has_disk and has_diffdisk) return error.AmbiguousLimaDisk;
+    if (!has_disk and !has_diffdisk) return error.MissingLimaInstance;
+    const chosen = if (has_disk) "disk" else "diffdisk";
+    const file = try inst.openFile(io, chosen, .{ .follow_symlinks = false });
+    defer file.close(io);
+    const st = try file.stat(io);
+    if (st.kind != .file or st.nlink != 1) return error.UnsafeLimaDisk;
+    var head: [520]u8 = undefined;
+    const n = try file.readPositionalAll(io, &head, 0);
+    if (n >= 4 and std.mem.eql(u8, head[0..4], "QFI\xfb")) return error.LimaLegacyQcow2Disk;
+    if (n != head.len or !std.mem.eql(u8, head[512..520], "EFI PART"))
+        return error.UnsafeLimaDisk;
+    return gpa.print("{s}/{s}", .{ instance, chosen });
+}
+
+fn probeRawCandidate(io: Io, inst: Dir, name: []const u8) !bool {
+    const st = inst.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    if (st.kind != .file or st.nlink != 1) return error.UnsafeLimaDisk;
+    return true;
+}
+
 /// template returns a Lima template that boots disk with config_disk as a
 /// second, unformatted disk, and no mounts, ssh or provisioning. A null m
 /// omits the vzNAT network, for forms without a DHCP client.
@@ -504,4 +541,55 @@ test template {
     ) != null);
     try testing.expectEqualStrings("werewolf.ip=192.168.5.15/24", managed_args[1]);
     try testing.expectEqual(null, formOf("vmType: vz\n"));
+}
+
+test "storageDisk selects raw GPT disk or diffdisk and refuses qcow2, links and ambiguity" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    try testing.expectError(
+        error.MissingLimaInstance,
+        storageDisk(testing.io, gpa, try gpa.print("{s}/absent", .{root})),
+    );
+    const inst = try gpa.print("{s}/inst", .{root});
+    try tmp.dir.createDir(testing.io, "inst", .fromMode(0o700));
+    try testing.expectError(error.MissingLimaInstance, storageDisk(testing.io, gpa, inst));
+
+    var gpt: [1024]u8 = @splat(0);
+    @memcpy(gpt[512..520], "EFI PART");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inst/disk", .data = &gpt });
+    try testing.expectEqualStrings(
+        try gpa.print("{s}/disk", .{inst}),
+        try storageDisk(testing.io, gpa, inst),
+    );
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inst/diffdisk", .data = &gpt });
+    try testing.expectError(error.AmbiguousLimaDisk, storageDisk(testing.io, gpa, inst));
+
+    try tmp.dir.deleteFile(testing.io, "inst/disk");
+    try testing.expectEqualStrings(
+        try gpa.print("{s}/diffdisk", .{inst}),
+        try storageDisk(testing.io, gpa, inst),
+    );
+
+    var qcow2 = gpt;
+    @memcpy(qcow2[0..4], "QFI\xfb");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inst/diffdisk", .data = &qcow2 });
+    try testing.expectError(error.LimaLegacyQcow2Disk, storageDisk(testing.io, gpa, inst));
+
+    var plain: [1024]u8 = @splat(0);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inst/diffdisk", .data = &plain });
+    try testing.expectError(error.UnsafeLimaDisk, storageDisk(testing.io, gpa, inst));
+
+    try tmp.dir.deleteFile(testing.io, "inst/diffdisk");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "outside.raw", .data = &gpt });
+    try tmp.dir.symLink(testing.io, "../outside.raw", "inst/disk", .{});
+    try testing.expectError(error.UnsafeLimaDisk, storageDisk(testing.io, gpa, inst));
+
+    try tmp.dir.deleteFile(testing.io, "inst/disk");
+    try tmp.dir.hardLink("outside.raw", tmp.dir, "inst/disk", testing.io, .{});
+    try testing.expectError(error.UnsafeLimaDisk, storageDisk(testing.io, gpa, inst));
 }

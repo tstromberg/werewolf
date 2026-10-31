@@ -203,10 +203,23 @@ pub fn main(init: std.process.Init) !void {
         _ = linux.mkdir("/data/svc", 0o755);
         own(l, data_dir, user, s.share);
     }
-    if (s.nofile) |n| {
-        if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = n, .max = n })) != .SUCCESS)
-            l.fail(.park, "nofile {d}: refused", .{n});
-    }
+    var rlim: linux.rlimit = undefined;
+    if (linux.errno(linux.getrlimit(.NOFILE, &rlim)) != .SUCCESS)
+        l.fail(.park, "nofile: getrlimit refused", .{});
+    const target_nofile: linux.rlim_t = if (s.nofile) |n| n else rlim.cur;
+    // Reserve one slot above target_nofile while root so pledgeAndExec can
+    // place prog on target_nofile and immediately drop RLIMIT_NOFILE back to
+    // target_nofile, leaving exec_fd >= rlim_max after exec.
+    const prep_nofile: linux.rlim_t = if (!s.pledge.contains(.exec) and
+        target_nofile < (1 << 20))
+        target_nofile + 1
+    else
+        target_nofile;
+    if (linux.errno(linux.setrlimit(
+        .NOFILE,
+        &.{ .cur = prep_nofile, .max = prep_nofile },
+    )) != .SUCCESS)
+        l.fail(.park, "nofile {d}: refused", .{target_nofile});
     // Join the service's cgroup (cmd/init delegates memory and pids under
     // /run/cgroup/svc). memory.max caps resident memory, not address space,
     // which the JVM and V8 over-reserve; leash-reap kills the whole tree at
@@ -467,9 +480,9 @@ test "only developer SSH can launch a nested leash" {
 }
 
 /// pledgeAndExec installs a pledge of promises and becomes the program
-/// opened as prog, which a pledge without exec allows. The pledge returns
-/// ENOSYS outside its promises and has no listener, so no_new_privs
-/// suffices to install it.
+/// opened as prog, which a pledge without exec allows once via ExecGate.
+/// The pledge returns ENOSYS outside its promises and has no listener, so
+/// no_new_privs suffices to install it.
 fn pledgeAndExec(
     l: Leash,
     prog: usize,
@@ -478,29 +491,123 @@ fn pledgeAndExec(
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
 ) noreturn {
-    const high_fd: i32 = 1021;
-    const exec_fd: usize = if (prog != high_fd and
-        linux.errno(linux.dup3(
-            @intCast(prog),
-            high_fd,
-            @as(u32, @bitCast(linux.O{ .CLOEXEC = true })),
-        )) == .SUCCESS)
-    blk: {
-        _ = linux.close(@intCast(prog));
-        break :blk @intCast(high_fd);
-    } else prog;
     var filter_buf: [seal.max_filter]seal.Filter = undefined;
-    const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(exec_fd));
+    if (promises.contains(.exec)) {
+        const filter = seal.buildServiceFilter(&filter_buf, promises, null);
+        _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
+        const rc = linux.syscall5(
+            .execveat,
+            prog,
+            @intFromPtr(""),
+            @intFromPtr(argv),
+            @intFromPtr(envp),
+            0x1000, // AT_EMPTY_PATH
+        );
+        l.fail(.park, "exec {s}: {s}", .{ path, @tagName(linux.errno(rc)) });
+    }
+    const gate = prepareExecGate(prog) catch |e| l.fail(.park, "exec gate: {s}", .{@errorName(e)});
+    const filter = seal.buildServiceFilter(&filter_buf, promises, gate);
     _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
-    const rc = linux.syscall5(
-        .execveat,
-        exec_fd,
-        @intFromPtr(""),
+    const rc = execveatTrampoline(
+        gate.fd,
+        @intCast(gate.empty_path),
         @intFromPtr(argv),
         @intFromPtr(envp),
         0x1000, // AT_EMPTY_PATH
     );
     l.fail(.park, "exec {s}: {s}", .{ path, @tagName(linux.errno(rc)) });
+}
+
+/// prepareExecGate maps a read-only zero page at a random byte offset, moves
+/// prog onto the highest available descriptor below RLIMIT_NOFILE, and lowers
+/// RLIMIT_NOFILE (soft and hard) to that descriptor number so no syscall in
+/// the new image can ever allocate it again.
+fn prepareExecGate(prog: usize) !seal.ExecGate {
+    var rlim: linux.rlimit = undefined;
+    if (linux.errno(linux.getrlimit(.NOFILE, &rlim)) != .SUCCESS or rlim.cur < 4)
+        return error.LimitExecFd;
+    const cap: linux.rlim_t = @min(rlim.cur - 1, (1 << 20) - 1);
+    const ceil_fd: i32 = @intCast(cap);
+    const page = linux.mmap(
+        null,
+        4096,
+        .{ .READ = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    if (linux.errno(page) != .SUCCESS) return error.Mmap;
+    var rnd: [2]u8 = undefined;
+    const got = linux.getrandom(&rnd, rnd.len, 0);
+    if (linux.errno(got) != .SUCCESS or got != rnd.len) return error.Random;
+    const empty_path: u64 = page + (std.mem.readInt(u16, &rnd, .little) & 0xfff);
+    if (prog != @as(usize, @intCast(ceil_fd))) {
+        if (linux.errno(linux.dup3(
+            @intCast(prog),
+            ceil_fd,
+            @as(u32, @bitCast(linux.O{ .CLOEXEC = true })),
+        )) != .SUCCESS) return error.DupExecFd;
+        _ = linux.close(@intCast(prog));
+    }
+    const lim: linux.rlim_t = @intCast(ceil_fd);
+    if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = lim, .max = lim })) != .SUCCESS)
+        return error.LimitExecFd;
+    return .{ .fd = @intCast(ceil_fd), .ip = execveatAfterIp(), .empty_path = empty_path };
+}
+
+fn execveatAfterIp() u64 {
+    if (@import("builtin").os.tag != .linux) return 0;
+    return switch (@import("builtin").cpu.arch) {
+        .x86_64 => asm (
+            \\lea werewolf_leash_execveat_after(%rip), %[ret]
+            : [ret] "=r" (-> usize),
+        ),
+        .aarch64 => asm (
+            \\adrp %[ret], werewolf_leash_execveat_after
+            \\add %[ret], %[ret], :lo12:werewolf_leash_execveat_after
+            : [ret] "=r" (-> usize),
+        ),
+        else => @compileError("unsupported arch"),
+    };
+}
+
+noinline fn execveatTrampoline(
+    fd: usize,
+    empty_path: usize,
+    argv: usize,
+    envp: usize,
+    flags: usize,
+) usize {
+    if (@import("builtin").os.tag != .linux) return 0;
+    return switch (@import("builtin").cpu.arch) {
+        .x86_64 => asm volatile (
+            \\syscall
+            \\.globl werewolf_leash_execveat_after
+            \\.hidden werewolf_leash_execveat_after
+            \\werewolf_leash_execveat_after:
+            : [ret] "={rax}" (-> usize),
+            : [nr] "{rax}" (@as(usize, @backingInt(linux.SYS.execveat))),
+              [a0] "{rdi}" (fd),
+              [a1] "{rsi}" (empty_path),
+              [a2] "{rdx}" (argv),
+              [a3] "{r10}" (envp),
+              [a4] "{r8}" (flags),
+            : .{ .rcx = true, .r11 = true, .memory = true }),
+        .aarch64 => asm volatile (
+            \\svc #0
+            \\.globl werewolf_leash_execveat_after
+            \\.hidden werewolf_leash_execveat_after
+            \\werewolf_leash_execveat_after:
+            : [ret] "={x0}" (-> usize),
+            : [nr] "{x8}" (@as(usize, @backingInt(linux.SYS.execveat))),
+              [a0] "{x0}" (fd),
+              [a1] "{x1}" (empty_path),
+              [a2] "{x2}" (argv),
+              [a3] "{x3}" (envp),
+              [a4] "{x4}" (flags),
+            : .{ .memory = true }),
+        else => @compileError("unsupported arch"),
+    };
 }
 
 // --- a narrowed program ------------------------------------------------------------
@@ -1361,4 +1468,47 @@ test usesJit {
         s.exec = &.{program};
         try testing.expect(usesJit(s));
     }
+}
+
+test "non-exec gate seals RLIMIT_NOFILE and kills untrusted execveat" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return error.ForkFailed;
+    if (pid == 0) {
+        _ = linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+        _ = linux.setrlimit(.NOFILE, &.{ .cur = 64, .max = 64 });
+        const fd = linux.open(
+            "/dev/null",
+            .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(fd) != .SUCCESS) linux.exit_group(2);
+        const gate = prepareExecGate(fd) catch linux.exit_group(3);
+        if (gate.fd != 63) linux.exit_group(4);
+        var buf: [seal.max_filter]seal.Filter = undefined;
+        const filter = seal.buildServiceFilter(&buf, .initMany(&.{ .stdio, .rpath }), gate);
+        _ = seal.install(filter, false) catch linux.exit_group(5);
+        // flags == 0 returns ENOSYS cleanly.
+        const probe = linux.syscall5(.execveat, gate.fd, @intCast(gate.empty_path), 0, 0, 0);
+        if (linux.errno(probe) != .NOSYS) linux.exit_group(6);
+        // Closing gate.fd leaves it >= rlim_max, so reopening cannot reach it.
+        _ = linux.close(@intCast(gate.fd));
+        var rlim: linux.rlimit = undefined;
+        if (linux.errno(linux.getrlimit(.NOFILE, &rlim)) != .SUCCESS or rlim.max != 63)
+            linux.exit_group(7);
+        // Calling execveat from outside the trampoline kills the process with SIGSYS.
+        const argv = [_:null]?[*:0]const u8{null};
+        _ = linux.syscall5(
+            .execveat,
+            gate.fd,
+            @intCast(gate.empty_path),
+            @intFromPtr(&argv),
+            @intFromPtr(&argv),
+            0x1000,
+        );
+        linux.exit_group(8);
+    }
+    var status: u32 = 0;
+    _ = linux.waitpid(@intCast(pid), &status, 0);
+    try testing.expectEqual(@as(u32, @backingInt(linux.SIG.SYS)), status & 0x7f);
 }
