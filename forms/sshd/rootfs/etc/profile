@@ -1,6 +1,18 @@
 export PATH=/usr/bin
 umask 022
-PS1='\h:\w\$ '
+case ${KSH_VERSION-} in
+    *MIRBSD*)
+        : "${HOSTNAME:=$(hostname)}"
+        # mksh expands shell parameters in prompts, not Bash's backslash escapes.
+        PS1='${HOSTNAME%%.*}:$PWD'
+        if [ "$USER_ID" -eq 0 ]; then
+            PS1="$PS1# "
+        else
+            PS1="$PS1\$ "
+        fi
+        ;;
+    *) PS1='\h:\w\$ ' ;;
+esac
 for script in /etc/profile.d/*.sh; do
     [ ! -r "$script" ] || . "$script"
 done

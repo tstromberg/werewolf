@@ -32,10 +32,12 @@ process. Master exit ends the service.
 Its sequenced-packet socket is `/data/share/unifi/reload/nginx.sock`, mode
 0660. SO_PEERCRED must identify the declared Core UID. The only accepted
 packet is `reload\n`; oversized packets and other actions are rejected.
-Each connection has one second to send a request. The helper validates the
-fixed configuration with nginx before delivering SIGHUP to its own child.
-Success acknowledges validation and signal delivery; VM checks also verify
-that workers actually change.
+Each connection has one second to send a request. The helper screens Core's
+HTTP fragments into `/run/svc/nginx/http` (`0700`, owned by `nginx`) and
+validates the staged configuration with nginx before delivering SIGHUP to its
+own child; on any screening or validation failure, the previous staged tree
+stays in place. Success acknowledges validation and signal delivery; VM checks
+also verify that workers actually change.
 
 Core owns the shared configuration and TLS directories. nginx has read
 access and joins Core's group; it cannot rewrite generated configuration.
