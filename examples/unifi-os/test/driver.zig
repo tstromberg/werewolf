@@ -252,9 +252,11 @@ fn invalidConfig(io: Io, a: Allocator, core: unix.Identity) !bool {
     const before = try workers(io, a);
     if (before.len == 0) return error.NoWorkers;
     const broken = try std.mem.concat(a, u8, &.{ original, "\nwerewolf_invalid_directive;\n" });
-    const refused = brokenReload(io, a, core, broken, before);
+    const refused_syntax = brokenReload(io, a, core, broken, before);
+    const forbidden = try std.mem.concat(a, u8, &.{ original, "\ninclude /etc/passwd;\n" });
+    const refused_include = brokenReload(io, a, core, forbidden, before);
     try rewrite(core, original);
-    if (!try refused) return false;
+    if (!try refused_syntax or !try refused_include) return false;
     return answers(core, "reload\n", "ok\n");
 }
 
