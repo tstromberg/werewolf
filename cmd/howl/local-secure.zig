@@ -6,6 +6,7 @@
 //! otherwise takes changes by reinstalling (docs/design/implemented/independent-updates.md).
 const std = @import("std");
 const howl = @import("howl.zig");
+const cloud = @import("data-cloud.zig");
 const lima = @import("lima.zig");
 const native = @import("build.zig");
 const secureboot = @import("secureboot.zig");

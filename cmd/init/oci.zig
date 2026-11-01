@@ -38,7 +38,7 @@ const OPEN_TREE_CLONE: u32 = 1;
 const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x04;
 const MOVE_MOUNT_T_EMPTY_PATH: u32 = 0x40;
 
-const ATTR = struct {
+const Attr = struct {
     const RDONLY: u64 = 0x1;
     const NOSUID: u64 = 0x2;
     const NODEV: u64 = 0x4;
@@ -563,8 +563,8 @@ fn bindFd(src_fd: i32, dst_fd: i32, read_only: bool) !void {
     const tree: i32 = @intCast(tree_rc);
     defer _ = linux.close(tree);
 
-    var set: u64 = ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW;
-    if (read_only) set |= ATTR.RDONLY;
+    var set: u64 = Attr.NOSUID | Attr.NODEV | Attr.NOEXEC | Attr.NOSYMFOLLOW;
+    if (read_only) set |= Attr.RDONLY;
     var attr: MountAttr = .{ .set = set, .clr = 0, .propagation = 0, .userns_fd = 0 };
     if (linux.errno(linux.syscall5(
         .mount_setattr,

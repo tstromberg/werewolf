@@ -216,22 +216,7 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
             try publish(io, a, work, destination.?, approved, o.service);
             return;
         }
-        if (op == .import and try machineRunning(io, a, o.name, at, profile.provider, why)) {
-            if (o.disk != null or o.key != null) return error.TransferArguments;
-            try @import("data-ssh.zig").restore(
-                io,
-                a,
-                o.name,
-                at,
-                profile.provider,
-                o.service,
-                o.identity,
-                o.archive.?,
-                why,
-            );
-            return;
-        }
-        try requireStopped(io, a, o.name, at, profile.provider, why);
+        if (!profile.cloud_staged) try requireStopped(io, a, o.name, at, profile.provider, why);
         record = if (profile.data_image) |approved_image|
             try images.read(io, a, approved_image)
         else
@@ -331,7 +316,7 @@ pub fn command(io: Io, a: A, op: Operation, args: []const []const u8, why: *howl
     blk: {
         const before = try Dir.cwd().statFile(io, disk, .{});
         const copy = try a.print("{s}/source.raw", .{work});
-        try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "raw", "-O", "raw", disk, copy });
+        try copyRaw(io, disk, copy, why);
         try requireStopped(io, a, o.name, at, profile.provider, why);
         try requireUnused(io, a, disk);
         const after = try Dir.cwd().statFile(io, disk, .{});

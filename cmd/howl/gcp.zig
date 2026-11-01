@@ -125,6 +125,7 @@ pub fn privateImage(
         disk,
         work,
         .{ .name = name, .bucket = bucket },
+        true,
         why,
     );
 }
@@ -138,6 +139,7 @@ fn ensureImageAt(
     disk: []const u8,
     work: []const u8,
     private: ?struct { name: []const u8, bucket: []const u8 },
+    protected: bool,
     why: *howl.Why,
 ) ![]const u8 {
     // The image's own boot certificate is PK, KEK and db: the published
