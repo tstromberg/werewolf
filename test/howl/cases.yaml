@@ -293,6 +293,8 @@ ssh:
     limactl:
       - when: ['{{.Name}}']
         stdout: werewolf-run
+      - when: ['{{.Dir}}']
+        stdout: lima-instance
       - when: ['{{.SSHLocalPort}}']
         stdout: '60022'
       - when: ['{{.Config.User.Name}}|{{.IdentityFile}}']
@@ -325,6 +327,15 @@ ssh:
           ends: [alice@127.0.0.1]
           has: [/test/lima-key, StrictHostKeyChecking=accept-new, HostKeyAlias=werewolf-run]
     - args: [ssh, werewolf-run]
+      ran: [id, limactl, ssh]
+      calls:
+        ssh:
+          ends: [alice@127.0.0.1]
+          has: [/test/lima-key, StrictHostKeyChecking=accept-new, HostKeyAlias=werewolf-run]
+    # A rebuilt machine directory lost its create record; the managed marker
+    # still comes from the instance's config, which Lima keeps.
+    - before: record-ended
+      args: [ssh]
       ran: [id, limactl, ssh]
       calls:
         ssh:

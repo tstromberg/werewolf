@@ -344,7 +344,7 @@ fn leashAttack(p: *Posture) !void {
     // execve and non-AT_EMPTY_PATH execveat after startup.
     const noexec_service = try p.gpa.print(
         "# posture's non-exec probe (werewolf.check=1)\n" ++
-            "exec {s} --probe-noexec\nuser nobody\n" ++
+            "exec {s} --probe-noexec\nuser nobody\nnofile 256\n" ++
             "pledge stdio rpath wpath proc\n",
         .{self},
     );
@@ -666,18 +666,22 @@ fn runs(path: [:0]const u8) bool {
 pub fn probeNoexec() u8 {
     var bits: u32 = 0;
     var rl: linux.rlimit = undefined;
-    if (linux.errno(linux.getrlimit(.NOFILE, &rl)) != .SUCCESS or rl.max == 0 or rl.max >= 65536) {
+    if (linux.errno(linux.getrlimit(.NOFILE, &rl)) != .SUCCESS or rl.cur != 256 or rl.max != 256) {
         bits |= 1 << 0;
     } else {
         const ceiling: i32 = @intCast(rl.max);
         var st: linux.Statx = undefined;
         const stat_rc = linux.statx(ceiling, "", linux.AT.EMPTY_PATH, .{}, &st);
-        const dup_rc = linux.dup2(1, ceiling);
+        const dup_gate_rc = linux.dup2(1, ceiling);
+        const dup_above_rc = linux.dup2(1, ceiling + 1);
+        const fcntl_rc = linux.fcntl(1, linux.F.DUPFD, @as(usize, @intCast(ceiling)));
         const raise: linux.rlimit = .{ .cur = rl.max + 1, .max = rl.max + 1 };
-        const set_rc = linux.setrlimit(.NOFILE, &raise);
+        const prlimit_rc = linux.prlimit(0, .NOFILE, &raise, null);
         if (linux.errno(stat_rc) != .BADF or
-            linux.errno(dup_rc) != .BADF or
-            linux.errno(set_rc) != .PERM)
+            linux.errno(dup_gate_rc) != .NOSYS or
+            linux.errno(dup_above_rc) != .BADF or
+            linux.errno(fcntl_rc) != .NOSYS or
+            linux.errno(prlimit_rc) != .PERM)
             bits |= 1 << 0;
     }
     if (runs("/usr/bin/sv")) bits |= 1 << 1;

@@ -109,6 +109,7 @@ const Step = enum {
     @"config-users-alice",
     @"fido-removed",
     @"software-removed",
+    @"record-ended",
 };
 
 /// Check is what a case checks in Zig after the table's checks.
@@ -682,6 +683,10 @@ const Scene = struct {
                 try put(io, d, machine ++ "dev-address", "192.168.64.40");
             },
             .@"dev-ended" => try d.deleteFile(io, machine ++ "dev"),
+            .@"record-ended" => {
+                try d.deleteFile(io, machine ++ "lima.yaml");
+                try put(io, d, "lima-instance/lima.yaml", "# werewolf lima: managed\n");
+            },
             .@"identity-files" => {
                 try put(io, d, "admin key", "test identity");
                 try put(io, d, "second;key", "test identity");

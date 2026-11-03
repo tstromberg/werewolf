@@ -126,13 +126,26 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
         // A machine Lima manages has no vzNAT lease of its own: one under its
-        // name is an earlier machine's, gone.
-        const yaml = Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/lima.yaml", .{dir}),
-            gpa,
-            .limited(64 << 10),
-        ) catch "";
+        // name is an earlier machine's, gone. Whether it is managed comes
+        // from the machine directory's record of the create, or, if a
+        // rebuilt or reconfigured machine lost it, from the instance's
+        // config, which Lima keeps.
+        const yaml: []const u8 = blk: {
+            const record = Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/lima.yaml", .{dir}),
+                gpa,
+                .limited(64 << 10),
+            ) catch "";
+            if (record.len > 0) break :blk record;
+            const instance = try lima.dir(io, gpa, name) orelse break :blk "";
+            break :blk Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/lima.yaml", .{instance}),
+                gpa,
+                .limited(64 << 10),
+            ) catch "";
+        };
         const managed = lima.isManaged(yaml);
         // Developer SSH has its own listener. Use the address the current
         // boot reported, rather than a lease left by an earlier instance.
