@@ -9,6 +9,7 @@ const linux = std.os.linux;
 
 const posture = @import("posture.zig");
 const allow = @import("allow");
+const people = @import("people");
 const Posture = posture.Posture;
 const capBit = posture.capBit;
 const exists = posture.exists;
@@ -337,6 +338,57 @@ fn leashAttack(p: *Posture) !void {
     if (ran) for (probe_tries, 0..) |what, i| {
         if (mask & (@as(u32, 1) << @intCast(i)) != 0) try listAdd(p.gpa, &got, "{s}", .{what});
     };
+
+    // Second leash run without `exec` in pledge: proves the one-shot execveat
+    // gate closed its high descriptor, lowered RLIMIT_NOFILE, and refuses both
+    // execve and non-AT_EMPTY_PATH execveat after startup.
+    const noexec_service = try p.gpa.print(
+        "# posture's non-exec probe (werewolf.check=1)\n" ++
+            "exec {s} --probe-noexec\nuser nobody\n" ++
+            "pledge stdio rpath wpath proc\n",
+        .{self},
+    );
+    Dir.cwd().writeFile(
+        p.io,
+        .{ .sub_path = probe_dir ++ "/service", .data = noexec_service },
+    ) catch return;
+    var noexec_child = std.process.spawn(p.io, .{
+        .argv = &.{leash_bin},
+        .cwd = .{ .path = probe_dir },
+        .stdin = .ignore,
+        .stdout = .ignore,
+    }) catch return;
+    const noexec_term = noexec_child.wait(p.io) catch return;
+    const noexec_ran = noexec_term == .exited and noexec_term.exited == 0x80;
+    var noexec_mask: u32 = 0;
+    const noexec_fd = linux.open(
+        "/run/svc/" ++ probe_name ++ "/noexec",
+        .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(noexec_fd) == .SUCCESS) {
+        var nm: [4]u8 = undefined;
+        if (linux.read(@intCast(noexec_fd), &nm, nm.len) == nm.len)
+            noexec_mask = std.mem.readInt(u32, &nm, .little);
+        _ = linux.close(@intCast(noexec_fd));
+    }
+    if (!noexec_ran) {
+        try listAdd(p.gpa, &got, "the non-exec probe did not run", .{});
+    } else for (noexec_tries, 0..) |what, i| {
+        if (noexec_mask & (@as(u32, 1) << @intCast(i)) != 0)
+            try listAdd(p.gpa, &got, "{s}", .{what});
+    }
+
+    // Policy-routing boundary probes: non-root cannot reach this machine's
+    // assigned NIC address on an undeclared port via RT_TABLE_LOCAL, and
+    // interactive people uids cannot reach undeclared loopback ports.
+    if (firstLocalNicIp4(p.read("/proc/net/fib_trie"))) |nic_ip| {
+        if (udpConnectAs(65534, nic_ip, 9) != .ACCES)
+            try listAdd(p.gpa, &got, "connected to local NIC address on undeclared port", .{});
+    }
+    if (udpConnectAs(people.ids[0][0], .{ 127, 0, 0, 1 }, 9) != .ACCES)
+        try listAdd(p.gpa, &got, "people uid connected to undeclared loopback port", .{});
+
     try p.add(.{
         .id = "processes-leash-attack",
         .area = "processes",
@@ -348,12 +400,14 @@ fn leashAttack(p: *Posture) !void {
                 "and pledged stdio rpath wpath inet connect proc exec, cannot read " ++
                 "/run/werewolf/hostname, write /tmp, run /usr/bin/sv, connect to port 2, " ++
                 "or (its pledge not promising them) make a memfd, an inotify watch or " ++
-                "SysV shared memory; and can read /etc/passwd, write its own directory " ++
-                "and connect to port {d}; with Landlock ABI 9, it reaches the UNIX " ++
-                "socket its file names and no other",
+                "SysV shared memory; can read /etc/passwd, write its own directory " ++
+                "and connect to port {d}; with Landlock ABI 9, reaches only its named " ++
+                "UNIX socket; without exec in pledge, closes and locks out its startup " ++
+                "execveat descriptor; and non-root/people routing refuses local NIC and " ++
+                "undeclared loopback ports",
             .{ granted, granted },
         ),
-        .result = if (ran and got.items.len == 0) .pass else .fail,
+        .result = if (ran and noexec_ran and got.items.len == 0) .pass else .fail,
         .detail = if (!ran) "the probe did not run" else got.items,
     });
 }
@@ -428,6 +482,12 @@ const probe_tries = [_][]const u8{
     "made SysV shared memory, which its pledge did not promise",
     "connected to a UNIX socket it was not granted",
     "could not connect to the UNIX socket it was granted",
+};
+
+const noexec_tries = [_][]const u8{
+    "kept or recreated the startup execveat descriptor",
+    "ran execve without exec in its pledge",
+    "ran execveat without exec in its pledge",
 };
 
 /// landlockAbi returns the kernel's Landlock ABI version, or 0.
@@ -598,6 +658,137 @@ fn runs(path: [:0]const u8) bool {
         null,
     )) != .SUCCESS) return false;
     return !(linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 42);
+}
+
+/// probeNoexec runs under leash without `exec` in its pledge and checks that
+/// the startup execveat gate descriptor is closed, above RLIMIT_NOFILE, and
+/// that execve and execveat are refused.
+pub fn probeNoexec() u8 {
+    var bits: u32 = 0;
+    var rl: linux.rlimit = undefined;
+    if (linux.errno(linux.getrlimit(.NOFILE, &rl)) != .SUCCESS or rl.max == 0 or rl.max >= 65536) {
+        bits |= 1 << 0;
+    } else {
+        const ceiling: i32 = @intCast(rl.max);
+        var st: linux.Statx = undefined;
+        const stat_rc = linux.statx(ceiling, "", linux.AT.EMPTY_PATH, .{}, &st);
+        const dup_rc = linux.dup2(1, ceiling);
+        const raise: linux.rlimit = .{ .cur = rl.max + 1, .max = rl.max + 1 };
+        const set_rc = linux.setrlimit(.NOFILE, &raise);
+        if (linux.errno(stat_rc) != .BADF or
+            linux.errno(dup_rc) != .BADF or
+            linux.errno(set_rc) != .PERM)
+            bits |= 1 << 0;
+    }
+    if (runs("/usr/bin/sv")) bits |= 1 << 1;
+    if (runsExecveat("/usr/bin/sv")) bits |= 1 << 2;
+
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, bits, .little);
+    const fd = linux.open(
+        "/run/svc/" ++ probe_name ++ "/noexec",
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+        0o600,
+    );
+    if (linux.errno(fd) == .SUCCESS) {
+        _ = linux.write(@intCast(fd), &buf, buf.len);
+        _ = linux.close(@intCast(fd));
+    }
+    return 0x80;
+}
+
+fn runsExecveat(path: [:0]const u8) bool {
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return false;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ path, null };
+        const envp = [_:null]?[*:0]const u8{null};
+        _ = linux.syscall5(
+            .execveat,
+            @bitCast(@as(isize, linux.AT.FDCWD)),
+            @intFromPtr(path.ptr),
+            @intFromPtr(&argv),
+            @intFromPtr(&envp),
+            0,
+        );
+        linux.exit_group(42);
+    }
+    var status: u32 = 0;
+    if (linux.errno(linux.wait4(@intCast(pid), @ptrCast(&status), 0, null)) != .SUCCESS)
+        return false;
+    return !(linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 42);
+}
+
+fn firstLocalNicIp4(fib_trie: []const u8) ?[4]u8 {
+    var pending: ?[4]u8 = null;
+    var lines = std.mem.splitScalar(u8, fib_trie, '\n');
+    while (lines.next()) |line| {
+        const t = trim(line);
+        if (std.mem.startsWith(u8, t, "|-- ")) {
+            const addr = std.Io.net.IpAddress.parse(t["|-- ".len..], 0) catch {
+                pending = null;
+                continue;
+            };
+            pending = switch (addr) {
+                .ip4 => |v4| if (v4.bytes[0] != 127) v4.bytes else null,
+                .ip6 => null,
+            };
+            continue;
+        }
+        if (pending) |ip| {
+            if (std.mem.eql(u8, t, "/32 host LOCAL")) return ip;
+            pending = null;
+        }
+    }
+    return null;
+}
+
+fn udpConnectAs(uid: linux.uid_t, ip: [4]u8, port: u16) linux.E {
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
+    if (rc == 0) {
+        const none = [0]linux.gid_t{};
+        if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) !=
+            .SUCCESS or
+            linux.errno(linux.setgroups(0, &none)) != .SUCCESS or
+            linux.errno(linux.setresgid(uid, uid, uid)) != .SUCCESS or
+            linux.errno(linux.setresuid(uid, uid, uid)) != .SUCCESS)
+            linux.exit_group(254);
+        const s = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+        if (linux.errno(s) != .SUCCESS) linux.exit_group(@intCast(@backingInt(linux.errno(s))));
+        var addr: linux.sockaddr.in = .{
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = @bitCast(ip),
+        };
+        const err = linux.errno(
+            linux.connect(@intCast(s), @ptrCast(&addr), @sizeOf(linux.sockaddr.in)),
+        );
+        linux.exit_group(@intCast(@min(@as(u16, @backingInt(err)), 253)));
+    }
+    var status: i32 = 0;
+    if (linux.errno(linux.wait4(@intCast(rc), &status, 0, null)) != .SUCCESS) return .FAULT;
+    const st: u32 = @bitCast(status);
+    if (!linux.W.IFEXITED(st)) return .FAULT;
+    const code = linux.W.EXITSTATUS(st);
+    if (code >= 254) return .FAULT;
+    return @fromBackingInt(@intCast(code));
+}
+
+test firstLocalNicIp4 {
+    const trie =
+        \\Main:
+        \\  |-- 10.0.2.0
+        \\     |-- 10.0.2.15
+        \\        /32 host LOCAL
+        \\Local:
+        \\  |-- 127.0.0.1
+        \\     /32 host LOCAL
+    ;
+    try std.testing.expectEqual(@as(?[4]u8, .{ 10, 0, 2, 15 }), firstLocalNicIp4(trie));
+    try std.testing.expectEqual(
+        @as(?[4]u8, null),
+        firstLocalNicIp4("Local:\n  |-- 127.0.0.1\n     /32 host LOCAL\n"),
+    );
 }
 
 test firstTcpPort {

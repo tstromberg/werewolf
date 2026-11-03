@@ -256,8 +256,7 @@ suites:
                 - nextcloud
           - file: /run/svc/nextcloud/admin-password
             expect:
-              uid: nextcloud
-              mode: '600'
+              exists: false
           - file: /data/svc/nextcloud/config/config.php
             expect:
               uid: nextcloud

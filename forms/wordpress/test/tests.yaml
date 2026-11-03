@@ -143,7 +143,7 @@ suites:
             expect:
               uid: php
               mode: '600'
-          - file: /data/svc/php-fpm/salts.php
+          - file: /data/svc/php-fpm/salts.json
             expect:
               uid: php
               mode: '600'

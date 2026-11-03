@@ -29,10 +29,17 @@ suites:
         steps:
           - file: /data/svc/velociraptor/server.config.yaml
             expect:
+              type: file
               uid: velociraptor
               mode: '600'
               body:
                 absent: werewolf-check-pass-1
+          - file: /run/svc/velociraptor/admin-password
+            expect:
+              exists: false
+          - file: /run/svc/velociraptor/merge.json
+            expect:
+              exists: false
       - name: vr-anon
         steps:
           - fetch:

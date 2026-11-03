@@ -15,10 +15,11 @@
  * php-fpm stays down.
  */
 
-const SITE  = '/run/svc/php-fpm/site.json';
-const HASH  = '/run/svc/php-fpm/admin-password-hash';
-const DATA  = '/data/svc/php-fpm';
-const SALTS = DATA . '/salts.php';
+const SITE       = '/run/svc/php-fpm/site.json';
+const HASH       = '/run/svc/php-fpm/admin-password-hash';
+const DATA       = '/data/svc/php-fpm';
+const SALTS      = DATA . '/salts.json';
+const SALTS_OLD  = DATA . '/salts.php';
 
 function fail( string $why ): never {
 	fwrite( STDERR, "wordpress-install: $why\n" );
@@ -48,15 +49,16 @@ foreach ( array( DATA . '/uploads' => 0755, DATA . '/database' => 0700 ) as $dir
 	}
 }
 
-// The salts, made once: eight keys of 64 random bytes, written whole and
-// renamed into place, 0600.
-if ( ! file_exists( '/run/svc/php-fpm/salts' ) && ! file_exists( SALTS ) ) {
-	$lines = "<?php\n// Made by werewolf on this machine's first start; a new file logs everyone out.\n";
+// The salts, made once as plain JSON data (never executable PHP on /data):
+// eight keys of 64 random bytes, written whole and renamed into place, 0600.
+if ( ! file_exists( '/run/svc/php-fpm/salts' ) && ! file_exists( SALTS ) && ! file_exists( SALTS_OLD ) ) {
+	$salts = array();
 	foreach ( array( 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ) as $key ) {
-		$lines .= sprintf( "define( '%s', '%s' );\n", $key, base64_encode( random_bytes( 64 ) ) );
+		$salts[ $key ] = base64_encode( random_bytes( 64 ) );
 	}
-	$tmp = SALTS . '.tmp';
-	if ( file_put_contents( $tmp, $lines ) !== strlen( $lines ) || ! chmod( $tmp, 0600 ) || ! rename( $tmp, SALTS ) ) {
+	$json = json_encode( $salts, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
+	$tmp  = SALTS . '.tmp';
+	if ( file_put_contents( $tmp, $json ) !== strlen( $json ) || ! chmod( $tmp, 0600 ) || ! rename( $tmp, SALTS ) ) {
 		@unlink( $tmp );
 		fail( 'cannot write ' . SALTS );
 	}

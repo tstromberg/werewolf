@@ -29,8 +29,31 @@ define( 'DB_COLLATE', '' );
 define( 'DB_PATH', '/data/svc/php-fpm/database/wordpress.sqlite' );
 $table_prefix = 'wp_';
 
-// Salts: the config's, or the ones install.php made once on /data.
-require file_exists( '/run/svc/php-fpm/salts' ) ? '/run/svc/php-fpm/salts' : '/data/svc/php-fpm/salts.php';
+// Salts: read as data (JSON or define() lines), never executed from /run or /data.
+$werewolf_salts_raw = '';
+foreach ( array( '/run/svc/php-fpm/salts', '/data/svc/php-fpm/salts.json', '/data/svc/php-fpm/salts.php' ) as $werewolf_salts_path ) {
+	if ( is_file( $werewolf_salts_path ) ) {
+		$werewolf_salts_raw = (string) @file_get_contents( $werewolf_salts_path );
+		break;
+	}
+}
+$werewolf_salts = json_decode( $werewolf_salts_raw, true );
+if ( ! is_array( $werewolf_salts ) ) {
+	$werewolf_salts = array();
+	if ( preg_match_all( "/define\(\s*'([A-Z_]+)'\s*,\s*'((?:\\\\.|[^'\\\\])*)'\s*\)\s*;/", $werewolf_salts_raw, $werewolf_matches, PREG_SET_ORDER ) ) {
+		foreach ( $werewolf_matches as $werewolf_m ) {
+			$werewolf_salts[ $werewolf_m[1] ] = stripcslashes( $werewolf_m[2] );
+		}
+	}
+}
+foreach ( array( 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT' ) as $werewolf_key ) {
+	if ( empty( $werewolf_salts[ $werewolf_key ] ) || ! is_string( $werewolf_salts[ $werewolf_key ] ) ) {
+		http_response_code( 503 );
+		exit( "werewolf: missing salt $werewolf_key\n" );
+	}
+	define( $werewolf_key, $werewolf_salts[ $werewolf_key ] );
+}
+unset( $werewolf_salts_raw, $werewolf_salts_path, $werewolf_salts, $werewolf_matches, $werewolf_m, $werewolf_key );
 
 // Plugins, themes and updates come with the image: nothing on the
 // machine may change the code, and nothing fetches any.

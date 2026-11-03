@@ -503,8 +503,7 @@ suites:
         steps:
           - file: /run/svc/php-fpm/admin-password
             expect:
-              uid: php
-              mode: '600'
+              exists: false
           - file: /data/svc/php-fpm/secrets.php
             expect:
               uid: php

@@ -183,7 +183,9 @@ fn stageNext(io: Io, gpa: Allocator, src: Dir, baked: ?Dir, run: Dir) !void {
         count += 1;
         if (count > max_configs) return error.TooManyConfigs;
         const raw = try readSourceConf(io, gpa, src, baked, entry.name, entry.kind);
+        defer gpa.free(raw);
         const screened = try screenFragment(gpa, raw);
+        defer gpa.free(screened);
         var out = try dst.createFile(io, entry.name, .{
             .exclusive = true,
             .permissions = .fromMode(0o600),
@@ -242,6 +244,7 @@ fn screenFragment(gpa: Allocator, input: []const u8) ![]u8 {
         if (c == 0) return error.ControlCharacter;
     }
     var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
     var tokens: std.ArrayList(Token) = .empty;
     var unquoted_bufs: std.ArrayList([]u8) = .empty;
     defer {
@@ -265,7 +268,8 @@ fn screenFragment(gpa: Allocator, input: []const u8) ![]u8 {
         if (c == ';' or c == '{' or c == '}') {
             if (tokens.items.len > 0) {
                 if (c == '}') return error.MalformedDirective;
-                if (try checkDirective(tokens.items)) |rewritten| {
+                var rewrite_buf: [256]u8 = undefined;
+                if (try checkDirective(tokens.items, &rewrite_buf)) |rewritten| {
                     const arg = tokens.items[1];
                     try out.appendSlice(gpa, input[emit_from..arg.raw_start]);
                     try out.appendSlice(gpa, rewritten);
@@ -335,7 +339,7 @@ fn isDelimiter(c: u8) bool {
 }
 
 /// Returns a replacement argument slice when `include` needs prefix rewriting.
-fn checkDirective(tokens: []const Token) !?[]const u8 {
+fn checkDirective(tokens: []const Token, rewrite_buf: *[256]u8) !?[]const u8 {
     const cmd = tokens[0].value;
     for ([_][]const u8{
         "load_module",
@@ -379,12 +383,12 @@ fn checkDirective(tokens: []const Token) !?[]const u8 {
         if (std.mem.startsWith(u8, target, legacy_http_prefix)) {
             const tail = target[legacy_http_prefix.len..];
             if (!safeIncludeTail(tail)) return error.ForbiddenInclude;
-            return tryRewrite(tail);
+            return try tryRewrite(rewrite_buf, tail);
         }
         if (std.mem.startsWith(u8, target, share_http_prefix)) {
             const tail = target[share_http_prefix.len..];
             if (!safeIncludeTail(tail)) return error.ForbiddenInclude;
-            return tryRewrite(tail);
+            return try tryRewrite(rewrite_buf, tail);
         }
         if (std.mem.startsWith(u8, target, staged_http_prefix)) {
             if (!safeIncludeTail(target[staged_http_prefix.len..])) return error.ForbiddenInclude;
@@ -433,12 +437,8 @@ fn checkDirective(tokens: []const Token) !?[]const u8 {
     return null;
 }
 
-const RewriteBuf = struct {
-    var buf: [256]u8 = undefined;
-};
-
-fn tryRewrite(tail: []const u8) ![]const u8 {
-    return std.mem.print(&RewriteBuf.buf, "{s}{s}", .{ staged_http_prefix, tail }) catch
+fn tryRewrite(buf: *[256]u8, tail: []const u8) ![]const u8 {
+    return std.mem.print(buf, "{s}{s}", .{ staged_http_prefix, tail }) catch
         error.ForbiddenInclude;
 }
 

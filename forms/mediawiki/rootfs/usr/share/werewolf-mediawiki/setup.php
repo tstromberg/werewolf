@@ -50,6 +50,30 @@ function put( string $path, string $text ): void {
 	}
 }
 
+// scrub zeroes and removes a bootstrap secret file from /run before php-fpm serves.
+function scrub( string $path ): void {
+	if ( !is_file( $path ) && !is_link( $path ) ) {
+		return;
+	}
+	if ( is_file( $path ) && !is_link( $path ) ) {
+		$len = (int)@filesize( $path );
+		$fh  = @fopen( $path, 'r+b' );
+		if ( $fh !== false ) {
+			if ( $len > 0 ) {
+				@fwrite( $fh, str_repeat( "\0", $len ) );
+				@fflush( $fh );
+			}
+			if ( function_exists( 'fsync' ) ) {
+				@fsync( $fh );
+			}
+			@fclose( $fh );
+		}
+	}
+	if ( !@unlink( $path ) && ( is_file( $path ) || is_link( $path ) ) ) {
+		fail( "cannot remove $path" );
+	}
+}
+
 // rmtree removes what an install cut short left.
 function rmtree( string $dir ): void {
 	foreach ( scandir( $dir ) ?: [] as $f ) {
@@ -122,10 +146,12 @@ if ( $have === false ) {
 	require __DIR__ . '/installer.php';
 	$done = 'installed';
 } elseif ( $have !== $want ) {
+	scrub( PASS );
 	define( 'MW_CONFIG_FILE', CONF );
 	$argv = [ IP . '/maintenance/run.php', 'update', '--quick' ];
 	$done = 'updated';
 } else {
+	scrub( PASS );
 	say( 'the wiki in ' . DB . ' is MediaWiki ' . strtok( $want, ' ' ) . '; keeping it' );
 	exit( 0 );
 }
@@ -139,8 +165,9 @@ chdir( IP );
 require IP . '/maintenance/run.php';
 
 if ( $done === 'installed' ) {
-	// The installer's LocalSettings.php is not used: the image's is.
+	// The installer's LocalSettings.php and bootstrap password are not kept.
 	@unlink( '/run/svc/php-fpm/LocalSettings.php' );
+	scrub( PASS );
 	put( DB . '.new/schema', $want );
 	if ( !rename( DB . '.new', DB ) ) {
 		fail( 'cannot rename ' . DB . '.new to ' . DB );

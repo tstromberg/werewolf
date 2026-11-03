@@ -54,3 +54,19 @@ suites:
             expect:
               body:
                 absent: werewolf-check-client-secret
+      - name: o2p-no-forwarded-spoof
+        steps:
+          - fetch:
+              url: http://127.0.0.1:4180/
+              headers:
+                X-Forwarded-For: 127.0.0.1
+                X-Real-IP: 127.0.0.1
+                X-Forwarded-Host: evil.example
+                X-Forwarded-Proto: https
+                X-Forwarded-Uri: //evil.example/pwn
+            expect:
+              status: 302
+              headers:
+                location:
+                  matches: ^https://idp[.]example[.]test/authorize
+                  not_matches: evil[.]example

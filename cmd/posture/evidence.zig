@@ -10,8 +10,9 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     },
     .{
         "boot-secure-boot",
-        "/sys/firmware/efi/efivars/{SecureBoot,SetupMode}-8be4df61-93ca-11d2-aa0d-00e098032b8c:" ++
-            " byte 4 after the four-byte attributes",
+        "/sys/firmware/efi/efivars/{SecureBoot,SetupMode,PK,KEK}-8be4df61-93ca-11d2-aa0d-" ++
+            "00e098032b8c; /sys/firmware/efi/efivars/{db,dbx}-d719b2cb-3d3a-4596-a3bc-" ++
+            "dad00e67656f; /usr/share/werewolf/boot.der",
     },
     .{ "boot-sig-enforced", "/sys/module/module/parameters/sig_enforce" },
     .{
@@ -188,6 +189,16 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
             " stx_mode world-write and sticky bits",
     },
     .{
+        "files-shared-roots",
+        "statx(AT_SYMLINK_NOFOLLOW) on /run, /run/svc, /var/lib, /data, /data/svc and" ++
+            " /data/share: stx_mode, stx_uid and stx_gid",
+    },
+    .{
+        "files-runtime-secrets",
+        "descriptor-relative statx and key-header scan under /tmp, /var/tmp, /dev/shm, /run and" ++
+            " /var/lib; /etc/sv/*/supervise/stat and /run/svc/* bootstrap inputs",
+    },
+    .{
         "files-account-db",
         "resolved /etc/{passwd,group,shadow,gshadow} and parent directories: statx stx_uid and" ++
             " stx_mode",
@@ -240,6 +251,11 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
         "network-ssh-security-keys",
         "sshd -T: pubkeyacceptedalgorithms, casignaturealgorithms and pubkeyauthoptions",
     },
+    .{
+        "network-web-config",
+        "/etc/nginx/nginx.conf, /etc/caddy/Caddyfile and /etc/oauth2-proxy/oauth2-proxy.cfg:" ++
+            " symlink, include and forwarded-header directives",
+    },
     .{ "network-bind", "bind(AF_INET TCP, INADDR_ANY, undeclared port)" },
     .{ "network-outbound", "connect(AF_INET UDP, 192.0.2.1:9), no packets sent" },
     .{
@@ -285,8 +301,8 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     },
     .{
         "processes-leash-attack",
-        "leash's generated service policy; posture --probe syscall exit bitmap and" ++
-            " granted/denied file, exec, TCP and UNIX socket probes",
+        "leash's generated service policy; posture --probe and --probe-noexec bitmaps; non-root" ++
+            " local-NIC and people loopback UDP connect probes",
     },
 });
 
@@ -308,8 +324,8 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         "boot-secure-boot",
         Brief{
             .label = "Secure Boot enabled",
-            .expr = "efivars[4]",
-            .want = "SecureBoot=1, SetupMode=0",
+            .expr = "efivars + X.509 db-dbx",
+            .want = "SecureBoot=1, SetupMode=0, 1 X.509 signer",
         },
     },
     .{
@@ -737,6 +753,22 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         },
     },
     .{
+        "files-shared-roots",
+        Brief{
+            .label = "Shared service roots root-owned",
+            .expr = "statx(shared roots)",
+            .want = "real dirs, 0:0, mode & 022 = 0",
+        },
+    },
+    .{
+        "files-runtime-secrets",
+        Brief{
+            .label = "Runtime secrets private",
+            .expr = "scan(tmp|run|var/lib)",
+            .want = "no temp secrets; mode 0600; bootstrap scrubbed",
+        },
+    },
+    .{
         "files-account-db",
         Brief{
             .label = "Account files protected",
@@ -825,6 +857,14 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         },
     },
     .{
+        "network-web-config",
+        Brief{
+            .label = "Web server configs hardened",
+            .expr = "nginx|caddy|oauth2-proxy",
+            .want = "symlinks off; safe includes; no spoofed client IP",
+        },
+    },
+    .{
         "network-bind",
         Brief{
             .label = "Undeclared listeners blocked",
@@ -877,7 +917,15 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
         Brief{
             .label = "Unsolicited traffic blocked",
             .expr = "RTM_GETRULE(AF_INET)",
-            .want = "inbound blackhole; undeclared egress prohibited",
+            .want = "inbound blackhole; pinned local_out; people isolated",
+        },
+    },
+    .{
+        "network-ipv6-ra-limits",
+        Brief{
+            .label = "IPv6 advertisements limited",
+            .expr = "ipv6.conf RA limits + if_inet6",
+            .want = "rtr_pref=rt_info=mtu=0, max_addresses=4, plen>=48",
         },
     },
     .{

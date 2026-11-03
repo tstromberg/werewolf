@@ -7,6 +7,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const testing = std.testing;
+const people = @import("people");
 
 const posture = @import("posture.zig");
 const Posture = posture.Posture;
@@ -47,6 +48,7 @@ pub fn check(p: *Posture) !void {
         &.{ "sshd", "dropbear", "telnetd", "in.telnetd" },
     );
     try ssh(p);
+    try web(p);
     // With IPv6 off, there is no IPv6 forwarding to check.
     const forwarding = [_][2][]const u8{
         .{ "net/ipv4/ip_forward", "0" },
@@ -99,19 +101,8 @@ pub fn check(p: *Posture) !void {
         &.{.{ "net/ipv4/conf/*/route_localnet", "0" }},
     );
     // IPv6 takes its route from router advertisements, so they stay on,
-    // limited to what they must provide.
-    if (v6_on) try p.sysctls(
-        "network-ipv6-ra-limits",
-        "network",
-        "Router advertisements limited",
-        "A rogue router on the same network cannot rank itself above the real one, add a " ++
-            "route to steal one destination's traffic, or flood the machine with addresses.",
-        &.{
-            .{ "net/ipv6/conf/*/accept_ra_rtr_pref", "0" },
-            .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" },
-            .{ "net/ipv6/conf/*/max_addresses", "4" },
-        },
-    );
+    // limited to what they must provide, with overly broad prefixes refused.
+    if (v6_on) try ipv6RaLimits(p);
     try p.sysctls(
         "network-martians",
         "network",
@@ -780,12 +771,14 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .area = "network",
         .name = "Unsolicited traffic dropped",
         .why = "Packets the machine did not ask for and does not serve are dropped " ++
-            "unanswered, whatever is listening.",
+            "unanswered, whatever is listening, and local delivery cannot be abused " ++
+            "across NIC addresses or by interactive logins.",
         .how = "the IPv4 policy-routing rules (RTM_GETRULE) blackhole arriving TCP and UDP " ++
-            "(or everything) before any rule delivers it to the local table, and refuse " ++
-            "locally sent traffic that no rule allows",
+            "(or everything) before any rule delivers it to the local table, pin non-root " ++
+            "local delivery to 127.0.0.0/8, isolate people's uid ranges from undeclared " ++
+            "loopback ports, and refuse locally sent traffic that no rule allows",
         .result = if (rules) |r|
-            (if (r.inbound_dropped and r.outbound_refused) .pass else .fail)
+            (if (r.complete()) .pass else .fail)
         else
             .skip,
         .detail = if (rules) |r| try ruleDetail(p.gpa, r) else unreadable,
@@ -801,11 +794,12 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
             "not be a way around the IPv4 rules.",
         .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its " ++
             "policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before " ++
-            "delivering it and refuse locally sent traffic no rule allows",
+            "delivering it, pin non-root local delivery to ::1/128, isolate people's uid " ++
+            "ranges on ::1/128, and refuse locally sent traffic no rule allows",
         .result = if (!v6_on)
             .pass
         else if (rules6) |r|
-            (if (r.inbound_dropped and r.outbound_refused) .pass else .fail)
+            (if (r.complete()) .pass else .fail)
         else
             .skip,
         .detail = if (!v6_on)
@@ -818,14 +812,8 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     if (rules6 == null) try p.fromBoot(ipv6) else try p.add(ipv6);
 }
 
-/// unreadable is a rule check's detail when this process may not open
-/// netlink, as a root SSH session may not (forms/sshd's pledge), and has
-/// no boot result to take (Posture.fromBoot).
 const unreadable = "this process may not open netlink, as an SSH session may not";
 
-/// rulesOf summarizes family's policy-routing rules, or returns null if this
-/// process's seccomp filter refuses netlink. Any other failure summarizes as
-/// no rules, which fails the check.
 fn rulesOf(gpa: Allocator, family: u8) ?RuleSummary {
     const dump = ruleDump(gpa, family) catch |err|
         return if (err == error.Filtered) null else .{};
@@ -833,9 +821,11 @@ fn rulesOf(gpa: Allocator, family: u8) ?RuleSummary {
 }
 
 fn ruleDetail(gpa: Allocator, r: RuleSummary) ![]const u8 {
-    return gpa.print("arriving: {s}; sent: {s}", .{
+    return gpa.print("arriving: {s}; sent: {s}; local: {s}; people: {s}", .{
         if (r.inbound_dropped) "dropped unless declared" else "delivered",
         if (r.outbound_refused) "refused unless declared" else "routed",
+        if (r.local_pinned) "pinned to loopback" else "unpinned",
+        if (r.people_isolated) "isolated on loopback" else "exposed on loopback",
     });
 }
 
@@ -1100,6 +1090,293 @@ fn dumpDone(batch: []const u8) bool {
     return false;
 }
 
+fn ipv6RaLimits(p: *Posture) !void {
+    const want = [_][2][]const u8{
+        .{ "net/ipv6/conf/*/accept_ra_rtr_pref", "0" },
+        .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" },
+        .{ "net/ipv6/conf/*/accept_ra_mtu", "0" },
+        .{ "net/ipv6/conf/*/max_addresses", "4" },
+    };
+    var bad: std.ArrayList(u8) = .empty;
+    var observed: std.ArrayList(u8) = .empty;
+    for (want) |kv| {
+        const keys = try p.expand(kv[0]);
+        for (keys) |key| {
+            const value = p.sysctl(key);
+            try listAdd(p.gpa, &observed, "/proc/sys/{s}={s}", .{
+                key, if (value.len > 0) value else "unavailable",
+            });
+            if (!std.mem.eql(u8, value, kv[1]))
+                try listAdd(
+                    p.gpa,
+                    &bad,
+                    "{s} is {s}",
+                    .{ key, if (value.len > 0) value else "absent" },
+                );
+        }
+    }
+    const broad = try broadIpv6Prefixes(p.gpa, p.read("/proc/net/if_inet6"));
+    if (broad.len > 0) try listAdd(p.gpa, &bad, "broad IPv6 prefix: {s}", .{broad});
+    try listAdd(
+        p.gpa,
+        &observed,
+        "/proc/net/if_inet6 broad={s}",
+        .{if (broad.len > 0) broad else "none"},
+    );
+    try p.add(.{
+        .id = "network-ipv6-ra-limits",
+        .area = "network",
+        .name = "Router advertisements limited",
+        .why = "A rogue router on the same network cannot rank itself above the real one, add a " ++
+            "route or broad prefix to steal traffic, lower the MTU, or flood the machine with " ++
+            "addresses.",
+        .how = "net.ipv6.conf.*.accept_ra_rtr_pref, accept_ra_rt_info_max_plen and " ++
+            "accept_ra_mtu are 0, max_addresses is 4, and /proc/net/if_inet6 has no " ++
+            "global/ULA prefix broader than /48 or link-local broader than /64",
+        .source = "/proc/sys/net/ipv6/conf/*/{accept_ra_rtr_pref,accept_ra_rt_info_max_plen," ++
+            "accept_ra_mtu,max_addresses}; /proc/net/if_inet6",
+        .observed = observed.items,
+        .result = if (bad.items.len == 0) .pass else .fail,
+        .detail = bad.items,
+    });
+}
+
+fn broadIpv6Prefixes(gpa: Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        const hex_addr = words.next() orelse continue;
+        _ = words.next() orelse continue; // ifindex
+        const plen_hex = words.next() orelse continue;
+        _ = words.next() orelse continue; // scope
+        _ = words.next() orelse continue; // dad_status
+        const nic = words.next() orelse continue;
+        if (std.mem.eql(u8, nic, "lo") or hex_addr.len != 32) continue;
+        var addr: [16]u8 = undefined;
+        _ = std.fmt.hexToBytes(&addr, hex_addr) catch continue;
+        const plen = std.fmt.parseInt(u8, plen_hex, 16) catch continue;
+        if (plen == 128) continue;
+        const link_local = addr[0] == 0xfe and (addr[1] & 0xc0) == 0x80;
+        const floor: u8 = if (link_local) 64 else 48;
+        if (plen < floor) try listAdd(gpa, &out, "{s} /{d}", .{ nic, plen });
+    }
+    return out.items;
+}
+
+fn stripHashComments(gpa: Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var quote: u8 = 0;
+    var in_comment = false;
+    for (text) |c| {
+        if (in_comment) {
+            if (c == '\n') {
+                in_comment = false;
+                try out.append(gpa, '\n');
+            }
+            continue;
+        }
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            try out.append(gpa, c);
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            try out.append(gpa, c);
+            continue;
+        }
+        if (c == '#') {
+            in_comment = true;
+            continue;
+        }
+        try out.append(gpa, c);
+    }
+    return out.items;
+}
+
+fn isWritableServeRoot(path: []const u8) bool {
+    const clean = std.mem.trim(u8, path, "\"' \t\r\n");
+    return std.mem.eql(u8, clean, "/data") or std.mem.startsWith(u8, clean, "/data/") or
+        std.mem.eql(u8, clean, "/var") or std.mem.startsWith(u8, clean, "/var/");
+}
+
+fn isUnsafeNginxInclude(path: []const u8) bool {
+    const clean = std.mem.trim(u8, path, "\"' \t\r\n");
+    for ([_][]const u8{
+        "/data/",
+        "/tmp/",
+        "/var/tmp/",
+        "/dev/shm/",
+        "/home/",
+        "/werewolf/config/",
+    }) |bad| if (std.mem.startsWith(u8, clean, bad)) return true;
+    return false;
+}
+
+fn webConfigProblems(
+    gpa: Allocator,
+    nginx_raw: []const u8,
+    caddy_raw: []const u8,
+    oauth2_raw: []const u8,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    if (nginx_raw.len > 0) {
+        const clean = try stripHashComments(gpa, nginx_raw);
+        var serves_writable = false;
+        var symlinks_on = false;
+        var symlinks_off = false;
+        var stmts = std.mem.tokenizeAny(u8, clean, ";{}\r\n");
+        while (stmts.next()) |stmt| {
+            var words = std.mem.tokenizeAny(u8, stmt, " \t");
+            const dir = words.next() orelse continue;
+            const arg1 = words.next() orelse continue;
+            if (std.mem.eql(u8, dir, "root") or std.mem.eql(u8, dir, "alias")) {
+                if (isWritableServeRoot(arg1)) serves_writable = true;
+            } else if (std.mem.eql(u8, dir, "disable_symlinks")) {
+                if (std.mem.eql(u8, arg1, "on")) symlinks_on = true;
+                if (std.mem.eql(u8, arg1, "off")) symlinks_off = true;
+            } else if (std.mem.eql(u8, dir, "include")) {
+                if (isUnsafeNginxInclude(arg1))
+                    try listAdd(gpa, &out, "nginx.conf includes writable path {s}", .{arg1});
+            } else if (std.mem.eql(u8, dir, "set_real_ip_from")) {
+                const cidr = std.mem.trim(u8, arg1, "\"'");
+                if (std.mem.eql(u8, cidr, "0.0.0.0/0") or std.mem.eql(u8, cidr, "::/0"))
+                    try listAdd(gpa, &out, "nginx.conf trusts forwarded IP from {s}", .{cidr});
+            }
+        }
+        if (serves_writable and (!symlinks_on or symlinks_off))
+            try listAdd(
+                gpa,
+                &out,
+                "nginx.conf serves /data or /var without disable_symlinks on",
+                .{},
+            );
+    }
+    if (caddy_raw.len > 0) {
+        const clean = try stripHashComments(gpa, caddy_raw);
+        var has_file_server = false;
+        var writable_root = false;
+        var auto_https_off = false;
+        var lines = std.mem.tokenizeAny(u8, clean, "\r\n{};");
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeAny(u8, line, " \t");
+            const dir = words.next() orelse continue;
+            if (std.mem.eql(u8, dir, "file_server")) {
+                has_file_server = true;
+            } else if (std.mem.eql(u8, dir, "auto_https")) {
+                if (std.mem.eql(u8, words.next() orelse "", "off")) auto_https_off = true;
+            } else if (std.mem.eql(u8, dir, "root")) {
+                const a = words.next() orelse continue;
+                const path = if (words.next()) |b| b else a;
+                if (isWritableServeRoot(path)) writable_root = true;
+            } else if (std.mem.eql(u8, dir, "trusted_proxies")) {
+                while (words.next()) |w| {
+                    const cidr = std.mem.trim(u8, w, "\"'");
+                    if (std.mem.eql(u8, cidr, "0.0.0.0/0") or std.mem.eql(u8, cidr, "::/0"))
+                        try listAdd(
+                            gpa,
+                            &out,
+                            "Caddyfile trusts forwarded headers from {s}",
+                            .{cidr},
+                        );
+                }
+            }
+        }
+        if (has_file_server and writable_root and !auto_https_off)
+            try listAdd(
+                gpa,
+                &out,
+                "Caddyfile serves /data or /var with file_server while managing TLS keys",
+                .{},
+            );
+    }
+    if (oauth2_raw.len > 0) {
+        const clean = try stripHashComments(gpa, oauth2_raw);
+        var reverse_proxy = false;
+        var public_listener = false;
+        var lines = std.mem.tokenizeAny(u8, clean, "\r\n");
+        while (lines.next()) |line| {
+            const eq = std.mem.findScalar(u8, line, '=') orelse continue;
+            const key = trim(line[0..eq]);
+            const val = std.mem.trim(u8, line[eq + 1 ..], " \t\"'");
+            if (std.mem.eql(u8, key, "reverse_proxy") and std.mem.eql(u8, val, "true"))
+                reverse_proxy = true;
+            if (std.mem.eql(u8, key, "http_address") and
+                !std.mem.startsWith(u8, val, "127.") and
+                !std.mem.startsWith(u8, val, "[::1]") and
+                !std.mem.startsWith(u8, val, "unix:"))
+                public_listener = true;
+        }
+        if (reverse_proxy and public_listener)
+            try listAdd(
+                gpa,
+                &out,
+                "oauth2-proxy.cfg trusts X-Forwarded-* on a non-loopback listener",
+                .{},
+            );
+    }
+    return out.items;
+}
+
+fn web(p: *Posture) !void {
+    const has_nginx = exists(p.io, "/etc/nginx/nginx.conf");
+    const has_caddy = exists(p.io, "/etc/caddy/Caddyfile");
+    const has_oauth2 = exists(p.io, "/etc/oauth2-proxy/oauth2-proxy.cfg");
+    if (!has_nginx and !has_caddy and !has_oauth2) return;
+
+    const nginx_raw = if (has_nginx) p.read("/etc/nginx/nginx.conf") else "";
+    const caddy_raw = if (has_caddy) p.read("/etc/caddy/Caddyfile") else "";
+    const oauth2_raw = if (has_oauth2) p.read("/etc/oauth2-proxy/oauth2-proxy.cfg") else "";
+    const unread = (has_nginx and nginx_raw.len == 0) or
+        (has_caddy and caddy_raw.len == 0) or
+        (has_oauth2 and oauth2_raw.len == 0);
+
+    var bad: std.ArrayList(u8) = .empty;
+    const problems = try webConfigProblems(p.gpa, nginx_raw, caddy_raw, oauth2_raw);
+    if (problems.len > 0) try bad.appendSlice(p.gpa, problems);
+
+    if (nginx_raw.len > 0) {
+        const clean = try stripHashComments(p.gpa, nginx_raw);
+        var stmts = std.mem.tokenizeAny(u8, clean, ";{}\r\n");
+        while (stmts.next()) |stmt| {
+            var words = std.mem.tokenizeAny(u8, stmt, " \t");
+            if (!std.mem.eql(u8, words.next() orelse "", "include")) continue;
+            const target = std.mem.trim(u8, words.next() orelse continue, "\"'");
+            if (!std.mem.startsWith(u8, target, "/run/") and
+                !std.mem.startsWith(u8, target, "/var/")) continue;
+            const dir = std.fs.path.dirname(target) orelse continue;
+            if (statx(p.gpa, dir)) |st| if (st.mode & 0o022 != 0)
+                try listAdd(
+                    p.gpa,
+                    &bad,
+                    "nginx include directory {s} is writable by others",
+                    .{dir},
+                );
+        }
+    }
+
+    try p.add(.{
+        .id = "network-web-config",
+        .area = "network",
+        .name = "Web servers isolate symlinks, includes and client IP headers",
+        .why = "A web server that follows symlinks in writable storage, includes configuration " ++
+            "from writable paths, or trusts X-Forwarded-* from any client exposes TLS keys, " ++
+            "code execution or IP spoofing.",
+        .how = "nginx.conf disables symlinks when serving /data or /var, includes no writable " ++
+            "tree, and never trusts real_ip from 0.0.0.0/0 or ::/0; Caddyfile never serves " ++
+            "/data or /var with file_server while managing TLS; oauth2-proxy disables " ++
+            "reverse_proxy on non-loopback listeners",
+        .result = if (bad.items.len > 0) .fail else if (unread) .skip else .pass,
+        .detail = if (bad.items.len > 0)
+            bad.items
+        else if (unread)
+            "cannot read web server configuration"
+        else
+            "",
+    });
+}
+
 const RuleSummary = struct {
     /// outbound_refused is set if a rule with no selector but iif lo
     /// prohibits whatever locally sent traffic no earlier rule allowed.
@@ -1107,7 +1384,30 @@ const RuleSummary = struct {
     /// inbound_dropped is set if arriving traffic is dropped before any
     /// rule without selectors delivers it to the local table.
     inbound_dropped: bool = false,
+    /// local_pinned is set if non-root local-table delivery on lo is pinned to
+    /// 127.0.0.0/8 (IPv4) or ::1/128 (IPv6), never assigned NIC addresses.
+    local_pinned: bool = false,
+    /// people_isolated is set if people's uid ranges are prohibited from
+    /// undeclared loopback destinations before non-root local delivery.
+    people_isolated: bool = false,
+
+    fn complete(r: RuleSummary) bool {
+        return r.inbound_dropped and r.outbound_refused and
+            r.local_pinned and r.people_isolated;
+    }
 };
+
+fn isLoopbackDst(family: u8, dst_len: u8, dst: []const u8, full_net_only: bool) bool {
+    if (family == linux.AF.INET) {
+        if (dst.len != 4 or dst[0] != 127) return false;
+        return dst_len == 8 or (!full_net_only and dst_len == 32);
+    }
+    if (family == linux.AF.INET6) {
+        return dst_len == 128 and dst.len == 16 and
+            std.mem.allEqual(u8, dst[0..15], 0) and dst[15] == 1;
+    }
+    return false;
+}
 
 /// summarizeRules reads a policy-routing rule dump for traffic in and out.
 fn summarizeRules(dump: []const u8) RuleSummary {
@@ -1118,6 +1418,9 @@ fn summarizeRules(dump: []const u8) RuleSummary {
     var tcp_drop_at: ?u32 = null;
     var udp_drop_at: ?u32 = null;
     var local_at: ?u32 = null;
+    var local_out_at: ?u32 = null;
+    var unpinned_local_out = false;
+    var people_refused_at: [people.ids.len]?u32 = @splat(null);
     var out_refused = false;
     var off: usize = 0;
     while (off + 28 <= dump.len) {
@@ -1126,12 +1429,17 @@ fn summarizeRules(dump: []const u8) RuleSummary {
         const msg = dump[off .. off + len];
         off += std.mem.alignForward(usize, len, 4);
         if (std.mem.readInt(u16, msg[4..6], .little) != 32 or msg.len < 28) continue; // RTM_NEWRULE
+        const family = msg[16];
+        const dst_len = msg[17];
         var table: u32 = msg[16 + 4];
         const action = msg[16 + 7];
         var priority: u32 = 0;
         var from_lo = false;
         var iif = false;
-        var selective = false;
+        var other_sel = false;
+        var dst: []const u8 = "";
+        var uid_range: ?[2]u32 = null;
+        var has_dport = false;
         var proto: ?u8 = null;
         var a: usize = 28;
         while (a + 4 <= msg.len) {
@@ -1140,6 +1448,7 @@ fn summarizeRules(dump: []const u8) RuleSummary {
             const kind = std.mem.readInt(u16, msg[a + 2 ..][0..2], .little) & 0x3fff;
             const v = msg[a + 4 .. a + alen];
             switch (kind) {
+                1 => dst = v,
                 6 => if (v.len == 4) {
                     priority = std.mem.readInt(u32, v[0..4], .little);
                 },
@@ -1150,13 +1459,48 @@ fn summarizeRules(dump: []const u8) RuleSummary {
                     iif = true;
                     from_lo = std.mem.eql(u8, std.mem.sliceTo(v, 0), "lo");
                 },
+                20 => if (v.len == 8) {
+                    uid_range = .{
+                        std.mem.readInt(u32, v[0..4], .little),
+                        std.mem.readInt(u32, v[4..8], .little),
+                    };
+                } else {
+                    other_sel = true;
+                },
                 22 => if (v.len == 1) {
                     proto = v[0];
                 },
-                1, 2, 10, 17, 20, 23, 24 => selective = true, // dst, src, fwmark, oif, uid, ports
+                24 => has_dport = true,
+                2, 10, 17, 23 => other_sel = true, // src, fwmark, oif, sport
                 else => {},
             }
             a += std.mem.alignForward(usize, alen, 4);
+        }
+        const selective = dst_len != 0 or dst.len != 0 or uid_range != null or
+            has_dport or other_sel;
+        if (from_lo and !other_sel) {
+            if (action == 1 and table == 255) {
+                const root_only = uid_range != null and uid_range.?[0] == 0 and uid_range.?[1] == 0;
+                if (isLoopbackDst(family, dst_len, dst, true) and
+                    uid_range == null and proto == null and !has_dport)
+                {
+                    local_out_at = @min(local_out_at orelse priority, priority);
+                } else if (!root_only and !isLoopbackDst(family, dst_len, dst, false)) {
+                    unpinned_local_out = true;
+                }
+            } else if (action == 8 and proto == null and !has_dport and
+                isLoopbackDst(family, dst_len, dst, true))
+            {
+                if (uid_range) |ur| {
+                    for (people.ids, 0..) |want, idx| {
+                        if (ur[0] == want[0] and ur[1] == want[1])
+                            people_refused_at[idx] = @min(
+                                people_refused_at[idx] orelse priority,
+                                priority,
+                            );
+                    }
+                }
+            }
         }
         if (selective or (iif and proto != null)) continue;
         if (action == 8 and from_lo) out_refused = true; // FR_ACT_PROHIBIT
@@ -1184,7 +1528,19 @@ fn summarizeRules(dump: []const u8) RuleSummary {
     }.f;
     const dropped = before(drop_at, local_at) or
         (before(tcp_drop_at, local_at) and before(udp_drop_at, local_at));
-    return .{ .outbound_refused = out_refused, .inbound_dropped = dropped };
+    const local_pinned = local_out_at != null and !unpinned_local_out;
+    const people_isolated = if (local_out_at) |lo_at| blk: {
+        for (people_refused_at) |ref_at| {
+            if (ref_at == null or ref_at.? >= lo_at) break :blk false;
+        }
+        break :blk true;
+    } else false;
+    return .{
+        .outbound_refused = out_refused,
+        .inbound_dropped = dropped,
+        .local_pinned = local_pinned,
+        .people_isolated = people_isolated,
+    };
 }
 
 test listenPorts {
@@ -1271,8 +1627,14 @@ test sshMismatches {
     );
 }
 
+const TestRuleOptions = struct {
+    dst_len: u8 = 0,
+    dst: ?[]const u8 = null,
+    uid_range: ?[2]u32 = null,
+};
+
 /// testRule builds a netlink rule message with priority, action, table, and
-/// the given iif name and protocol.
+/// the given iif name, protocol and optional selectors.
 fn testRule(
     buf: []u8,
     priority: u32,
@@ -1280,10 +1642,12 @@ fn testRule(
     table: u8,
     iif: ?[]const u8,
     proto: ?u8,
+    opts: TestRuleOptions,
 ) []const u8 {
     @memset(buf, 0);
     var n: usize = 28;
     buf[16] = linux.AF.INET;
+    buf[17] = opts.dst_len;
     buf[16 + 4] = table;
     buf[16 + 7] = action;
     const put = struct {
@@ -1297,6 +1661,13 @@ fn testRule(
     put(buf, &n, 6, std.mem.asBytes(&priority));
     if (iif) |name| put(buf, &n, 3, name);
     if (proto) |pr| put(buf, &n, 22, &.{pr});
+    if (opts.dst) |d| put(buf, &n, 1, d);
+    if (opts.uid_range) |ur| {
+        var raw: [8]u8 = undefined;
+        std.mem.writeInt(u32, raw[0..4], ur[0], .little);
+        std.mem.writeInt(u32, raw[4..8], ur[1], .little);
+        put(buf, &n, 20, &raw);
+    }
     std.mem.writeInt(u32, buf[0..4], @intCast(n), .little);
     std.mem.writeInt(u16, buf[4..6], 32, .little);
     return buf[0..n];
@@ -1305,52 +1676,126 @@ fn testRule(
 test summarizeRules {
     var dump: std.ArrayList(u8) = .empty;
     defer dump.deinit(std.testing.allocator);
-    var b: [64]u8 = undefined;
+    var b: [96]u8 = undefined;
     // The kernel's own rules (local at 0, main) drop nothing.
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 32766, 1, 254, null, null));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null, .{}));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 32766, 1, 254, null, null, .{}));
     try std.testing.expectEqual(RuleSummary{}, summarizeRules(dump.items));
 
-    // fence's rules: local first only for lo, allowances with selectors, the
-    // refusal from lo, ICMP in, the TCP and UDP drops, then the moved local
-    // rule.
+    // fence's rules: people's loopback refusal before loopback-pinned local_out
+    // (plus root's local_out), allowances, refusal from lo, ICMP in, TCP/UDP
+    // drops, then the moved local rule.
     dump.clearRetainingCapacity();
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 10, 1, 255, "lo\x00", null));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 200, 1, 254, "lo\x00", 6));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 299, 8, 0, "lo\x00", null));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 300, 1, 255, null, 1));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, 6));
-    const tcp_only = dump.items.len;
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, 17));
-    try dump.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
-    try std.testing.expectEqual(
-        RuleSummary{ .outbound_refused = true, .inbound_dropped = true },
-        summarizeRules(dump.items),
+    for (people.ids) |range| try dump.appendSlice(
+        std.testing.allocator,
+        testRule(&b, 9, 8, 0, "lo\x00", null, .{
+            .dst_len = 8,
+            .dst = &.{ 127, 0, 0, 0 },
+            .uid_range = range,
+        }),
     );
+    try dump.appendSlice(
+        std.testing.allocator,
+        testRule(&b, 10, 1, 255, "lo\x00", null, .{ .dst_len = 8, .dst = &.{ 127, 0, 0, 0 } }),
+    );
+    try dump.appendSlice(
+        std.testing.allocator,
+        testRule(&b, 10, 1, 255, "lo\x00", null, .{ .uid_range = .{ 0, 0 } }),
+    );
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 200, 1, 254, "lo\x00", 6, .{}));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 299, 8, 0, "lo\x00", null, .{}));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 300, 1, 255, null, 1, .{}));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, 6, .{}));
+    const tcp_only = dump.items.len;
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, 17, .{}));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null, .{}));
+    const full = summarizeRules(dump.items);
+    try std.testing.expectEqual(RuleSummary{
+        .outbound_refused = true,
+        .inbound_dropped = true,
+        .local_pinned = true,
+        .people_isolated = true,
+    }, full);
+    try std.testing.expect(full.complete());
+
+    // Unpinned local_out on lo (without dst 127.0.0.0/8 or root uid 0..0) fails local_pinned.
+    var unpinned: std.ArrayList(u8) = .empty;
+    defer unpinned.deinit(std.testing.allocator);
+    try unpinned.appendSlice(std.testing.allocator, dump.items);
+    try unpinned.appendSlice(std.testing.allocator, testRule(&b, 11, 1, 255, "lo\x00", null, .{}));
+    try std.testing.expect(!summarizeRules(unpinned.items).local_pinned);
+    try std.testing.expect(!summarizeRules(unpinned.items).complete());
 
     // Dropping TCP but not UDP does not count as dropped.
     var half: std.ArrayList(u8) = .empty;
     defer half.deinit(std.testing.allocator);
     try half.appendSlice(std.testing.allocator, dump.items[0..tcp_only]);
-    try half.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
+    try half.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null, .{}));
     try std.testing.expect(!summarizeRules(half.items).inbound_dropped);
 
     // Dropping everything counts too.
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(std.testing.allocator);
-    try all.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null));
-    try all.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
+    try all.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null, .{}));
+    try all.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null, .{}));
     try std.testing.expect(summarizeRules(all.items).inbound_dropped);
 
     // A drop that comes after delivery to the local table drops nothing.
     var late: std.ArrayList(u8) = .empty;
     defer late.deinit(std.testing.allocator);
-    try late.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null));
-    try late.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null));
+    try late.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null, .{}));
+    try late.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null, .{}));
     try std.testing.expect(!summarizeRules(late.items).inbound_dropped);
 
     // Truncated input is not trusted past its end.
     try std.testing.expectEqual(RuleSummary{}, summarizeRules(dump.items[0..20]));
+}
+
+test broadIpv6Prefixes {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const ok =
+        "00000000000000000000000000000001 01 80 10 80 lo\n" ++
+        "fe8000000000000002163efffe123456 02 40 20 80 eth0\n" ++
+        "20010db8000000010000000000000001 02 40 00 80 eth0\n";
+    try testing.expectEqualStrings("", try broadIpv6Prefixes(gpa, ok));
+
+    const poisoned = ok ++
+        "80000000000000000000000000000001 02 01 00 80 eth0\n" ++
+        "fe8000000000000002163efffe123456 03 20 20 80 eth1\n";
+    try testing.expectEqualStrings("eth0 /1, eth1 /32", try broadIpv6Prefixes(gpa, poisoned));
+}
+
+test webConfigProblems {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    // Clean nginx + Caddy + oauth2-proxy configurations pass.
+    try testing.expectEqualStrings(
+        "",
+        try webConfigProblems(
+            gpa,
+            "http { disable_symlinks on from=$document_root; server { root /data/www; } }\n",
+            "example.com {\n  root * /usr/share/www\n  file_server\n}\n",
+            "http_address = \"0.0.0.0:4180\"\nreverse_proxy = false\n",
+        ),
+    );
+
+    // Unsafe symlink, writable include, and spoofed X-Forwarded-* configurations fail.
+    const bad = try webConfigProblems(
+        gpa,
+        "http { include /werewolf/config/http/*.conf; set_real_ip_from 0.0.0.0/0; server { root " ++
+            "/data/www; } }\n",
+        "example.com {\n  root * /data/svc/app\n  file_server\n}\n",
+        "http_address = \"0.0.0.0:4180\"\nreverse_proxy = true\n",
+    );
+    try testing.expect(std.mem.find(u8, bad, "includes writable path") != null);
+    try testing.expect(std.mem.find(u8, bad, "trusts forwarded IP") != null);
+    try testing.expect(std.mem.find(u8, bad, "without disable_symlinks on") != null);
+    try testing.expect(std.mem.find(u8, bad, "Caddyfile serves /data or /var") != null);
+    try testing.expect(std.mem.find(u8, bad, "oauth2-proxy.cfg trusts X-Forwarded-*") != null);
 }
 
 test unusedPort {

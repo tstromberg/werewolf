@@ -56,7 +56,6 @@ services:
       - SHOW_PASSWORD_HINT=false
       - DISABLE_ICON_DOWNLOAD=true
       - ICON_SERVICE=internal
-      - IP_HEADER=X-Forwarded-For
       - LOG_LEVEL=info
       - EXTENDED_LOGGING=true
       - USE_SYSLOG=false
@@ -66,4 +65,4 @@ services:
     # No one signs up; the admin invites. No hint is kept or shown.
     # Nothing fetched: an icon download is a request to every site a user
     # saves, from the machine, on their behalf.
-    # Behind caddy, which says who the client is.
+    # Listens on :8080 directly; client IP is the socket peer address.

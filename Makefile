@@ -909,7 +909,7 @@ $(BUILD)/dns-policy: test/dns-policy.zig $(wildcard lib/*.zig)
 $(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $(wildcard lib/*.zig)
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -fPIE -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
-		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm --dep uefi-sig --dep sandbox -Mposture=cmd/posture/posture.zig -femit-bin=$@
+		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm --dep uefi-sig --dep people --dep sandbox -Mposture=cmd/posture/posture.zig -femit-bin=$@
 check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress \
 	$(BUILD)/check-dns $(BUILD)/check-lan
 	$(DNS_TEST_RUNNER) $(BUILD)/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress

@@ -229,6 +229,37 @@ pub fn check(p: *Posture) !void {
         .result = if (open.found.len == 0) .pass else .fail,
         .detail = open.found,
     });
+    const bad_roots = try sharedRoots(p);
+    try p.add(.{
+        .id = "files-shared-roots",
+        .area = "files",
+        .name = "Shared service roots owned by root",
+        .why = "If an unprivileged service owns or can write a parent directory such as " ++
+            "/run/svc or /data/share, it can plant symlinks where privileged setup creates " ++
+            "another service's state.",
+        .how = "existing /run, /run/svc, /var/lib, /data, /data/svc and /data/share are real " ++
+            "directories owned by 0:0 and writable by no one else",
+        .result = if (bad_roots.len == 0) .pass else .fail,
+        .detail = bad_roots,
+    });
+    const secrets = try runtimeSecrets(p);
+    try p.add(.{
+        .id = "files-runtime-secrets",
+        .area = "files",
+        .name = "Runtime secrets private and scrubbed",
+        .why = "Credentials or private keys left in /tmp, readable by other users in /run or " ++
+            "/var/lib, or left in /run/svc after one-shot setup expose secrets after compromise.",
+        .how = "no credential or private-key file in /tmp, /var/tmp or /dev/shm; none in /run " ++
+            "or /var/lib with group or world mode bits; and on werewolf no consumed bootstrap " ++
+            "secret remains in /run/svc once its service runs",
+        .result = if (secrets.len > 0) .fail else if (!p.root) .skip else .pass,
+        .detail = if (secrets.len > 0)
+            secrets
+        else if (!p.root)
+            "requires root to inspect private runtime directories"
+        else
+            "",
+    });
     const loose = try accountFiles(p);
     try p.add(.{
         .id = "files-account-db",
@@ -770,6 +801,179 @@ fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
     return .{ .found = found.items, .tried = tried.items };
 }
 
+fn sharedRootProblem(st: linux.Statx) ?[]const u8 {
+    if (st.mode & linux.S.IFMT == linux.S.IFLNK) return "is a symlink";
+    if (st.mode & linux.S.IFMT != linux.S.IFDIR) return "is not a directory";
+    if (st.uid != 0 or st.gid != 0) return "is not owned by 0:0";
+    if (st.mode & 0o022 != 0) return "is writable by others";
+    return null;
+}
+
+fn sharedRoots(p: *Posture) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{
+        "/run",
+        "/run/svc",
+        "/var/lib",
+        "/data",
+        "/data/svc",
+        "/data/share",
+    }) |dir| {
+        const st = statx(p.gpa, dir) orelse continue;
+        if (sharedRootProblem(st)) |why| try listAdd(p.gpa, &out, "{s} {s}", .{ dir, why });
+    }
+    return out.items;
+}
+
+fn isSecretName(name: []const u8) bool {
+    for ([_][]const u8{
+        ".pub", ".crt", ".cer", ".der", ".csr", ".srl", ".sock", ".pid", ".lock", ".log",
+    }) |ext| if (std.ascii.endsWithIgnoreCase(name, ext)) return false;
+    for ([_][]const u8{
+        "password",
+        "passwords",
+        "tls-key",
+        "intermediate-key",
+        "unseal-key",
+        "api-token",
+        "secrets.json",
+        "secrets.php",
+        ".opencanary.conf",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+    }) |exact| if (std.ascii.eqlIgnoreCase(name, exact)) return true;
+    return std.ascii.findIgnoreCase(name, "password") != null or
+        std.ascii.findIgnoreCase(name, "private-key") != null or
+        std.ascii.findIgnoreCase(name, "secret-key") != null;
+}
+
+fn hasPrivateKeyHeader(head: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, head, " \t\r\n");
+    if (std.mem.startsWith(u8, trimmed, "AGE-SECRET-KEY-1")) return true;
+    if (!std.mem.startsWith(u8, trimmed, "-----BEGIN ")) return false;
+    const end = std.mem.findAny(u8, trimmed, "\r\n") orelse trimmed.len;
+    return std.mem.endsWith(u8, trimmed[0..end], "PRIVATE KEY-----");
+}
+
+fn fileHasPrivateKey(dir: Dir, name: [:0]const u8) bool {
+    const rc = linux.openat(
+        dir.handle,
+        name,
+        .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var head: [128]u8 = undefined;
+    const n = linux.read(fd, &head, head.len);
+    if (linux.errno(n) != .SUCCESS or n == 0) return false;
+    return hasPrivateKeyHeader(head[0..n]);
+}
+
+fn bootstrapLeftovers(service_text: []const u8) []const []const u8 {
+    if (std.mem.find(u8, service_text, "werewolf-mediawiki/setup.php") != null or
+        std.mem.find(u8, service_text, "werewolf-moodle/setup.php") != null or
+        std.mem.find(u8, service_text, "werewolf-nextcloud/setup.php") != null)
+        return &.{ "admin-password", "smtp-password" };
+    if (std.mem.find(u8, service_text, "continuwuity-init") != null)
+        return &.{"admin-password"};
+    if (std.mem.find(u8, service_text, "kafka-setup") != null)
+        return &.{ "admin-password", "users", "tls-key" };
+    if (std.mem.find(u8, service_text, "velociraptor-setup") != null)
+        return &.{ "admin-password", "merge.json" };
+    return &.{};
+}
+
+fn walkSecrets(
+    p: *Posture,
+    dir: Dir,
+    path: []const u8,
+    top: linux.Statx,
+    temporary: bool,
+    found: *std.ArrayList(u8),
+    depth: usize,
+) !void {
+    if (depth > 16) return;
+    const sep = if (std.mem.endsWith(u8, path, "/")) "" else "/";
+    var it = dir.iterate();
+    while (it.next(p.io) catch null) |e| {
+        var name_buf: [256]u8 = undefined;
+        const name = std.mem.printSentinel(&name_buf, "{s}", .{e.name}, 0) catch continue;
+        var st: linux.Statx = undefined;
+        if (linux.errno(linux.statx(
+            dir.handle,
+            name,
+            linux.AT.SYMLINK_NOFOLLOW,
+            .{ .TYPE = true, .MODE = true },
+            &st,
+        )) != .SUCCESS) continue;
+        if (st.dev_major != top.dev_major or st.dev_minor != top.dev_minor) continue;
+        p.walkProgress(path);
+        const kind = st.mode & linux.S.IFMT;
+        if (kind == linux.S.IFREG and (temporary or st.mode & 0o077 != 0)) {
+            if (isSecretName(e.name) or fileHasPrivateKey(dir, name))
+                try listAdd(p.gpa, found, "{s}{s}{s}", .{ path, sep, e.name });
+        }
+        if (kind != linux.S.IFDIR) continue;
+        var sub = dir.openDir(
+            p.io,
+            e.name,
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch continue;
+        defer sub.close(p.io);
+        try walkSecrets(
+            p,
+            sub,
+            try p.gpa.print("{s}{s}{s}", .{ path, sep, e.name }),
+            top,
+            temporary,
+            found,
+            depth + 1,
+        );
+    }
+}
+
+fn runtimeSecrets(p: *Posture) ![]const u8 {
+    var found: std.ArrayList(u8) = .empty;
+    for ([_]struct { path: []const u8, temporary: bool }{
+        .{ .path = "/tmp", .temporary = true },
+        .{ .path = "/var/tmp", .temporary = true },
+        .{ .path = "/dev/shm", .temporary = true },
+        .{ .path = "/run", .temporary = false },
+        .{ .path = "/var/lib", .temporary = false },
+    }) |place| {
+        const top = statx(p.gpa, place.path) orelse continue;
+        if (top.mode & linux.S.IFMT != linux.S.IFDIR) continue;
+        var d = Dir.cwd().openDir(
+            p.io,
+            place.path,
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch continue;
+        defer d.close(p.io);
+        p.work("files-runtime-secrets: walking", place.path);
+        p.startWalk();
+        try walkSecrets(p, d, place.path, top, place.temporary, &found, 0);
+    }
+    if (p.werewolf) if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |sv_root| {
+        var sv = sv_root;
+        defer sv.close(p.io);
+        var it = sv.iterate();
+        while (it.next(p.io) catch null) |e| {
+            const stat_path = try p.gpa.print("/etc/sv/{s}/supervise/stat", .{e.name});
+            if (!std.mem.eql(u8, trim(p.read(stat_path)), "run")) continue;
+            const svc_path = try p.gpa.print("/etc/sv/{s}/service", .{e.name});
+            for (bootstrapLeftovers(p.read(svc_path))) |secret| {
+                const leftover = try p.gpa.print("/run/svc/{s}/{s}", .{ e.name, secret });
+                if (statx(p.gpa, leftover) != null)
+                    try listAdd(p.gpa, &found, "{s} (unscrubbed)", .{leftover});
+            }
+        }
+    } else |_| {};
+    return found.items;
+}
+
 /// accountFiles lists problems with the account files, after following
 /// links: each and its directory must be root's and writable by no one
 /// else, and the shadow files must not be readable by everyone.
@@ -986,4 +1190,111 @@ test "walk: from descriptors, links not followed" {
     try testing.expect(std.mem.find(u8, found.items, "T/open") != null);
     try testing.expect(std.mem.find(u8, found.items, "T/closed/anyones") != null);
     try testing.expectEqual(1, std.mem.count(u8, found.items, ", "));
+}
+
+test "shared roots require real 0:0 directories without group or world write" {
+    var ok: linux.Statx = std.mem.zeroes(linux.Statx);
+    ok.mode = linux.S.IFDIR | 0o755;
+    try testing.expectEqual(@as(?[]const u8, null), sharedRootProblem(ok));
+
+    var sym = ok;
+    sym.mode = linux.S.IFLNK | 0o777;
+    try testing.expectEqualStrings("is a symlink", sharedRootProblem(sym).?);
+
+    var foreign = ok;
+    foreign.uid = 1000;
+    try testing.expectEqualStrings("is not owned by 0:0", sharedRootProblem(foreign).?);
+
+    var foreign_group = ok;
+    foreign_group.gid = 1000;
+    try testing.expectEqualStrings("is not owned by 0:0", sharedRootProblem(foreign_group).?);
+
+    var writable = ok;
+    writable.mode = linux.S.IFDIR | 0o775;
+    try testing.expectEqualStrings("is writable by others", sharedRootProblem(writable).?);
+}
+
+test "runtime secret classifiers distinguish private keys and bootstrap inputs from public keys" {
+    try testing.expect(isSecretName("admin-password"));
+    try testing.expect(isSecretName("smtp-password"));
+    try testing.expect(isSecretName("tls-key"));
+    try testing.expect(isSecretName("id_ed25519"));
+    try testing.expect(!isSecretName("host-key.pub"));
+    try testing.expect(!isSecretName("tls.crt"));
+    try testing.expect(!isSecretName("root.key"));
+    try testing.expect(!isSecretName("site.json"));
+
+    try testing.expect(hasPrivateKeyHeader("-----BEGIN PRIVATE KEY-----\nMIIB..."));
+    try testing.expect(hasPrivateKeyHeader("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl..."));
+    try testing.expect(hasPrivateKeyHeader("AGE-SECRET-KEY-1QQQQQQQQ"));
+    try testing.expect(!hasPrivateKeyHeader("-----BEGIN CERTIFICATE-----\nMIIB..."));
+    try testing.expect(!hasPrivateKeyHeader("-----BEGIN PGP PUBLIC KEY BLOCK-----\n"));
+    try testing.expect(
+        !hasPrivateKeyHeader(
+            ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n",
+        ),
+    );
+
+    try testing.expectEqual(
+        @as(usize, 2),
+        bootstrapLeftovers("before /usr/bin/php /usr/share/werewolf-nextcloud/setup.php\n").len,
+    );
+    try testing.expectEqual(
+        @as(usize, 3),
+        bootstrapLeftovers("before /usr/lib/werewolf/kafka-setup\n").len,
+    );
+    try testing.expectEqual(
+        @as(usize, 2),
+        bootstrapLeftovers("before /usr/lib/werewolf/velociraptor-setup\n").len,
+    );
+    try testing.expectEqual(@as(usize, 0), bootstrapLeftovers("exec /usr/bin/nginx\n").len);
+}
+
+test "walkSecrets flags temporary secrets and world-readable runtime keys" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "temp", .fromMode(0o755));
+    try tmp.dir.createDir(io, "run", .fromMode(0o755));
+    try tmp.dir.writeFile(io, .{ .sub_path = "temp/admin-password", .data = "s3cr3t\n" });
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "run/private-ok", .data = "-----BEGIN PRIVATE KEY-----\n" },
+    );
+    try tmp.dir.writeFile(
+        io,
+        .{ .sub_path = "run/leaked.key", .data = "-----BEGIN PRIVATE KEY-----\n" },
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "run/host-key.pub", .data = "ssh-ed25519 AAAA\n" });
+
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
+    for ([_][]const u8{
+        "temp/admin-password",
+        "run/private-ok",
+        "run/leaked.key",
+        "run/host-key.pub",
+    }, [_]linux.mode_t{ 0o600, 0o600, 0o644, 0o644 }) |rel, mode| {
+        const z = try testing.allocator.printSentinel("{s}/{s}", .{ base, rel }, 0);
+        defer testing.allocator.free(z);
+        try testing.expectEqual(.SUCCESS, linux.errno(linux.chmod(z, mode)));
+    }
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var p: Posture = .{ .io = io, .gpa = arena.allocator(), .root = true };
+    const top = statx(p.gpa, base) orelse return error.NoStat;
+
+    var temp_dir = try tmp.dir.openDir(io, "temp", .{ .iterate = true });
+    defer temp_dir.close(io);
+    var temp_found: std.ArrayList(u8) = .empty;
+    try walkSecrets(&p, temp_dir, "/tmp", top, true, &temp_found, 0);
+    try testing.expectEqualStrings("/tmp/admin-password", temp_found.items);
+
+    var run_dir = try tmp.dir.openDir(io, "run", .{ .iterate = true });
+    defer run_dir.close(io);
+    var run_found: std.ArrayList(u8) = .empty;
+    try walkSecrets(&p, run_dir, "/run", top, false, &run_found, 0);
+    try testing.expectEqualStrings("/run/leaked.key", run_found.items);
 }

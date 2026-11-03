@@ -40,22 +40,46 @@ fn rateLimit(a: Allocator) !void {
 }
 
 fn uploads(io: Io, a: Allocator) !void {
-    const paths = [_][]const u8{
-        "/data/svc/php-fpm/uploads/x.php", "/data/svc/php-fpm/uploads/x.svg",
+    const blocked = [_][]const u8{
+        "/data/svc/php-fpm/uploads/x.php",
+        "/data/svc/php-fpm/uploads/x.phtml",
+        "/data/svc/php-fpm/uploads/x.phar",
+        "/data/svc/php-fpm/uploads/x.xhtml",
+        "/data/svc/php-fpm/uploads/x.shtml",
+        "/data/svc/php-fpm/uploads/x.xml",
     };
-    defer for (paths) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
+    const svg_path = "/data/svc/php-fpm/uploads/x.svg";
+    const link_path = "/data/svc/php-fpm/uploads/leak.json";
+    defer {
+        for (blocked) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
+        Io.Dir.cwd().deleteFile(io, svg_path) catch {};
+        Io.Dir.cwd().deleteFile(io, link_path) catch {};
+    }
+    for (blocked) |path| {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "<script>alert(1)</script>" });
+    }
     try Io.Dir.cwd().writeFile(io, .{
-        .sub_path = paths[0],
-        .data = "<?php echo \"ran\"; ?>",
-    });
-    try Io.Dir.cwd().writeFile(io, .{
-        .sub_path = paths[1],
+        .sub_path = svg_path,
         .data = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
     });
+    Io.Dir.cwd().deleteFile(io, link_path) catch {};
+    try Io.Dir.cwd().symLink(io, "/data/svc/php-fpm/salts.json", link_path, .{});
     var client = try driver.fetch.Client.init(a);
     defer client.deinit();
-    const php = try request(a, &client, "/wp-content/uploads/x.php");
-    if (php.object.get("status").?.integer != 404) return error.UploadedCodeServed;
+    for ([_][]const u8{
+        "/wp-content/uploads/x.php",
+        "/wp-content/uploads/x.phtml",
+        "/wp-content/uploads/x.phar",
+        "/wp-content/uploads/x.xhtml",
+        "/wp-content/uploads/x.shtml",
+        "/wp-content/uploads/x.xml",
+    }) |uri| {
+        const res = try request(a, &client, uri);
+        if (res.object.get("status").?.integer != 404) return error.UploadedCodeServed;
+    }
+    const leak = try request(a, &client, "/wp-content/uploads/leak.json");
+    const leak_status = leak.object.get("status").?.integer;
+    if (leak_status != 403 and leak_status != 404) return error.UploadSymlinkFollowed;
     const svg = try request(a, &client, "/wp-content/uploads/x.svg");
     if (svg.object.get("status").?.integer != 200) return error.UploadedDataMissing;
     const csp = svg.object.get("headers").?.object.get("content-security-policy") orelse

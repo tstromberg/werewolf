@@ -58,17 +58,29 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         return error.BadClusterId;
     };
 
+    var rdir = try Dir.cwd().openDir(io, run_dir, .{ .follow_symlinks = false });
+    defer rdir.close(io);
+    defer for ([_][]const u8{ "admin-password", "users", "tls-key", "tls-cert" }) |f| {
+        scrubFile(io, rdir, f);
+    };
+
     const cert = try read(io, gpa, run_dir ++ "/tls-cert");
-    const key = try read(io, gpa, run_dir ++ "/tls-key");
+    const key = try readMut(io, gpa, run_dir ++ "/tls-key");
+    defer std.crypto.secureZero(u8, key);
     try pem(io, cert, key);
     var secret: [16]u8 = undefined;
     io.random(&secret);
+    defer std.crypto.secureZero(u8, &secret);
     const image = try read(io, gpa, image_properties);
-    try replace(io, keystore, try std.mem.concat(gpa, u8, &.{ key, "\n", cert }), 0o600);
+    const pem_bundle = try std.mem.concat(gpa, u8, &.{ key, "\n", cert });
+    defer std.crypto.secureZero(u8, pem_bundle);
+    try replace(io, keystore, pem_bundle, 0o600);
+    var hex_secret = std.fmt.bytesToHex(secret, .lower);
+    defer std.crypto.secureZero(u8, &hex_secret);
     try replace(
         io,
         properties,
-        try server(gpa, image, domain, admin, &std.fmt.bytesToHex(secret, .lower)),
+        try server(gpa, image, domain, admin, &hex_secret),
         0o600,
     );
 
@@ -327,10 +339,33 @@ fn setting(gpa: Allocator, environ: std.process.Environ, key: []const u8) ?[]con
 }
 
 fn read(io: Io, gpa: Allocator, p: []const u8) ![]const u8 {
+    return readMut(io, gpa, p);
+}
+
+fn readMut(io: Io, gpa: Allocator, p: []const u8) ![]u8 {
     return Dir.cwd().readFileAlloc(io, p, gpa, .limited(64 << 10)) catch |err| {
         say(io, "{s}: {s}", .{ p, @errorName(err) });
         return err;
     };
+}
+
+fn scrubFile(io: Io, dir: Dir, sub_path: []const u8) void {
+    if (dir.openFile(io, sub_path, .{ .mode = .read_write, .follow_symlinks = false })) |file| {
+        defer file.close(io);
+        if (file.stat(io)) |st| {
+            if (st.kind == .file and st.size > 0) {
+                var zeros: [4096]u8 = @splat(0);
+                var left: u64 = @min(st.size, 1 << 20);
+                while (left > 0) {
+                    const chunk: usize = @intCast(@min(left, zeros.len));
+                    file.writeStreamingAll(io, zeros[0..chunk]) catch break;
+                    left -= chunk;
+                }
+                file.sync(io) catch {};
+            }
+        } else |_| {}
+    } else |_| {}
+    dir.deleteFile(io, sub_path) catch {};
 }
 
 /// replace writes p whole or not at all: a temporary file, synced, then
@@ -451,4 +486,23 @@ test "name and hostname" {
     }) |bad| try testing.expect(!name(bad));
     try testing.expect(hostname("kafka.corp.example") and hostname("10.0.0.5"));
     for ([_][]const u8{ "", "a b", "a:9093", "a\nb" }) |bad| try testing.expect(!hostname(bad));
+}
+
+test "scrubFile: zeroes and removes staged inputs without following symlinks" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    for ([_][]const u8{ "admin-password", "users", "tls-key", "tls-cert" }) |f| {
+        try tmp.dir.writeFile(io, .{ .sub_path = f, .data = "secret-material\n" });
+        scrubFile(io, tmp.dir, f);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(io, f, .{}));
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside", .data = "preserve" });
+    try tmp.dir.symLink(io, "outside", "tls-key", .{});
+    scrubFile(io, tmp.dir, "tls-key");
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "tls-key", .{}));
+    const kept = try tmp.dir.readFileAlloc(io, "outside", testing.allocator, .limited(64));
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("preserve", kept);
 }

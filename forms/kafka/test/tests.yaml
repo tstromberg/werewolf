@@ -186,6 +186,18 @@ suites:
               type: file
               uid: kafka
               mode: '600'
+          - file: /run/svc/kafka/admin-password
+            expect:
+              exists: false
+          - file: /run/svc/kafka/users
+            expect:
+              exists: false
+          - file: /run/svc/kafka/tls-key
+            expect:
+              exists: false
+          - file: /run/svc/kafka/tls-cert
+            expect:
+              exists: false
           - listeners: tcp
             expect:
               contains:

@@ -13,7 +13,8 @@ const Allocator = std.mem.Allocator;
 const data_dir = "/data/svc/continuwuity";
 const run_dir = "/run/svc/continuwuity";
 const config_name = "continuwuity.toml";
-const password_file = run_dir ++ "/admin-password";
+const password_name = "admin-password";
+const password_file = run_dir ++ "/" ++ password_name;
 const db_mark = "CURRENT";
 
 pub fn main(init: std.process.Init) !void {
@@ -32,7 +33,16 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         say(io, "the server name and the admin are one word, with no quotes", .{});
         return error.BadName;
     }
-    const password = try passwordOf(io, gpa);
+    var dir = try Dir.cwd().openDir(io, run_dir, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    defer scrubFile(io, dir, password_name);
+
+    const pw = try passwordOf(io, gpa);
+    defer {
+        std.crypto.secureZero(u8, pw.raw);
+        gpa.free(pw.raw);
+    }
+    const password = pw.trimmed;
     if (!passwordOk(password)) {
         say(io, "the admin password is 8 to 256 characters, with no space or quote", .{});
         return error.BadPassword;
@@ -43,9 +53,10 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     };
     const create = !dbExists(io);
     const text = try configText(gpa, domain, admin, password, create);
-    defer gpa.free(text);
-    var dir = try Dir.cwd().openDir(io, run_dir, .{});
-    defer dir.close(io);
+    defer {
+        std.crypto.secureZero(u8, text);
+        gpa.free(text);
+    }
     const tmp = ".continuwuity.toml.tmp";
     dir.deleteFile(io, tmp) catch {};
     {
@@ -64,6 +75,25 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         say(io, "keeping the database", .{});
 }
 
+fn scrubFile(io: Io, dir: Dir, sub_path: []const u8) void {
+    if (dir.openFile(io, sub_path, .{ .mode = .read_write, .follow_symlinks = false })) |file| {
+        defer file.close(io);
+        if (file.stat(io)) |st| {
+            if (st.kind == .file and st.size > 0) {
+                var zeros: [4096]u8 = @splat(0);
+                var left: u64 = @min(st.size, 1 << 20);
+                while (left > 0) {
+                    const chunk: usize = @intCast(@min(left, zeros.len));
+                    file.writeStreamingAll(io, zeros[0..chunk]) catch break;
+                    left -= chunk;
+                }
+                file.sync(io) catch {};
+            }
+        } else |_| {}
+    } else |_| {}
+    dir.deleteFile(io, sub_path) catch {};
+}
+
 fn dbExists(io: Io) bool {
     var dir = Dir.cwd().openDir(io, data_dir, .{}) catch return false;
     defer dir.close(io);
@@ -71,13 +101,13 @@ fn dbExists(io: Io) bool {
     return true;
 }
 
-fn passwordOf(io: Io, gpa: Allocator) ![]u8 {
+fn passwordOf(io: Io, gpa: Allocator) !struct { raw: []u8, trimmed: []const u8 } {
     const raw = Dir.cwd().readFileAlloc(io, password_file, gpa, .limited(4096)) catch |err| {
         say(io, "{s}: {s}", .{ password_file, @errorName(err) });
         return err;
     };
     const n = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw.len - 1 else raw.len;
-    return raw[0..n];
+    return .{ .raw = raw, .trimmed = raw[0..n] };
 }
 
 fn setting(gpa: Allocator, environ: std.process.Environ, key: []const u8) ?[]const u8 {
@@ -189,6 +219,24 @@ test "the first start names the admin and a later one does not" {
     try std.testing.expect(passwordOk("werewolf-check-password"));
     try std.testing.expect(!nameOk("bad name"));
     try std.testing.expect(nameOk("matrix.example.com"));
+}
+
+test "scrubFile zeroes and unlinks a secret without following symlinks" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{ .sub_path = password_name, .data = "super-secret-pass\n" });
+    scrubFile(io, tmp.dir, password_name);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, password_name, .{}));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "target", .data = "keep-intact" });
+    try tmp.dir.symLink(io, "target", password_name, .{});
+    scrubFile(io, tmp.dir, password_name);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, password_name, .{}));
+    const kept = try tmp.dir.readFileAlloc(io, "target", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("keep-intact", kept);
 }
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {

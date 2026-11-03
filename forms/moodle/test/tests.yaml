@@ -411,8 +411,10 @@ suites:
         steps:
           - file: /run/svc/moodle/admin-password
             expect:
-              uid: moodle
-              mode: '600'
+              exists: false
+          - file: /run/svc/moodle/smtp-password
+            expect:
+              exists: false
           - file: /data/svc/moodle/site.json
             expect:
               uid: moodle

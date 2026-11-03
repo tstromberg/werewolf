@@ -69,6 +69,10 @@ suites:
               type: file
               size:
                 min: 1
+          - file: /data/svc/opencanary/.opencanary.conf
+            expect:
+              type: file
+              mode: '600'
   - name: opencanary-key-denied
     user: nobody
     policy:

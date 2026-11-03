@@ -94,3 +94,13 @@ suites:
                 /errcode: M_FORBIDDEN
               body:
                 absent: access_token
+      - name: continuwuity-private
+        steps:
+          - file: /run/svc/continuwuity/admin-password
+            expect:
+              exists: false
+          - file: /run/svc/continuwuity/continuwuity.toml
+            expect:
+              type: file
+              uid: continuwuity
+              mode: '600'

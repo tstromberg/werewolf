@@ -231,3 +231,54 @@ suites:
           - file: /data/svc/vaultwarden/config.json
             expect:
               exists: false
+      - name: vw-no-forwarded-for-spoof
+        steps:
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              headers:
+                X-Forwarded-For: 198.51.100.10
+              form:
+                token: wrong-admin-token-1
+            expect:
+              status:
+                one_of: [401, 429]
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              headers:
+                X-Forwarded-For: 198.51.100.11
+              form:
+                token: wrong-admin-token-2
+            expect:
+              status:
+                one_of: [401, 429]
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              headers:
+                X-Forwarded-For: 198.51.100.12
+              form:
+                token: wrong-admin-token-3
+            expect:
+              status:
+                one_of: [401, 429]
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              headers:
+                X-Forwarded-For: 198.51.100.13
+              form:
+                token: wrong-admin-token-4
+            expect:
+              status:
+                one_of: [401, 429]
+          - fetch:
+              url: http://127.0.0.1:8080/admin
+              method: POST
+              headers:
+                X-Forwarded-For: 198.51.100.14
+              form:
+                token: wrong-admin-token-5
+            expect:
+              status: 429

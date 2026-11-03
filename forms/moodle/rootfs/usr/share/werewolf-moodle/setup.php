@@ -27,9 +27,34 @@ function say(string $what): void {
     fwrite(STDOUT, "moodle-setup: $what\n");
 }
 
+function scrub(string $path): void {
+    if (!is_file($path) && !is_link($path)) {
+        return;
+    }
+    if (is_file($path) && !is_link($path)) {
+        $len = (int) @filesize($path);
+        $fh  = @fopen($path, 'r+b');
+        if ($fh !== false) {
+            if ($len > 0) {
+                @fwrite($fh, str_repeat("\0", $len));
+                @fflush($fh);
+            }
+            if (function_exists('fsync')) {
+                @fsync($fh);
+            }
+            @fclose($fh);
+        }
+    }
+    if (!@unlink($path) && (is_file($path) || is_link($path))) {
+        fail("cannot remove $path");
+    }
+}
+
 // Cron must not load Moodle while installation or upgrade is changing its
 // defaults: even a refused run can cache an incomplete core configuration.
 if ($argc === 2 && $argv[1] === 'ready') {
+    scrub(RUN . '/admin-password');
+    scrub(RUN . '/smtp-password');
     if (file_put_contents(RUN . '/ready', "ready\n") !== 6 || !chmod(RUN . '/ready', 0640)) {
         fail('cannot publish the ready mark');
     }
@@ -82,6 +107,7 @@ if (file_put_contents($tmp, $json) !== strlen($json) || !chmod($tmp, 0640) || !r
     @unlink($tmp);
     fail('cannot write ' . SITE);
 }
+scrub(RUN . '/smtp-password');
 
 // PostgreSQL starts beside Moodle, and pg-init makes its role and schema
 // first: wait for it, two minutes at most.
@@ -95,6 +121,7 @@ for ($i = 0; !($pg = @pg_connect($dsn)); $i++) {
 $installed = pg_fetch_result(pg_query($pg, "SELECT to_regclass('moodle.mdl_config') IS NOT NULL"), 0, 0) === 't';
 pg_close($pg);
 if ($installed) {
+    scrub(RUN . '/admin-password');
     say('Moodle is installed in the schema moodle; keeping it');
     exit(0);
 }
@@ -159,4 +186,5 @@ install_cli_database([
 upgrade_themes();
 ob_end_clean();
 $done = true;
+scrub(RUN . '/admin-password');
 say("installed Moodle $release, administrator $admin with the password from the config");

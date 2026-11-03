@@ -23,6 +23,29 @@ function fail(string $line): never {
 	exit(1);
 }
 
+function scrub(string $path): void {
+	if (!is_file($path) && !is_link($path)) {
+		return;
+	}
+	if (is_file($path) && !is_link($path)) {
+		$len = (int)@filesize($path);
+		$fh = @fopen($path, 'r+b');
+		if ($fh !== false) {
+			if ($len > 0) {
+				@fwrite($fh, str_repeat("\0", $len));
+				@fflush($fh);
+			}
+			if (function_exists('fsync')) {
+				@fsync($fh);
+			}
+			@fclose($fh);
+		}
+	}
+	if (!@unlink($path) && (is_file($path) || is_link($path))) {
+		fail("cannot remove $path");
+	}
+}
+
 // What service-config wrote from the settings (render json site.json); a
 // missing base URL kept the service down before this ran.
 $site = json_decode((string)file_get_contents(RUN . '/site.json'), true);
@@ -134,6 +157,7 @@ if (!$system->getValue('installed', false)) {
 	\OCP\Server::get(\OCP\App\IAppManager::class)->disableApp('nextcloud_announcements');
 	say('installed');
 }
+scrub(RUN . '/admin-password');
 
 // Nothing on this machine turns maintenance on but an upgrade, which turns
 // it off; one cut short leaves it on, and the site down.

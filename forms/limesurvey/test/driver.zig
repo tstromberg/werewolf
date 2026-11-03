@@ -115,22 +115,43 @@ fn token(page: []const u8) ![]const u8 {
 /// Uploads are data, never code: a .php planted there is a 404, an SVG is
 /// sandboxed; and the assets LimeSurvey published are served.
 fn uploads(io: Io, a: Allocator) !void {
-    const paths = [_][]const u8{
-        "/data/svc/php-fpm/upload/global/x.php", "/data/svc/php-fpm/upload/global/x.svg",
+    const blocked = [_][]const u8{
+        "/data/svc/php-fpm/upload/global/x.php",
+        "/data/svc/php-fpm/upload/global/x.phtml",
+        "/data/svc/php-fpm/upload/global/x.xhtml",
+        "/data/svc/php-fpm/upload/global/x.shtml",
+        "/data/svc/php-fpm/upload/global/x.xml",
     };
-    defer for (paths) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
+    const svg_path = "/data/svc/php-fpm/upload/global/x.svg";
+    const link_path = "/data/svc/php-fpm/upload/global/leak.json";
+    defer {
+        for (blocked) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
+        Io.Dir.cwd().deleteFile(io, svg_path) catch {};
+        Io.Dir.cwd().deleteFile(io, link_path) catch {};
+    }
+    for (blocked) |path| {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "<script>alert(1)</script>" });
+    }
     try Io.Dir.cwd().writeFile(io, .{
-        .sub_path = paths[0],
-        .data = "<?php echo \"ran\"; ?>",
-    });
-    try Io.Dir.cwd().writeFile(io, .{
-        .sub_path = paths[1],
+        .sub_path = svg_path,
         .data = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
     });
+    Io.Dir.cwd().deleteFile(io, link_path) catch {};
+    try Io.Dir.cwd().symLink(io, "/data/svc/php-fpm/security.json", link_path, .{});
     var client = try driver.fetch.Client.init(a);
     defer client.deinit();
-    if (status(try request(a, &client, "/upload/global/x.php", null)) != 404)
-        return error.UploadedCodeServed;
+    for ([_][]const u8{
+        "/upload/global/x.php",
+        "/upload/global/x.phtml",
+        "/upload/global/x.xhtml",
+        "/upload/global/x.shtml",
+        "/upload/global/x.xml",
+    }) |uri| {
+        if (status(try request(a, &client, uri, null)) != 404)
+            return error.UploadedCodeServed;
+    }
+    const leak_status = status(try request(a, &client, "/upload/global/leak.json", null));
+    if (leak_status != 403 and leak_status != 404) return error.UploadSymlinkFollowed;
     const svg = try request(a, &client, "/upload/global/x.svg", null);
     if (status(svg) != 200) return error.UploadedDataMissing;
     const csp = svg.object.get("headers").?.object.get("content-security-policy") orelse

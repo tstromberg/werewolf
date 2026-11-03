@@ -27,6 +27,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--probe-noexec"))
+        std.process.exit(attacks.probeNoexec());
     if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "--probe"))
         std.process.exit(attacks.probe(
             std.fmt.parseInt(u16, args[2], 10) catch 0,
@@ -1821,7 +1823,7 @@ pub fn statx(gpa: Allocator, path: []const u8) ?linux.Statx {
         linux.AT.FDCWD,
         z,
         linux.AT.SYMLINK_NOFOLLOW,
-        .{ .TYPE = true, .MODE = true, .UID = true },
+        .{ .TYPE = true, .MODE = true, .UID = true, .GID = true },
         &st,
     );
     if (linux.errno(rc) != .SUCCESS) return null;
