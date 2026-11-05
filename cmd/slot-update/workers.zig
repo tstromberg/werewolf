@@ -208,7 +208,7 @@ fn prepare(io: std.Io, gpa: std.mem.Allocator) !void {
     for ([_][:0]const u8{ "usr", "etc", "host", "cache", "data", "data/svc" }) |name|
         try setRootDir(state.handle, name);
     {
-        var work = try state.openDir(io, "work", .{ .follow_symlinks = false });
+        var work = try state.openDir(io, "work", .{ .iterate = true, .follow_symlinks = false });
         defer work.close(io);
         _ = try sandbox.sys(
             linux.fchown(work.handle, coordinator_id, coordinator_id),

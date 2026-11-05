@@ -500,6 +500,9 @@ _test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mr
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
+# Zig's own x86_64 backend cannot assemble the .globl label in leash's
+# execveat trampoline; the release build already uses LLVM.
+_test/cmd/leash/leash.zig: ; zig test -fllvm $(call ZIG_MODULES,cmd/leash/leash.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
 # host's tests read its YAML tables with lib/form.zig, which host itself does not import.
 _test/test/host/host.zig: ; zig test $(call ZIG_MODULES,test/host/host.zig)

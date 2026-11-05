@@ -552,23 +552,16 @@ fn prepareExecGate(prog: usize) !seal.ExecGate {
     const lim: linux.rlim_t = @intCast(ceil_fd);
     if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = lim, .max = lim })) != .SUCCESS)
         return error.LimitExecFd;
-    return .{ .fd = @intCast(ceil_fd), .ip = execveatAfterIp(), .empty_path = empty_path };
-}
-
-fn execveatAfterIp() u64 {
-    if (@import("builtin").os.tag != .linux) return 0;
-    return switch (@import("builtin").cpu.arch) {
-        .x86_64 => asm (
-            \\lea werewolf_leash_execveat_after(%rip), %[ret]
-            : [ret] "=r" (-> usize),
-        ),
-        .aarch64 => asm (
-            \\adrp %[ret], werewolf_leash_execveat_after
-            \\add %[ret], %[ret], :lo12:werewolf_leash_execveat_after
-            : [ret] "=r" (-> usize),
-        ),
-        else => @compileError("unsupported arch"),
-    };
+    // The label execveatTrampoline's asm places just after its syscall
+    // instruction: the instruction pointer the kernel reports for it.
+    // Taking the trampoline's address emits it, and so the label, even
+    // where nothing calls it, as in tests.
+    _ = &execveatTrampoline;
+    const after = @extern(*const u8, .{
+        .name = "werewolf_leash_execveat_after",
+        .visibility = .hidden,
+    });
+    return .{ .fd = @intCast(ceil_fd), .ip = @intFromPtr(after), .empty_path = empty_path };
 }
 
 noinline fn execveatTrampoline(
@@ -1508,7 +1501,10 @@ test "non-exec gate seals RLIMIT_NOFILE and kills untrusted execveat" {
         );
         linux.exit_group(8);
     }
-    var status: u32 = 0;
+    var status: i32 = 0;
     _ = linux.waitpid(@intCast(pid), &status, 0);
-    try testing.expectEqual(@as(u32, @backingInt(linux.SIG.SYS)), status & 0x7f);
+    try testing.expectEqual(
+        @as(u32, @backingInt(linux.SIG.SYS)),
+        @as(u32, @bitCast(status)) & 0x7f,
+    );
 }
